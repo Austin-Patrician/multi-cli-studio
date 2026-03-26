@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio\" && npx tsc --noEmit 2>&1 | head -50)",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio\" && npx tsc --noEmit 2>&1)",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio\" && npx vite build 2>&1 | tail -20)",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio/src-tauri\" && cargo check 2>&1 | tail -20)",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio/src-tauri\" && cargo check 2>&1 | tail -10)",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio\" && timeout 8 npx vite --host 127.0.0.1 --port 1420 2>&1 || true)",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio\" && npx vite build 2>&1)",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio\" && npx tailwindcss --version 2>&1 && npm ls tailwindcss @tailwindcss/vite 2>&1)",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio\" && npm ls tailwindcss @tailwindcss/vite 2>&1)",
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio\" && npx vite build 2>&1 | tail -10)",
+      "Bash(cd \"C:/Users/admin/source/repos/multi-cli-studio/src-tauri\" && cargo check 2>&1 | tail -30)",
+      "WebFetch(domain:agentclientprotocol.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(cd \"C:\\\\Users\\\\admin\\\\source\\\\repos\\\\multi-cli-studio\" && npx tsc --noEmit 2>&1 | head -50)",
+      "Bash(cd \"C:\\\\Users\\\\admin\\\\source\\\\repos\\\\multi-cli-studio\\\\src-tauri\" && cargo check 2>&1 | tail -30)",
+      "Bash(cd \"C:\\\\Users\\\\admin\\\\source\\\\repos\\\\multi-cli-studio\" && npx vite build 2>&1 | tail -10)"
+    ]
+  }
+}

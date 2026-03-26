@@ -1,0 +1,43 @@
+import { useStore } from "../../lib/store";
+
+export function ProjectBar() {
+  const workspaces = useStore((s) => s.workspaces);
+  const terminalTabs = useStore((s) => s.terminalTabs);
+  const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
+
+  const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
+  const workspace = workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null;
+
+  if (!workspace || !activeTab) return null;
+
+  return (
+    <div className="border-b border-border bg-white">
+      <div className="px-4 py-3">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#111827] text-white shadow-[0_12px_30px_rgba(17,24,39,0.18)]">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            </svg>
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="truncate text-sm font-semibold text-text">{workspace.name}</span>
+              {/* <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-semibold text-accent">
+                {workspace.branch}
+              </span> */}
+              {/* <span className="rounded-full bg-surface px-2 py-0.5 text-[11px] font-semibold text-secondary">
+                {activeTab.selectedCli}
+              </span> */}
+              {activeTab.planMode && (
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                  plan only
+                </span>
+              )}
+            </div>
+            <div className="truncate text-xs text-muted">{workspace.rootPath}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

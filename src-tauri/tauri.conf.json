@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Multi CLI Studio",
+  "version": "0.1.0",
+  "identifier": "com.local.multi-cli-studio",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Multi CLI Studio",
+        "width": 1560,
+        "height": 980,
+        "minWidth": 1280,
+        "minHeight": 820,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

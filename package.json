@@ -1,0 +1,33 @@
+{
+  "name": "multi-cli-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.config.ts",
+    "build": "tsc -b && vite build --config vite.config.ts",
+    "preview": "vite preview --config vite.config.ts",
+    "tauri:dev": "pwsh -File ./scripts/run-tauri.ps1 dev",
+    "tauri:build": "pwsh -File ./scripts/run-tauri.ps1 build",
+    "tauri:android": "pwsh -File ./scripts/run-tauri.ps1 android"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "@tauri-apps/api": "^2.8.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.13.2",
+    "remark-gfm": "^4.0.1",
+    "tailwindcss": "^4.2.2",
+    "zustand": "^5.0.12"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.8.2",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^5.0.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.7"
+  }
+}
