@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { bridge } from "../../lib/bridge";
 import type { GitFileChange, GitFileDiff } from "../../lib/models";
 import { useStore } from "../../lib/store";
@@ -628,19 +629,33 @@ function DiffOverlay({
 }
 
 export function GitPanel() {
-  const terminalTabs = useStore((s) => s.terminalTabs);
-  const workspaces = useStore((s) => s.workspaces);
-  const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
-  const gitPanelsByWorkspace = useStore((s) => s.gitPanelsByWorkspace);
+  const workspaceState = useStore(
+    useShallow((state) => {
+      const tab = state.terminalTabs.find((item) => item.id === state.activeTerminalTabId);
+      const workspace = state.workspaces.find((item) => item.id === tab?.workspaceId);
+      return {
+        workspaceId: workspace?.id ?? null,
+        workspaceName: workspace?.name ?? null,
+        workspaceRootPath: workspace?.rootPath ?? null,
+        gitPanel: workspace ? state.gitPanelsByWorkspace[workspace.id] ?? null : null,
+      };
+    })
+  );
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedDiff, setSelectedDiff] = useState<GitFileDiff | null>(null);
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
 
-  const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
-  const workspace = workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null;
-  const gitPanel = workspace ? gitPanelsByWorkspace[workspace.id] : null;
+  const workspace =
+    workspaceState.workspaceId && workspaceState.workspaceName && workspaceState.workspaceRootPath
+      ? {
+          id: workspaceState.workspaceId,
+          name: workspaceState.workspaceName,
+          rootPath: workspaceState.workspaceRootPath,
+        }
+      : null;
+  const gitPanel = workspaceState.gitPanel;
 
   const selectedChange =
     selectedPath && gitPanel

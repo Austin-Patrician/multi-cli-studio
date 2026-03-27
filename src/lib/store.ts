@@ -2,9 +2,12 @@ import { create } from "zustand";
 import { bridge } from "./bridge";
 import {
   AgentId,
+  AgentTransportKind,
+  AgentTransportSession,
   AppSettings,
   AppState,
   ChatMessage,
+  ChatMessageBlock,
   ChatContextTurn,
   ContextStore,
   ConversationSession,
@@ -15,7 +18,7 @@ import {
   WorkspacePickResult,
   WorkspaceRef,
 } from "./models";
-import { ACP_COMMANDS, AcpCommand } from "./acp";
+import { ACP_COMMANDS, AcpCliCapabilities, AcpCommand } from "./acp";
 import {
   detectAssistantContentFormat,
   normalizeAssistantContent,
@@ -23,6 +26,12 @@ import {
 } from "./messageFormatting";
 
 const TERMINAL_STATE_KEY = "multi-cli-studio::terminal-state";
+const DEFAULT_PROCESS_TIMEOUT_MS = 300000;
+const STREAM_RUNTIME_STALE_GRACE_MS = 10000;
+const STREAM_RUNTIME_STALE_MIN_MS = 60000;
+const STREAM_STALE_CHECK_MS = 3000;
+const INTERRUPTED_STREAM_TEXT = "Response interrupted before completion. You can retry this prompt.";
+const PARTIAL_STREAM_TEXT = "Streaming stopped before completion. This response may be partial.";
 
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -40,6 +49,34 @@ function basename(path: string) {
 
 function samePath(left: string, right: string) {
   return left.replace(/\//g, "\\").toLowerCase() === right.replace(/\//g, "\\").toLowerCase();
+}
+
+function defaultTransportKind(cliId: AgentId): AgentTransportKind {
+  switch (cliId) {
+    case "codex":
+      return "codex-app-server";
+    case "claude":
+      return "claude-cli";
+    case "gemini":
+      return "gemini-acp";
+    default:
+      return "browser-fallback";
+  }
+}
+
+function createTransportSession(
+  cliId: AgentId,
+  partial?: Partial<AgentTransportSession>
+): AgentTransportSession {
+  return {
+    cliId,
+    kind: partial?.kind ?? defaultTransportKind(cliId),
+    threadId: partial?.threadId ?? null,
+    turnId: partial?.turnId ?? null,
+    model: partial?.model ?? null,
+    permissionMode: partial?.permissionMode ?? null,
+    lastSyncAt: partial?.lastSyncAt ?? null,
+  };
 }
 
 function createWorkspaceRef(
@@ -74,6 +111,7 @@ function createTerminalTab(
     effortLevel: partial?.effortLevel ?? null,
     modelOverrides: partial?.modelOverrides ?? {},
     permissionOverrides: partial?.permissionOverrides ?? {},
+    transportSessions: partial?.transportSessions ?? {},
     draftPrompt: partial?.draftPrompt ?? "",
     status: partial?.status ?? "idle",
     lastActiveAt: partial?.lastActiveAt ?? nowIso(),
@@ -99,6 +137,8 @@ function createConversationSession(
           cliId: null,
           timestamp: nowIso(),
           content: `Session started for ${workspace.name}. Open a folder, choose a CLI, and send a prompt.`,
+          transportKind: null,
+          blocks: null,
           isStreaming: false,
           durationMs: null,
           exitCode: null,
@@ -115,6 +155,14 @@ interface PersistedTerminalState {
   activeTerminalTabId: string | null;
   chatSessions: Record<string, ConversationSession>;
 }
+
+type PersistableTerminalState = Pick<
+  PersistedTerminalState,
+  "workspaces" | "terminalTabs" | "activeTerminalTabId" | "chatSessions"
+>;
+
+let draftPromptPersistTimer: number | null = null;
+let streamingRecoveryInterval: number | null = null;
 
 function loadPersistedTerminalState(): PersistedTerminalState | null {
   if (typeof window === "undefined") return null;
@@ -141,6 +189,191 @@ function persistTerminalState(
     chatSessions,
   };
   window.localStorage.setItem(TERMINAL_STATE_KEY, JSON.stringify(payload));
+}
+
+function scheduleDraftPromptPersistence(getState: () => PersistableTerminalState) {
+  if (typeof window === "undefined") return;
+  if (draftPromptPersistTimer !== null) {
+    window.clearTimeout(draftPromptPersistTimer);
+  }
+  draftPromptPersistTimer = window.setTimeout(() => {
+    draftPromptPersistTimer = null;
+    const state = getState();
+    persistTerminalState(
+      state.workspaces,
+      state.terminalTabs,
+      state.activeTerminalTabId,
+      state.chatSessions
+    );
+  }, 180);
+}
+
+function hasStreamingActivity(
+  terminalTabs: TerminalTab[],
+  chatSessions: Record<string, ConversationSession>
+) {
+  return terminalTabs.some((tab) => {
+    const session = chatSessions[tab.id];
+    return tab.status === "streaming" || session?.messages.some((message) => message.isStreaming) === true;
+  });
+}
+
+function getRuntimeStreamStaleTimeoutMs(settings: AppSettings | null) {
+  const configuredTimeoutMs = settings?.processTimeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS;
+  return Math.max(configuredTimeoutMs + STREAM_RUNTIME_STALE_GRACE_MS, STREAM_RUNTIME_STALE_MIN_MS);
+}
+
+function isStreamingSessionStale(
+  session: ConversationSession,
+  staleTimeoutMs: number,
+  nowMs = Date.now()
+) {
+  const updatedAtMs = Date.parse(session.updatedAt);
+  if (!Number.isFinite(updatedAtMs)) return true;
+  return nowMs - updatedAtMs >= staleTimeoutMs;
+}
+
+function recoverInterruptedAssistantMessage(message: ChatMessage): ChatMessage {
+  const rawText = (message.rawContent ?? message.content).trim();
+  const statusText = rawText ? PARTIAL_STREAM_TEXT : INTERRUPTED_STREAM_TEXT;
+  const nextRawContent = rawText ? message.rawContent ?? message.content : statusText;
+  const hasMatchingStatus =
+    message.blocks?.some(
+      (block) => block.kind === "status" && block.level === "warning" && block.text === statusText
+    ) ?? false;
+
+  return {
+    ...message,
+    rawContent: nextRawContent,
+    content: normalizeAssistantContent(nextRawContent),
+    contentFormat: rawText
+      ? message.contentFormat ?? detectAssistantContentFormat(nextRawContent)
+      : "log",
+    blocks: hasMatchingStatus
+      ? message.blocks ?? null
+      : [
+          ...(message.blocks ?? []),
+          {
+            kind: "status",
+            level: "warning",
+            text: statusText,
+          } satisfies ChatMessageBlock,
+        ],
+    isStreaming: false,
+    exitCode: message.exitCode ?? 1,
+  };
+}
+
+function recoverStaleStreamingSessions(
+  terminalTabs: TerminalTab[],
+  chatSessions: Record<string, ConversationSession>,
+  staleTimeoutMs: number,
+  forceRecover = false,
+  nowMs = Date.now()
+) {
+  const staleTabIds = new Set<string>();
+  const nextChatSessions = { ...chatSessions };
+
+  Object.entries(chatSessions).forEach(([tabId, session]) => {
+    const tab = terminalTabs.find((item) => item.id === tabId) ?? null;
+    const hasStreamingMessage = session.messages.some((message) => message.isStreaming);
+    const isStreaming = tab?.status === "streaming" || hasStreamingMessage;
+    if (!isStreaming) return;
+    if (!forceRecover && !isStreamingSessionStale(session, staleTimeoutMs, nowMs)) return;
+
+    staleTabIds.add(tabId);
+    if (!hasStreamingMessage) return;
+
+    nextChatSessions[tabId] = {
+      ...session,
+      messages: session.messages.map((message) =>
+        message.isStreaming ? recoverInterruptedAssistantMessage(message) : message
+      ),
+      updatedAt: nowIso(),
+    };
+  });
+
+  terminalTabs.forEach((tab) => {
+    if (tab.status === "streaming" && !chatSessions[tab.id]) {
+      staleTabIds.add(tab.id);
+    }
+  });
+
+  if (staleTabIds.size === 0) {
+    return {
+      recovered: false,
+      terminalTabs,
+      chatSessions,
+    };
+  }
+
+  return {
+    recovered: true,
+    terminalTabs: terminalTabs.map((tab) =>
+      staleTabIds.has(tab.id) ? { ...tab, status: "idle" as const } : tab
+    ),
+    chatSessions: nextChatSessions,
+  };
+}
+
+function stopStreamingRecoveryWatch() {
+  if (typeof window === "undefined") return;
+  if (streamingRecoveryInterval !== null) {
+    window.clearInterval(streamingRecoveryInterval);
+    streamingRecoveryInterval = null;
+  }
+}
+
+function syncStreamingRecoveryWatch(
+  getState: () => {
+    workspaces: WorkspaceRef[];
+    terminalTabs: TerminalTab[];
+    activeTerminalTabId: string | null;
+    chatSessions: Record<string, ConversationSession>;
+    settings: AppSettings | null;
+    busyAction: string | null;
+  },
+  applyRecovery: (
+    terminalTabs: TerminalTab[],
+    chatSessions: Record<string, ConversationSession>
+  ) => void
+) {
+  if (typeof window === "undefined") return;
+
+  const current = getState();
+  if (!hasStreamingActivity(current.terminalTabs, current.chatSessions)) {
+    stopStreamingRecoveryWatch();
+    return;
+  }
+
+  if (streamingRecoveryInterval !== null) {
+    return;
+  }
+
+  streamingRecoveryInterval = window.setInterval(() => {
+    const state = getState();
+    const recovered = recoverStaleStreamingSessions(
+      state.terminalTabs,
+      state.chatSessions,
+      getRuntimeStreamStaleTimeoutMs(state.settings)
+    );
+    const nextTerminalTabs = recovered.recovered ? recovered.terminalTabs : state.terminalTabs;
+    const nextChatSessions = recovered.recovered ? recovered.chatSessions : state.chatSessions;
+
+    if (recovered.recovered) {
+      applyRecovery(nextTerminalTabs, nextChatSessions);
+      persistTerminalState(
+        state.workspaces,
+        nextTerminalTabs,
+        state.activeTerminalTabId,
+        nextChatSessions
+      );
+    }
+
+    if (!hasStreamingActivity(nextTerminalTabs, nextChatSessions)) {
+      stopStreamingRecoveryWatch();
+    }
+  }, STREAM_STALE_CHECK_MS);
 }
 
 function deriveActiveWorkspaceState(
@@ -197,6 +430,19 @@ function formatDiffSummary(gitPanel?: GitPanelData | null) {
     .join("\n");
 }
 
+function normalizeTransportSessions(
+  tab: Pick<TerminalTab, "selectedCli" | "transportSessions"> | Partial<TerminalTab>
+) {
+  const next = { ...(tab.transportSessions ?? {}) } as Partial<Record<AgentId, AgentTransportSession>>;
+  const cliIds: AgentId[] = ["codex", "claude", "gemini"];
+  cliIds.forEach((cliId) => {
+    if (next[cliId]) {
+      next[cliId] = createTransportSession(cliId, next[cliId] ?? undefined);
+    }
+  });
+  return next;
+}
+
 function buildRecentTabContextTurns(
   messages: ChatMessage[],
   fallbackCli: AgentId,
@@ -211,7 +457,12 @@ function buildRecentTabContextTurns(
       continue;
     }
 
-    if (message.role !== "assistant" || message.isStreaming || !pendingUser) {
+    if (
+      message.role !== "assistant" ||
+      message.isStreaming ||
+      !pendingUser ||
+      (message.exitCode != null && message.exitCode !== 0)
+    ) {
       continue;
     }
 
@@ -227,11 +478,65 @@ function buildRecentTabContextTurns(
   return turns.slice(-limit);
 }
 
+function resolveStreamingAssistantMessageId(
+  session: ConversationSession,
+  messageId: string
+) {
+  const explicitMatch = session.messages.find((message) => message.id === messageId);
+  if (explicitMatch) return messageId;
+
+  const streamingAssistantMessages = session.messages.filter(
+    (message) => message.role === "assistant" && message.isStreaming
+  );
+
+  if (streamingAssistantMessages.length === 1) {
+    return streamingAssistantMessages[0].id;
+  }
+
+  return null;
+}
+
+function appendSystemMessageToSession(
+  chatSessions: Record<string, ConversationSession>,
+  tabId: string,
+  cliId: AgentId,
+  content: string,
+  exitCode = 0
+) {
+  const session = chatSessions[tabId];
+  if (!session) return chatSessions;
+
+  return {
+    ...chatSessions,
+    [tabId]: {
+      ...session,
+      messages: [
+        ...session.messages,
+        {
+          id: createId("msg"),
+          role: "system" as const,
+          cliId,
+          timestamp: nowIso(),
+          content,
+          transportKind: defaultTransportKind(cliId),
+          blocks: null,
+          isStreaming: false,
+          durationMs: null,
+          exitCode,
+        },
+      ],
+      updatedAt: nowIso(),
+    },
+  };
+}
+
 interface StoreState {
   appState: AppState | null;
   contextStore: ContextStore | null;
   settings: AppSettings | null;
   busyAction: string | null;
+  acpCapabilitiesByCli: Partial<Record<AgentId, AcpCliCapabilities>>;
+  acpCapabilityStatusByCli: Partial<Record<AgentId, "idle" | "loading" | "ready" | "error">>;
 
   workspaces: WorkspaceRef[];
   terminalTabs: TerminalTab[];
@@ -252,6 +557,8 @@ interface StoreState {
   setAppState: (state: AppState) => void;
   appendTerminalLine: (agentId: AgentId, line: TerminalLine) => void;
   setBusyAction: (action: string | null) => void;
+  appendChatSystemMessage: (tabId: string, cliId: AgentId, content: string, exitCode?: number) => void;
+  deleteChatMessage: (tabId: string, messageId: string) => void;
 
   openWorkspaceFolder: () => Promise<void>;
   createTerminalTab: (workspaceId?: string) => void;
@@ -267,11 +574,17 @@ interface StoreState {
     tabId: string,
     messageId: string,
     exitCode: number | null,
-    durationMs: number
+    durationMs: number,
+    finalContent?: string | null,
+    contentFormat?: ChatMessage["contentFormat"],
+    blocks?: ChatMessageBlock[] | null,
+    transportSession?: AgentTransportSession | null,
+    transportKind?: AgentTransportKind | null
   ) => void;
   loadGitPanel: (workspaceId: string, projectRoot: string) => Promise<void>;
   refreshGitPanel: (workspaceId?: string) => Promise<void>;
   searchWorkspaceFiles: (workspaceId: string, query: string) => Promise<FileMentionCandidate[]>;
+  loadAcpCapabilities: (cliId: AgentId, force?: boolean) => Promise<AcpCliCapabilities | null>;
 
   executeAcpCommand: (command: AcpCommand, tabId?: string) => Promise<void>;
 }
@@ -281,6 +594,8 @@ export const useStore = create<StoreState>((set, get) => ({
   contextStore: null,
   settings: null,
   busyAction: null,
+  acpCapabilitiesByCli: {},
+  acpCapabilityStatusByCli: {},
   workspaces: [],
   terminalTabs: [],
   activeTerminalTabId: null,
@@ -314,6 +629,44 @@ export const useStore = create<StoreState>((set, get) => ({
 
   setBusyAction: (action) => set({ busyAction: action }),
 
+  appendChatSystemMessage: (tabId, cliId, content, exitCode = 0) => {
+    set((state) => {
+      const chatSessions = appendSystemMessageToSession(
+        state.chatSessions,
+        tabId,
+        cliId,
+        content,
+        exitCode
+      );
+      persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
+      return { chatSessions };
+    });
+  },
+
+  deleteChatMessage: (tabId, messageId) => {
+    set((state) => {
+      const session = state.chatSessions[tabId];
+      if (!session) return {};
+
+      const target = session.messages.find((message) => message.id === messageId);
+      if (!target || target.isStreaming) return {};
+
+      const messages = session.messages.filter((message) => message.id !== messageId);
+      if (messages.length === session.messages.length) return {};
+
+      const chatSessions = {
+        ...state.chatSessions,
+        [tabId]: {
+          ...session,
+          messages,
+          updatedAt: nowIso(),
+        },
+      };
+      persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
+      return { chatSessions };
+    });
+  },
+
   loadInitialState: async (projectRoot) => {
     const state = await bridge.loadAppState(projectRoot);
     let workspaces: WorkspaceRef[] = [];
@@ -324,7 +677,16 @@ export const useStore = create<StoreState>((set, get) => ({
     const persisted = loadPersistedTerminalState();
     if (persisted && persisted.workspaces.length > 0 && persisted.terminalTabs.length > 0) {
       workspaces = persisted.workspaces;
-      terminalTabs = persisted.terminalTabs;
+      terminalTabs = persisted.terminalTabs.map((tab) =>
+        createTerminalTab(
+          workspaces.find((workspace) => workspace.id === tab.workspaceId) ??
+            createWorkspaceRef(tab.workspaceId, { id: tab.workspaceId, name: tab.title, rootPath: tab.workspaceId }),
+          {
+            ...tab,
+            transportSessions: normalizeTransportSessions(tab),
+          }
+        )
+      );
       activeTerminalTabId = persisted.activeTerminalTabId;
       chatSessions = persisted.chatSessions ?? {};
     } else {
@@ -387,6 +749,17 @@ export const useStore = create<StoreState>((set, get) => ({
       }
     });
 
+    const recoveredStreamingState = recoverStaleStreamingSessions(
+      terminalTabs,
+      chatSessions,
+      0,
+      true
+    );
+    if (recoveredStreamingState.recovered) {
+      terminalTabs = recoveredStreamingState.terminalTabs;
+      chatSessions = recoveredStreamingState.chatSessions;
+    }
+
     const derived = deriveActiveWorkspaceState(
       state,
       workspaces,
@@ -404,6 +777,26 @@ export const useStore = create<StoreState>((set, get) => ({
     });
 
     persistTerminalState(workspaces, terminalTabs, activeTerminalTabId, chatSessions);
+    syncStreamingRecoveryWatch(
+      () => {
+        const current = get();
+        return {
+          workspaces: current.workspaces,
+          terminalTabs: current.terminalTabs,
+          activeTerminalTabId: current.activeTerminalTabId,
+          chatSessions: current.chatSessions,
+          settings: current.settings,
+          busyAction: current.busyAction,
+        };
+      },
+      (nextTerminalTabs, nextChatSessions) => {
+        set((state) => ({
+          terminalTabs: nextTerminalTabs,
+          chatSessions: nextChatSessions,
+          busyAction: state.busyAction === "chat" ? null : state.busyAction,
+        }));
+      }
+    );
 
     try {
       const ctx = await bridge.getContextStore();
@@ -721,12 +1114,24 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setTabDraftPrompt: (tabId, prompt) => {
+    const currentTab = get().terminalTabs.find((tab) => tab.id === tabId);
+    if (!currentTab || currentTab.draftPrompt === prompt) return;
+
     set((state) => {
       const terminalTabs = state.terminalTabs.map((tab) =>
         tab.id === tabId ? { ...tab, draftPrompt: prompt } : tab
       );
-      persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
       return { terminalTabs };
+    });
+
+    scheduleDraftPromptPersistence(() => {
+      const state = get();
+      return {
+        workspaces: state.workspaces,
+        terminalTabs: state.terminalTabs,
+        activeTerminalTabId: state.activeTerminalTabId,
+        chatSessions: state.chatSessions,
+      };
     });
   },
 
@@ -775,15 +1180,17 @@ export const useStore = create<StoreState>((set, get) => ({
     const text = (prompt ?? tab.draftPrompt).trim();
     if (!text || tab.status === "streaming") return;
 
-    const userMessage: ChatMessage = {
-      id: createId("msg"),
-      role: "user",
-      cliId: tab.selectedCli,
-      timestamp: nowIso(),
-      content: text,
-      isStreaming: false,
-      durationMs: null,
-      exitCode: null,
+      const userMessage: ChatMessage = {
+        id: createId("msg"),
+        role: "user",
+        cliId: tab.selectedCli,
+        timestamp: nowIso(),
+        content: text,
+        transportKind: tab.transportSessions[tab.selectedCli]?.kind ?? defaultTransportKind(tab.selectedCli),
+        blocks: null,
+        isStreaming: false,
+        durationMs: null,
+        exitCode: null,
     };
     const pendingMessage: ChatMessage = {
       id: createId("msg-pending"),
@@ -793,6 +1200,8 @@ export const useStore = create<StoreState>((set, get) => ({
       content: "",
       rawContent: "",
       contentFormat: "plain",
+      transportKind: tab.transportSessions[tab.selectedCli]?.kind ?? defaultTransportKind(tab.selectedCli),
+      blocks: null,
       isStreaming: true,
       durationMs: null,
       exitCode: null,
@@ -813,6 +1222,26 @@ export const useStore = create<StoreState>((set, get) => ({
       persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
       return { busyAction: "chat", terminalTabs, chatSessions };
     });
+    syncStreamingRecoveryWatch(
+      () => {
+        const current = get();
+        return {
+          workspaces: current.workspaces,
+          terminalTabs: current.terminalTabs,
+          activeTerminalTabId: current.activeTerminalTabId,
+          chatSessions: current.chatSessions,
+          settings: current.settings,
+          busyAction: current.busyAction,
+        };
+      },
+      (nextTerminalTabs, nextChatSessions) => {
+        set((state) => ({
+          terminalTabs: nextTerminalTabs,
+          chatSessions: nextChatSessions,
+          busyAction: state.busyAction === "chat" ? null : state.busyAction,
+        }));
+      }
+    );
 
     try {
       const writeMode = !tab.planMode;
@@ -829,6 +1258,7 @@ export const useStore = create<StoreState>((set, get) => ({
         effortLevel: tab.effortLevel,
         modelOverride: tab.modelOverrides[tab.selectedCli] ?? null,
         permissionOverride: tab.permissionOverrides[tab.selectedCli] ?? null,
+        transportSession: tab.transportSessions[tab.selectedCli] ?? null,
       });
 
       set((current) => {
@@ -861,6 +1291,13 @@ export const useStore = create<StoreState>((set, get) => ({
                     content: "Error: failed to send message",
                     rawContent: "Error: failed to send message",
                     contentFormat: "log",
+                    blocks: [
+                      {
+                        kind: "status",
+                        level: "error",
+                        text: "Error: failed to send message",
+                      },
+                    ] satisfies ChatMessageBlock[],
                     isStreaming: false,
                     exitCode: 1,
                   }
@@ -872,6 +1309,26 @@ export const useStore = create<StoreState>((set, get) => ({
         persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
         return { busyAction: null, terminalTabs, chatSessions };
       });
+      syncStreamingRecoveryWatch(
+        () => {
+          const current = get();
+          return {
+            workspaces: current.workspaces,
+            terminalTabs: current.terminalTabs,
+            activeTerminalTabId: current.activeTerminalTabId,
+            chatSessions: current.chatSessions,
+            settings: current.settings,
+            busyAction: current.busyAction,
+          };
+        },
+        (nextTerminalTabs, nextChatSessions) => {
+          set((state) => ({
+            terminalTabs: nextTerminalTabs,
+            chatSessions: nextChatSessions,
+            busyAction: state.busyAction === "chat" ? null : state.busyAction,
+          }));
+        }
+      );
     }
   },
 
@@ -879,12 +1336,14 @@ export const useStore = create<StoreState>((set, get) => ({
     set((state) => {
       const session = state.chatSessions[tabId];
       if (!session) return {};
+      const targetMessageId = resolveStreamingAssistantMessageId(session, messageId);
+      if (!targetMessageId) return {};
       const chatSessions = {
         ...state.chatSessions,
         [tabId]: {
           ...session,
           messages: session.messages.map<ChatMessage>((message) =>
-            message.id === messageId
+            message.id === targetMessageId
               ? {
                   ...message,
                   rawContent: (message.rawContent ?? message.content) + chunk,
@@ -903,26 +1362,60 @@ export const useStore = create<StoreState>((set, get) => ({
     });
   },
 
-  finalizeStream: (tabId, messageId, exitCode, durationMs) => {
+  finalizeStream: (
+    tabId,
+    messageId,
+    exitCode,
+    durationMs,
+    finalContent,
+    contentFormat,
+    blocks,
+    transportSession,
+    transportKind
+  ) => {
     set((state) => {
       const session = state.chatSessions[tabId];
       if (!session) return {};
+      const targetMessageId = resolveStreamingAssistantMessageId(session, messageId);
+      if (!targetMessageId) return {};
       const terminalTabs = state.terminalTabs.map((tab) =>
-        tab.id === tabId ? { ...tab, status: "idle" as const } : tab
+        tab.id === tabId
+          ? {
+              ...tab,
+              status: "idle" as const,
+              transportSessions: transportSession
+                ? {
+                    ...normalizeTransportSessions(tab),
+                    [transportSession.cliId]: createTransportSession(
+                      transportSession.cliId,
+                      transportSession
+                    ),
+                  }
+                : normalizeTransportSessions(tab),
+            }
+          : tab
       );
+      const effectiveTransportKind =
+        transportKind ??
+        session.messages.find((message) => message.id === targetMessageId)?.transportKind ??
+        null;
       const chatSessions = {
         ...state.chatSessions,
         [tabId]: {
           ...session,
           messages: session.messages.map<ChatMessage>((message) =>
-            message.id === messageId
+            message.id === targetMessageId
               ? {
                   ...message,
-                  rawContent: message.rawContent ?? message.content,
-                  content: normalizeAssistantContent(message.rawContent ?? message.content),
-                  contentFormat: detectAssistantContentFormat(
-                    message.rawContent ?? message.content
+                  rawContent: finalContent ?? message.rawContent ?? message.content,
+                  content: normalizeAssistantContent(
+                    finalContent ?? message.rawContent ?? message.content
                   ),
+                  contentFormat:
+                    contentFormat ??
+                    detectAssistantContentFormat(finalContent ?? message.rawContent ?? message.content),
+                  transportKind: effectiveTransportKind,
+                  blocks: blocks ?? message.blocks ?? null,
                   isStreaming: false,
                   exitCode,
                   durationMs,
@@ -935,6 +1428,26 @@ export const useStore = create<StoreState>((set, get) => ({
       persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, chatSessions);
       return { busyAction: null, terminalTabs, chatSessions };
     });
+    syncStreamingRecoveryWatch(
+      () => {
+        const current = get();
+        return {
+          workspaces: current.workspaces,
+          terminalTabs: current.terminalTabs,
+          activeTerminalTabId: current.activeTerminalTabId,
+          chatSessions: current.chatSessions,
+          settings: current.settings,
+          busyAction: current.busyAction,
+        };
+      },
+      (nextTerminalTabs, nextChatSessions) => {
+        set((state) => ({
+          terminalTabs: nextTerminalTabs,
+          chatSessions: nextChatSessions,
+          busyAction: state.busyAction === "chat" ? null : state.busyAction,
+        }));
+      }
+    );
 
     const tab = get().terminalTabs.find((item) => item.id === tabId);
     if (tab) {
@@ -996,38 +1509,55 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
+  loadAcpCapabilities: async (cliId, force = false) => {
+    const current = get();
+    const status = current.acpCapabilityStatusByCli[cliId];
+    if (!force && status === "ready" && current.acpCapabilitiesByCli[cliId]) {
+      return current.acpCapabilitiesByCli[cliId] ?? null;
+    }
+    if (!force && status === "loading") {
+      return current.acpCapabilitiesByCli[cliId] ?? null;
+    }
+
+    set((state) => ({
+      acpCapabilityStatusByCli: {
+        ...state.acpCapabilityStatusByCli,
+        [cliId]: "loading",
+      },
+    }));
+
+    try {
+      const capabilities = await bridge.getAcpCapabilities(cliId);
+      set((state) => ({
+        acpCapabilitiesByCli: {
+          ...state.acpCapabilitiesByCli,
+          [cliId]: capabilities,
+        },
+        acpCapabilityStatusByCli: {
+          ...state.acpCapabilityStatusByCli,
+          [cliId]: "ready",
+        },
+      }));
+      return capabilities;
+    } catch {
+      set((state) => ({
+        acpCapabilityStatusByCli: {
+          ...state.acpCapabilityStatusByCli,
+          [cliId]: "error",
+        },
+      }));
+      return null;
+    }
+  },
+
   executeAcpCommand: async (command, tabId) => {
     const activeTabId = tabId ?? get().activeTerminalTabId;
     const tab = get().terminalTabs.find((item) => item.id === activeTabId);
     const workspace = get().workspaces.find((item) => item.id === tab?.workspaceId);
     if (!tab || !workspace) return;
 
-    const pushSystemMessage = (content: string, exitCode = 0) => {
-      set((state) => {
-        const chatSessions = {
-          ...state.chatSessions,
-          [tab.id]: {
-            ...state.chatSessions[tab.id],
-            messages: [
-              ...state.chatSessions[tab.id].messages,
-              {
-                id: createId("msg"),
-                role: "system" as const,
-                cliId: tab.selectedCli,
-                timestamp: nowIso(),
-                content,
-                isStreaming: false,
-                durationMs: null,
-                exitCode,
-              },
-            ],
-            updatedAt: nowIso(),
-          },
-        };
-        persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
-        return { chatSessions };
-      });
-    };
+    const pushSystemMessage = (content: string, exitCode = 0) =>
+      get().appendChatSystemMessage(tab.id, tab.selectedCli, content, exitCode);
 
     switch (command.kind) {
       case "plan": {

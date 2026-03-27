@@ -1,12 +1,31 @@
+import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../../lib/store";
 
 export function ProjectBar() {
-  const workspaces = useStore((s) => s.workspaces);
-  const terminalTabs = useStore((s) => s.terminalTabs);
-  const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
-
-  const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
-  const workspace = workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null;
+  const activeTab = useStore(
+    useShallow((state) => {
+      const tab = state.terminalTabs.find((item) => item.id === state.activeTerminalTabId);
+      return tab
+        ? {
+            workspaceId: tab.workspaceId,
+            planMode: tab.planMode,
+          }
+        : null;
+    })
+  );
+  const workspace = useStore(
+    useShallow((state) => {
+      const tab = state.terminalTabs.find((item) => item.id === state.activeTerminalTabId);
+      const item = state.workspaces.find((workspace) => workspace.id === tab?.workspaceId);
+      return item
+        ? {
+            id: item.id,
+            name: item.name,
+            rootPath: item.rootPath,
+          }
+        : null;
+    })
+  );
 
   if (!workspace || !activeTab) return null;
 

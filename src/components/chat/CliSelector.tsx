@@ -1,23 +1,48 @@
+import { memo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { AgentId } from "../../lib/models";
 import { useStore } from "../../lib/store";
+import openaiIcon from "../../media/svg/openai.svg";
+import claudeIcon from "../../media/svg/claude-color.svg";
+import geminiIcon from "../../media/svg/gemini-color.svg";
 
-const CLI_OPTIONS: { id: AgentId; label: string }[] = [
-  { id: "codex", label: "Codex" },
-  { id: "claude", label: "Claude" },
-  { id: "gemini", label: "Gemini" },
+const CLI_OPTIONS: { id: AgentId; label: string; icon: string }[] = [
+  { id: "codex", label: "Codex", icon: openaiIcon },
+  { id: "claude", label: "Claude", icon: claudeIcon },
+  { id: "gemini", label: "Gemini", icon: geminiIcon },
 ];
 
-export function CliSelector() {
-  const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
-  const terminalTabs = useStore((s) => s.terminalTabs);
+export const CliSelector = memo(function CliSelector() {
+  const activeTab = useStore(
+    useShallow((state) => {
+      const tab = state.terminalTabs.find((item) => item.id === state.activeTerminalTabId);
+      return tab
+        ? {
+            id: tab.id,
+            selectedCli: tab.selectedCli,
+          }
+        : null;
+    })
+  );
   const appState = useStore((s) => s.appState);
   const setTabSelectedCli = useStore((s) => s.setTabSelectedCli);
 
-  const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
   const selectedCli = activeTab?.selectedCli ?? "codex";
+  const selectedIndex = Math.max(
+    0,
+    CLI_OPTIONS.findIndex((option) => option.id === selectedCli)
+  );
 
   return (
-    <div className="inline-flex min-w-0 items-center gap-1 rounded-full bg-[#f4f7fb]/90 p-0.5">
+    <div className="relative inline-flex min-w-0 w-[156px] items-center rounded-[21px] border border-[#d9e1eb] bg-[linear-gradient(180deg,rgba(255,255,255,0.96)_0%,rgba(243,247,251,0.94)_100%)] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.9),0_8px_22px_rgba(15,23,42,0.06)]">
+      <span
+        className="pointer-events-none absolute bottom-1 top-1 rounded-[16px] border border-white/90 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(247,250,252,0.96)_100%)] shadow-[0_10px_24px_rgba(15,23,42,0.10)] transition-transform duration-200 ease-out"
+        style={{
+          left: "4px",
+          width: "calc((100% - 8px) / 3)",
+          transform: `translateX(${selectedIndex * 100}%)`,
+        }}
+      />
       {CLI_OPTIONS.map((opt) => {
         const isSelected = selectedCli === opt.id;
         const runtime = appState?.agents.find((a) => a.id === opt.id)?.runtime;
@@ -28,21 +53,36 @@ export function CliSelector() {
             key={opt.id}
             type="button"
             onClick={() => activeTab && setTabSelectedCli(activeTab.id, opt.id)}
-            className={`relative flex min-w-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold transition-all ${
+            title={installed ? opt.label : `${opt.label} (not installed)`}
+            aria-label={installed ? `Switch to ${opt.label}` : `${opt.label} not installed`}
+            className={`relative z-10 inline-flex h-9 flex-1 items-center justify-center rounded-[16px] transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/35 focus-visible:ring-offset-2 focus-visible:ring-offset-white ${
               isSelected
-                ? "bg-[#111827] text-white shadow-[0_10px_22px_rgba(15,23,42,0.16)]"
-                : "text-secondary hover:bg-white hover:text-text"
+                ? "scale-[1.01]"
+                : "opacity-[0.82] hover:bg-white/35 hover:opacity-100"
             }`}
           >
+            <img
+              src={opt.icon}
+              alt=""
+              aria-hidden="true"
+              className={`h-[17px] w-[17px] select-none object-contain transition-all ${
+                installed ? "" : "opacity-45 grayscale-[0.15]"
+              } ${isSelected ? "scale-[1.06] opacity-100" : "opacity-80"}`}
+            />
             <span
-              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                installed ? (isSelected ? "bg-emerald-300" : "bg-emerald-500") : "bg-rose-400"
+              className={`absolute bottom-[7px] right-[10px] h-1.5 w-1.5 rounded-full transition-colors ${
+                installed
+                  ? isSelected
+                    ? "bg-emerald-500"
+                    : "bg-emerald-400/95"
+                  : isSelected
+                    ? "bg-rose-400"
+                    : "bg-rose-300"
               }`}
             />
-            <span className="truncate">{opt.label}</span>
           </button>
         );
       })}
     </div>
   );
-}
+});

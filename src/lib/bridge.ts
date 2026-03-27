@@ -14,7 +14,13 @@ import {
   TerminalEvent,
   WorkspacePickResult,
 } from "./models";
-import type { AcpCommand, AcpCommandDef, AcpCommandResult, AcpSession } from "./acp";
+import type {
+  AcpCliCapabilities,
+  AcpCommand,
+  AcpCommandDef,
+  AcpCommandResult,
+  AcpSession,
+} from "./acp";
 
 type Unlisten = () => void;
 
@@ -44,6 +50,7 @@ export interface RuntimeBridge {
   executeAcpCommand: (command: AcpCommand, cliId: AgentId) => Promise<AcpCommandResult>;
   getAcpCommands: (cliId: AgentId) => Promise<AcpCommandDef[]>;
   getAcpSession: () => Promise<AcpSession>;
+  getAcpCapabilities: (cliId: AgentId) => Promise<AcpCliCapabilities>;
 }
 
 function isTauriRuntime() {
@@ -152,6 +159,10 @@ const tauriRuntime: RuntimeBridge = {
   async getAcpSession() {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AcpSession>("get_acp_session");
+  },
+  async getAcpCapabilities(cliId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AcpCliCapabilities>("get_acp_capabilities", { cliId });
   },
 };
 

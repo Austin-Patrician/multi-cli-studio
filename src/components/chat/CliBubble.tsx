@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { ChatMessage, AgentId } from "../../lib/models";
+import { useMemo, useState, type ReactNode } from "react";
+import { ChatMessage, ChatMessageBlock, AgentId } from "../../lib/models";
 import {
   AssistantDisplayBlock,
   detectAssistantContentFormat,
@@ -20,10 +20,143 @@ function basename(path: string) {
   return parts[parts.length - 1] ?? path;
 }
 
-function summarizeInline(text: string, max = 116) {
-  const compact = text.replace(/\s+/g, " ").trim();
-  if (compact.length <= max) return compact;
-  return `${compact.slice(0, max).trimEnd()}...`;
+function samePath(left: string, right: string) {
+  return (
+    left.replace(/\//g, "\\").replace(/[\\]+$/, "").toLowerCase() ===
+    right.replace(/\//g, "\\").replace(/[\\]+$/, "").toLowerCase()
+  );
+}
+
+type FilePatchRow =
+  | {
+      kind: "hunk";
+      text: string;
+    }
+  | {
+      kind: "line";
+      tone: "context" | "add" | "delete" | "note";
+      prefix: string;
+      text: string;
+    };
+
+function parseFilePatch(diffText: string) {
+  let additions = 0;
+  let deletions = 0;
+  const rows: FilePatchRow[] = [];
+
+  for (const line of diffText.split(/\r?\n/)) {
+    if (!line) continue;
+    if (
+      line.startsWith("diff --git") ||
+      line.startsWith("index ") ||
+      line.startsWith("--- ") ||
+      line.startsWith("+++ ")
+    ) {
+      continue;
+    }
+
+    if (line.startsWith("@@")) {
+      rows.push({ kind: "hunk", text: line });
+      continue;
+    }
+
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      additions += 1;
+      rows.push({
+        kind: "line",
+        tone: "add",
+        prefix: "+",
+        text: line.slice(1),
+      });
+      continue;
+    }
+
+    if (line.startsWith("-") && !line.startsWith("---")) {
+      deletions += 1;
+      rows.push({
+        kind: "line",
+        tone: "delete",
+        prefix: "-",
+        text: line.slice(1),
+      });
+      continue;
+    }
+
+    if (line.startsWith(" ")) {
+      rows.push({
+        kind: "line",
+        tone: "context",
+        prefix: " ",
+        text: line.slice(1),
+      });
+      continue;
+    }
+
+    if (line.startsWith("\\")) {
+      rows.push({
+        kind: "line",
+        tone: "note",
+        prefix: "·",
+        text: line,
+      });
+    }
+  }
+
+  return {
+    additions,
+    deletions,
+    rows,
+    hasRenderablePatch: rows.length > 0,
+  };
+}
+
+function fileChangeTone(changeType: "add" | "delete" | "update", movePath?: string | null) {
+  if (changeType === "add") {
+    return {
+      label: "Added",
+      chip: "border-emerald-200 bg-emerald-50 text-emerald-700",
+      icon: "bg-emerald-50 text-emerald-600",
+    };
+  }
+  if (changeType === "delete") {
+    return {
+      label: "Deleted",
+      chip: "border-rose-200 bg-rose-50 text-rose-700",
+      icon: "bg-rose-50 text-rose-600",
+    };
+  }
+  if (movePath) {
+    return {
+      label: "Moved",
+      chip: "border-sky-200 bg-sky-50 text-sky-700",
+      icon: "bg-sky-50 text-sky-600",
+    };
+  }
+  return {
+    label: "Updated",
+    chip: "border-amber-200 bg-amber-50 text-amber-700",
+    icon: "bg-[#eaf2ff] text-[#2563eb]",
+  };
+}
+
+function summarizeMultiline(text: string, maxLines = 4, maxChars = 420) {
+  const normalized = text.trimEnd();
+  const lines = normalized.split("\n");
+  const preview = lines.slice(0, maxLines).join("\n");
+  if (lines.length <= maxLines && normalized.length <= maxChars) {
+    return { preview: normalized, truncated: false };
+  }
+
+  const compactPreview =
+    preview.length > maxChars ? `${preview.slice(0, maxChars).trimEnd()}...` : preview;
+  return { preview: compactPreview, truncated: true };
+}
+
+function titleCase(value: string) {
+  if (!value) return value;
+  return value
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function CommandIcon() {
@@ -42,6 +175,40 @@ function EditIcon() {
   );
 }
 
+function DirectoryIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M3.75 7.5A2.25 2.25 0 016 5.25h4.19a2.25 2.25 0 011.59.659l1.062 1.06a2.25 2.25 0 001.59.66H18A2.25 2.25 0 0120.25 9.9v6.35A2.25 2.25 0 0118 18.5H6A2.25 2.25 0 013.75 16.25V7.5z"
+      />
+    </svg>
+  );
+}
+
+function OutputIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7 8l-4 4 4 4m6 0h8M13 8h8" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      className={`h-3 w-3 transition-transform ${expanded ? "rotate-180" : ""}`}
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={1.8}
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
 function StatusIcon({ level }: { level: "error" | "warning" }) {
   return (
     <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
@@ -56,55 +223,266 @@ function StatusIcon({ level }: { level: "error" | "warning" }) {
 
 function ToggleButton({
   expanded,
+  label,
   onClick,
 }: {
   expanded: boolean;
+  label: string;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="rounded-full border border-slate-200 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-100 hover:text-slate-800"
+      className="inline-flex h-7 items-center gap-1 rounded-full border border-slate-200/90 bg-[linear-gradient(180deg,rgba(255,255,255,0.96)_0%,rgba(248,250,252,0.96)_100%)] px-2.5 text-[9.5px] font-semibold tracking-[0.08em] text-slate-500 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all hover:border-slate-300 hover:bg-white hover:text-slate-800 active:scale-[0.98]"
+      aria-expanded={expanded}
     >
-      {expanded ? "Hide" : "Details"}
+      <span>{label}</span>
+      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-100/90 text-slate-500">
+        <ChevronIcon expanded={expanded} />
+      </span>
     </button>
   );
 }
 
-function CommandBlock({ block }: { block: Extract<AssistantDisplayBlock, { kind: "command" }> }) {
-  const [expanded, setExpanded] = useState(false);
+function RefreshIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path
+        d="M15.5 8.2A5.8 5.8 0 105.9 13M15.5 8.2V4.8m0 3.4h-3.4"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function DeleteIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path
+        d="M4.5 6h11m-8.5 0V4.8A1.3 1.3 0 018.3 3.5h3.4A1.3 1.3 0 0113 4.8V6m-7.5 0l.6 8.1A1.5 1.5 0 007.6 15.5h4.8a1.5 1.5 0 001.5-1.4L14.5 6m-5.7 2.5v4m2.4-4v4"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function MessageActionButton({
+  label,
+  icon,
+  onClick,
+  disabled = false,
+  tone = "neutral",
+}: {
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  tone?: "neutral" | "danger";
+}) {
+  const toneClass =
+    tone === "danger"
+      ? "border-rose-200/90 bg-rose-50/90 text-rose-600 hover:border-rose-300 hover:bg-rose-100 hover:text-rose-700"
+      : "border-slate-200/90 bg-white/92 text-slate-500 hover:border-slate-300 hover:bg-slate-100 hover:text-slate-800";
 
   return (
-    <div className="rounded-[20px] border border-slate-200 bg-[#f8fafc] px-4 py-3">
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      aria-label={label}
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${toneClass}`}
+    >
+      {icon}
+    </button>
+  );
+}
+
+function MetaPill({
+  children,
+  tone = "neutral",
+}: {
+  children: ReactNode;
+  tone?: "neutral" | "success" | "warning" | "danger";
+}) {
+  const toneClass =
+    tone === "success"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : tone === "warning"
+        ? "border-amber-200 bg-amber-50 text-amber-700"
+        : tone === "danger"
+          ? "border-rose-200 bg-rose-50 text-rose-700"
+          : "border-slate-200 bg-white text-slate-600";
+
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] ${toneClass}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+function CommandSurface({
+  label,
+  icon,
+  tone = "light",
+  collapsible = false,
+  expanded = true,
+  onToggle,
+  children,
+}: {
+  label: string;
+  icon?: ReactNode;
+  tone?: "light" | "dark";
+  collapsible?: boolean;
+  expanded?: boolean;
+  onToggle?: () => void;
+  children: ReactNode;
+}) {
+  const toneClass =
+    tone === "dark"
+      ? "border-[#182132] bg-[#0f1728] text-slate-100"
+      : "border-slate-200 bg-white/95 text-slate-800";
+  const headerClass =
+    tone === "dark"
+      ? "border-white/8 bg-white/[0.03] text-slate-300"
+      : "border-slate-200/90 bg-slate-50/70 text-slate-500";
+  const headerContent = (
+    <div className="flex items-center gap-2">
+      {icon}
+      <span className="text-[10px] font-semibold uppercase tracking-[0.14em]">{label}</span>
+    </div>
+  );
+
+  return (
+    <div className={`overflow-hidden rounded-[18px] border ${toneClass}`}>
+      {collapsible ? (
+        <button
+          type="button"
+          onClick={onToggle}
+          className={`flex w-full items-center justify-between border-b px-3.5 py-2.5 text-left transition-colors ${
+            tone === "dark"
+              ? "hover:bg-white/[0.06] active:bg-white/[0.08]"
+              : "hover:bg-slate-100/80 active:bg-slate-100"
+          } ${headerClass}`}
+          aria-expanded={expanded}
+        >
+          {headerContent}
+          <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-current/15 bg-current/[0.06]">
+            <ChevronIcon expanded={expanded} />
+          </span>
+        </button>
+      ) : (
+        <div className={`flex items-center gap-2 border-b px-3.5 py-2.5 ${headerClass}`}>
+          {headerContent}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+
+function commandTone(status?: string, exitCode?: number): "neutral" | "success" | "warning" | "danger" {
+  if (status === "failed" || (exitCode != null && exitCode !== 0)) return "danger";
+  if (status === "declined") return "warning";
+  if (status === "completed" || status === "success" || status === "ok" || exitCode === 0) {
+    return "success";
+  }
+  return "neutral";
+}
+
+function CommandCard({
+  label,
+  command,
+  cwd,
+  workspaceRoot,
+  status,
+  exitCode,
+  output,
+}: {
+  label: string;
+  command: string;
+  cwd?: string | null;
+  workspaceRoot?: string | null;
+  status?: string | null;
+  exitCode?: number | null;
+  output?: string | null;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const statusTone = commandTone(status ?? undefined, exitCode ?? undefined);
+  const outputPreview = output ? summarizeMultiline(output, 4, 360) : null;
+  const hasOutput = Boolean(output?.trim());
+  const canToggleOutput = Boolean(outputPreview?.truncated);
+  const showCwd = Boolean(
+    cwd?.trim() && (!workspaceRoot?.trim() || !samePath(cwd.trim(), workspaceRoot.trim()))
+  );
+
+  return (
+    <div className="rounded-[24px] border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(248,250,252,0.98)_100%)] px-4 py-4 shadow-[0_16px_36px_rgba(15,23,42,0.05)]">
       <div className="flex items-start gap-3">
-        <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white">
+        <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[16px] border border-slate-200 bg-white text-slate-700 shadow-[0_10px_18px_rgba(15,23,42,0.06)]">
           <CommandIcon />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
-              Ran
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+              Command
             </span>
-            <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-700">
-              {block.label}
-            </span>
+            <MetaPill>{label}</MetaPill>
+            {status && <MetaPill tone={statusTone}>{titleCase(status)}</MetaPill>}
+            {exitCode != null && <MetaPill tone={statusTone}>exit {exitCode}</MetaPill>}
           </div>
-          <div className="mt-1 font-mono text-[12px] leading-6 text-slate-700">
-            {expanded ? block.command : summarizeInline(block.command)}
-          </div>
+          {showCwd && cwd && (
+            <div className="mt-2 inline-flex max-w-full items-center gap-1.5 rounded-full border border-slate-200 bg-white/85 px-3 py-1.5 text-[11px] text-slate-500">
+              <DirectoryIcon />
+              <span className="truncate">{cwd}</span>
+            </div>
+          )}
         </div>
-        <ToggleButton expanded={expanded} onClick={() => setExpanded((value) => !value)} />
       </div>
-      {expanded && (
-        <div className="mt-3 overflow-hidden rounded-[18px] border border-slate-200 bg-white">
-          <pre className="overflow-x-auto whitespace-pre-wrap break-all px-4 py-3 font-mono text-[12px] leading-6 text-slate-800">
-            {block.command}
+
+      <div className="mt-3 space-y-2.5">
+        <CommandSurface label="Shell Command">
+          <pre className="overflow-x-auto whitespace-pre-wrap break-all px-3.5 py-3 font-mono text-[12.5px] leading-6 text-slate-800">
+            {command}
           </pre>
-        </div>
-      )}
+        </CommandSurface>
+
+        {hasOutput && (
+          <CommandSurface
+            label="Output"
+            icon={<OutputIcon />}
+            tone="dark"
+            collapsible={canToggleOutput}
+            expanded={expanded}
+            onToggle={canToggleOutput ? () => setExpanded((value) => !value) : undefined}
+          >
+            <pre className="overflow-x-auto whitespace-pre-wrap break-all px-3.5 py-3 font-mono text-[12px] leading-6 text-slate-100">
+              {expanded || !outputPreview?.truncated ? output : outputPreview?.preview}
+            </pre>
+          </CommandSurface>
+        )}
+      </div>
     </div>
   );
+}
+
+function CommandBlock({
+  block,
+  workspaceRoot,
+}: {
+  block: Extract<AssistantDisplayBlock, { kind: "command" }>;
+  workspaceRoot?: string | null;
+}) {
+  return <CommandCard label={block.label} command={block.command} workspaceRoot={workspaceRoot} />;
 }
 
 function EditBlock({ block }: { block: Extract<AssistantDisplayBlock, { kind: "edit" }> }) {
@@ -214,10 +592,245 @@ function TextBlock({ block }: { block: Extract<AssistantDisplayBlock, { kind: "t
   );
 }
 
+function RuntimeTextBlock({
+  block,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "text" }>;
+}) {
+  return (
+    <AssistantMessageContent
+      content={block.text}
+      rawContent={block.text}
+      contentFormat={block.format}
+      isStreaming={false}
+      renderMode="rich"
+    />
+  );
+}
+
+function RuntimeReasoningBlock({
+  block,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "reasoning" }>;
+}) {
+  return (
+    <div className="rounded-[20px] border border-violet-200 bg-violet-50/80 px-4 py-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-violet-700">
+        Reasoning Summary
+      </div>
+      <pre className="mt-2 whitespace-pre-wrap break-all font-mono text-[12px] leading-6 text-violet-950">
+        {block.text}
+      </pre>
+    </div>
+  );
+}
+
+function RuntimeCommandBlock({
+  block,
+  workspaceRoot,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "command" }>;
+  workspaceRoot?: string | null;
+}) {
+  return (
+    <CommandCard
+      label={block.label}
+      command={block.command}
+      cwd={block.cwd}
+      workspaceRoot={workspaceRoot}
+      status={block.status}
+      exitCode={block.exitCode}
+      output={block.output}
+    />
+  );
+}
+
+function RuntimeFileChangeBlock({
+  block,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "fileChange" }>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const changeTone = fileChangeTone(block.changeType, block.movePath);
+  const patch = useMemo(() => parseFilePatch(block.diff), [block.diff]);
+  const hasCounts = patch.additions > 0 || patch.deletions > 0;
+
+  return (
+    <div className="rounded-[22px] border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(248,250,252,0.98)_100%)] px-4 py-3.5 shadow-[0_10px_28px_rgba(15,23,42,0.05)]">
+      <div className="flex items-start gap-3">
+        <div
+          className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl ${changeTone.icon}`}
+        >
+          <EditIcon />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] ${changeTone.chip}`}
+            >
+              {changeTone.label}
+            </span>
+            {block.status && (
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-700">
+                {block.status}
+              </span>
+            )}
+            {hasCounts && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 font-mono text-[11px]">
+                <span className="text-emerald-700">+{patch.additions}</span>
+                <span className="text-slate-300">,</span>
+                <span className="text-rose-700">-{patch.deletions}</span>
+              </span>
+            )}
+          </div>
+          <div className="mt-1.5 text-[13.5px] font-semibold text-slate-900">
+            {basename(block.path)}
+          </div>
+          <div className="mt-0.5 break-all text-[12px] text-slate-500">{block.path}</div>
+          {block.movePath && (
+            <div className="mt-1 break-all text-[12px] text-slate-500">
+              moved from {block.movePath}
+            </div>
+          )}
+        </div>
+        <ToggleButton
+          expanded={expanded}
+          label="Patch"
+          onClick={() => setExpanded((value) => !value)}
+        />
+      </div>
+      {expanded && (
+        <div className="mt-3 overflow-hidden rounded-[18px] border border-slate-200 bg-white">
+          {patch.hasRenderablePatch ? (
+            <div className="max-h-[320px] overflow-y-auto px-2 py-2">
+              {patch.rows.map((row, index) => {
+                if (row.kind === "hunk") {
+                  return (
+                    <div
+                      key={`${row.kind}-${index}`}
+                      className="mx-1 my-1 rounded-xl bg-slate-100 px-3 py-1.5 font-mono text-[10.5px] text-slate-500"
+                    >
+                      {row.text}
+                    </div>
+                  );
+                }
+
+                const toneClass =
+                  row.tone === "add"
+                    ? "bg-emerald-50/90 text-emerald-950"
+                    : row.tone === "delete"
+                      ? "bg-rose-50/90 text-rose-950"
+                      : row.tone === "note"
+                        ? "bg-slate-100 text-slate-500"
+                        : "text-slate-600";
+                const prefixClass =
+                  row.tone === "add"
+                    ? "text-emerald-600"
+                    : row.tone === "delete"
+                      ? "text-rose-600"
+                      : row.tone === "note"
+                        ? "text-slate-400"
+                        : "text-slate-300";
+
+                return (
+                  <div
+                    key={`${row.kind}-${index}`}
+                    className={`grid grid-cols-[18px_minmax(0,1fr)] items-start gap-2 rounded-xl px-3 py-1.5 font-mono text-[12px] leading-6 ${toneClass}`}
+                  >
+                    <span className={`select-none font-semibold ${prefixClass}`}>{row.prefix}</span>
+                    <span className="whitespace-pre-wrap break-all">{row.text || " "}</span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <pre className="overflow-x-auto whitespace-pre-wrap break-all px-4 py-3 font-mono text-[12px] leading-6 text-slate-700">
+              {block.diff}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuntimeToolBlock({
+  block,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "tool" }>;
+}) {
+  return (
+    <div className="rounded-[20px] border border-[#dbe4ef] bg-[#f8fbff] px-4 py-3">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+          Tool
+        </span>
+        <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-700">
+          {block.tool}
+        </span>
+        {block.status && (
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-600">
+            {block.status}
+          </span>
+        )}
+      </div>
+      {(block.source || block.summary) && (
+        <div className="mt-2 space-y-1 text-[12px] leading-6 text-slate-600">
+          {block.source && <div>{block.source}</div>}
+          {block.summary && <div className="whitespace-pre-wrap break-words">{block.summary}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuntimePlanBlock({
+  block,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "plan" }>;
+}) {
+  return (
+    <div className="rounded-[20px] border border-sky-200 bg-sky-50/70 px-4 py-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-700">
+        Plan
+      </div>
+      <div className="mt-2 whitespace-pre-wrap break-words text-[13px] leading-7 text-sky-950">
+        {block.text}
+      </div>
+    </div>
+  );
+}
+
+function RuntimeStatusBlock({
+  block,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "status" }>;
+}) {
+  const tone =
+    block.level === "error"
+      ? "border-rose-200 bg-rose-50 text-rose-900"
+      : block.level === "warning"
+        ? "border-amber-200 bg-amber-50 text-amber-900"
+        : "border-slate-200 bg-slate-50 text-slate-900";
+
+  return (
+    <div className={`rounded-[20px] border px-4 py-3 ${tone}`}>
+      <div className="text-xs font-semibold uppercase tracking-[0.16em]">
+        {block.level}
+      </div>
+      <pre className="mt-2 whitespace-pre-wrap break-all font-mono text-[12px] leading-6">
+        {block.text}
+      </pre>
+    </div>
+  );
+}
+
 function StructuredAssistantBlocks({
   blocks,
+  workspaceRoot,
 }: {
   blocks: AssistantDisplayBlock[];
+  workspaceRoot?: string | null;
 }) {
   return (
     <div className="space-y-3">
@@ -225,7 +838,7 @@ function StructuredAssistantBlocks({
         const key = `${block.kind}-${index}`;
         switch (block.kind) {
           case "command":
-            return <CommandBlock key={key} block={block} />;
+            return <CommandBlock key={key} block={block} workspaceRoot={workspaceRoot} />;
           case "edit":
             return <EditBlock key={key} block={block} />;
           case "status":
@@ -242,7 +855,53 @@ function StructuredAssistantBlocks({
   );
 }
 
-export function CliBubble({ message }: { message: ChatMessage }) {
+function RuntimeStructuredBlocks({
+  blocks,
+  workspaceRoot,
+}: {
+  blocks: ChatMessageBlock[];
+  workspaceRoot?: string | null;
+}) {
+  return (
+    <div className="space-y-3">
+      {blocks.map((block, index) => {
+        const key = `${block.kind}-${index}`;
+        switch (block.kind) {
+          case "text":
+            return <RuntimeTextBlock key={key} block={block} />;
+          case "reasoning":
+            return <RuntimeReasoningBlock key={key} block={block} />;
+          case "command":
+            return <RuntimeCommandBlock key={key} block={block} workspaceRoot={workspaceRoot} />;
+          case "fileChange":
+            return <RuntimeFileChangeBlock key={key} block={block} />;
+          case "tool":
+            return <RuntimeToolBlock key={key} block={block} />;
+          case "plan":
+            return <RuntimePlanBlock key={key} block={block} />;
+          case "status":
+            return <RuntimeStatusBlock key={key} block={block} />;
+          default:
+            return null;
+        }
+      })}
+    </div>
+  );
+}
+
+export function CliBubble({
+  message,
+  workspaceRoot,
+  onRegenerate,
+  onDelete,
+  actionsDisabled = false,
+}: {
+  message: ChatMessage;
+  workspaceRoot?: string | null;
+  onRegenerate?: (() => void) | null;
+  onDelete?: ((messageId: string) => void) | null;
+  actionsDisabled?: boolean;
+}) {
   const cli = message.cliId as AgentId;
   const badge = cli ? CLI_BADGE[cli] : null;
   const [renderMode, setRenderMode] = useState<"rich" | "raw">("rich");
@@ -258,12 +917,21 @@ export function CliBubble({ message }: { message: ChatMessage }) {
   );
   const contentFormat = message.contentFormat ?? detectAssistantContentFormat(rawText);
   const parsed = useMemo(() => parseAssistantDisplayBlocks(rawText), [rawText]);
+  const runtimeBlocks = message.blocks ?? null;
   const formatLabel =
-    !message.isStreaming && parsed.hasSpecialBlocks ? "structured" : contentFormat;
+    runtimeBlocks?.length
+      ? "structured"
+      : !message.isStreaming && parsed.hasSpecialBlocks
+        ? "structured"
+        : contentFormat;
   const showRawToggle =
     !message.isStreaming &&
     rawText.length > 0 &&
-    (parsed.hasSpecialBlocks || contentFormat !== "plain" || rawText.includes("\n"));
+    ((runtimeBlocks?.length ?? 0) > 0 ||
+      parsed.hasSpecialBlocks ||
+      contentFormat !== "plain" ||
+      rawText.includes("\n"));
+  const showBottomActions = Boolean(onRegenerate || onDelete);
 
   return (
     <div className="flex w-full max-w-[min(90%,960px)] flex-col items-start gap-2">
@@ -326,25 +994,51 @@ export function CliBubble({ message }: { message: ChatMessage }) {
         )}
       </div>
 
-      <div className="w-full overflow-hidden rounded-[26px] rounded-bl-lg border border-[#dce4f2] bg-white/96 px-4 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-sm">
-        {renderMode === "raw" ? (
-          <AssistantMessageContent
-            content={message.content}
-            rawContent={message.rawContent}
-            contentFormat={contentFormat}
-            isStreaming={message.isStreaming}
-            renderMode="raw"
-          />
-        ) : message.isStreaming ? (
-          <AssistantMessageContent
-            content={message.content}
-            rawContent={message.rawContent}
-            contentFormat={contentFormat}
-            isStreaming={message.isStreaming}
-            renderMode="rich"
-          />
-        ) : (
-          <StructuredAssistantBlocks blocks={parsed.blocks} />
+      <div className="w-full">
+        <div className="overflow-hidden rounded-[26px] rounded-bl-lg border border-[#dce4f2] bg-white/96 px-4 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-sm">
+          {renderMode === "raw" ? (
+            <AssistantMessageContent
+              content={message.content}
+              rawContent={message.rawContent}
+              contentFormat={contentFormat}
+              isStreaming={message.isStreaming}
+              renderMode="raw"
+            />
+          ) : message.isStreaming ? (
+            <AssistantMessageContent
+              content={message.content}
+              rawContent={message.rawContent}
+              contentFormat={contentFormat}
+              isStreaming={message.isStreaming}
+              renderMode="rich"
+            />
+          ) : runtimeBlocks?.length ? (
+            <RuntimeStructuredBlocks blocks={runtimeBlocks} workspaceRoot={workspaceRoot} />
+          ) : (
+            <StructuredAssistantBlocks blocks={parsed.blocks} workspaceRoot={workspaceRoot} />
+          )}
+        </div>
+
+        {showBottomActions && (
+          <div className="mt-1.5 flex items-center gap-1 pl-1">
+            {onRegenerate && (
+              <MessageActionButton
+                label="Regenerate"
+                icon={<RefreshIcon />}
+                onClick={onRegenerate}
+                disabled={actionsDisabled}
+              />
+            )}
+            {onDelete && (
+              <MessageActionButton
+                label="Delete"
+                icon={<DeleteIcon />}
+                onClick={() => onDelete(message.id)}
+                disabled={actionsDisabled}
+                tone="danger"
+              />
+            )}
+          </div>
         )}
       </div>
     </div>

@@ -1,11 +1,52 @@
 import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ACP_COMMANDS, AcpCommandDef, parseSlashCommand } from "../../lib/acp";
-import { FileMentionCandidate } from "../../lib/models";
+import {
+  ACP_COMMANDS,
+  AcpCliCapabilities,
+  AcpCommandDef,
+  AcpOptionDef,
+  AcpPickerCommandKind,
+  getCommandCategory,
+  getCommandCategoryLabel,
+  getPickerCatalog,
+  isPickerCommandKind,
+  parseSlashCommand,
+} from "../../lib/acp";
+import { AgentId, FileMentionCandidate, TerminalTab } from "../../lib/models";
 import { useStore } from "../../lib/store";
 import { CliSelector } from "./CliSelector";
-import { PromptOverlay } from "./PromptOverlay";
+import { PromptOverlay, PromptOverlayItem, PromptOverlaySection } from "./PromptOverlay";
 
-type OverlayKind = "slash" | "mention" | null;
+type InteractiveOverlayEntry =
+  | { id: string; kind: "command"; command: AcpCommandDef }
+  | { id: string; kind: "mention"; mention: FileMentionCandidate }
+  | { id: string; kind: "option"; commandKind: AcpPickerCommandKind; option: AcpOptionDef };
+
+type CommandOverlayState =
+  | {
+      kind: "command-list";
+      title: string;
+      description: string;
+      footer: string;
+      sections: PromptOverlaySection[];
+      entries: InteractiveOverlayEntry[];
+    }
+  | {
+      kind: "command-help";
+      title: string;
+      description: string;
+      footer: string;
+      sections: PromptOverlaySection[];
+    }
+  | {
+      kind: "command-argument";
+      title: string;
+      description: string;
+      footer: string;
+      sections: PromptOverlaySection[];
+      entries: InteractiveOverlayEntry[];
+      commandKind: AcpPickerCommandKind;
+      loading: boolean;
+    };
 
 function findMentionToken(value: string, caret: number) {
   const prefix = value.slice(0, caret);
@@ -19,18 +60,313 @@ function findMentionToken(value: string, caret: number) {
   };
 }
 
+function titleCaseCli(cliId: AgentId) {
+  return cliId.charAt(0).toUpperCase() + cliId.slice(1);
+}
+
+function currentModelLabel(tab: TerminalTab) {
+  return tab.modelOverrides[tab.selectedCli] ?? "default";
+}
+
+function currentPermissionLabel(tab: TerminalTab) {
+  return tab.permissionOverrides[tab.selectedCli] ?? (
+    tab.selectedCli === "codex"
+      ? "workspace-write"
+      : tab.selectedCli === "claude"
+        ? "acceptEdits"
+        : "auto_edit"
+  );
+}
+
+function currentEffortLabel(tab: TerminalTab) {
+  return tab.effortLevel ?? "default";
+}
+
+function commandStateMeta(command: AcpCommandDef, tab: TerminalTab) {
+  switch (command.kind) {
+    case "plan":
+      return tab.planMode ? "ON" : "OFF";
+    case "model":
+      return currentModelLabel(tab);
+    case "permissions":
+      return currentPermissionLabel(tab);
+    case "effort":
+      return currentEffortLabel(tab);
+    case "fast":
+      return tab.fastMode ? "ON" : "OFF";
+    default:
+      return undefined;
+  }
+}
+
+function commandHelpSubtitle(command: AcpCommandDef, tab: TerminalTab) {
+  const details = [command.description];
+  const current = commandStateMeta(command, tab);
+  if (current) {
+    details.push(`Current: ${current}`);
+  }
+  return details.join("\n");
+}
+
+function appendSectionItem(
+  sections: PromptOverlaySection[],
+  sectionId: string,
+  sectionTitle: string,
+  item: PromptOverlayItem
+) {
+  const existing = sections.find((section) => section.id === sectionId);
+  if (existing) {
+    existing.items.push(item);
+    return;
+  }
+  sections.push({
+    id: sectionId,
+    title: sectionTitle,
+    items: [item],
+  });
+}
+
+function buildCommandListOverlay(
+  activeTab: TerminalTab,
+  query: string
+): CommandOverlayState {
+  const supportedCommands = ACP_COMMANDS.filter((command) =>
+    command.supportedClis.includes(activeTab.selectedCli)
+  ).filter((command) => {
+    const normalized = query.toLowerCase();
+    return (
+      !normalized ||
+      command.slash.slice(1).startsWith(normalized) ||
+      command.label.toLowerCase().includes(normalized)
+    );
+  });
+
+  const sections: PromptOverlaySection[] = [];
+  const entries: InteractiveOverlayEntry[] = [];
+
+  supportedCommands.forEach((command) => {
+    const category = getCommandCategory(command.kind);
+    const itemId = command.kind;
+    appendSectionItem(sections, category, getCommandCategoryLabel(category), {
+      id: itemId,
+      title: command.slash,
+      subtitle: command.description,
+      meta: commandStateMeta(command, activeTab),
+      badge: command.argsHint ? "pick" : undefined,
+    });
+    entries.push({ id: itemId, kind: "command", command });
+  });
+
+  if (sections.length === 0) {
+    sections.push({
+      id: "empty",
+      items: [
+        {
+          id: "empty",
+          title: "No matching commands",
+          subtitle: "Try another slash command or press Esc to return to the composer.",
+        },
+      ],
+    });
+  }
+
+  return {
+    kind: "command-list",
+    title: `${titleCaseCli(activeTab.selectedCli)} Commands`,
+    description: "Pick a command directly from the palette. Parameterized commands continue in-place with a second selection step.",
+    footer: "Arrow keys move, Enter applies, Esc clears, Shift+Tab toggles plan mode when the palette is closed.",
+    sections,
+    entries,
+  };
+}
+
+function buildHelpOverlay(activeTab: TerminalTab): CommandOverlayState {
+  const commands = ACP_COMMANDS.filter((command) =>
+    command.supportedClis.includes(activeTab.selectedCli)
+  );
+  const sections: PromptOverlaySection[] = [];
+
+  commands.forEach((command) => {
+    const category = getCommandCategory(command.kind);
+    appendSectionItem(sections, category, getCommandCategoryLabel(category), {
+      id: `help-${command.kind}`,
+      title: `${command.slash}${command.argsHint ? ` ${command.argsHint}` : ""}`,
+      subtitle: commandHelpSubtitle(command, activeTab),
+      meta: command.label,
+    });
+  });
+
+  return {
+    kind: "command-help",
+    title: `${titleCaseCli(activeTab.selectedCli)} Help`,
+    description: "Reference view for the active CLI. This panel explains each command without executing anything.",
+    footer: "Esc returns to the command palette.",
+    sections,
+  };
+}
+
+function optionMatchesQuery(option: AcpOptionDef, query: string) {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return true;
+  return (
+    option.value.toLowerCase().includes(normalized) ||
+    option.label.toLowerCase().includes(normalized) ||
+    option.description?.toLowerCase().includes(normalized) === true
+  );
+}
+
+function buildArgumentOverlay(
+  activeTab: TerminalTab,
+  commandKind: AcpPickerCommandKind,
+  capabilities: AcpCliCapabilities | null | undefined,
+  capabilityStatus: "idle" | "loading" | "ready" | "error" | undefined,
+  query: string
+): CommandOverlayState {
+  const catalog = getPickerCatalog(capabilities, commandKind);
+  const current =
+    commandKind === "model"
+      ? currentModelLabel(activeTab)
+      : commandKind === "permissions"
+        ? currentPermissionLabel(activeTab)
+        : currentEffortLabel(activeTab);
+
+  if (capabilityStatus === "loading" || (capabilityStatus !== "error" && !catalog)) {
+    return {
+      kind: "command-argument",
+      commandKind,
+      loading: true,
+      title: `Select ${commandKind} for ${titleCaseCli(activeTab.selectedCli)}`,
+      description: `Current: ${current}. Loading available options from the installed CLI...`,
+      footer: "Esc returns to the command palette.",
+      sections: [
+        {
+          id: "loading",
+          items: [
+            {
+              id: "loading",
+              title: "Loading options",
+              subtitle: "Inspecting CLI help output and available flags.",
+              badge: "runtime",
+            },
+          ],
+        },
+      ],
+      entries: [],
+    };
+  }
+
+  if (!catalog || !catalog.supported) {
+    return {
+      kind: "command-argument",
+      commandKind,
+      loading: false,
+      title: `Select ${commandKind} for ${titleCaseCli(activeTab.selectedCli)}`,
+      description: `Current: ${current}. This parameter is not exposed by the active CLI.`,
+      footer: "Esc returns to the command palette.",
+      sections: [
+        {
+          id: "unsupported",
+          items: [
+            {
+              id: "unsupported",
+              title: "No selectable options",
+              subtitle: catalog?.note ?? "The active CLI does not expose this parameter as a selectable flag.",
+            },
+          ],
+        },
+      ],
+      entries: [],
+    };
+  }
+
+  const filteredOptions = catalog.options.filter((option) => optionMatchesQuery(option, query));
+  const options = [...filteredOptions];
+  const trimmedQuery = query.trim();
+  const hasExactQueryMatch = options.some((option) => option.value.toLowerCase() === trimmedQuery.toLowerCase());
+
+  if (commandKind === "model" && trimmedQuery && !hasExactQueryMatch) {
+    options.push({
+      value: trimmedQuery,
+      label: trimmedQuery,
+      description: "Apply the typed model value directly.",
+      source: "manual",
+    });
+  }
+
+  const sections: PromptOverlaySection[] = [];
+  const entries: InteractiveOverlayEntry[] = [];
+
+  options.forEach((option) => {
+    const sourceKey = option.source === "manual" ? "manual" : option.source;
+    const sourceLabel =
+      option.source === "runtime"
+        ? "runtime"
+        : option.source === "fallback"
+          ? "preset"
+          : "manual";
+
+    const itemId = `${commandKind}-${option.value}`;
+    appendSectionItem(
+      sections,
+      sourceKey,
+      sourceLabel === "runtime" ? "Detected" : sourceLabel === "preset" ? "Presets" : "Typed Value",
+      {
+        id: itemId,
+        title: option.label,
+        subtitle: option.description ?? undefined,
+        meta: current === option.value ? "current" : undefined,
+        badge: sourceLabel,
+      }
+    );
+    entries.push({ id: itemId, kind: "option", commandKind, option });
+  });
+
+  if (sections.length === 0) {
+    sections.push({
+      id: "empty",
+      items: [
+        {
+          id: "empty",
+          title: "No matching options",
+          subtitle: "Refine the filter or press Esc to return to the command palette.",
+        },
+      ],
+    });
+  }
+
+  return {
+    kind: "command-argument",
+    commandKind,
+    loading: false,
+    title: `Select ${commandKind} for ${titleCaseCli(activeTab.selectedCli)}`,
+    description: `Current: ${current}.${catalog.note ? ` ${catalog.note}` : ""}`,
+    footer: "Arrow keys move, Enter applies, Esc returns to the command palette.",
+    sections,
+    entries,
+  };
+}
+
 export function ChatPromptBar() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const actionMenuRef = useRef<HTMLDivElement>(null);
-  const [overlayKind, setOverlayKind] = useState<OverlayKind>(null);
+  const promptHistoryStateRef = useRef<{ index: number | null; draft: string }>({
+    index: null,
+    draft: "",
+  });
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [mentionItems, setMentionItems] = useState<FileMentionCandidate[]>([]);
+  const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
   const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
 
   const terminalTabs = useStore((s) => s.terminalTabs);
   const workspaces = useStore((s) => s.workspaces);
   const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
   const busyAction = useStore((s) => s.busyAction);
+  const activeSession = useStore((s) =>
+    s.activeTerminalTabId ? s.chatSessions[s.activeTerminalTabId] ?? null : null
+  );
+  const acpCapabilitiesByCli = useStore((s) => s.acpCapabilitiesByCli);
+  const acpCapabilityStatusByCli = useStore((s) => s.acpCapabilityStatusByCli);
   const setTabDraftPrompt = useStore((s) => s.setTabDraftPrompt);
   const sendChatMessage = useStore((s) => s.sendChatMessage);
   const executeAcpCommand = useStore((s) => s.executeAcpCommand);
@@ -38,6 +374,8 @@ export function ChatPromptBar() {
   const runChecks = useStore((s) => s.runChecks);
   const togglePlanMode = useStore((s) => s.togglePlanMode);
   const searchWorkspaceFiles = useStore((s) => s.searchWorkspaceFiles);
+  const loadAcpCapabilities = useStore((s) => s.loadAcpCapabilities);
+  const appendChatSystemMessage = useStore((s) => s.appendChatSystemMessage);
 
   const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
   const workspace = workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null;
@@ -45,30 +383,42 @@ export function ChatPromptBar() {
   const isStreaming = activeTab?.status === "streaming";
   const isBusy = busyAction === "checks" || busyAction?.startsWith("review-") || false;
 
-  const slashCommands = useMemo(() => {
-    const raw = prompt.trimStart();
-    if (!raw.startsWith("/") || raw.includes(" ")) return [];
-    const q = raw.toLowerCase().replace(/^\//, "");
-    return ACP_COMMANDS
-      .filter((cmd) => !q || cmd.slash.slice(1).startsWith(q) || cmd.label.toLowerCase().includes(q))
-      .sort((a, b) => {
-        const aSupported = activeTab ? (a.supportedClis.includes(activeTab.selectedCli) ? 0 : 1) : 1;
-        const bSupported = activeTab ? (b.supportedClis.includes(activeTab.selectedCli) ? 0 : 1) : 1;
-        return aSupported - bSupported;
-      });
-  }, [activeTab, prompt]);
+  const rawSlashPrompt = prompt.trimStart();
+  const slashQuery = rawSlashPrompt.startsWith("/") ? rawSlashPrompt.slice(1).toLowerCase() : "";
+  const promptHistory = useMemo(
+    () => activeSession?.messages.filter((message) => message.role === "user").map((message) => message.content) ?? [],
+    [activeSession?.messages]
+  );
+
+  useEffect(() => {
+    if (!activeTab) return;
+    void loadAcpCapabilities(activeTab.selectedCli);
+  }, [activeTab, loadAcpCapabilities]);
+
+  useEffect(() => {
+    promptHistoryStateRef.current = {
+      index: null,
+      draft: "",
+    };
+  }, [activeTab?.id]);
 
   const mentionToken = useMemo(() => {
     const caret = textareaRef.current?.selectionStart ?? prompt.length;
     return findMentionToken(prompt, caret);
   }, [prompt]);
 
+  const mentionKey = mentionToken ? `${mentionToken.start}:${mentionToken.query}` : null;
+
   useEffect(() => {
-    if (!activeTab || !workspace) return;
+    if (!activeTab || !workspace || rawSlashPrompt.startsWith("/")) return;
     if (!mentionToken) {
       setMentionItems([]);
-      if (overlayKind === "mention") setOverlayKind(null);
+      setDismissedMentionKey(null);
       return;
+    }
+
+    if (mentionKey && dismissedMentionKey && mentionKey !== dismissedMentionKey) {
+      setDismissedMentionKey(null);
     }
 
     let cancelled = false;
@@ -76,28 +426,89 @@ export function ChatPromptBar() {
       if (!cancelled) {
         setMentionItems(items);
         if (items.length > 0) {
-          setOverlayKind("mention");
           setSelectedIndex(0);
-        } else if (overlayKind === "mention") {
-          setOverlayKind(null);
         }
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [activeTab, mentionToken, overlayKind, searchWorkspaceFiles, workspace]);
+  }, [
+    activeTab,
+    dismissedMentionKey,
+    mentionKey,
+    mentionToken,
+    rawSlashPrompt,
+    searchWorkspaceFiles,
+    workspace,
+  ]);
+
+  const commandOverlay = useMemo<CommandOverlayState | null>(() => {
+    if (!activeTab || !rawSlashPrompt.startsWith("/")) return null;
+
+    if (/^\/help\s*$/i.test(rawSlashPrompt)) {
+      return buildHelpOverlay(activeTab);
+    }
+
+    const pickerMatch = rawSlashPrompt.match(/^\/(model|permissions|effort)\s+(.*)$/is);
+    if (pickerMatch && isPickerCommandKind(pickerMatch[1] as AcpPickerCommandKind)) {
+      const commandKind = pickerMatch[1] as AcpPickerCommandKind;
+      return buildArgumentOverlay(
+        activeTab,
+        commandKind,
+        acpCapabilitiesByCli[activeTab.selectedCli],
+        acpCapabilityStatusByCli[activeTab.selectedCli],
+        pickerMatch[2] ?? ""
+      );
+    }
+
+    return buildCommandListOverlay(activeTab, slashQuery);
+  }, [
+    activeTab,
+    acpCapabilitiesByCli,
+    acpCapabilityStatusByCli,
+    rawSlashPrompt,
+    slashQuery,
+  ]);
+
+  const showMentionOverlay =
+    !commandOverlay &&
+    !!mentionToken &&
+    mentionItems.length > 0 &&
+    mentionKey !== dismissedMentionKey;
+
+  const activeSections = commandOverlay
+    ? commandOverlay.sections
+    : showMentionOverlay
+      ? [
+          {
+            id: "mentions",
+            items: mentionItems.map((item) => ({
+              id: item.id,
+              title: item.relativePath,
+              subtitle: item.name,
+            })),
+          },
+        ]
+      : [];
+
+  const interactiveEntries = commandOverlay
+      ? "entries" in commandOverlay
+      ? commandOverlay.entries
+      : []
+    : showMentionOverlay
+      ? mentionItems.map<InteractiveOverlayEntry>((mention) => ({
+          id: mention.id,
+          kind: "mention",
+          mention,
+        }))
+      : [];
+
+  const safeSelectedIndex = Math.max(0, Math.min(selectedIndex, interactiveEntries.length - 1));
 
   useEffect(() => {
-    if (slashCommands.length > 0) {
-      setOverlayKind("slash");
-      setSelectedIndex(0);
-      return;
-    }
-    if (overlayKind === "slash") {
-      setOverlayKind(null);
-    }
-  }, [overlayKind, slashCommands]);
+    setSelectedIndex(0);
+  }, [commandOverlay?.kind, rawSlashPrompt, mentionKey]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -122,47 +533,131 @@ export function ChatPromptBar() {
     };
   }, [isActionMenuOpen]);
 
-  const overlayItems = overlayKind === "slash"
-    ? slashCommands.map((cmd) => ({
-        id: cmd.kind,
-        title: cmd.slash,
-        subtitle: cmd.description,
-        meta: cmd.argsHint,
-        chips: cmd.supportedClis,
-        disabled: activeTab ? !cmd.supportedClis.includes(activeTab.selectedCli) : true,
-      }))
-    : mentionItems.map((item) => ({
-        id: item.id,
-        title: item.relativePath,
-        subtitle: item.name,
-      }));
-
-  const safeSelectedIndex = Math.max(0, Math.min(selectedIndex, overlayItems.length - 1));
-
   function setPrompt(value: string) {
     if (!activeTab) return;
     setTabDraftPrompt(activeTab.id, value);
   }
 
+  function handlePromptChange(value: string) {
+    if (promptHistoryStateRef.current.index !== null) {
+      promptHistoryStateRef.current = {
+        index: null,
+        draft: "",
+      };
+    }
+    setPrompt(value);
+  }
+
+  function focusPromptAtEnd() {
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const caret = el.value.length;
+      el.setSelectionRange(caret, caret);
+    });
+  }
+
+  function navigatePromptHistory(direction: -1 | 1) {
+    if (!activeTab || promptHistory.length === 0) return;
+
+    const current = promptHistoryStateRef.current;
+    if (direction === -1) {
+      const nextIndex =
+        current.index == null
+          ? promptHistory.length - 1
+          : Math.max(current.index - 1, 0);
+      promptHistoryStateRef.current = {
+        index: nextIndex,
+        draft: current.index == null ? prompt : current.draft,
+      };
+      setPrompt(promptHistory[nextIndex]);
+      focusPromptAtEnd();
+      return;
+    }
+
+    if (current.index == null) return;
+    if (current.index >= promptHistory.length - 1) {
+      setPrompt(current.draft);
+      promptHistoryStateRef.current = {
+        index: null,
+        draft: "",
+      };
+      focusPromptAtEnd();
+      return;
+    }
+
+    const nextIndex = current.index + 1;
+    promptHistoryStateRef.current = {
+      index: nextIndex,
+      draft: current.draft,
+    };
+    setPrompt(promptHistory[nextIndex]);
+    focusPromptAtEnd();
+  }
+
   function handleSend() {
     if (!activeTab) return;
     setIsActionMenuOpen(false);
+
+    if (commandOverlay) {
+      if (commandOverlay.kind === "command-help") {
+        return;
+      }
+
+      if (interactiveEntries.length > 0) {
+        handleOverlaySelect(safeSelectedIndex);
+        return;
+      }
+
+      const parsed = parseSlashCommand(rawSlashPrompt);
+      if (parsed && commandOverlay.kind === "command-list") {
+        setPrompt("");
+        void executeAcpCommand(parsed, activeTab.id);
+        return;
+      }
+
+      if (commandOverlay.kind === "command-argument") {
+        if (commandOverlay.loading) {
+          return;
+        }
+        appendChatSystemMessage(
+          activeTab.id,
+          activeTab.selectedCli,
+          `No matching ${commandOverlay.commandKind} option for ${titleCaseCli(activeTab.selectedCli)}.`,
+          1
+        );
+        return;
+      }
+    }
+
+    promptHistoryStateRef.current = {
+      index: null,
+      draft: "",
+    };
     void sendChatMessage(activeTab.id);
   }
 
-  function selectSlashCommand(cmd: AcpCommandDef) {
+  function selectCommand(command: AcpCommandDef) {
     if (!activeTab) return;
-    if (!cmd.supportedClis.includes(activeTab.selectedCli)) return;
-    if (cmd.argsHint) {
-      setPrompt(`${cmd.slash} `);
-      setOverlayKind(null);
+    if (!command.supportedClis.includes(activeTab.selectedCli)) return;
+
+    if (command.kind === "help") {
+      setPrompt("/help");
       requestAnimationFrame(() => textareaRef.current?.focus());
       return;
     }
-    const parsed = parseSlashCommand(cmd.slash);
+
+    if (isPickerCommandKind(command.kind)) {
+      void loadAcpCapabilities(activeTab.selectedCli);
+      setPrompt(`${command.slash} `);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      return;
+    }
+
+    const parsed = parseSlashCommand(command.slash);
     if (!parsed) return;
     setPrompt("");
-    setOverlayKind(null);
     void executeAcpCommand(parsed, activeTab.id);
   }
 
@@ -170,7 +665,7 @@ export function ChatPromptBar() {
     if (!activeTab || !mentionToken) return;
     const next = `${prompt.slice(0, mentionToken.start)}@${item.relativePath} ${prompt.slice(mentionToken.end)}`;
     setPrompt(next);
-    setOverlayKind(null);
+    setDismissedMentionKey(null);
     requestAnimationFrame(() => {
       const el = textareaRef.current;
       if (!el) return;
@@ -180,27 +675,72 @@ export function ChatPromptBar() {
     });
   }
 
+  function selectOption(commandKind: AcpPickerCommandKind, option: AcpOptionDef) {
+    if (!activeTab) return;
+    setPrompt("");
+    void executeAcpCommand(
+      {
+        kind: commandKind,
+        args: [option.value],
+        rawInput: `/${commandKind} ${option.value}`,
+      },
+      activeTab.id
+    );
+  }
+
   function handleOverlaySelect(index: number) {
-    if (overlayKind === "slash") {
-      const command = slashCommands[index];
-      if (command) selectSlashCommand(command);
+    const entry = interactiveEntries[index];
+    if (!entry) return;
+    if (entry.kind === "command") {
+      selectCommand(entry.command);
       return;
     }
-    const item = mentionItems[index];
-    if (item) selectMention(item);
+    if (entry.kind === "mention") {
+      selectMention(entry.mention);
+      return;
+    }
+    selectOption(entry.commandKind, entry.option);
+  }
+
+  function handleEscape() {
+    if (commandOverlay?.kind === "command-argument" || commandOverlay?.kind === "command-help") {
+      setPrompt("/");
+      return;
+    }
+
+    if (commandOverlay?.kind === "command-list") {
+      setPrompt("");
+      return;
+    }
+
+    if (showMentionOverlay && mentionKey) {
+      setDismissedMentionKey(mentionKey);
+      return;
+    }
+
+    if (isActionMenuOpen) {
+      setIsActionMenuOpen(false);
+    }
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Tab" && event.shiftKey && activeTab && (!overlayKind || overlayItems.length === 0)) {
+    const hasInteractiveOverlay = interactiveEntries.length > 0;
+    const selectionStart = event.currentTarget.selectionStart ?? 0;
+    const selectionEnd = event.currentTarget.selectionEnd ?? 0;
+    const hasSelection = selectionStart !== selectionEnd;
+    const atPromptStart = !hasSelection && selectionStart === 0;
+    const atPromptEnd = !hasSelection && selectionEnd === event.currentTarget.value.length;
+
+    if (event.key === "Tab" && event.shiftKey && activeTab && !commandOverlay && !showMentionOverlay) {
       event.preventDefault();
       togglePlanMode(activeTab.id);
       return;
     }
 
-    if (overlayKind && overlayItems.length > 0) {
+    if (hasInteractiveOverlay) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        setSelectedIndex((current) => Math.min(current + 1, overlayItems.length - 1));
+        setSelectedIndex((current) => Math.min(current + 1, interactiveEntries.length - 1));
         return;
       }
       if (event.key === "ArrowUp") {
@@ -213,21 +753,29 @@ export function ChatPromptBar() {
         handleOverlaySelect(safeSelectedIndex);
         return;
       }
-      if (event.key === "Tab") {
+      if (event.key === "Tab" && !event.shiftKey) {
         event.preventDefault();
         handleOverlaySelect(safeSelectedIndex);
         return;
       }
-      if (event.key === "Escape") {
+    }
+
+    if (!commandOverlay && !showMentionOverlay && !isActionMenuOpen) {
+      if (event.key === "ArrowUp" && atPromptStart) {
         event.preventDefault();
-        setOverlayKind(null);
+        navigatePromptHistory(-1);
+        return;
+      }
+      if (event.key === "ArrowDown" && atPromptEnd && promptHistoryStateRef.current.index !== null) {
+        event.preventDefault();
+        navigatePromptHistory(1);
         return;
       }
     }
 
-    if (event.key === "Escape" && isActionMenuOpen) {
+    if (event.key === "Escape" && (commandOverlay || showMentionOverlay || isActionMenuOpen)) {
       event.preventDefault();
-      setIsActionMenuOpen(false);
+      handleEscape();
       return;
     }
 
@@ -238,21 +786,31 @@ export function ChatPromptBar() {
   }
 
   if (!activeTab || !workspace) return null;
-  const cliLabel =
-    activeTab.selectedCli.charAt(0).toUpperCase() + activeTab.selectedCli.slice(1);
+  const cliLabel = titleCaseCli(activeTab.selectedCli);
 
   return (
     <div className="border-t border-border bg-[radial-gradient(circle_at_top,#f8fbff_0%,#ffffff_48%)] px-5 py-4">
       <div className="mx-auto max-w-5xl">
         <div className="relative overflow-visible">
-          <PromptOverlay
-            items={overlayItems}
-            selectedIndex={safeSelectedIndex}
-            onSelect={(item) => {
-              const index = overlayItems.findIndex((entry) => entry.id === item.id);
-              if (index >= 0) handleOverlaySelect(index);
-            }}
-          />
+          {(commandOverlay || showMentionOverlay) && (
+            <PromptOverlay
+              title={commandOverlay?.title}
+              description={commandOverlay?.description}
+              sections={activeSections}
+              selectedIndex={safeSelectedIndex}
+              interactive={interactiveEntries.length > 0}
+              footer={commandOverlay?.footer}
+              onBack={
+                commandOverlay?.kind === "command-argument" || commandOverlay?.kind === "command-help"
+                  ? () => setPrompt("/")
+                  : undefined
+              }
+              onSelect={(item) => {
+                const index = interactiveEntries.findIndex((entry) => entry.id === item.id);
+                if (index >= 0) handleOverlaySelect(index);
+              }}
+            />
+          )}
 
           <div className="rounded-[28px] border border-[#d7e0eb] bg-[linear-gradient(180deg,#ffffff_0%,#f8fbff_100%)] px-4 pt-3 pb-3.5 shadow-[0_18px_54px_rgba(15,23,42,0.08)] transition-colors focus-within:border-accent/40 focus-within:shadow-[0_22px_64px_rgba(59,130,246,0.09)]">
             <div className="mb-3 flex items-center justify-between gap-3">
@@ -264,7 +822,7 @@ export function ChatPromptBar() {
                 <button
                   type="button"
                   onClick={() => {
-                    setOverlayKind(null);
+                    setDismissedMentionKey(null);
                     setIsActionMenuOpen((current) => !current);
                   }}
                   disabled={isStreaming || isBusy}
@@ -350,7 +908,7 @@ export function ChatPromptBar() {
               ref={textareaRef}
               rows={1}
               value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
+              onChange={(event) => handlePromptChange(event.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
                 isStreaming
@@ -364,13 +922,14 @@ export function ChatPromptBar() {
 
           <div className="mt-3 flex flex-col gap-1 text-[11px] text-muted md:flex-row md:items-center md:justify-between">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <span>/ commands</span>
+              <span>/ command center</span>
+              <span>/help reference</span>
               <span>@ files</span>
-              <span>Shift+Tab for plan</span>
             </div>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <span>Enter sends</span>
+              <span>Enter sends or applies</span>
               <span>Shift+Enter for newline</span>
+              <span>Up/Down recalls prompts</span>
             </div>
           </div>
         </div>

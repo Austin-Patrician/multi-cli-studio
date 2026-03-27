@@ -23,6 +23,30 @@ export interface AcpCommand {
   rawInput: string;
 }
 
+export type AcpPickerCommandKind = Extract<AcpCommandKind, "model" | "permissions" | "effort">;
+
+export type AcpOptionSource = "runtime" | "fallback" | "manual";
+
+export interface AcpOptionDef {
+  value: string;
+  label: string;
+  description?: string | null;
+  source: AcpOptionSource;
+}
+
+export interface AcpOptionCatalog {
+  supported: boolean;
+  options: AcpOptionDef[];
+  note?: string | null;
+}
+
+export interface AcpCliCapabilities {
+  cliId: AgentId;
+  model: AcpOptionCatalog;
+  permissions: AcpOptionCatalog;
+  effort: AcpOptionCatalog;
+}
+
 export interface AcpCommandResult {
   success: boolean;
   output: string;
@@ -150,6 +174,46 @@ export function parseSlashCommand(input: string): AcpCommand | null {
 
 export function getCommandsForCli(cliId: AgentId): AcpCommandDef[] {
   return ACP_COMMANDS.filter((c) => c.supportedClis.includes(cliId));
+}
+
+export function isPickerCommandKind(kind: AcpCommandKind): kind is AcpPickerCommandKind {
+  return kind === "model" || kind === "permissions" || kind === "effort";
+}
+
+export function getPickerCatalog(
+  capabilities: AcpCliCapabilities | null | undefined,
+  kind: AcpPickerCommandKind
+): AcpOptionCatalog | null {
+  if (!capabilities) return null;
+  return capabilities[kind];
+}
+
+export function getCommandCategory(kind: AcpCommandKind) {
+  switch (kind) {
+    case "plan":
+    case "model":
+    case "permissions":
+    case "effort":
+    case "fast":
+    case "status":
+      return "session";
+    case "diff":
+    case "memory":
+      return "workspace";
+    default:
+      return "history";
+  }
+}
+
+export function getCommandCategoryLabel(category: ReturnType<typeof getCommandCategory>) {
+  switch (category) {
+    case "session":
+      return "Session Controls";
+    case "workspace":
+      return "Workspace Tools";
+    default:
+      return "History & Context";
+  }
 }
 
 export function filterCommands(filter: string, cliId: AgentId): AcpCommandDef[] {

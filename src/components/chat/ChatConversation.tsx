@@ -1,18 +1,79 @@
 import { useEffect, useMemo, useRef } from "react";
+import { useShallow } from "zustand/react/shallow";
+import { AgentId } from "../../lib/models";
 import { useStore } from "../../lib/store";
 import { UserBubble } from "./UserBubble";
 import { CliBubble } from "./CliBubble";
 
+async function copyTextToClipboard(value: string) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      // Fall through to the legacy copy path below.
+    }
+  }
+
+  if (typeof document === "undefined") {
+    return false;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
 export function ChatConversation() {
-  const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
-  const chatSessions = useStore((s) => s.chatSessions);
-  const terminalTabs = useStore((s) => s.terminalTabs);
-  const workspaces = useStore((s) => s.workspaces);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
-  const activeSession = activeTerminalTabId ? chatSessions[activeTerminalTabId] ?? null : null;
-  const workspace = workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null;
+  const activeTab = useStore(
+    useShallow((state) => {
+      const tab = state.terminalTabs.find((item) => item.id === state.activeTerminalTabId);
+      return tab
+        ? {
+            id: tab.id,
+            workspaceId: tab.workspaceId,
+            selectedCli: tab.selectedCli,
+            planMode: tab.planMode,
+            status: tab.status,
+          }
+        : null;
+    })
+  );
+  const activeSession = useStore((state) =>
+    state.activeTerminalTabId ? state.chatSessions[state.activeTerminalTabId] ?? null : null
+  );
+  const workspace = useStore(
+    useShallow((state) => {
+      const tab = state.terminalTabs.find((item) => item.id === state.activeTerminalTabId);
+      const item = state.workspaces.find((workspace) => workspace.id === tab?.workspaceId);
+      return item
+        ? {
+            id: item.id,
+            name: item.name,
+            rootPath: item.rootPath,
+          }
+        : null;
+    })
+  );
+  const setTabSelectedCli = useStore((state) => state.setTabSelectedCli);
+  const sendChatMessage = useStore((state) => state.sendChatMessage);
+  const deleteChatMessage = useStore((state) => state.deleteChatMessage);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({
@@ -25,6 +86,23 @@ export function ChatConversation() {
     if (!workspace) return "No workspace attached yet.";
     return `No messages yet for ${workspace.name}. Type / for commands or @ to mention files.`;
   }, [workspace]);
+
+  function handleCopyPrompt(prompt: string) {
+    return copyTextToClipboard(prompt);
+  }
+
+  function handleRegeneratePrompt(prompt: string, cliId: AgentId | null) {
+    if (!activeTab || activeTab.status === "streaming") return;
+    if (cliId && cliId !== activeTab.selectedCli) {
+      setTabSelectedCli(activeTab.id, cliId);
+    }
+    void sendChatMessage(activeTab.id, prompt);
+  }
+
+  function handleDeleteMessage(messageId: string) {
+    if (!activeTab || activeTab.status === "streaming") return;
+    deleteChatMessage(activeTab.id, messageId);
+  }
 
   if (!activeSession || !activeTab) {
     return (
@@ -58,21 +136,51 @@ export function ChatConversation() {
           </div>
         )}
 
-        {activeSession.messages.map((msg) => {
-          if (msg.role === "system") {
+        {(() => {
+          let lastUserPrompt: { content: string; cliId: AgentId | null } | null = null;
+
+          return activeSession.messages.map((msg) => {
+            if (msg.role === "system") {
+              return (
+                <div key={msg.id} className="flex justify-center">
+                  <span className="rounded-full border border-border bg-white px-3 py-1 text-xs text-secondary">
+                    {msg.content}
+                  </span>
+                </div>
+              );
+            }
+
+            if (msg.role === "user") {
+              lastUserPrompt = { content: msg.content, cliId: msg.cliId };
+              return (
+                <UserBubble
+                  key={msg.id}
+                  message={msg}
+                  onCopy={handleCopyPrompt}
+                  onDelete={handleDeleteMessage}
+                  deleteDisabled={activeTab.status === "streaming"}
+                />
+              );
+            }
+
+            const regeneratePrompt = lastUserPrompt;
+
             return (
-              <div key={msg.id} className="flex justify-center">
-                <span className="rounded-full border border-border bg-white px-3 py-1 text-xs text-secondary">
-                  {msg.content}
-                </span>
-              </div>
+              <CliBubble
+                key={msg.id}
+                message={msg}
+                workspaceRoot={workspace?.rootPath ?? null}
+                onRegenerate={
+                  !msg.isStreaming && regeneratePrompt
+                    ? () => handleRegeneratePrompt(regeneratePrompt.content, regeneratePrompt.cliId)
+                    : null
+                }
+                onDelete={!msg.isStreaming ? handleDeleteMessage : null}
+                actionsDisabled={activeTab.status === "streaming" || msg.isStreaming}
+              />
             );
-          }
-          if (msg.role === "user") {
-            return <UserBubble key={msg.id} message={msg} />;
-          }
-          return <CliBubble key={msg.id} message={msg} />;
-        })}
+          });
+        })()}
 
         <div ref={bottomRef} />
       </div>

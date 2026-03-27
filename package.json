@@ -14,12 +14,15 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/api": "^2.8.0",
+    "echarts": "^6.0.0",
+    "echarts-for-react": "^3.0.6",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.13.2",
     "remark-gfm": "^4.0.1",
     "tailwindcss": "^4.2.2",
+    "tslib": "^2.8.1",
     "zustand": "^5.0.12"
   },
   "devDependencies": {

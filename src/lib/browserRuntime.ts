@@ -1,8 +1,11 @@
 import {
   AppState,
   AgentId,
+  AgentTransportKind,
+  AgentTransportSession,
   AgentRuntimeResources,
   AgentPromptRequest,
+  ChatMessageBlock,
   TerminalEvent,
   TerminalLine,
   ContextStore,
@@ -18,6 +21,7 @@ import {
   WorkspacePickResult,
 } from "./models";
 import {
+  AcpCliCapabilities,
   AcpCommand,
   AcpCommandDef,
   AcpCommandResult,
@@ -43,6 +47,19 @@ let acpSession: AcpSession = defaultAcpSession();
 const stateListeners = new Set<StateListener>();
 const terminalListeners = new Set<TerminalListener>();
 const streamListeners = new Set<StreamListener>();
+
+function defaultTransportKind(agentId: AgentId): AgentTransportKind {
+  switch (agentId) {
+    case "codex":
+      return "codex-app-server";
+    case "claude":
+      return "claude-cli";
+    case "gemini":
+      return "gemini-acp";
+    default:
+      return "browser-fallback";
+  }
+}
 
 function defaultResourceGroup(supported: boolean) {
   return {
@@ -535,12 +552,28 @@ export const browserRuntime = {
     const { cliId, prompt, terminalTabId } = request;
     const messageId = createId("msg");
     const startTime = Date.now();
+    const transportSession: AgentTransportSession = {
+      cliId,
+      kind: "browser-fallback",
+      threadId: request.transportSession?.threadId ?? null,
+      turnId: createId("turn"),
+      model: request.modelOverride ?? null,
+      permissionMode: request.permissionOverride ?? null,
+      lastSyncAt: nowISO(),
+    };
 
     pushActivity("info", `${cliId} queued`, "Prompt dispatched to the selected CLI.");
     emitState();
 
     // Simulate streaming: emit chunks over time
     const output = fakeOutputFor(cliId, prompt);
+    const blocks: ChatMessageBlock[] = [
+      {
+        kind: "text",
+        text: output,
+        format: "markdown",
+      },
+    ];
     const words = output.split(" ");
     let emitted = 0;
 
@@ -549,7 +582,19 @@ export const browserRuntime = {
       if (chunkSize <= 0) {
         clearInterval(interval);
         const durationMs = Date.now() - startTime;
-        emitStream({ terminalTabId, messageId, chunk: "", done: true, exitCode: 0, durationMs });
+        emitStream({
+          terminalTabId,
+          messageId,
+          chunk: "",
+          done: true,
+          exitCode: 0,
+          durationMs,
+          finalContent: output,
+          contentFormat: "markdown",
+          transportKind: defaultTransportKind(cliId),
+          transportSession,
+          blocks,
+        });
         addConversationTurn(cliId, prompt, prompt, output, true, 0, durationMs);
         pushActivity("success", `${cliId} finished`, "The job output was captured and added to the project record.");
         emitState();
@@ -849,5 +894,82 @@ rename to src/components/chat/GitPanel.tsx`,
 
   async getAcpSession(): Promise<AcpSession> {
     return structuredClone(acpSession);
+  },
+
+  async getAcpCapabilities(cliId: AgentId): Promise<AcpCliCapabilities> {
+    const fallbackModels = {
+      codex: [
+        { value: "default", label: "Default", description: "Use the CLI default model", source: "fallback" as const },
+        { value: "gpt-5", label: "gpt-5", description: "General-purpose flagship", source: "fallback" as const },
+        { value: "gpt-5-codex", label: "gpt-5-codex", description: "Code-focused GPT-5 profile", source: "fallback" as const },
+        { value: "gpt-5-mini", label: "gpt-5-mini", description: "Lighter GPT-5 variant", source: "fallback" as const },
+        { value: "o3", label: "o3", description: "Reasoning-focused model alias", source: "fallback" as const },
+        { value: "oss", label: "oss", description: "Use local open-source provider mode", source: "fallback" as const },
+      ],
+      claude: [
+        { value: "default", label: "Default", description: "Use the CLI default model", source: "fallback" as const },
+        { value: "sonnet", label: "sonnet", description: "Claude Sonnet alias", source: "fallback" as const },
+        { value: "opus", label: "opus", description: "Claude Opus alias", source: "fallback" as const },
+      ],
+      gemini: [
+        { value: "default", label: "Default", description: "Use the CLI default model", source: "fallback" as const },
+        { value: "gemini-3-flash-preview", label: "gemini-3-flash-preview", description: "Preview of the next-generation flash model", source: "fallback" as const },
+        { value: "gemini-2.5-pro", label: "gemini-2.5-pro", description: "High-capability Gemini preset", source: "fallback" as const },
+        { value: "gemini-2.5-flash", label: "gemini-2.5-flash", description: "Fast Gemini preset", source: "fallback" as const },
+        { value: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite", description: "Lightweight fast Gemini preset", source: "fallback" as const },
+      ],
+    } satisfies Record<AgentId, AcpCliCapabilities["model"]["options"]>;
+
+    const permissionOptions = {
+      codex: [
+        { value: "read-only", label: "read-only", description: "Read-only shell sandbox", source: "runtime" as const },
+        { value: "workspace-write", label: "workspace-write", description: "Allow edits inside the workspace", source: "runtime" as const },
+        { value: "danger-full-access", label: "danger-full-access", description: "Disable sandbox restrictions", source: "runtime" as const },
+      ],
+      claude: [
+        { value: "acceptEdits", label: "acceptEdits", description: "Auto-approve edit actions", source: "runtime" as const },
+        { value: "bypassPermissions", label: "bypassPermissions", description: "Bypass permission checks", source: "runtime" as const },
+        { value: "default", label: "default", description: "Use Claude default permission mode", source: "runtime" as const },
+        { value: "dontAsk", label: "dontAsk", description: "Do not ask before actions", source: "runtime" as const },
+        { value: "plan", label: "plan", description: "Read-only planning mode", source: "runtime" as const },
+        { value: "auto", label: "auto", description: "Automatic permission behavior", source: "runtime" as const },
+      ],
+      gemini: [
+        { value: "default", label: "default", description: "Prompt for approval when needed", source: "runtime" as const },
+        { value: "auto_edit", label: "auto_edit", description: "Auto-approve edit tools", source: "runtime" as const },
+        { value: "yolo", label: "yolo", description: "Auto-approve all tools", source: "runtime" as const },
+        { value: "plan", label: "plan", description: "Read-only plan mode", source: "runtime" as const },
+      ],
+    } satisfies Record<AgentId, AcpCliCapabilities["permissions"]["options"]>;
+
+    return {
+      cliId,
+      model: {
+        supported: true,
+        options: fallbackModels[cliId],
+        note: "Browser fallback cannot interrogate the installed CLI, so model presets are curated.",
+      },
+      permissions: {
+        supported: true,
+        options: permissionOptions[cliId],
+        note:
+          cliId === "codex"
+            ? "Codex permission selection maps to exec sandbox modes in the desktop runtime."
+            : null,
+      },
+      effort: {
+        supported: cliId === "claude",
+        options:
+          cliId === "claude"
+            ? [
+                { value: "low", label: "low", description: "Lower reasoning effort", source: "runtime" as const },
+                { value: "medium", label: "medium", description: "Balanced reasoning effort", source: "runtime" as const },
+                { value: "high", label: "high", description: "High reasoning effort", source: "runtime" as const },
+                { value: "max", label: "max", description: "Maximum reasoning effort", source: "runtime" as const },
+              ]
+            : [],
+        note: cliId === "claude" ? null : "Reasoning effort is only exposed by Claude CLI.",
+      },
+    };
   },
 };

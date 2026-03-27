@@ -134,6 +134,7 @@ export interface TerminalTab {
   effortLevel: string | null;
   modelOverrides: Partial<Record<AgentId, string>>;
   permissionOverrides: Partial<Record<AgentId, string>>;
+  transportSessions: Partial<Record<AgentId, AgentTransportSession>>;
   draftPrompt: string;
   status: "idle" | "streaming";
   lastActiveAt: string;
@@ -230,6 +231,8 @@ export interface ChatMessage {
   content: string;
   rawContent?: string | null;
   contentFormat?: "markdown" | "plain" | "log" | null;
+  transportKind?: AgentTransportKind | null;
+  blocks?: ChatMessageBlock[] | null;
   isStreaming: boolean;
   durationMs: number | null;
   exitCode: number | null;
@@ -260,6 +263,7 @@ export interface ChatPromptRequest {
   effortLevel: string | null;
   modelOverride?: string | null;
   permissionOverride?: string | null;
+  transportSession?: AgentTransportSession | null;
 }
 
 export type AssistantContentFormat = NonNullable<ChatMessage["contentFormat"]>;
@@ -272,6 +276,11 @@ export interface StreamEvent {
   done: boolean;
   exitCode?: number | null;
   durationMs?: number;
+  finalContent?: string | null;
+  contentFormat?: AssistantContentFormat | null;
+  transportKind?: AgentTransportKind | null;
+  transportSession?: AgentTransportSession | null;
+  blocks?: ChatMessageBlock[] | null;
 }
 
 export interface FileMentionCandidate {
@@ -304,3 +313,64 @@ export interface GitPanelData {
   branch: string;
   recentChanges: GitFileChange[];
 }
+
+export type AgentTransportKind =
+  | "codex-app-server"
+  | "claude-cli"
+  | "gemini-cli"
+  | "gemini-acp"
+  | "browser-fallback";
+
+export interface AgentTransportSession {
+  cliId: AgentId;
+  kind: AgentTransportKind;
+  threadId?: string | null;
+  turnId?: string | null;
+  model?: string | null;
+  permissionMode?: string | null;
+  lastSyncAt?: string | null;
+}
+
+export type ChatMessageBlock =
+  | {
+      kind: "text";
+      text: string;
+      format: AssistantContentFormat;
+    }
+  | {
+      kind: "reasoning";
+      text: string;
+    }
+  | {
+      kind: "command";
+      label: string;
+      command: string;
+      status?: string | null;
+      cwd?: string | null;
+      exitCode?: number | null;
+      output?: string | null;
+    }
+  | {
+      kind: "fileChange";
+      path: string;
+      diff: string;
+      changeType: "add" | "delete" | "update";
+      movePath?: string | null;
+      status?: string | null;
+    }
+  | {
+      kind: "tool";
+      tool: string;
+      source?: string | null;
+      status?: string | null;
+      summary?: string | null;
+    }
+  | {
+      kind: "plan";
+      text: string;
+    }
+  | {
+      kind: "status";
+      level: "info" | "warning" | "error";
+      text: string;
+    };

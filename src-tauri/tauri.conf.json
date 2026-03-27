@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "Multi CLI Studio",
-        "width": 1560,
-        "height": 980,
-        "minWidth": 1280,
-        "minHeight": 820,
+        "width": 1480,
+        "height": 860,
+        "minWidth": 1120,
+        "minHeight": 720,
         "resizable": true
       }
     ],

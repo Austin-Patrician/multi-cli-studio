@@ -42,7 +42,12 @@ function App() {
           event.terminalTabId,
           event.messageId,
           event.exitCode ?? null,
-          event.durationMs ?? 0
+          event.durationMs ?? 0,
+          event.finalContent ?? null,
+          event.contentFormat ?? null,
+          event.blocks ?? null,
+          event.transportSession ?? null,
+          event.transportKind ?? null
         );
       } else {
         appendStreamChunk(event.terminalTabId, event.messageId, event.chunk);
