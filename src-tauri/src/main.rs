@@ -366,9 +366,11 @@ enum ChatMessageBlock {
     ApprovalRequest {
         request_id: String,
         tool_name: String,
+        provider: Option<String>,
         title: Option<String>,
         description: Option<String>,
         summary: Option<String>,
+        persistent_label: Option<String>,
         state: Option<String>,
     },
     Plan {
@@ -484,6 +486,7 @@ struct AppStore {
     acp_session: Arc<Mutex<acp::AcpSession>>,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -500,6 +503,11 @@ struct PendingClaudeApproval {
     sender: mpsc::Sender<ClaudeApprovalDecision>,
 }
 
+#[derive(Debug)]
+struct PendingCodexApproval {
+    sender: mpsc::Sender<ClaudeApprovalDecision>,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ClaudeApprovalDecision {
     AllowOnce,
@@ -512,6 +520,7 @@ struct CodexStreamState {
     final_content: String,
     blocks: Vec<ChatMessageBlock>,
     delta_by_item: BTreeMap<String, String>,
+    approval_block_by_request_id: BTreeMap<String, usize>,
     latest_plan_text: Option<String>,
     thread_id: Option<String>,
     turn_id: Option<String>,
@@ -1015,14 +1024,17 @@ fn upsert_claude_approval_block(
     title: Option<String>,
     description: Option<String>,
     summary: Option<String>,
+    persistent_label: Option<String>,
     state: Option<String>,
 ) {
     let next_block = ChatMessageBlock::ApprovalRequest {
         request_id: request_id.to_string(),
         tool_name: tool_name.to_string(),
+        provider: Some("claude".to_string()),
         title,
         description,
         summary,
+        persistent_label,
         state,
     };
 
@@ -2041,6 +2053,7 @@ fn codex_rpc_call<R: BufRead, W: Write>(
     terminal_tab_id: &str,
     message_id: &str,
     stream_state: &mut CodexStreamState,
+    codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
 ) -> Result<Value, String> {
     let request_id = *next_id;
     *next_id += 1;
@@ -2059,14 +2072,28 @@ fn codex_rpc_call<R: BufRead, W: Write>(
             .ok_or_else(|| format!("Codex app-server closed while waiting for {}", method))?;
 
         if let Some(notification_method) = message.get("method").and_then(Value::as_str) {
-            handle_codex_notification(
-                app,
-                terminal_tab_id,
-                message_id,
-                notification_method,
-                message.get("params").unwrap_or(&Value::Null),
-                stream_state,
-            )?;
+            if let Some(server_request_id) = message.get("id") {
+                handle_codex_server_request(
+                    writer,
+                    app,
+                    terminal_tab_id,
+                    message_id,
+                    server_request_id,
+                    notification_method,
+                    message.get("params").unwrap_or(&Value::Null),
+                    stream_state,
+                    codex_pending_approvals,
+                )?;
+            } else {
+                handle_codex_notification(
+                    app,
+                    terminal_tab_id,
+                    message_id,
+                    notification_method,
+                    message.get("params").unwrap_or(&Value::Null),
+                    stream_state,
+                )?;
+            }
             continue;
         }
 
@@ -2113,6 +2140,95 @@ fn codex_startup_error(
     }
 }
 
+fn handle_codex_server_request<W: Write>(
+    writer: &mut W,
+    app: &AppHandle,
+    terminal_tab_id: &str,
+    message_id: &str,
+    request_id: &Value,
+    method: &str,
+    params: &Value,
+    stream_state: &mut CodexStreamState,
+    codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+) -> Result<(), String> {
+    let request_key = request_id_key(request_id);
+
+    let (title, summary, description, tool_name) = match method {
+        "item/commandExecution/requestApproval" => (
+            Some("Codex wants to run a command".to_string()),
+            codex_command_approval_summary(params),
+            params
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(|value| value.to_string()),
+            "commandExecution".to_string(),
+        ),
+        "item/fileChange/requestApproval" => (
+            Some("Codex wants to apply file changes".to_string()),
+            codex_file_change_approval_summary(params),
+            params
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(|value| value.to_string()),
+            "fileChange".to_string(),
+        ),
+        "item/permissions/requestApproval" => (
+            Some("Codex requests additional permissions".to_string()),
+            codex_permissions_approval_summary(params),
+            params
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(|value| value.to_string()),
+            "permissions".to_string(),
+        ),
+        _ => {
+            return Err(format!("Unsupported Codex server request: {}", method));
+        }
+    };
+
+    codex_upsert_approval_block(
+        &mut stream_state.blocks,
+        &mut stream_state.approval_block_by_request_id,
+        &request_key,
+        &tool_name,
+        title,
+        description,
+        summary,
+        Some("pending".to_string()),
+    );
+    emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
+
+    let (sender, receiver) = mpsc::channel::<ClaudeApprovalDecision>();
+    {
+        let mut approvals = codex_pending_approvals
+            .lock()
+            .map_err(|err| err.to_string())?;
+        approvals.insert(request_key.clone(), PendingCodexApproval { sender });
+    }
+
+    let decision = receiver.recv().unwrap_or(ClaudeApprovalDecision::Deny);
+
+    codex_upsert_approval_block(
+        &mut stream_state.blocks,
+        &mut stream_state.approval_block_by_request_id,
+        &request_key,
+        &tool_name,
+        None,
+        None,
+        None,
+        Some(claude_approval_state(decision).to_string()),
+    );
+    emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
+
+    write_jsonrpc_message(
+        writer,
+        &json!({
+            "id": request_id.clone(),
+            "result": codex_build_approval_response(method, params, decision)
+        }),
+    )
+}
+
 fn handle_codex_notification(
     app: &AppHandle,
     terminal_tab_id: &str,
@@ -2121,6 +2237,7 @@ fn handle_codex_notification(
     params: &Value,
     stream_state: &mut CodexStreamState,
 ) -> Result<(), String> {
+    let mut blocks_changed = false;
     if let Some(thread_id) = params.get("threadId").and_then(Value::as_str) {
         stream_state.thread_id = Some(thread_id.to_string());
     }
@@ -2177,6 +2294,7 @@ fn handle_codex_notification(
                             text,
                             format: "markdown".to_string(),
                         });
+                        blocks_changed = true;
                     }
                 }
                 "reasoning" => {
@@ -2191,6 +2309,7 @@ fn handle_codex_notification(
                         stream_state
                             .blocks
                             .push(ChatMessageBlock::Reasoning { text });
+                        blocks_changed = true;
                     }
                 }
                 "commandExecution" => {
@@ -2220,6 +2339,7 @@ fn handle_codex_notification(
                                 .and_then(Value::as_str)
                                 .map(|value| value.to_string()),
                         });
+                        blocks_changed = true;
                     }
                 }
                 "fileChange" => {
@@ -2256,6 +2376,7 @@ fn handle_codex_notification(
                                     .map(|value| value.to_string()),
                                 status: status.clone(),
                             });
+                            blocks_changed = true;
                         }
                     }
                 }
@@ -2266,6 +2387,7 @@ fn handle_codex_notification(
                             stream_state.blocks.push(ChatMessageBlock::Plan {
                                 text: trimmed.to_string(),
                             });
+                            blocks_changed = true;
                         }
                     }
                 }
@@ -2290,6 +2412,7 @@ fn handle_codex_notification(
                             .or_else(|| item.get("result").and_then(json_value_as_text))
                             .or_else(|| item.get("arguments").and_then(json_value_as_text)),
                     });
+                    blocks_changed = true;
                 }
                 "dynamicToolCall" => {
                     stream_state.blocks.push(ChatMessageBlock::Tool {
@@ -2308,6 +2431,7 @@ fn handle_codex_notification(
                             .and_then(json_value_as_text)
                             .or_else(|| item.get("arguments").and_then(json_value_as_text)),
                     });
+                    blocks_changed = true;
                 }
                 "collabAgentToolCall" => {
                     stream_state.blocks.push(ChatMessageBlock::Tool {
@@ -2327,6 +2451,7 @@ fn handle_codex_notification(
                             .map(|value| value.to_string())
                             .or_else(|| item.get("agentsStates").and_then(json_value_as_text)),
                     });
+                    blocks_changed = true;
                 }
                 "webSearch" => {
                     stream_state.blocks.push(ChatMessageBlock::Tool {
@@ -2338,6 +2463,7 @@ fn handle_codex_notification(
                         status: Some("completed".to_string()),
                         summary: item.get("action").and_then(json_value_as_text),
                     });
+                    blocks_changed = true;
                 }
                 "imageView" => {
                     stream_state.blocks.push(ChatMessageBlock::Tool {
@@ -2349,6 +2475,7 @@ fn handle_codex_notification(
                         status: Some("completed".to_string()),
                         summary: None,
                     });
+                    blocks_changed = true;
                 }
                 "imageGeneration" => {
                     stream_state.blocks.push(ChatMessageBlock::Tool {
@@ -2371,6 +2498,7 @@ fn handle_codex_notification(
                                     .map(|value| value.to_string())
                             }),
                     });
+                    blocks_changed = true;
                 }
                 "enteredReviewMode" => {
                     if let Some(review) = item.get("review").and_then(Value::as_str) {
@@ -2378,6 +2506,7 @@ fn handle_codex_notification(
                             level: "info".to_string(),
                             text: format!("Entered review mode: {}", review),
                         });
+                        blocks_changed = true;
                     }
                 }
                 "exitedReviewMode" => {
@@ -2386,6 +2515,7 @@ fn handle_codex_notification(
                             level: "info".to_string(),
                             text: format!("Exited review mode: {}", review),
                         });
+                        blocks_changed = true;
                     }
                 }
                 "contextCompaction" => {
@@ -2393,6 +2523,7 @@ fn handle_codex_notification(
                         level: "info".to_string(),
                         text: "Codex compacted the thread context.".to_string(),
                     });
+                    blocks_changed = true;
                 }
                 _ => {}
             }
@@ -2410,6 +2541,7 @@ fn handle_codex_notification(
                     stream_state
                         .blocks
                         .push(ChatMessageBlock::Plan { text: plan_text });
+                    blocks_changed = true;
                 }
             }
 
@@ -2425,6 +2557,7 @@ fn handle_codex_notification(
                     level: "error".to_string(),
                     text: error_text.clone(),
                 });
+                blocks_changed = true;
                 if stream_state.final_content.trim().is_empty() {
                     stream_state.final_content = error_text.clone();
                 }
@@ -2442,6 +2575,10 @@ fn handle_codex_notification(
         _ => {}
     }
 
+    if blocks_changed {
+        emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
+    }
+
     Ok(())
 }
 
@@ -2455,6 +2592,7 @@ fn run_codex_app_server_turn(
     terminal_tab_id: &str,
     message_id: &str,
     write_mode: bool,
+    codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
 ) -> Result<CodexTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
     let mut cmd = batch_aware_command(
@@ -2525,6 +2663,7 @@ fn run_codex_app_server_turn(
         terminal_tab_id,
         message_id,
         &mut stream_state,
+        &codex_pending_approvals,
     ) {
         Ok(result) => result,
         Err(err) => {
@@ -2559,7 +2698,7 @@ fn run_codex_app_server_turn(
             json!({
                 "threadId": thread_id,
                 "cwd": project_root,
-                "approvalPolicy": "never",
+                "approvalPolicy": "on-request",
                 "sandbox": sandbox_mode,
                 "personality": "pragmatic",
                 "model": requested_model,
@@ -2568,6 +2707,7 @@ fn run_codex_app_server_turn(
             terminal_tab_id,
             message_id,
             &mut stream_state,
+            &codex_pending_approvals,
         ) {
             Ok(result) => result,
             Err(err) => {
@@ -2588,7 +2728,7 @@ fn run_codex_app_server_turn(
             "thread/start",
             json!({
                 "cwd": project_root,
-                "approvalPolicy": "never",
+                "approvalPolicy": "on-request",
                 "sandbox": sandbox_mode,
                 "personality": "pragmatic",
                 "model": requested_model,
@@ -2598,6 +2738,7 @@ fn run_codex_app_server_turn(
             terminal_tab_id,
             message_id,
             &mut stream_state,
+            &codex_pending_approvals,
         ) {
             Ok(result) => result,
             Err(err) => {
@@ -2644,7 +2785,7 @@ fn run_codex_app_server_turn(
             "threadId": thread_id,
             "cwd": project_root,
             "model": effective_model,
-            "approvalPolicy": "never",
+            "approvalPolicy": "on-request",
             "sandboxPolicy": codex_sandbox_policy(&permission_mode, project_root),
             "effort": effort_override,
             "summary": "detailed",
@@ -2659,6 +2800,7 @@ fn run_codex_app_server_turn(
         terminal_tab_id,
         message_id,
         &mut stream_state,
+        &codex_pending_approvals,
     ) {
         Ok(result) => result,
         Err(err) => {
@@ -2676,14 +2818,28 @@ fn run_codex_app_server_turn(
         let message = read_jsonrpc_message(&mut reader)?
             .ok_or_else(|| "Codex app-server closed before the turn completed".to_string())?;
         if let Some(method) = message.get("method").and_then(Value::as_str) {
-            handle_codex_notification(
-                app,
-                terminal_tab_id,
-                message_id,
-                method,
-                message.get("params").unwrap_or(&Value::Null),
-                &mut stream_state,
-            )?;
+            if let Some(server_request_id) = message.get("id") {
+                handle_codex_server_request(
+                    &mut stdin,
+                    app,
+                    terminal_tab_id,
+                    message_id,
+                    server_request_id,
+                    method,
+                    message.get("params").unwrap_or(&Value::Null),
+                    &mut stream_state,
+                    &codex_pending_approvals,
+                )?;
+            } else {
+                handle_codex_notification(
+                    app,
+                    terminal_tab_id,
+                    message_id,
+                    method,
+                    message.get("params").unwrap_or(&Value::Null),
+                    &mut stream_state,
+                )?;
+            }
         }
     }
 
@@ -3118,6 +3274,7 @@ fn handle_claude_stream_record(
                         title,
                         description,
                         summary,
+                        Some("Yes, don't ask again".to_string()),
                         Some("pending".to_string()),
                     );
                     emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
@@ -3142,6 +3299,7 @@ fn handle_claude_stream_record(
                         stream_state,
                         &request_id,
                         &tool_name,
+                        None,
                         None,
                         None,
                         None,
@@ -3267,6 +3425,168 @@ fn emit_stream_block_update(
             blocks: Some(blocks.to_vec()),
         },
     );
+}
+
+fn request_id_key(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn codex_upsert_approval_block(
+    blocks: &mut Vec<ChatMessageBlock>,
+    by_request_id: &mut BTreeMap<String, usize>,
+    request_id: &str,
+    tool_name: &str,
+    title: Option<String>,
+    description: Option<String>,
+    summary: Option<String>,
+    state: Option<String>,
+) {
+    let next_block = ChatMessageBlock::ApprovalRequest {
+        request_id: request_id.to_string(),
+        tool_name: tool_name.to_string(),
+        provider: Some("codex".to_string()),
+        title,
+        description,
+        summary,
+        persistent_label: Some("Yes, for this session".to_string()),
+        state,
+    };
+
+    if let Some(index) = by_request_id.get(request_id).copied() {
+        if let Some(block) = blocks.get_mut(index) {
+            *block = next_block;
+            return;
+        }
+    }
+
+    let index = blocks.len();
+    blocks.push(next_block);
+    by_request_id.insert(request_id.to_string(), index);
+}
+
+fn codex_summary_with_lines(lines: Vec<String>) -> Option<String> {
+    let filtered = lines
+        .into_iter()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(filtered.join("\n"))
+    }
+}
+
+fn codex_command_approval_summary(params: &Value) -> Option<String> {
+    codex_summary_with_lines(vec![
+        params
+            .get("command")
+            .and_then(Value::as_str)
+            .map(|value| format!("Command: {}", value))
+            .unwrap_or_default(),
+        params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(|value| format!("Cwd: {}", value))
+            .unwrap_or_default(),
+    ])
+}
+
+fn codex_file_change_approval_summary(params: &Value) -> Option<String> {
+    codex_summary_with_lines(vec![
+        params
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(|value| format!("Reason: {}", value))
+            .unwrap_or_default(),
+        params
+            .get("grantRoot")
+            .and_then(Value::as_str)
+            .map(|value| format!("Grant root: {}", value))
+            .unwrap_or_default(),
+    ])
+}
+
+fn codex_permissions_approval_summary(params: &Value) -> Option<String> {
+    let permissions = params.get("permissions").unwrap_or(&Value::Null);
+    let fs = permissions.get("fileSystem").unwrap_or(&Value::Null);
+    let network = permissions.get("network").unwrap_or(&Value::Null);
+
+    let read_paths = fs
+        .get("read")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let write_paths = fs
+        .get("write")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let network_enabled = network
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    codex_summary_with_lines(vec![
+        if read_paths.is_empty() {
+            String::new()
+        } else {
+            format!("Read: {}", read_paths.join(", "))
+        },
+        if write_paths.is_empty() {
+            String::new()
+        } else {
+            format!("Write: {}", write_paths.join(", "))
+        },
+        if network_enabled {
+            "Network: enabled".to_string()
+        } else {
+            String::new()
+        },
+    ])
+}
+
+fn codex_build_approval_response(
+    method: &str,
+    params: &Value,
+    decision: ClaudeApprovalDecision,
+) -> Value {
+    match method {
+        "item/commandExecution/requestApproval" => {
+            let mapped = match decision {
+                ClaudeApprovalDecision::AllowOnce => "accept",
+                ClaudeApprovalDecision::AllowAlways => "acceptForSession",
+                ClaudeApprovalDecision::Deny => "decline",
+            };
+            json!({ "decision": mapped })
+        }
+        "item/fileChange/requestApproval" => {
+            let mapped = match decision {
+                ClaudeApprovalDecision::AllowOnce => "accept",
+                ClaudeApprovalDecision::AllowAlways => "acceptForSession",
+                ClaudeApprovalDecision::Deny => "decline",
+            };
+            json!({ "decision": mapped })
+        }
+        "item/permissions/requestApproval" => {
+            let permissions = match decision {
+                ClaudeApprovalDecision::Deny => json!({}),
+                _ => params.get("permissions").cloned().unwrap_or_else(|| json!({})),
+            };
+            let scope = match decision {
+                ClaudeApprovalDecision::AllowAlways => "session",
+                _ => "turn",
+            };
+            json!({
+                "permissions": permissions,
+                "scope": scope,
+            })
+        }
+        _ => json!({ "decision": "decline" }),
+    }
 }
 
 fn run_claude_headless_turn_once(
@@ -4721,6 +5041,7 @@ fn send_chat_message(
         let codex_project_root = project_root.clone();
         let codex_requested_transport_session = requested_transport_session.clone();
         let codex_transport_kind = transport_kind.clone();
+        let codex_pending_approvals = store.codex_pending_approvals.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -4734,6 +5055,7 @@ fn send_chat_message(
                 &stream_tab_id,
                 &msg_id,
                 turn_write_mode,
+                codex_pending_approvals,
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -5274,41 +5596,52 @@ fn send_chat_message(
 }
 
 #[tauri::command]
-fn respond_claude_approval(
+fn respond_assistant_approval(
     store: State<'_, AppStore>,
     request: ClaudeApprovalResponseRequest,
 ) -> Result<ClaudeApprovalResponseResult, String> {
     let Some(parsed_decision) = parse_claude_approval_decision(&request.decision) else {
-        return Err("Unknown Claude approval decision.".to_string());
+        return Err("Unknown approval decision.".to_string());
     };
 
-    let pending = {
+    if let Some(pending) = {
         let mut approvals = store
             .claude_pending_approvals
             .lock()
             .map_err(|err| err.to_string())?;
         approvals.remove(&request.request_id)
-    };
+    } {
+        if matches!(parsed_decision, ClaudeApprovalDecision::AllowAlways) {
+            let mut rules = store
+                .claude_approval_rules
+                .lock()
+                .map_err(|err| err.to_string())?;
+            store_claude_tool_approval(&mut rules, &pending.project_root, &pending.tool_name);
+            persist_claude_approval_rules(&rules)?;
+        }
 
-    let Some(pending) = pending else {
-        return Ok(ClaudeApprovalResponseResult { applied: false });
-    };
-
-    if matches!(parsed_decision, ClaudeApprovalDecision::AllowAlways) {
-        let mut rules = store
-            .claude_approval_rules
-            .lock()
-            .map_err(|err| err.to_string())?;
-        store_claude_tool_approval(&mut rules, &pending.project_root, &pending.tool_name);
-        persist_claude_approval_rules(&rules)?;
+        pending
+            .sender
+            .send(parsed_decision)
+            .map_err(|_| "Assistant approval request is no longer active.".to_string())?;
+        return Ok(ClaudeApprovalResponseResult { applied: true });
     }
 
-    pending
-        .sender
-        .send(parsed_decision)
-        .map_err(|_| "Claude approval request is no longer active.".to_string())?;
+    if let Some(pending) = {
+        let mut approvals = store
+            .codex_pending_approvals
+            .lock()
+            .map_err(|err| err.to_string())?;
+        approvals.remove(&request.request_id)
+    } {
+        pending
+            .sender
+            .send(parsed_decision)
+            .map_err(|_| "Assistant approval request is no longer active.".to_string())?;
+        return Ok(ClaudeApprovalResponseResult { applied: true });
+    }
 
-    Ok(ClaudeApprovalResponseResult { applied: true })
+    Ok(ClaudeApprovalResponseResult { applied: false })
 }
 
 // ── ACP commands ────────────────────────────────────────────────────────
@@ -8029,6 +8362,7 @@ pub fn run() {
                 load_or_seed_claude_approval_rules().unwrap_or_default(),
             )),
             claude_pending_approvals: Arc::new(Mutex::new(BTreeMap::new())),
+            codex_pending_approvals: Arc::new(Mutex::new(BTreeMap::new())),
         })
         .invoke_handler(tauri::generate_handler![
             load_app_state,
@@ -8041,7 +8375,7 @@ pub fn run() {
             get_context_store,
             get_conversation_history,
             send_chat_message,
-            respond_claude_approval,
+            respond_assistant_approval,
             get_git_panel,
             get_git_file_diff,
             open_workspace_file,

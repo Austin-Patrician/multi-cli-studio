@@ -5,6 +5,7 @@ import {
   AgentTransportSession,
   AgentRuntimeResources,
   AgentPromptRequest,
+  AssistantApprovalDecision,
   ChatMessageBlock,
   TerminalEvent,
   TerminalLine,
@@ -13,7 +14,6 @@ import {
   AppSettings,
   EnrichedHandoff,
   ChatPromptRequest,
-  ClaudeApprovalDecision,
   FileMentionCandidate,
   GitFileDiff,
   StreamEvent,
@@ -608,7 +608,7 @@ export const browserRuntime = {
 
     return messageId;
   },
-  async respondClaudeApproval(_requestId: string, _decision: ClaudeApprovalDecision) {
+  async respondAssistantApproval(_requestId: string, _decision: AssistantApprovalDecision) {
     return false;
   },
 

@@ -266,7 +266,7 @@ export interface ChatPromptRequest {
   transportSession?: AgentTransportSession | null;
 }
 
-export type ClaudeApprovalDecision = "allowOnce" | "allowAlways" | "deny";
+export type AssistantApprovalDecision = "allowOnce" | "allowAlways" | "deny";
 
 export type AssistantContentFormat = NonNullable<ChatMessage["contentFormat"]>;
 
@@ -371,9 +371,11 @@ export type ChatMessageBlock =
       kind: "approvalRequest";
       requestId: string;
       toolName: string;
+      provider?: "claude" | "codex" | null;
       title?: string | null;
       description?: string | null;
       summary?: string | null;
+      persistentLabel?: string | null;
       state?: "pending" | "approved" | "approvedAlways" | "denied" | null;
     }
   | {

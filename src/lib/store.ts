@@ -6,10 +6,10 @@ import {
   AgentTransportSession,
   AppSettings,
   AppState,
+  AssistantApprovalDecision,
   ChatMessage,
   ChatMessageBlock,
   ChatContextTurn,
-  ClaudeApprovalDecision,
   ContextStore,
   ConversationSession,
   FileMentionCandidate,
@@ -619,7 +619,7 @@ interface StoreState {
   refreshGitPanel: (workspaceId?: string) => Promise<void>;
   searchWorkspaceFiles: (workspaceId: string, query: string) => Promise<FileMentionCandidate[]>;
   loadAcpCapabilities: (cliId: AgentId, force?: boolean) => Promise<AcpCliCapabilities | null>;
-  respondClaudeApproval: (requestId: string, decision: ClaudeApprovalDecision) => Promise<void>;
+  respondAssistantApproval: (requestId: string, decision: AssistantApprovalDecision) => Promise<void>;
 
   executeAcpCommand: (command: AcpCommand, tabId?: string) => Promise<void>;
 }
@@ -1535,7 +1535,9 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  respondClaudeApproval: async (requestId, decision) => {
+  respondAssistantApproval: async (requestId, decision) => {
+    const approvalCli =
+      get().terminalTabs.find((tab) => tab.id === get().activeTerminalTabId)?.selectedCli ?? "codex";
     const nextState =
       decision === "allowAlways"
         ? "approvedAlways"
@@ -1569,15 +1571,15 @@ export const useStore = create<StoreState>((set, get) => ({
     updateApprovalState(nextState);
 
     try {
-      const applied = await bridge.respondClaudeApproval(requestId, decision);
+      const applied = await bridge.respondAssistantApproval(requestId, decision);
       if (!applied) {
         updateApprovalState("pending");
         set((state) => {
           const chatSessions = appendSystemMessageToSession(
             state.chatSessions,
             state.activeTerminalTabId ?? "",
-            "claude",
-            "Claude approval request was no longer pending.",
+            approvalCli,
+            "Approval request was no longer pending.",
             1
           );
           persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
@@ -1596,8 +1598,8 @@ export const useStore = create<StoreState>((set, get) => ({
         const chatSessions = appendSystemMessageToSession(
           state.chatSessions,
           state.activeTerminalTabId ?? "",
-          "claude",
-          `Failed to send Claude approval response: ${detail}`,
+          approvalCli,
+          `Failed to send approval response: ${detail}`,
           1
         );
         persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);

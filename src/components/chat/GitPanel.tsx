@@ -5,6 +5,7 @@ import type { GitFileChange, GitFileDiff } from "../../lib/models";
 import { useStore } from "../../lib/store";
 
 type DiffCellTone = "context" | "add" | "delete" | "empty";
+type DiffViewMode = "split" | "unified";
 type SplitDiffRowType = "hunk" | "code" | "note";
 type SplitDiffSide = "left" | "right";
 
@@ -28,6 +29,19 @@ interface ParsedSplitDiff {
   headerLines: string[];
   isBinary: boolean;
   isMetadataOnly: boolean;
+}
+
+type UnifiedDiffRowType = "hunk" | "code" | "note";
+
+interface UnifiedDiffRow {
+  id: string;
+  type: UnifiedDiffRowType;
+  header?: string;
+  note?: string;
+  lineNumber: number | null;
+  sign: " " | "+" | "-";
+  content: string;
+  tone: Exclude<DiffCellTone, "empty">;
 }
 
 function samePath(left: string, right: string) {
@@ -287,43 +301,58 @@ function parseSplitDiff(diffText: string): ParsedSplitDiff {
   };
 }
 
-function splitCellClasses(tone: DiffCellTone, side: SplitDiffSide, active: boolean) {
-  const activeState = active
-    ? side === "left"
-      ? "shadow-[inset_0_0_0_1px_rgba(59,130,246,0.24)]"
-      : "shadow-[inset_0_0_0_1px_rgba(59,130,246,0.3)]"
-    : "";
-
+function splitCellClasses(tone: DiffCellTone, side: SplitDiffSide) {
   switch (tone) {
     case "add":
-      return `bg-emerald-50/95 text-slate-900 ${activeState}`.trim();
+      return "bg-[#e6ffec] text-slate-900";
     case "delete":
-      return `bg-rose-50/95 text-slate-900 ${activeState}`.trim();
+      return "bg-[#fff0f0] text-slate-900";
     case "empty":
-      return `${side === "left" ? "bg-[#f5f7fa]" : "bg-slate-50/80"} text-transparent ${activeState}`.trim();
+      return side === "left" ? "bg-[#f7f7f7] text-transparent" : "bg-[#fbfbfb] text-transparent";
     default:
-      return `${side === "left" ? "bg-[#fafbfd]" : "bg-white"} text-slate-700 ${activeState}`.trim();
+      return side === "left" ? "bg-[#fafafa] text-slate-700" : "bg-white text-slate-700";
   }
 }
 
-function splitNumberClasses(tone: DiffCellTone, side: SplitDiffSide, active: boolean) {
-  const base = side === "left" ? "border-r border-slate-200/80" : "border-l border-slate-200/60";
-  const activeState = active ? "text-sky-700" : "";
-
+function splitNumberClasses(tone: DiffCellTone, side: SplitDiffSide) {
+  const base = side === "left" ? "border-r border-slate-200/90" : "border-l border-slate-200/90";
   switch (tone) {
     case "add":
-      return `bg-emerald-100/80 text-emerald-700 ${base} ${activeState}`.trim();
+      return `bg-[#cdf0d8] text-emerald-700 ${base}`.trim();
     case "delete":
-      return `bg-rose-100/80 text-rose-700 ${base} ${activeState}`.trim();
+      return `bg-[#ffd9d9] text-rose-700 ${base}`.trim();
     case "empty":
-      return `${side === "left" ? "bg-[#eef2f6]" : "bg-slate-100/80"} text-transparent ${base}`.trim();
+      return `${side === "left" ? "bg-[#f2f2f2]" : "bg-[#f8f8f8]"} text-transparent ${base}`.trim();
     default:
-      return `${side === "left" ? "bg-[#f1f5f9]" : "bg-slate-50"} text-slate-400 ${base} ${activeState}`.trim();
+      return `${side === "left" ? "bg-[#f3f3f3]" : "bg-[#f8f8f8]"} text-slate-400 ${base}`.trim();
   }
 }
 
 function renderLineNumber(value: number | null) {
   return value == null ? "" : String(value);
+}
+
+function unifiedLineClasses(tone: Exclude<DiffCellTone, "empty">) {
+  switch (tone) {
+    case "add":
+      return {
+        row: "bg-[#e6ffec]",
+        gutter: "bg-[#cdf0d8] text-emerald-700 border-r border-slate-200/90",
+        sign: "text-emerald-700",
+      };
+    case "delete":
+      return {
+        row: "bg-[#fff0f0]",
+        gutter: "bg-[#ffd9d9] text-rose-700 border-r border-slate-200/90",
+        sign: "text-rose-700",
+      };
+    default:
+      return {
+        row: "bg-white",
+        gutter: "bg-[#f3f3f3] text-slate-400 border-r border-slate-200/90",
+        sign: "text-slate-300",
+      };
+  }
 }
 
 function metadataSummaryLines(headerLines: string[]) {
@@ -338,6 +367,77 @@ function metadataSummaryLines(headerLines: string[]) {
   });
 }
 
+function buildUnifiedRows(parsed: ParsedSplitDiff): UnifiedDiffRow[] {
+  const rows: UnifiedDiffRow[] = [];
+
+  for (const row of parsed.rows) {
+    if (row.type === "hunk") {
+      rows.push({
+        id: row.id,
+        type: "hunk",
+        header: row.header,
+        lineNumber: null,
+        sign: " ",
+        content: "",
+        tone: "context",
+      });
+      continue;
+    }
+
+    if (row.type === "note") {
+      rows.push({
+        id: row.id,
+        type: "note",
+        note: row.note,
+        lineNumber: null,
+        sign: " ",
+        content: "",
+        tone: "context",
+      });
+      continue;
+    }
+
+    const leftTone = row.left.tone;
+    const rightTone = row.right.tone;
+
+    if (leftTone === "context" && rightTone === "context") {
+      rows.push({
+        id: `${row.id}-context`,
+        type: "code",
+        lineNumber: row.right.lineNumber ?? row.left.lineNumber,
+        sign: " ",
+        content: row.right.content || row.left.content,
+        tone: "context",
+      });
+      continue;
+    }
+
+    if (leftTone === "delete") {
+      rows.push({
+        id: `${row.id}-delete`,
+        type: "code",
+        lineNumber: row.left.lineNumber,
+        sign: "-",
+        content: row.left.content,
+        tone: "delete",
+      });
+    }
+
+    if (rightTone === "add") {
+      rows.push({
+        id: `${row.id}-add`,
+        type: "code",
+        lineNumber: row.right.lineNumber,
+        sign: "+",
+        content: row.right.content,
+        tone: "add",
+      });
+    }
+  }
+
+  return rows;
+}
+
 function DiffStateNotice({
   title,
   description,
@@ -348,22 +448,19 @@ function DiffStateNotice({
   lines?: string[];
 }) {
   return (
-    <div className="px-4 py-4">
-      <div className="overflow-hidden rounded-[20px] border border-slate-200 bg-white">
-        <div className="border-b border-slate-200 bg-slate-50/90 px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+    <div className="px-5 py-8">
+      <div className="overflow-hidden rounded-[10px] border border-slate-200 bg-white">
+        <div className="border-b border-slate-200 bg-[#f3f3f3] px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
           {title}
         </div>
-        <div className="px-5 py-5 text-sm leading-6 text-slate-600">{description}</div>
+        <div className="px-5 py-10 text-sm leading-6 text-slate-600">{description}</div>
         {lines.length > 0 && (
-          <div className="border-t border-slate-200 bg-[#f8fafc] px-4 py-4">
-            <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-              Change details
-            </div>
-            <div className="space-y-2">
+          <div className="border-t border-slate-200 bg-[#fafafa] px-4 py-4">
+            <div className="space-y-1.5">
               {lines.map((line, index) => (
                 <div
                   key={`${index}-${line}`}
-                  className="rounded-[12px] border border-slate-200 bg-white px-3 py-2 font-mono text-[12px] leading-5 text-slate-600"
+                  className="font-mono text-[11px] leading-5 text-slate-500"
                 >
                   {line}
                 </div>
@@ -377,7 +474,6 @@ function DiffStateNotice({
 }
 
 function SplitDiffView({ parsed }: { parsed: ParsedSplitDiff }) {
-  const [activeRowId, setActiveRowId] = useState<string | null>(null);
   const metadataLines = metadataSummaryLines(parsed.headerLines);
 
   if (parsed.isBinary) {
@@ -402,14 +498,15 @@ function SplitDiffView({ parsed }: { parsed: ParsedSplitDiff }) {
 
   return (
     <div className="px-4 py-4">
-      <div className="overflow-hidden rounded-[20px] border border-slate-200 bg-white shadow-[0_18px_48px_rgba(15,23,42,0.06)]">
+      <div className="overflow-hidden rounded-[10px] border border-slate-200 bg-white">
         <div className="overflow-x-auto">
-          <div className="min-w-[1040px] bg-[linear-gradient(to_right,#f8fafc_0%,#f8fafc_49.7%,#e2e8f0_49.7%,#e2e8f0_50.3%,#ffffff_50.3%,#ffffff_100%)]">
-            <div className="sticky top-0 z-10 grid grid-cols-[72px,minmax(0,1fr),72px,minmax(0,1fr)] border-b border-slate-200 bg-white/90 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 backdrop-blur">
-              <div className="border-r border-slate-200/80 bg-[#eef2f6] px-3 py-3 text-right">Line</div>
-              <div className="border-r border-slate-200 px-4 py-3 text-slate-500">Original</div>
-              <div className="border-l border-r border-slate-200/60 bg-slate-50 px-3 py-3 text-right">Line</div>
-              <div className="px-4 py-3 text-slate-500">Modified</div>
+          <div className="min-w-[980px] bg-white">
+            <div className="sticky top-0 z-10 grid grid-cols-[52px_minmax(0,1fr)_2px_52px_minmax(0,1fr)] border-b border-slate-200 bg-[#f3f3f3] text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+              <div className="border-r border-slate-200 px-2 py-2 text-right">Line</div>
+              <div className="border-r border-slate-200 px-3 py-2 text-slate-500">Original</div>
+              <div className="bg-slate-300" />
+              <div className="border-r border-slate-200 px-2 py-2 text-right">Line</div>
+              <div className="px-3 py-2 text-slate-500">Modified</div>
             </div>
 
             {parsed.rows.map((row) => {
@@ -417,7 +514,7 @@ function SplitDiffView({ parsed }: { parsed: ParsedSplitDiff }) {
                 return (
                   <div
                     key={row.id}
-                    className="border-b border-slate-200 bg-amber-50/70 px-4 py-2.5 font-mono text-[11px] font-medium text-amber-900"
+                    className="border-b border-slate-200 bg-[#f0f0f0] px-3 py-1.5 font-mono text-[10.5px] font-medium text-slate-600"
                   >
                     {row.header}
                   </div>
@@ -428,58 +525,50 @@ function SplitDiffView({ parsed }: { parsed: ParsedSplitDiff }) {
                 return (
                   <div
                     key={row.id}
-                    className="border-b border-slate-100 bg-slate-50 px-4 py-2 font-mono text-[11px] text-slate-500"
+                    className="border-b border-slate-100 bg-[#fafafa] px-3 py-1.5 font-mono text-[10.5px] text-slate-500"
                   >
                     {row.note}
                   </div>
                 );
               }
 
-              const isActive = activeRowId === row.id;
-
               return (
                 <div
                   key={row.id}
-                  onClick={() => setActiveRowId((current) => (current === row.id ? null : row.id))}
-                  className={`group grid cursor-pointer grid-cols-[72px,minmax(0,1fr),72px,minmax(0,1fr)] border-b border-slate-100 transition-colors last:border-b-0 ${
-                    isActive ? "bg-sky-50/25" : "hover:bg-slate-50/50"
-                  }`}
+                  className="group grid grid-cols-[52px_minmax(0,1fr)_2px_52px_minmax(0,1fr)] border-b border-slate-100 transition-colors last:border-b-0 hover:bg-slate-50/35"
                 >
                   <div
-                    className={`px-3 py-1.5 text-right font-mono text-[11px] leading-6 ${splitNumberClasses(
+                    className={`px-2 py-0.5 text-right font-mono text-[10px] leading-5 ${splitNumberClasses(
                       row.left.tone,
-                      "left",
-                      isActive
+                      "left"
                     )}`}
                   >
                     {renderLineNumber(row.left.lineNumber)}
                   </div>
                   <div
-                    className={`border-r border-slate-200 px-4 py-1.5 font-mono text-[12px] leading-6 ${splitCellClasses(
+                    className={`border-r border-slate-200 px-3 py-0.5 font-mono text-[11px] leading-5 ${splitCellClasses(
                       row.left.tone,
-                      "left",
-                      isActive
+                      "left"
                     )}`}
                   >
-                    <div className="whitespace-pre-wrap break-all">{row.left.content || " "}</div>
+                    <div className="whitespace-pre">{row.left.content || " "}</div>
                   </div>
+                  <div className="bg-slate-300/95" />
                   <div
-                    className={`px-3 py-1.5 text-right font-mono text-[11px] leading-6 ${splitNumberClasses(
+                    className={`px-2 py-0.5 text-right font-mono text-[10px] leading-5 ${splitNumberClasses(
                       row.right.tone,
-                      "right",
-                      isActive
+                      "right"
                     )}`}
                   >
                     {renderLineNumber(row.right.lineNumber)}
                   </div>
                   <div
-                    className={`px-4 py-1.5 font-mono text-[12px] leading-6 ${splitCellClasses(
+                    className={`px-3 py-0.5 font-mono text-[11px] leading-5 ${splitCellClasses(
                       row.right.tone,
-                      "right",
-                      isActive
+                      "right"
                     )}`}
                   >
-                    <div className="whitespace-pre-wrap break-all">{row.right.content || " "}</div>
+                    <div className="whitespace-pre">{row.right.content || " "}</div>
                   </div>
                 </div>
               );
@@ -487,6 +576,116 @@ function SplitDiffView({ parsed }: { parsed: ParsedSplitDiff }) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function UnifiedDiffView({ parsed }: { parsed: ParsedSplitDiff }) {
+  const metadataLines = metadataSummaryLines(parsed.headerLines);
+  const rows = useMemo(() => buildUnifiedRows(parsed), [parsed]);
+
+  if (parsed.isBinary) {
+    return (
+      <DiffStateNotice
+        title="Binary change"
+        description="This file changed, but Git returned a binary diff, so there is no textual comparison to render."
+        lines={metadataLines}
+      />
+    );
+  }
+
+  if (rows.filter((row) => row.type === "code").length === 0) {
+    return (
+      <DiffStateNotice
+        title="No textual hunks"
+        description="This change does not contain editable text hunks, so the diff viewer only shows the file-level change details."
+        lines={metadataLines}
+      />
+    );
+  }
+
+  return (
+    <div className="px-4 py-4">
+      <div className="overflow-hidden rounded-[10px] border border-slate-200 bg-white">
+        <div className="overflow-x-auto">
+          <div className="min-w-[760px] bg-white">
+            <div className="sticky top-0 z-10 grid grid-cols-[52px_18px_minmax(0,1fr)] border-b border-slate-200 bg-[#f3f3f3] text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+              <div className="border-r border-slate-200 px-2 py-2 text-right">Line</div>
+              <div className="border-r border-slate-200 px-1 py-2 text-center"> </div>
+              <div className="px-3 py-2 text-slate-500">Diff</div>
+            </div>
+
+            {rows.map((row) => {
+              if (row.type === "hunk") {
+                return (
+                  <div
+                    key={row.id}
+                    className="border-b border-slate-200 bg-[#f0f0f0] px-3 py-1.5 font-mono text-[10.5px] font-medium text-slate-600"
+                  >
+                    {row.header}
+                  </div>
+                );
+              }
+
+              if (row.type === "note") {
+                return (
+                  <div
+                    key={row.id}
+                    className="border-b border-slate-100 bg-[#fafafa] px-3 py-1.5 font-mono text-[10.5px] text-slate-500"
+                  >
+                    {row.note}
+                  </div>
+                );
+              }
+
+              const tone = unifiedLineClasses(row.tone);
+              return (
+                <div
+                  key={row.id}
+                  className={`grid grid-cols-[52px_18px_minmax(0,1fr)] border-b border-slate-100 last:border-b-0 ${tone.row}`}
+                >
+                  <div className={`px-2 py-0.5 text-right font-mono text-[10px] leading-5 ${tone.gutter}`}>
+                    {renderLineNumber(row.lineNumber)}
+                  </div>
+                  <div className={`border-r border-slate-200 px-1 py-0.5 text-center font-mono text-[11px] leading-5 ${tone.sign}`}>
+                    {row.sign}
+                  </div>
+                  <div className="px-3 py-0.5 font-mono text-[11px] leading-5 text-slate-800">
+                    <div className="whitespace-pre">{row.content || " "}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DiffModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: DiffViewMode;
+  onChange: (mode: DiffViewMode) => void;
+}) {
+  return (
+    <div className="inline-flex items-center rounded-full border border-slate-200 bg-[#f8fafc] p-0.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
+      {(["split", "unified"] as const).map((option) => (
+        <button
+          key={option}
+          type="button"
+          onClick={() => onChange(option)}
+          className={`rounded-full px-3 py-1.5 text-[11px] font-medium transition-all ${
+            mode === option
+              ? "bg-white text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.08)]"
+              : "text-slate-500 hover:text-slate-900"
+          }`}
+        >
+          {option === "split" ? "Split" : "Unified"}
+        </button>
+      ))}
     </div>
   );
 }
@@ -507,6 +706,7 @@ function DiffOverlay({
   onClose: () => void;
 }) {
   const [isOpeningFile, setIsOpeningFile] = useState(false);
+  const [viewMode, setViewMode] = useState<DiffViewMode>("split");
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -524,10 +724,14 @@ function DiffOverlay({
     () => summarizeDiff(diff?.diff ?? ""),
     [diff?.diff]
   );
-  const parsedSplitDiff = useMemo(
+  const parsedDiff = useMemo(
     () => parseSplitDiff(diff?.diff ?? ""),
     [diff?.diff]
   );
+
+  useEffect(() => {
+    setViewMode("split");
+  }, [titlePath]);
 
   async function handleOpenFile() {
     if (!titlePath || isOpeningFile) return;
@@ -546,60 +750,36 @@ function DiffOverlay({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="absolute inset-x-4 inset-y-4 mx-auto max-w-[1320px] overflow-hidden rounded-[26px] border border-slate-200 bg-[#f3f6fa] shadow-[0_36px_120px_rgba(15,23,42,0.24)]">
-        <div className="border-b border-slate-200 bg-white/94 px-6 py-5">
-          <div className="flex items-start justify-between gap-4">
+      <div className="absolute inset-x-4 inset-y-4 mx-auto flex max-w-[1320px] flex-col overflow-hidden rounded-[14px] border border-slate-300 bg-[#f3f3f3] shadow-[0_28px_100px_rgba(15,23,42,0.22)]">
+        <div className="border-b border-slate-200 bg-[#f3f3f3] px-4 py-3">
+          <div className="flex items-center justify-between gap-4">
             <div className="min-w-0">
-              <div className="flex items-center gap-3">
-                <span
-                  className={`inline-flex h-8 min-w-8 items-center justify-center rounded-full px-2 text-[11px] font-semibold ${status.chip}`}
-                >
-                  {status.short}
-                </span>
-                <span
-                  className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] ${fileType.tone}`}
-                >
-                  {fileType.label}
-                </span>
-                <div className="min-w-0">
-                  <div className="truncate text-[16px] font-semibold text-slate-950">
-                    {basename(titlePath)}
-                  </div>
-                  <div className="truncate text-xs text-slate-500">{titlePath}</div>
-                </div>
+              <div className="truncate text-[14px] font-semibold text-slate-900">
+                {basename(titlePath)}
               </div>
-
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-                <span className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-700">
-                  {status.label}
-                </span>
-                <span className="rounded-full bg-emerald-50 px-2.5 py-1 font-medium text-emerald-700">
-                  +{additions}
-                </span>
-                <span className="rounded-full bg-rose-50 px-2.5 py-1 font-medium text-rose-700">
-                  -{deletions}
-                </span>
-                {diff?.previousPath && (
-                  <span className="truncate rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600">
-                    from {diff.previousPath}
-                  </span>
-                )}
+              <div className="mt-0.5 truncate text-[11px] text-slate-500">{titlePath}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                {status.label}
+                {additions > 0 && <span className="font-medium text-emerald-700">+{additions}</span>}
+                {deletions > 0 && <span className="font-medium text-rose-700">-{deletions}</span>}
+                {diff?.previousPath ? ` · from ${diff.previousPath}` : ""}
               </div>
             </div>
 
             <div className="flex items-center gap-2">
+              <DiffModeToggle mode={viewMode} onChange={setViewMode} />
               <button
                 type="button"
                 onClick={() => void handleOpenFile()}
                 disabled={isOpeningFile || !titlePath}
-                className="rounded-full border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center rounded-full border border-slate-300 bg-white px-3.5 py-2 text-[11px] font-medium text-slate-700 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-colors hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {isOpeningFile ? "Opening..." : "Open file"}
               </button>
               <button
                 type="button"
                 onClick={onClose}
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 text-lg text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-100 hover:text-slate-900"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-sm text-slate-500 transition-colors hover:border-slate-300 hover:bg-slate-100 hover:text-slate-900"
                 aria-label="Close diff"
               >
                 x
@@ -608,19 +788,23 @@ function DiffOverlay({
           </div>
         </div>
 
-        <div className="h-[calc(100%-109px)] overflow-y-auto bg-[#f3f6fa]">
+        <div className="flex-1 overflow-y-auto bg-white">
           {loading ? (
             <div className="flex h-full items-center justify-center px-6">
               <div className="text-sm text-slate-500">Loading diff...</div>
             </div>
           ) : error ? (
             <div className="flex h-full items-center justify-center px-6">
-              <div className="max-w-md rounded-[22px] border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700">
+              <div className="max-w-md rounded-[10px] border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700">
                 {error}
               </div>
             </div>
           ) : diff ? (
-            <SplitDiffView parsed={parsedSplitDiff} />
+            viewMode === "split" ? (
+              <SplitDiffView parsed={parsedDiff} />
+            ) : (
+              <UnifiedDiffView parsed={parsedDiff} />
+            )
           ) : null}
         </div>
       </div>
@@ -647,14 +831,23 @@ export function GitPanel() {
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
 
-  const workspace =
-    workspaceState.workspaceId && workspaceState.workspaceName && workspaceState.workspaceRootPath
-      ? {
-          id: workspaceState.workspaceId,
-          name: workspaceState.workspaceName,
-          rootPath: workspaceState.workspaceRootPath,
-        }
-      : null;
+  const workspace = useMemo(
+    () =>
+      workspaceState.workspaceId &&
+      workspaceState.workspaceName &&
+      workspaceState.workspaceRootPath
+        ? {
+            id: workspaceState.workspaceId,
+            name: workspaceState.workspaceName,
+            rootPath: workspaceState.workspaceRootPath,
+          }
+        : null,
+    [
+      workspaceState.workspaceId,
+      workspaceState.workspaceName,
+      workspaceState.workspaceRootPath,
+    ]
+  );
   const gitPanel = workspaceState.gitPanel;
 
   const selectedChange =
@@ -711,7 +904,7 @@ export function GitPanel() {
     return () => {
       cancelled = true;
     };
-  }, [workspace, gitPanel, selectedPath, changesVersion]);
+  }, [workspace?.rootPath, gitPanel, selectedPath, changesVersion]);
 
   if (!workspace) return null;
 

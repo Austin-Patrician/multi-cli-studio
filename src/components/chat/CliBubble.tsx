@@ -3,7 +3,7 @@ import {
   ChatMessage,
   ChatMessageBlock,
   AgentId,
-  ClaudeApprovalDecision,
+  AssistantApprovalDecision,
 } from "../../lib/models";
 import {
   AssistantDisplayBlock,
@@ -837,12 +837,14 @@ function RuntimeApprovalRequestBlock({
   onDecision,
 }: {
   block: Extract<ChatMessageBlock, { kind: "approvalRequest" }>;
-  onDecision?: ((requestId: string, decision: ClaudeApprovalDecision) => void) | null;
+  onDecision?: ((requestId: string, decision: AssistantApprovalDecision) => void) | null;
 }) {
   const pending = !block.state || block.state === "pending";
   const statusLabel =
     block.state === "approvedAlways"
-      ? "Always allowed"
+      ? block.provider === "codex"
+        ? "Approved for session"
+        : "Always allowed"
       : block.state === "approved"
         ? "Approved"
         : block.state === "denied"
@@ -883,7 +885,7 @@ function RuntimeApprovalRequestBlock({
             onClick={() => onDecision(block.requestId, "allowOnce")}
           />
           <ApprovalActionButton
-            label="Yes, don't ask again"
+            label={block.persistentLabel ?? "Yes, don't ask again"}
             onClick={() => onDecision(block.requestId, "allowAlways")}
           />
           <ApprovalActionButton
@@ -971,11 +973,11 @@ function StructuredAssistantBlocks({
 function RuntimeStructuredBlocks({
   blocks,
   workspaceRoot,
-  onClaudeApproval,
+  onApprovalDecision,
 }: {
   blocks: ChatMessageBlock[];
   workspaceRoot?: string | null;
-  onClaudeApproval?: ((requestId: string, decision: ClaudeApprovalDecision) => void) | null;
+  onApprovalDecision?: ((requestId: string, decision: AssistantApprovalDecision) => void) | null;
 }) {
   return (
     <div className="space-y-3">
@@ -997,7 +999,7 @@ function RuntimeStructuredBlocks({
               <RuntimeApprovalRequestBlock
                 key={key}
                 block={block}
-                onDecision={onClaudeApproval}
+                onDecision={onApprovalDecision}
               />
             );
           case "plan":
@@ -1017,14 +1019,14 @@ export function CliBubble({
   workspaceRoot,
   onRegenerate,
   onDelete,
-  onClaudeApproval,
+  onApprovalDecision,
   actionsDisabled = false,
 }: {
   message: ChatMessage;
   workspaceRoot?: string | null;
   onRegenerate?: (() => void) | null;
   onDelete?: ((messageId: string) => void) | null;
-  onClaudeApproval?: ((requestId: string, decision: ClaudeApprovalDecision) => void) | null;
+  onApprovalDecision?: ((requestId: string, decision: AssistantApprovalDecision) => void) | null;
   actionsDisabled?: boolean;
 }) {
   const cli = message.cliId as AgentId;
@@ -1134,7 +1136,7 @@ export function CliBubble({
               <RuntimeStructuredBlocks
                 blocks={runtimeBlocks}
                 workspaceRoot={workspaceRoot}
-                onClaudeApproval={onClaudeApproval}
+                onApprovalDecision={onApprovalDecision}
               />
               {message.isStreaming && message.content.trim() && (
                 <AssistantMessageContent
