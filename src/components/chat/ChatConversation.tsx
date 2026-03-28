@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { AgentId } from "../../lib/models";
+import { AgentId, ClaudeApprovalDecision } from "../../lib/models";
 import { useStore } from "../../lib/store";
 import { UserBubble } from "./UserBubble";
 import { CliBubble } from "./CliBubble";
@@ -74,6 +74,7 @@ export function ChatConversation() {
   const setTabSelectedCli = useStore((state) => state.setTabSelectedCli);
   const sendChatMessage = useStore((state) => state.sendChatMessage);
   const deleteChatMessage = useStore((state) => state.deleteChatMessage);
+  const respondClaudeApproval = useStore((state) => state.respondClaudeApproval);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({
@@ -102,6 +103,10 @@ export function ChatConversation() {
   function handleDeleteMessage(messageId: string) {
     if (!activeTab || activeTab.status === "streaming") return;
     deleteChatMessage(activeTab.id, messageId);
+  }
+
+  function handleClaudeApproval(requestId: string, decision: ClaudeApprovalDecision) {
+    void respondClaudeApproval(requestId, decision);
   }
 
   if (!activeSession || !activeTab) {
@@ -177,6 +182,7 @@ export function ChatConversation() {
                 }
                 onDelete={!msg.isStreaming ? handleDeleteMessage : null}
                 actionsDisabled={activeTab.status === "streaming" || msg.isStreaming}
+                onClaudeApproval={handleClaudeApproval}
               />
             );
           });

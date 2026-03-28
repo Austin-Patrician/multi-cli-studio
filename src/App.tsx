@@ -50,7 +50,12 @@ function App() {
           event.transportKind ?? null
         );
       } else {
-        appendStreamChunk(event.terminalTabId, event.messageId, event.chunk);
+        appendStreamChunk(
+          event.terminalTabId,
+          event.messageId,
+          event.chunk,
+          event.blocks ?? null
+        );
       }
     }).then((unlisten) => {
       unlistenStream = unlisten;

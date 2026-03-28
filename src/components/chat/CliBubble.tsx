@@ -1,5 +1,10 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { ChatMessage, ChatMessageBlock, AgentId } from "../../lib/models";
+import {
+  ChatMessage,
+  ChatMessageBlock,
+  AgentId,
+  ClaudeApprovalDecision,
+} from "../../lib/models";
 import {
   AssistantDisplayBlock,
   detectAssistantContentFormat,
@@ -799,6 +804,99 @@ function RuntimeToolBlock({
   );
 }
 
+function ApprovalActionButton({
+  label,
+  onClick,
+  disabled = false,
+  tone = "neutral",
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  tone?: "neutral" | "danger";
+}) {
+  const toneClass =
+    tone === "danger"
+      ? "border-rose-200 bg-rose-50 text-rose-700 hover:border-rose-300 hover:bg-rose-100"
+      : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`rounded-full border px-3.5 py-2 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${toneClass}`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function RuntimeApprovalRequestBlock({
+  block,
+  onDecision,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "approvalRequest" }>;
+  onDecision?: ((requestId: string, decision: ClaudeApprovalDecision) => void) | null;
+}) {
+  const pending = !block.state || block.state === "pending";
+  const statusLabel =
+    block.state === "approvedAlways"
+      ? "Always allowed"
+      : block.state === "approved"
+        ? "Approved"
+        : block.state === "denied"
+          ? "Denied"
+          : "Awaiting approval";
+
+  return (
+    <div className="rounded-[20px] border border-amber-200 bg-amber-50/80 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-700">
+          Tool approval
+        </span>
+        <MetaPill tone={pending ? "warning" : block.state === "denied" ? "danger" : "success"}>
+          {statusLabel}
+        </MetaPill>
+      </div>
+
+      <div className="mt-2 text-[13px] font-semibold text-amber-950">
+        {block.title ?? block.toolName}
+      </div>
+
+      {block.summary && (
+        <div className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-6 text-amber-900">
+          {block.summary}
+        </div>
+      )}
+
+      {block.description && (
+        <div className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-6 text-amber-800/90">
+          {block.description}
+        </div>
+      )}
+
+      {pending && onDecision && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          <ApprovalActionButton
+            label="Yes"
+            onClick={() => onDecision(block.requestId, "allowOnce")}
+          />
+          <ApprovalActionButton
+            label="Yes, don't ask again"
+            onClick={() => onDecision(block.requestId, "allowAlways")}
+          />
+          <ApprovalActionButton
+            label="No"
+            tone="danger"
+            onClick={() => onDecision(block.requestId, "deny")}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RuntimePlanBlock({
   block,
 }: {
@@ -873,9 +971,11 @@ function StructuredAssistantBlocks({
 function RuntimeStructuredBlocks({
   blocks,
   workspaceRoot,
+  onClaudeApproval,
 }: {
   blocks: ChatMessageBlock[];
   workspaceRoot?: string | null;
+  onClaudeApproval?: ((requestId: string, decision: ClaudeApprovalDecision) => void) | null;
 }) {
   return (
     <div className="space-y-3">
@@ -892,6 +992,14 @@ function RuntimeStructuredBlocks({
             return <RuntimeFileChangeBlock key={key} block={block} />;
           case "tool":
             return <RuntimeToolBlock key={key} block={block} />;
+          case "approvalRequest":
+            return (
+              <RuntimeApprovalRequestBlock
+                key={key}
+                block={block}
+                onDecision={onClaudeApproval}
+              />
+            );
           case "plan":
             return <RuntimePlanBlock key={key} block={block} />;
           case "status":
@@ -909,12 +1017,14 @@ export function CliBubble({
   workspaceRoot,
   onRegenerate,
   onDelete,
+  onClaudeApproval,
   actionsDisabled = false,
 }: {
   message: ChatMessage;
   workspaceRoot?: string | null;
   onRegenerate?: (() => void) | null;
   onDelete?: ((messageId: string) => void) | null;
+  onClaudeApproval?: ((requestId: string, decision: ClaudeApprovalDecision) => void) | null;
   actionsDisabled?: boolean;
 }) {
   const cli = message.cliId as AgentId;
@@ -1019,6 +1129,23 @@ export function CliBubble({
               isStreaming={message.isStreaming}
               renderMode="raw"
             />
+          ) : runtimeBlocks?.length ? (
+            <div className="space-y-3">
+              <RuntimeStructuredBlocks
+                blocks={runtimeBlocks}
+                workspaceRoot={workspaceRoot}
+                onClaudeApproval={onClaudeApproval}
+              />
+              {message.isStreaming && message.content.trim() && (
+                <AssistantMessageContent
+                  content={message.content}
+                  rawContent={message.rawContent}
+                  contentFormat={contentFormat}
+                  isStreaming={message.isStreaming}
+                  renderMode="rich"
+                />
+              )}
+            </div>
           ) : message.isStreaming ? (
             <AssistantMessageContent
               content={message.content}
@@ -1027,8 +1154,6 @@ export function CliBubble({
               isStreaming={message.isStreaming}
               renderMode="rich"
             />
-          ) : runtimeBlocks?.length ? (
-            <RuntimeStructuredBlocks blocks={runtimeBlocks} workspaceRoot={workspaceRoot} />
           ) : (
             <StructuredAssistantBlocks blocks={parsed.blocks} workspaceRoot={workspaceRoot} />
           )}

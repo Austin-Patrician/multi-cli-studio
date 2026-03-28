@@ -13,6 +13,7 @@ import {
   AppSettings,
   EnrichedHandoff,
   ChatPromptRequest,
+  ClaudeApprovalDecision,
   FileMentionCandidate,
   GitFileDiff,
   StreamEvent,
@@ -606,6 +607,9 @@ export const browserRuntime = {
     }, 100);
 
     return messageId;
+  },
+  async respondClaudeApproval(_requestId: string, _decision: ClaudeApprovalDecision) {
+    return false;
   },
 
   async pickWorkspaceFolder(): Promise<WorkspacePickResult | null> {

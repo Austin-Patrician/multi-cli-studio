@@ -9,6 +9,7 @@ import {
   ChatMessage,
   ChatMessageBlock,
   ChatContextTurn,
+  ClaudeApprovalDecision,
   ContextStore,
   ConversationSession,
   FileMentionCandidate,
@@ -597,7 +598,12 @@ interface StoreState {
   togglePlanMode: (tabId?: string) => void;
 
   sendChatMessage: (tabId: string, prompt?: string) => Promise<void>;
-  appendStreamChunk: (tabId: string, messageId: string, chunk: string) => void;
+  appendStreamChunk: (
+    tabId: string,
+    messageId: string,
+    chunk: string,
+    blocks?: ChatMessageBlock[] | null
+  ) => void;
   finalizeStream: (
     tabId: string,
     messageId: string,
@@ -613,6 +619,7 @@ interface StoreState {
   refreshGitPanel: (workspaceId?: string) => Promise<void>;
   searchWorkspaceFiles: (workspaceId: string, query: string) => Promise<FileMentionCandidate[]>;
   loadAcpCapabilities: (cliId: AgentId, force?: boolean) => Promise<AcpCliCapabilities | null>;
+  respondClaudeApproval: (requestId: string, decision: ClaudeApprovalDecision) => Promise<void>;
 
   executeAcpCommand: (command: AcpCommand, tabId?: string) => Promise<void>;
 }
@@ -1403,7 +1410,7 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
-  appendStreamChunk: (tabId, messageId, chunk) => {
+  appendStreamChunk: (tabId, messageId, chunk, blocks) => {
     set((state) => {
       const session = state.chatSessions[tabId];
       if (!session) return {};
@@ -1422,6 +1429,7 @@ export const useStore = create<StoreState>((set, get) => ({
                     (message.rawContent ?? message.content) + chunk
                   ),
                   contentFormat: "plain",
+                  blocks: blocks ?? message.blocks ?? null,
                 }
               : message
           ),
@@ -1524,6 +1532,77 @@ export const useStore = create<StoreState>((set, get) => ({
     if (tab) {
       void get().refreshGitPanel(tab.workspaceId);
       void get().loadContextStore();
+    }
+  },
+
+  respondClaudeApproval: async (requestId, decision) => {
+    const nextState =
+      decision === "allowAlways"
+        ? "approvedAlways"
+        : decision === "allowOnce"
+          ? "approved"
+          : "denied";
+
+    const updateApprovalState = (stateValue: "pending" | "approved" | "approvedAlways" | "denied") =>
+      set((state) => {
+        const chatSessions = Object.fromEntries(
+          Object.entries(state.chatSessions).map(([tabId, session]) => [
+            tabId,
+            {
+              ...session,
+              messages: session.messages.map<ChatMessage>((message) => ({
+                ...message,
+                blocks:
+                  message.blocks?.map((block) =>
+                    block.kind === "approvalRequest" && block.requestId === requestId
+                      ? { ...block, state: stateValue }
+                      : block
+                  ) ?? message.blocks ?? null,
+              })),
+            },
+          ])
+        );
+        persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
+        return { chatSessions };
+      });
+
+    updateApprovalState(nextState);
+
+    try {
+      const applied = await bridge.respondClaudeApproval(requestId, decision);
+      if (!applied) {
+        updateApprovalState("pending");
+        set((state) => {
+          const chatSessions = appendSystemMessageToSession(
+            state.chatSessions,
+            state.activeTerminalTabId ?? "",
+            "claude",
+            "Claude approval request was no longer pending.",
+            1
+          );
+          persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
+          return { chatSessions };
+        });
+      }
+    } catch (error) {
+      updateApprovalState("pending");
+      const detail =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "Unknown error";
+      set((state) => {
+        const chatSessions = appendSystemMessageToSession(
+          state.chatSessions,
+          state.activeTerminalTabId ?? "",
+          "claude",
+          `Failed to send Claude approval response: ${detail}`,
+          1
+        );
+        persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
+        return { chatSessions };
+      });
     }
   },
 

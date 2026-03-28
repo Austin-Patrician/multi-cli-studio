@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
+        mpsc,
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
@@ -284,6 +285,20 @@ struct ChatPromptRequest {
     transport_session: Option<AgentTransportSession>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ClaudeApprovalResponseRequest {
+    #[serde(alias = "requestId")]
+    request_id: String,
+    #[serde(alias = "decision")]
+    decision: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeApprovalResponseResult {
+    applied: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StreamEvent {
@@ -318,7 +333,7 @@ struct AgentTransportSession {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum ChatMessageBlock {
     Text {
         text: String,
@@ -347,6 +362,14 @@ enum ChatMessageBlock {
         source: Option<String>,
         status: Option<String>,
         summary: Option<String>,
+    },
+    ApprovalRequest {
+        request_id: String,
+        tool_name: String,
+        title: Option<String>,
+        description: Option<String>,
+        summary: Option<String>,
+        state: Option<String>,
     },
     Plan {
         text: String,
@@ -459,6 +482,29 @@ struct AppStore {
     context: Arc<Mutex<ContextStore>>,
     settings: Arc<Mutex<AppSettings>>,
     acp_session: Arc<Mutex<acp::AcpSession>>,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeApprovalRules {
+    #[serde(default)]
+    always_allow_by_project: BTreeMap<String, BTreeSet<String>>,
+}
+
+#[derive(Debug)]
+struct PendingClaudeApproval {
+    project_root: String,
+    tool_name: String,
+    sender: mpsc::Sender<ClaudeApprovalDecision>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClaudeApprovalDecision {
+    AllowOnce,
+    AllowAlways,
+    Deny,
 }
 
 #[derive(Debug, Default)]
@@ -493,6 +539,7 @@ struct ClaudeStreamState {
     blocks: Vec<ChatMessageBlock>,
     content_blocks: BTreeMap<usize, ClaudeContentBlockState>,
     tool_block_by_use_id: BTreeMap<String, usize>,
+    approval_block_by_request_id: BTreeMap<String, usize>,
     session_id: Option<String>,
     turn_id: Option<String>,
     current_model_id: Option<String>,
@@ -500,6 +547,7 @@ struct ClaudeStreamState {
     stop_reason: Option<String>,
     result_text: Option<String>,
     result_is_error: bool,
+    result_received: bool,
     parse_failures: Vec<String>,
 }
 
@@ -762,6 +810,15 @@ fn read_jsonrpc_message<R: BufRead>(reader: &mut R) -> Result<Option<Value>, Str
         .map_err(|err| format!("Failed to decode JSON-RPC body: {}", err))
 }
 
+fn write_line_json_message<W: Write>(writer: &mut W, payload: &Value) -> Result<(), String> {
+    let line = serde_json::to_string(payload).map_err(|err| err.to_string())?;
+    writer
+        .write_all(line.as_bytes())
+        .map_err(|err| err.to_string())?;
+    writer.write_all(b"\n").map_err(|err| err.to_string())?;
+    writer.flush().map_err(|err| err.to_string())
+}
+
 fn json_value_as_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
@@ -900,6 +957,91 @@ fn claude_tool_input_summary(tool_name: &str, input: &Value) -> Option<String> {
             .map(|description| claude_truncate_preview(description, 280)),
         _ => json_value_as_text(input).map(|text| claude_truncate_preview(&text, 280)),
     }
+}
+
+fn parse_claude_approval_decision(value: &str) -> Option<ClaudeApprovalDecision> {
+    match value {
+        "allowOnce" => Some(ClaudeApprovalDecision::AllowOnce),
+        "allowAlways" => Some(ClaudeApprovalDecision::AllowAlways),
+        "deny" => Some(ClaudeApprovalDecision::Deny),
+        _ => None,
+    }
+}
+
+fn claude_approval_state(decision: ClaudeApprovalDecision) -> &'static str {
+    match decision {
+        ClaudeApprovalDecision::AllowOnce => "approved",
+        ClaudeApprovalDecision::AllowAlways => "approvedAlways",
+        ClaudeApprovalDecision::Deny => "denied",
+    }
+}
+
+fn claude_decision_classification(decision: ClaudeApprovalDecision) -> &'static str {
+    match decision {
+        ClaudeApprovalDecision::AllowOnce => "user_temporary",
+        ClaudeApprovalDecision::AllowAlways => "user_permanent",
+        ClaudeApprovalDecision::Deny => "user_reject",
+    }
+}
+
+fn project_has_claude_tool_approval(
+    rules: &ClaudeApprovalRules,
+    project_root: &str,
+    tool_name: &str,
+) -> bool {
+    rules
+        .always_allow_by_project
+        .get(project_root)
+        .map(|tools| tools.contains(&tool_name.to_ascii_lowercase()))
+        .unwrap_or(false)
+}
+
+fn store_claude_tool_approval(
+    rules: &mut ClaudeApprovalRules,
+    project_root: &str,
+    tool_name: &str,
+) {
+    rules
+        .always_allow_by_project
+        .entry(project_root.to_string())
+        .or_default()
+        .insert(tool_name.to_ascii_lowercase());
+}
+
+fn upsert_claude_approval_block(
+    stream_state: &mut ClaudeStreamState,
+    request_id: &str,
+    tool_name: &str,
+    title: Option<String>,
+    description: Option<String>,
+    summary: Option<String>,
+    state: Option<String>,
+) {
+    let next_block = ChatMessageBlock::ApprovalRequest {
+        request_id: request_id.to_string(),
+        tool_name: tool_name.to_string(),
+        title,
+        description,
+        summary,
+        state,
+    };
+
+    if let Some(index) = stream_state
+        .approval_block_by_request_id
+        .get(request_id)
+        .copied()
+    {
+        if let Some(block) = stream_state.blocks.get_mut(index) {
+            *block = next_block;
+            return;
+        }
+    }
+
+    let index = stream_state.blocks.len();
+    stream_state.blocks.push(next_block);
+    stream_state
+        .approval_block_by_request_id
+        .insert(request_id.to_string(), index);
 }
 
 fn claude_build_write_diff(project_root: &str, path: &str, new_text: &str) -> String {
@@ -1844,6 +1986,28 @@ fn render_chat_blocks(
                 }
                 sections.push(section);
             }
+            ChatMessageBlock::ApprovalRequest {
+                tool_name,
+                title,
+                summary,
+                state,
+                ..
+            } => {
+                let mut section = format!(
+                    "Approval request: {}",
+                    title.as_deref().unwrap_or(tool_name)
+                );
+                if let Some(summary) = summary {
+                    let trimmed = summary.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str(&format!("\n{}", trimmed));
+                    }
+                }
+                if let Some(state) = state {
+                    section.push_str(&format!("\nState: {}", state));
+                }
+                sections.push(section);
+            }
             ChatMessageBlock::Plan { text } => {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
@@ -2585,6 +2749,7 @@ fn handle_claude_stream_event(
     stream_state: &mut ClaudeStreamState,
 ) -> Result<(), String> {
     let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let mut blocks_changed = false;
     match event_type {
         "message_start" => {
             let message = event.get("message").unwrap_or(&Value::Null);
@@ -2668,6 +2833,7 @@ fn handle_claude_stream_event(
                     );
                     let block_index = stream_state.blocks.len();
                     stream_state.blocks.push(block);
+                    blocks_changed = true;
                     if !tool_use_id.trim().is_empty() {
                         stream_state
                             .tool_block_by_use_id
@@ -2755,6 +2921,7 @@ fn handle_claude_stream_event(
                             stream_state
                                 .blocks
                                 .push(ChatMessageBlock::Reasoning { text: trimmed.to_string() });
+                            blocks_changed = true;
                         }
                     }
                     ClaudeContentBlockState::Tool(tool_state) => {
@@ -2830,6 +2997,7 @@ fn handle_claude_stream_event(
                                 },
                                 other => other,
                             };
+                            blocks_changed = true;
                         }
                     }
                 }
@@ -2847,16 +3015,23 @@ fn handle_claude_stream_event(
         _ => {}
     }
 
+    if blocks_changed {
+        emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
+    }
+
     Ok(())
 }
 
 fn handle_claude_stream_record(
     app: &AppHandle,
+    stdin: &mut std::process::ChildStdin,
     terminal_tab_id: &str,
     message_id: &str,
     project_root: &str,
     record: &Value,
     stream_state: &mut ClaudeStreamState,
+    claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
 ) -> Result<(), String> {
     if let Some(session_id) = record.get("session_id").and_then(Value::as_str) {
         stream_state.session_id = Some(session_id.to_string());
@@ -2872,6 +3047,141 @@ fn handle_claude_stream_record(
                 stream_state.permission_mode = Some(permission_mode.to_string());
             }
         }
+        "control_request" => {
+            let request = record.get("request").unwrap_or(&Value::Null);
+            if request.get("subtype").and_then(Value::as_str) == Some("can_use_tool") {
+                let request_id = record
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "Claude permission request missing request_id".to_string())?
+                    .to_string();
+                let tool_name = request
+                    .get("tool_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_string();
+                let tool_use_id = request
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_string());
+                let input = request.get("input").cloned().unwrap_or(Value::Null);
+                let title = request
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_string())
+                    .or_else(|| {
+                        request
+                            .get("display_name")
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string())
+                    })
+                    .or_else(|| Some(format!("Claude wants to use {}", tool_name)));
+                let summary = claude_tool_input_summary(&tool_name, &input);
+                let description = request
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_string())
+                    .or_else(|| {
+                        request
+                            .get("decision_reason")
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string())
+                    });
+
+                let auto_allow = claude_approval_rules
+                    .lock()
+                    .map(|rules| project_has_claude_tool_approval(&rules, project_root, &tool_name))
+                    .unwrap_or(false);
+
+                if auto_allow {
+                    write_line_json_message(
+                        stdin,
+                        &json!({
+                            "type": "control_response",
+                            "response": {
+                                "subtype": "success",
+                                "request_id": request_id,
+                                "response": {
+                                    "behavior": "allow",
+                                    "updatedInput": {},
+                                    "toolUseID": tool_use_id,
+                                    "decisionClassification": claude_decision_classification(ClaudeApprovalDecision::AllowAlways)
+                                }
+                            }
+                        }),
+                    )?;
+                } else {
+                    upsert_claude_approval_block(
+                        stream_state,
+                        &request_id,
+                        &tool_name,
+                        title,
+                        description,
+                        summary,
+                        Some("pending".to_string()),
+                    );
+                    emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
+
+                    let (sender, receiver) = mpsc::channel::<ClaudeApprovalDecision>();
+                    {
+                        let mut approvals = claude_pending_approvals
+                            .lock()
+                            .map_err(|err| err.to_string())?;
+                        approvals.insert(
+                            request_id.clone(),
+                            PendingClaudeApproval {
+                                project_root: project_root.to_string(),
+                                tool_name: tool_name.clone(),
+                                sender,
+                            },
+                        );
+                    }
+
+                    let decision = receiver.recv().unwrap_or(ClaudeApprovalDecision::Deny);
+                    upsert_claude_approval_block(
+                        stream_state,
+                        &request_id,
+                        &tool_name,
+                        None,
+                        None,
+                        None,
+                        Some(claude_approval_state(decision).to_string()),
+                    );
+                    emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
+
+                    let response = match decision {
+                        ClaudeApprovalDecision::AllowOnce | ClaudeApprovalDecision::AllowAlways => {
+                            json!({
+                                "behavior": "allow",
+                                "updatedInput": {},
+                                "toolUseID": tool_use_id,
+                                "decisionClassification": claude_decision_classification(decision)
+                            })
+                        }
+                        ClaudeApprovalDecision::Deny => {
+                            json!({
+                                "behavior": "deny",
+                                "message": "Permission denied by user.",
+                                "toolUseID": tool_use_id,
+                                "decisionClassification": claude_decision_classification(decision)
+                            })
+                        }
+                    };
+
+                    write_line_json_message(
+                        stdin,
+                        &json!({
+                            "type": "control_response",
+                            "response": {
+                                "subtype": "success",
+                                "request_id": request_id,
+                                "response": response
+                            }
+                        }),
+                    )?;
+                }
+            }
+        }
         "stream_event" => {
             handle_claude_stream_event(
                 app,
@@ -2883,6 +3193,7 @@ fn handle_claude_stream_record(
             )?;
         }
         "user" => {
+            let mut blocks_changed = false;
             if let Some(items) = record
                 .get("message")
                 .and_then(|message| message.get("content"))
@@ -2907,10 +3218,15 @@ fn handle_claude_stream_record(
                         content_text.as_deref(),
                         is_error,
                     );
+                    blocks_changed = true;
                 }
+            }
+            if blocks_changed {
+                emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
             }
         }
         "result" => {
+            stream_state.result_received = true;
             stream_state.result_is_error = record
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -2929,6 +3245,30 @@ fn handle_claude_stream_record(
     Ok(())
 }
 
+fn emit_stream_block_update(
+    app: &AppHandle,
+    terminal_tab_id: &str,
+    message_id: &str,
+    blocks: &[ChatMessageBlock],
+) {
+    let _ = app.emit(
+        "stream-chunk",
+        StreamEvent {
+            terminal_tab_id: terminal_tab_id.to_string(),
+            message_id: message_id.to_string(),
+            chunk: String::new(),
+            done: false,
+            exit_code: None,
+            duration_ms: None,
+            final_content: None,
+            content_format: None,
+            transport_kind: None,
+            transport_session: None,
+            blocks: Some(blocks.to_vec()),
+        },
+    );
+}
+
 fn run_claude_headless_turn_once(
     app: &AppHandle,
     command_path: &str,
@@ -2941,6 +3281,8 @@ fn run_claude_headless_turn_once(
     message_id: &str,
     write_mode: bool,
     timeout_ms: u64,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
 ) -> Result<ClaudeTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
     let requested_model = claude_requested_model(session, previous_transport_session.as_ref());
@@ -2951,11 +3293,13 @@ fn run_claude_headless_turn_once(
     let mut args = vec![
         "-p".to_string(),
         "--input-format".to_string(),
-        "text".to_string(),
+        "stream-json".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
         "--include-partial-messages".to_string(),
+        "--permission-prompt-tool".to_string(),
+        "stdio".to_string(),
         "--permission-mode".to_string(),
         requested_permission.clone(),
     ];
@@ -3010,13 +3354,19 @@ fn run_claude_headless_turn_once(
         .take()
         .ok_or_else(|| "Failed to capture Claude stderr".to_string())?;
 
-    stdin
-        .write_all(prompt.as_bytes())
-        .map_err(|err| format!("Failed to write Claude prompt: {}", err))?;
-    stdin
-        .flush()
-        .map_err(|err| format!("Failed to flush Claude prompt: {}", err))?;
-    drop(stdin);
+    write_line_json_message(
+        &mut stdin,
+        &json!({
+            "type": "user",
+            "session_id": "",
+            "message": {
+                "role": "user",
+                "content": prompt,
+            },
+            "parent_tool_use_id": Value::Null
+        }),
+    )
+    .map_err(|err| format!("Failed to write Claude prompt: {}", err))?;
 
     let completed = Arc::new(AtomicBool::new(false));
     let timed_out = Arc::new(AtomicBool::new(false));
@@ -3056,11 +3406,14 @@ fn run_claude_headless_turn_once(
         match serde_json::from_str::<Value>(trimmed) {
             Ok(record) => handle_claude_stream_record(
                 app,
+                &mut stdin,
                 terminal_tab_id,
                 message_id,
                 project_root,
                 &record,
                 &mut stream_state,
+                &claude_approval_rules,
+                &claude_pending_approvals,
             )?,
             Err(error) => stream_state.parse_failures.push(format!(
                 "{} | {}",
@@ -3068,8 +3421,13 @@ fn run_claude_headless_turn_once(
                 claude_truncate_preview(trimmed, 240)
             )),
         }
+
+        if stream_state.result_received {
+            break;
+        }
     }
 
+    drop(stdin);
     let status = child.wait().map_err(|err| err.to_string())?;
     completed.store(true, Ordering::SeqCst);
     let _ = stderr_handle.join();
@@ -3185,6 +3543,8 @@ fn run_claude_headless_turn(
     message_id: &str,
     write_mode: bool,
     timeout_ms: u64,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
 ) -> Result<ClaudeTurnOutcome, String> {
     let resume_session_id = previous_transport_session
         .as_ref()
@@ -3202,6 +3562,8 @@ fn run_claude_headless_turn(
         message_id,
         write_mode,
         timeout_ms,
+        claude_approval_rules.clone(),
+        claude_pending_approvals.clone(),
     ) {
         Ok(outcome) => Ok(outcome),
         Err(error)
@@ -3223,6 +3585,8 @@ fn run_claude_headless_turn(
                 message_id,
                 write_mode,
                 timeout_ms,
+                claude_approval_rules,
+                claude_pending_approvals,
             )
         }
         Err(error) => Err(error),
@@ -4587,6 +4951,8 @@ fn send_chat_message(
         let claude_project_root = project_root.clone();
         let claude_requested_transport_session = requested_transport_session.clone();
         let claude_transport_kind = transport_kind.clone();
+        let claude_approval_rules = store.claude_approval_rules.clone();
+        let claude_pending_approvals = store.claude_pending_approvals.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -4601,6 +4967,8 @@ fn send_chat_message(
                 &msg_id,
                 turn_write_mode,
                 timeout_ms,
+                claude_approval_rules,
+                claude_pending_approvals,
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -4903,6 +5271,44 @@ fn send_chat_message(
     });
 
     Ok(message_id)
+}
+
+#[tauri::command]
+fn respond_claude_approval(
+    store: State<'_, AppStore>,
+    request: ClaudeApprovalResponseRequest,
+) -> Result<ClaudeApprovalResponseResult, String> {
+    let Some(parsed_decision) = parse_claude_approval_decision(&request.decision) else {
+        return Err("Unknown Claude approval decision.".to_string());
+    };
+
+    let pending = {
+        let mut approvals = store
+            .claude_pending_approvals
+            .lock()
+            .map_err(|err| err.to_string())?;
+        approvals.remove(&request.request_id)
+    };
+
+    let Some(pending) = pending else {
+        return Ok(ClaudeApprovalResponseResult { applied: false });
+    };
+
+    if matches!(parsed_decision, ClaudeApprovalDecision::AllowAlways) {
+        let mut rules = store
+            .claude_approval_rules
+            .lock()
+            .map_err(|err| err.to_string())?;
+        store_claude_tool_approval(&mut rules, &pending.project_root, &pending.tool_name);
+        persist_claude_approval_rules(&rules)?;
+    }
+
+    pending
+        .sender
+        .send(parsed_decision)
+        .map_err(|_| "Claude approval request is no longer active.".to_string())?;
+
+    Ok(ClaudeApprovalResponseResult { applied: true })
 }
 
 // ── ACP commands ────────────────────────────────────────────────────────
@@ -7123,6 +7529,10 @@ fn settings_file() -> Result<PathBuf, String> {
     Ok(data_dir()?.join("settings.json"))
 }
 
+fn claude_approval_rules_file() -> Result<PathBuf, String> {
+    Ok(data_dir()?.join("claude-approval-rules.json"))
+}
+
 fn persist_state(state: &AppStateDto) -> Result<(), String> {
     let path = state_file()?;
     let raw = serde_json::to_string_pretty(state).map_err(|err| err.to_string())?;
@@ -7138,6 +7548,12 @@ fn persist_context(ctx: &ContextStore) -> Result<(), String> {
 fn persist_settings(settings: &AppSettings) -> Result<(), String> {
     let path = settings_file()?;
     let raw = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
+    fs::write(path, raw).map_err(|err| err.to_string())
+}
+
+fn persist_claude_approval_rules(rules: &ClaudeApprovalRules) -> Result<(), String> {
+    let path = claude_approval_rules_file()?;
+    let raw = serde_json::to_string_pretty(rules).map_err(|err| err.to_string())?;
     fs::write(path, raw).map_err(|err| err.to_string())
 }
 
@@ -7182,6 +7598,18 @@ fn load_or_seed_settings(project_root: &str) -> Result<AppSettings, String> {
         let s = seed_settings(project_root);
         persist_settings(&s)?;
         Ok(s)
+    }
+}
+
+fn load_or_seed_claude_approval_rules() -> Result<ClaudeApprovalRules, String> {
+    let path = claude_approval_rules_file()?;
+    if path.exists() {
+        let raw = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+        serde_json::from_str::<ClaudeApprovalRules>(&raw).map_err(|err| err.to_string())
+    } else {
+        let rules = ClaudeApprovalRules::default();
+        persist_claude_approval_rules(&rules)?;
+        Ok(rules)
     }
 }
 
@@ -7597,6 +8025,10 @@ pub fn run() {
             context: Arc::new(Mutex::new(seed_context())),
             settings: Arc::new(Mutex::new(seed_settings(&project_root))),
             acp_session: Arc::new(Mutex::new(acp::AcpSession::default())),
+            claude_approval_rules: Arc::new(Mutex::new(
+                load_or_seed_claude_approval_rules().unwrap_or_default(),
+            )),
+            claude_pending_approvals: Arc::new(Mutex::new(BTreeMap::new())),
         })
         .invoke_handler(tauri::generate_handler![
             load_app_state,
@@ -7609,6 +8041,7 @@ pub fn run() {
             get_context_store,
             get_conversation_history,
             send_chat_message,
+            respond_claude_approval,
             get_git_panel,
             get_git_file_diff,
             open_workspace_file,

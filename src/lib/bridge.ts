@@ -5,6 +5,7 @@ import {
   AppSettings,
   AppState,
   ChatPromptRequest,
+  ClaudeApprovalDecision,
   ContextStore,
   ConversationTurn,
   FileMentionCandidate,
@@ -40,6 +41,7 @@ export interface RuntimeBridge {
   updateSettings: (settings: AppSettings) => Promise<AppSettings>;
   // Chat methods
   sendChatMessage: (request: ChatPromptRequest) => Promise<string>;
+  respondClaudeApproval: (requestId: string, decision: ClaudeApprovalDecision) => Promise<boolean>;
   getGitPanel: (projectRoot: string) => Promise<GitPanelData>;
   getGitFileDiff: (projectRoot: string, path: string) => Promise<GitFileDiff>;
   openWorkspaceFile: (projectRoot: string, path: string) => Promise<boolean>;
@@ -119,6 +121,16 @@ const tauriRuntime: RuntimeBridge = {
   async sendChatMessage(request) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<string>("send_chat_message", { request });
+  },
+  async respondClaudeApproval(requestId, decision) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const result = await invoke<{ applied: boolean }>("respond_claude_approval", {
+      request: {
+        requestId,
+        decision,
+      },
+    });
+    return result.applied;
   },
   async getGitPanel(projectRoot) {
     const { invoke } = await import("@tauri-apps/api/core");
