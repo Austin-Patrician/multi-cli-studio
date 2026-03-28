@@ -1436,7 +1436,6 @@ export const useStore = create<StoreState>((set, get) => ({
           updatedAt: nowIso(),
         },
       };
-      persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
       return { chatSessions };
     });
   },

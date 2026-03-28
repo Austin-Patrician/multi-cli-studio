@@ -1,123 +1,83 @@
-import { useState } from "react";
 import { EnrichedHandoff } from "../lib/models";
 
 interface Props {
   handoffs: EnrichedHandoff[];
+  selectedId: string | null;
+  onSelect: (handoffId: string) => void;
 }
 
-export function HandoffTimeline({ handoffs }: Props) {
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+function formatTimestamp(value: string) {
+  return new Date(value).toLocaleString("en-US", {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function statusTone(status: EnrichedHandoff["status"]) {
+  switch (status) {
+    case "completed":
+      return "bg-emerald-500";
+    case "ready":
+      return "bg-sky-500";
+    default:
+      return "bg-amber-500";
+  }
+}
+
+export function HandoffTimeline({ handoffs, selectedId, onSelect }: Props) {
 
   if (handoffs.length === 0) {
-    return <p className="text-sm text-muted py-4">No handoffs recorded yet.</p>;
+    return (
+      <div className="px-5 py-8 text-sm text-slate-500">
+        No handoffs recorded yet.
+      </div>
+    );
   }
 
   return (
-    <div className="border border-border rounded-[8px] bg-bg divide-y divide-border">
+    <div className="divide-y divide-slate-200">
       {handoffs.map((handoff) => {
-        const isExpanded = expandedId === handoff.id;
+        const isSelected = selectedId === handoff.id;
         return (
-          <div key={handoff.id}>
-            <button
-              onClick={() => setExpandedId(isExpanded ? null : handoff.id)}
-              className="w-full text-left px-4 py-3 flex items-center justify-between hover:bg-surface transition-colors"
-            >
-              <div className="flex items-center gap-3">
-                <span className={`w-2 h-2 rounded-full ${
-                  handoff.status === "completed" ? "bg-success" : handoff.status === "ready" ? "bg-accent" : "bg-muted"
-                }`} />
-                <span className="text-sm font-medium text-text">
-                  {handoff.from} → {handoff.to}
-                </span>
-                <span className="text-xs text-muted capitalize">{handoff.status}</span>
+          <button
+            key={handoff.id}
+            type="button"
+            onClick={() => onSelect(handoff.id)}
+            className={`w-full border-l-2 px-4 py-4 text-left transition-colors ${
+              isSelected
+                ? "border-slate-900 bg-slate-50/80"
+                : "border-transparent hover:bg-slate-50/60"
+            }`}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className={`h-2.5 w-2.5 rounded-full ${statusTone(handoff.status)}`} />
+                  <span className="text-sm font-semibold text-slate-900">
+                    {handoff.from} → {handoff.to}
+                  </span>
+                  <span className="text-[11px] uppercase tracking-[0.16em] text-slate-400">
+                    {handoff.status}
+                  </span>
+                </div>
+                <div className="mt-1 line-clamp-2 text-[13px] leading-6 text-slate-600">
+                  {handoff.userGoal}
+                </div>
+                <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-400">
+                  <span>{handoff.changedFiles.length} files</span>
+                  <span>{handoff.previousTurns.length} turns</span>
+                </div>
               </div>
-              <span className="text-xs text-muted">
-                {new Date(handoff.timestamp).toLocaleString()}
-              </span>
-            </button>
-            {isExpanded && (
-              <HandoffDetail handoff={handoff} />
-            )}
-          </div>
+              <div className="shrink-0 text-[11px] text-slate-400">
+                {formatTimestamp(handoff.timestamp)}
+              </div>
+            </div>
+          </button>
         );
       })}
-    </div>
-  );
-}
-
-function HandoffDetail({ handoff }: { handoff: EnrichedHandoff }) {
-  return (
-    <div className="px-4 pb-4 space-y-4">
-      <div>
-        <p className="text-xs text-muted uppercase tracking-wider mb-1">Goal</p>
-        <p className="text-sm text-text">{handoff.userGoal}</p>
-      </div>
-
-      {handoff.changedFiles.length > 0 && (
-        <div>
-          <p className="text-xs text-muted uppercase tracking-wider mb-1">Changed Files</p>
-          <div className="flex flex-wrap gap-1">
-            {handoff.changedFiles.map((file) => (
-              <span key={file} className="text-xs px-2 py-0.5 bg-surface rounded text-secondary font-mono">
-                {file}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {handoff.gitDiff && (
-        <div>
-          <p className="text-xs text-muted uppercase tracking-wider mb-1">Git Diff</p>
-          <pre className="text-xs font-mono bg-surface rounded-[8px] p-3 overflow-x-auto text-secondary whitespace-pre-wrap">
-            {handoff.gitDiff}
-          </pre>
-        </div>
-      )}
-
-      {handoff.previousTurns.length > 0 && (
-        <div>
-          <p className="text-xs text-muted uppercase tracking-wider mb-1">
-            Previous Turns ({handoff.previousTurns.length})
-          </p>
-          <div className="space-y-2">
-            {handoff.previousTurns.map((turn) => (
-              <ConversationTurnCard key={turn.id} turn={turn} />
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-import { ConversationTurn } from "../lib/models";
-
-function ConversationTurnCard({ turn }: { turn: ConversationTurn }) {
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <div className="border border-border rounded-[8px] p-3 bg-bg">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          <p className="text-xs text-muted">
-            {turn.agentId} · {turn.writeMode ? "write" : "read-only"} · {turn.durationMs}ms
-          </p>
-          <p className="text-sm text-text mt-1 truncate">User: {turn.userPrompt}</p>
-        </div>
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="text-xs text-accent shrink-0"
-        >
-          {expanded ? "Collapse" : "Expand"}
-        </button>
-      </div>
-      <p className="text-xs text-secondary mt-1">{turn.outputSummary}</p>
-      {expanded && (
-        <pre className="text-xs font-mono bg-surface rounded p-2 mt-2 overflow-x-auto whitespace-pre-wrap text-secondary max-h-60 overflow-y-auto">
-          {turn.rawOutput}
-        </pre>
-      )}
     </div>
   );
 }

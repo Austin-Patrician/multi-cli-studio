@@ -20,6 +20,32 @@ function App() {
     let unlistenState = () => {};
     let unlistenTerminal = () => {};
     let unlistenStream = () => {};
+    let flushTimer: number | null = null;
+    const pendingChunks = new Map<
+      string,
+      {
+        terminalTabId: string;
+        messageId: string;
+        chunk: string;
+        blocks: Parameters<typeof appendStreamChunk>[3];
+      }
+    >();
+
+    function flushPendingChunks() {
+      if (flushTimer !== null) {
+        window.clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      for (const pending of pendingChunks.values()) {
+        appendStreamChunk(
+          pending.terminalTabId,
+          pending.messageId,
+          pending.chunk,
+          pending.blocks ?? null
+        );
+      }
+      pendingChunks.clear();
+    }
 
     loadInitialState();
 
@@ -38,6 +64,7 @@ function App() {
     bridge.onStream((event) => {
       if (cancelled) return;
       if (event.done) {
+        flushPendingChunks();
         finalizeStream(
           event.terminalTabId,
           event.messageId,
@@ -50,12 +77,25 @@ function App() {
           event.transportKind ?? null
         );
       } else {
-        appendStreamChunk(
-          event.terminalTabId,
-          event.messageId,
-          event.chunk,
-          event.blocks ?? null
-        );
+        const key = `${event.terminalTabId}:${event.messageId}`;
+        const existing = pendingChunks.get(key);
+        if (existing) {
+          existing.chunk += event.chunk;
+          existing.blocks = event.blocks ?? existing.blocks ?? null;
+        } else {
+          pendingChunks.set(key, {
+            terminalTabId: event.terminalTabId,
+            messageId: event.messageId,
+            chunk: event.chunk,
+            blocks: event.blocks ?? null,
+          });
+        }
+
+        if (flushTimer === null) {
+          flushTimer = window.setTimeout(() => {
+            flushPendingChunks();
+          }, 40);
+        }
       }
     }).then((unlisten) => {
       unlistenStream = unlisten;
@@ -63,6 +103,7 @@ function App() {
 
     return () => {
       cancelled = true;
+      flushPendingChunks();
       unlistenState();
       unlistenTerminal();
       unlistenStream();

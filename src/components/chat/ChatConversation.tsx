@@ -5,6 +5,8 @@ import { useStore } from "../../lib/store";
 import { UserBubble } from "./UserBubble";
 import { CliBubble } from "./CliBubble";
 
+const AUTO_FOLLOW_THRESHOLD_PX = 120;
+
 async function copyTextToClipboard(value: string) {
   if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
     try {
@@ -38,8 +40,16 @@ async function copyTextToClipboard(value: string) {
   }
 }
 
+function isNearBottom(element: HTMLDivElement) {
+  const distanceFromBottom =
+    element.scrollHeight - element.scrollTop - element.clientHeight;
+  return distanceFromBottom <= AUTO_FOLLOW_THRESHOLD_PX;
+}
+
 export function ChatConversation() {
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const shouldAutoFollowRef = useRef(true);
 
   const activeTab = useStore(
     useShallow((state) => {
@@ -77,11 +87,21 @@ export function ChatConversation() {
   const respondAssistantApproval = useStore((state) => state.respondAssistantApproval);
 
   useEffect(() => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) return;
+    if (!shouldAutoFollowRef.current) return;
+
     bottomRef.current?.scrollIntoView({
       behavior: activeTab?.status === "streaming" ? "auto" : "smooth",
       block: "end",
     });
   }, [activeSession?.messages]);
+
+  useEffect(() => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) return;
+    shouldAutoFollowRef.current = isNearBottom(scrollContainer);
+  }, [activeTab?.id]);
 
   const emptyMessage = useMemo(() => {
     if (!workspace) return "No workspace attached yet.";
@@ -109,6 +129,12 @@ export function ChatConversation() {
     void respondAssistantApproval(requestId, decision);
   }
 
+  function handleScroll() {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) return;
+    shouldAutoFollowRef.current = isNearBottom(scrollContainer);
+  }
+
   if (!activeSession || !activeTab) {
     return (
       <div className="flex flex-1 items-center justify-center text-sm text-muted">
@@ -118,7 +144,11 @@ export function ChatConversation() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto bg-[radial-gradient(circle_at_top,#eef4ff_0%,#ffffff_42%)] px-5 py-5">
+    <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      className="flex-1 overflow-y-auto bg-[radial-gradient(circle_at_top,#eef4ff_0%,#ffffff_42%)] px-5 py-5"
+    >
       <div className="mx-auto flex max-w-6xl flex-col gap-4">
         <div className="flex items-center justify-between rounded-[22px] border border-border bg-white/85 px-4 py-3 backdrop-blur">
           <div>
