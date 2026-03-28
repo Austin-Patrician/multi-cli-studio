@@ -29,7 +29,11 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+#[cfg(target_os = "windows")]
 const FALLBACK_SHELL: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
+
+#[cfg(not(target_os = "windows"))]
+const FALLBACK_SHELL: &str = "/bin/zsh";
 const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
@@ -1914,6 +1918,37 @@ fn codex_rpc_call<R: BufRead, W: Write>(
     }
 }
 
+fn codex_startup_error(
+    mut child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stderr_handle: std::thread::JoinHandle<()>,
+    stderr_buffer: Arc<Mutex<String>>,
+    error: String,
+) -> String {
+    drop(stdin);
+
+    match child.try_wait() {
+        Ok(Some(_)) => {}
+        _ => {
+            terminate_process_tree(child.id());
+            let _ = child.wait();
+        }
+    }
+
+    let _ = stderr_handle.join();
+    let stderr_output = stderr_buffer
+        .lock()
+        .map(|buffer| buffer.clone())
+        .unwrap_or_default();
+    let trimmed_stderr = stderr_output.trim();
+
+    if trimmed_stderr.is_empty() {
+        error
+    } else {
+        format!("{}\n\nstderr:\n{}", error, trimmed_stderr)
+    }
+}
+
 fn handle_codex_notification(
     app: &AppHandle,
     terminal_tab_id: &str,
@@ -2264,8 +2299,6 @@ fn run_codex_app_server_turn(
             "app-server",
             "--listen",
             "stdio://",
-            "--session-source",
-            "cli",
         ],
     );
 
@@ -2313,7 +2346,7 @@ fn run_codex_app_server_turn(
     let requested_model = session.model.get("codex").cloned();
     let effort_override = codex_reasoning_effort(session);
 
-    let _ = codex_rpc_call(
+    let _initialize = match codex_rpc_call(
         &mut reader,
         &mut stdin,
         &mut next_id,
@@ -2328,14 +2361,33 @@ fn run_codex_app_server_turn(
         terminal_tab_id,
         message_id,
         &mut stream_state,
-    )?;
-    write_jsonrpc_message(&mut stdin, &json!({ "method": "initialized" }))?;
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            return Err(codex_startup_error(
+                child,
+                stdin,
+                stderr_handle,
+                stderr_buffer,
+                err,
+            ))
+        }
+    };
+    if let Err(err) = write_jsonrpc_message(&mut stdin, &json!({ "method": "initialized" })) {
+        return Err(codex_startup_error(
+            child,
+            stdin,
+            stderr_handle,
+            stderr_buffer,
+            err,
+        ));
+    }
 
     let thread_result = if let Some(thread_id) = previous_transport_session
         .as_ref()
         .and_then(|session| session.thread_id.clone())
     {
-        codex_rpc_call(
+        match codex_rpc_call(
             &mut reader,
             &mut stdin,
             &mut next_id,
@@ -2352,9 +2404,20 @@ fn run_codex_app_server_turn(
             terminal_tab_id,
             message_id,
             &mut stream_state,
-        )?
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                return Err(codex_startup_error(
+                    child,
+                    stdin,
+                    stderr_handle,
+                    stderr_buffer,
+                    err,
+                ))
+            }
+        }
     } else {
-        codex_rpc_call(
+        match codex_rpc_call(
             &mut reader,
             &mut stdin,
             &mut next_id,
@@ -2371,7 +2434,18 @@ fn run_codex_app_server_turn(
             terminal_tab_id,
             message_id,
             &mut stream_state,
-        )?
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                return Err(codex_startup_error(
+                    child,
+                    stdin,
+                    stderr_handle,
+                    stderr_buffer,
+                    err,
+                ))
+            }
+        }
     };
 
     if let Some(thread_id) = thread_result
@@ -2397,7 +2471,7 @@ fn run_codex_app_server_turn(
         .clone()
         .ok_or_else(|| "Codex app-server did not return a thread id".to_string())?;
 
-    let _ = codex_rpc_call(
+    let _turn_start = match codex_rpc_call(
         &mut reader,
         &mut stdin,
         &mut next_id,
@@ -2421,7 +2495,18 @@ fn run_codex_app_server_turn(
         terminal_tab_id,
         message_id,
         &mut stream_state,
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            return Err(codex_startup_error(
+                child,
+                stdin,
+                stderr_handle,
+                stderr_buffer,
+                err,
+            ))
+        }
+    };
 
     while stream_state.completion.is_none() {
         let message = read_jsonrpc_message(&mut reader)?
@@ -5843,9 +5928,6 @@ fn build_agent_script(
     write_mode: bool,
     session: &acp::AcpSession,
 ) -> Result<String, String> {
-    let wrapper = ps_quote(wrapper_path);
-    let prompt = ps_quote(prompt);
-
     let script = match agent_id {
         "codex" => {
             let sandbox = if write_mode {
@@ -5859,17 +5941,23 @@ fn build_agent_script(
             };
             let model_flag = session
                 .model
-                .get("codex")
-                .map(|model| format!(" --model {}", ps_quote(model)))
-                .unwrap_or_default();
-
-            format!(
-                "& {} --ask-for-approval 'never' exec --skip-git-repo-check --sandbox {} --color 'never'{} {}",
-                wrapper,
-                ps_quote(&sandbox),
-                model_flag,
-                prompt
-            )
+                .get("codex");
+            let mut args = vec![
+                "--ask-for-approval".to_string(),
+                "never".to_string(),
+                "exec".to_string(),
+                "--skip-git-repo-check".to_string(),
+                "--sandbox".to_string(),
+                sandbox,
+                "--color".to_string(),
+                "never".to_string(),
+            ];
+            if let Some(model) = model_flag {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+            args.push(prompt.to_string());
+            shell_command(wrapper_path, &args)
         }
         "claude" => {
             let perm = session
@@ -5877,26 +5965,28 @@ fn build_agent_script(
                 .get("claude")
                 .cloned()
                 .unwrap_or_else(|| "acceptEdits".to_string());
-            let model_flag = session
-                .model
-                .get("claude")
-                .map(|m| format!("--model '{}'", m))
-                .unwrap_or_default();
-            let effort_flag = session
-                .effort_level
-                .as_ref()
-                .map(|e| format!("--effort '{}'", e))
-                .unwrap_or_default();
-            let plan_flag = if session.plan_mode || !write_mode {
-                "--permission-mode 'plan'".to_string()
+            let permission_mode = if session.plan_mode || !write_mode {
+                "plan".to_string()
             } else {
-                format!("--permission-mode '{}'", perm)
+                perm
             };
-
-            format!(
-                "& {} -p {} --output-format 'text' {} {} {}",
-                wrapper, prompt, plan_flag, model_flag, effort_flag
-            )
+            let mut args = vec![
+                "-p".to_string(),
+                prompt.to_string(),
+                "--output-format".to_string(),
+                "text".to_string(),
+                "--permission-mode".to_string(),
+                permission_mode,
+            ];
+            if let Some(model) = session.model.get("claude") {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+            if let Some(effort) = session.effort_level.as_ref() {
+                args.push("--effort".to_string());
+                args.push(effort.clone());
+            }
+            shell_command(wrapper_path, &args)
         }
         "gemini" => {
             let approval = if session.plan_mode || !write_mode {
@@ -5908,16 +5998,19 @@ fn build_agent_script(
                     .cloned()
                     .unwrap_or_else(|| "auto_edit".to_string())
             };
-            let model_flag = session
-                .model
-                .get("gemini")
-                .map(|m| format!("-m '{}'", m))
-                .unwrap_or_default();
-
-            format!(
-                "& {} -p {} --output-format 'text' --approval-mode '{}' {}",
-                wrapper, prompt, approval, model_flag
-            )
+            let mut args = vec![
+                "-p".to_string(),
+                prompt.to_string(),
+                "--output-format".to_string(),
+                "text".to_string(),
+                "--approval-mode".to_string(),
+                approval,
+            ];
+            if let Some(model) = session.model.get("gemini") {
+                args.push("-m".to_string());
+                args.push(model.clone());
+            }
+            shell_command(wrapper_path, &args)
         }
         _ => return Err("Unknown agent".to_string()),
     };
@@ -6072,7 +6165,7 @@ fn spawn_shell_command(
     timeout_ms: u64,
 ) -> Result<String, String> {
     let mut cmd = Command::new(shell_path);
-    cmd.args(["-NoLogo", "-NoProfile", "-Command", command_text])
+    cmd.args(shell_command_args(shell_path, command_text))
         .current_dir(project_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -6243,9 +6336,9 @@ fn detect_runtimes() -> BTreeMap<String, AgentRuntime> {
     ] {
         let command_path = resolve_agent_command_path(agent_id);
 
-        let version = command_path.as_ref().and_then(|path| {
-            run_pwsh_capture(&format!("& {} {}", ps_quote(path), version_flag)).ok()
-        });
+        let version = command_path
+            .as_ref()
+            .and_then(|path| run_cli_command_capture(path, &[version_flag]));
 
         let last_error = if command_path.is_some() {
             None
@@ -6269,12 +6362,7 @@ fn detect_runtimes() -> BTreeMap<String, AgentRuntime> {
 }
 
 fn resolve_agent_command_path(agent_id: &str) -> Option<String> {
-    run_pwsh_capture(&format!(
-        "$cmd = Get-Command {} -ErrorAction SilentlyContinue; if ($cmd) {{ $cmd.Source }}",
-        agent_id
-    ))
-    .ok()
-    .filter(|value| !value.trim().is_empty())
+    resolve_command_path(agent_id)
 }
 
 fn detect_agent_resources(agent_id: &str) -> AgentRuntimeResources {
@@ -6701,15 +6789,13 @@ fn path_label(value: &str) -> String {
 }
 
 fn user_home_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(r"C:\Users\admin"))
+    dirs::home_dir()
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn rust_available() -> bool {
-    let cargo_bin = dirs::home_dir()
-        .map(|h| h.join(".cargo").join("bin"))
-        .unwrap_or_else(|| PathBuf::from(r"C:\Users\admin\.cargo\bin"));
-
-    cargo_bin.join("cargo.exe").exists() && cargo_bin.join("rustc.exe").exists()
+    resolve_command_path("cargo").is_some() && resolve_command_path("rustc").is_some()
 }
 
 fn environment_notes() -> Vec<String> {
@@ -6726,45 +6812,159 @@ fn environment_notes() -> Vec<String> {
 }
 
 fn shell_path() -> String {
-    if Path::new(FALLBACK_SHELL).exists() {
-        FALLBACK_SHELL.to_string()
-    } else {
-        "powershell.exe".to_string()
+    #[cfg(target_os = "windows")]
+    {
+        if Path::new(FALLBACK_SHELL).exists() {
+            FALLBACK_SHELL.to_string()
+        } else {
+            "powershell.exe".to_string()
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(shell) = std::env::var("SHELL") {
+            if Path::new(&shell).exists() {
+                return shell;
+            }
+        }
+        if Path::new(FALLBACK_SHELL).exists() {
+            FALLBACK_SHELL.to_string()
+        } else if Path::new("/bin/bash").exists() {
+            "/bin/bash".to_string()
+        } else {
+            "/bin/sh".to_string()
+        }
     }
 }
 
-fn run_pwsh_capture(script: &str) -> Result<String, String> {
-    let mut cmd = Command::new(shell_path());
-    cmd.args(["-NoLogo", "-NoProfile", "-Command", script]);
-
+fn shell_command_args(shell_path: &str, command_text: &str) -> Vec<String> {
     #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    {
+        let _ = shell_path;
+        vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            command_text.to_string(),
+        ]
+    }
 
-    let output = cmd.output().map_err(|err| err.to_string())?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    #[cfg(not(target_os = "windows"))]
+    {
+        let shell_name = Path::new(shell_path)
+            .file_name()
+            .and_then(|entry| entry.to_str())
+            .unwrap_or(shell_path);
+        let command_flag = match shell_name {
+            "bash" | "zsh" => "-lc",
+            _ => "-c",
+        };
+        vec![command_flag.to_string(), command_text.to_string()]
     }
 }
 
 fn run_cli_command_capture(command_path: &str, args: &[&str]) -> Option<String> {
-    let rendered_args = args
-        .iter()
-        .map(|arg| ps_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let script = if rendered_args.is_empty() {
-        format!("& {}", ps_quote(command_path))
+    let resolved_command = resolve_direct_command_path(command_path);
+    let output = batch_aware_command(&resolved_command, args).output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if output.status.success() {
+        if !stdout.is_empty() {
+            Some(stdout)
+        } else if !stderr.is_empty() {
+            Some(stderr)
+        } else {
+            None
+        }
+    } else if !stderr.is_empty() {
+        Some(stderr)
+    } else if !stdout.is_empty() {
+        Some(stdout)
     } else {
-        format!("& {} {}", ps_quote(command_path), rendered_args)
-    };
-    run_pwsh_capture(&script).ok()
+        None
+    }
 }
 
+#[cfg(target_os = "windows")]
 fn ps_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn shell_quote(value: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        ps_quote(value)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        sh_quote(value)
+    }
+}
+
+fn shell_command(command_path: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 2);
+
+    #[cfg(target_os = "windows")]
+    parts.push("&".to_string());
+
+    parts.push(shell_quote(command_path));
+    parts.extend(args.iter().map(|arg| shell_quote(arg)));
+    parts.join(" ")
+}
+
+fn command_lookup_names(command_name: &str) -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    let mut names = vec![command_name.to_string()];
+
+    #[cfg(not(target_os = "windows"))]
+    let names = vec![command_name.to_string()];
+
+    #[cfg(target_os = "windows")]
+    {
+        if Path::new(command_name).extension().is_none() {
+            let pathext = std::env::var("PATHEXT")
+                .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.PS1".to_string());
+            for ext in pathext.split(';') {
+                let trimmed = ext.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                names.push(format!("{}{}", command_name, trimmed));
+            }
+        }
+    }
+
+    names
+}
+
+fn resolve_command_path(command_name: &str) -> Option<String> {
+    let command_path = Path::new(command_name);
+    if command_path.components().count() > 1 || command_path.is_absolute() {
+        return command_path
+            .exists()
+            .then(|| command_path.to_string_lossy().to_string());
+    }
+
+    let lookup_names = command_lookup_names(command_name);
+    let path_value = std::env::var_os("PATH")?;
+
+    for dir in std::env::split_paths(&path_value) {
+        for candidate in &lookup_names {
+            let full_path = dir.join(candidate);
+            if full_path.exists() {
+                return Some(full_path.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    None
 }
 
 fn is_ignored_workspace_dir(name: &str) -> bool {
@@ -6859,9 +7059,46 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     }))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn pick_workspace_folder_impl() -> Result<Option<WorkspacePickResult>, String> {
-    Err("Workspace picking is currently implemented for Windows only.".to_string())
+    let output = Command::new("osascript")
+        .args([
+            "-e",
+            r#"try
+POSIX path of (choose folder with prompt "Choose a workspace folder")
+on error number -128
+return ""
+end try"#,
+        ])
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    if selected.is_empty() {
+        return Ok(None);
+    }
+
+    let name = Path::new(&selected)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    Ok(Some(WorkspacePickResult {
+        name,
+        root_path: selected,
+    }))
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn pick_workspace_folder_impl() -> Result<Option<WorkspacePickResult>, String> {
+    Err("Workspace picking is not implemented on this platform yet.".to_string())
 }
 
 // ── State persistence ──────────────────────────────────────────────────

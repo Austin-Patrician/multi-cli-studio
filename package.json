@@ -7,9 +7,9 @@
     "dev": "vite --config vite.config.ts",
     "build": "tsc -b && vite build --config vite.config.ts",
     "preview": "vite preview --config vite.config.ts",
-    "tauri:dev": "pwsh -File ./scripts/run-tauri.ps1 dev",
-    "tauri:build": "pwsh -File ./scripts/run-tauri.ps1 build",
-    "tauri:android": "pwsh -File ./scripts/run-tauri.ps1 android"
+    "tauri:dev": "node ./scripts/run-tauri.mjs dev",
+    "tauri:build": "node ./scripts/run-tauri.mjs build",
+    "tauri:android": "node ./scripts/run-tauri.mjs android"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",

@@ -149,6 +149,33 @@ function createConversationSession(
   };
 }
 
+function nextClonedTabTitle(baseTitle: string, existingTitles: string[]) {
+  const normalizedBase = baseTitle.replace(/\s·\s\d+$/, "");
+  let nextIndex = 2;
+
+  while (existingTitles.includes(`${normalizedBase} · ${nextIndex}`)) {
+    nextIndex += 1;
+  }
+
+  return `${normalizedBase} · ${nextIndex}`;
+}
+
+function cloneChatBlocks(blocks: ChatMessageBlock[] | null | undefined) {
+  if (!blocks) return blocks ?? null;
+  return blocks.map((block) => ({ ...block }));
+}
+
+function cloneConversationMessages(messages: ChatMessage[]) {
+  return messages
+    .filter((message) => !message.isStreaming)
+    .map<ChatMessage>((message) => ({
+      ...message,
+      id: createId("msg"),
+      blocks: cloneChatBlocks(message.blocks),
+      isStreaming: false,
+    }));
+}
+
 interface PersistedTerminalState {
   workspaces: WorkspaceRef[];
   terminalTabs: TerminalTab[];
@@ -562,6 +589,7 @@ interface StoreState {
 
   openWorkspaceFolder: () => Promise<void>;
   createTerminalTab: (workspaceId?: string) => void;
+  cloneTerminalTab: (sourceTabId?: string) => void;
   closeTerminalTab: (tabId: string) => void;
   setActiveTerminalTab: (tabId: string) => void;
   setTabSelectedCli: (tabId: string, cliId: AgentId) => void;
@@ -1039,6 +1067,49 @@ export const useStore = create<StoreState>((set, get) => ({
       selectedCli: sourceTab?.selectedCli ?? workspace.activeAgent,
     });
     const session = createConversationSession(tab, workspace);
+
+    set((state) => {
+      const terminalTabs = [...state.terminalTabs, tab];
+      const chatSessions = { ...state.chatSessions, [tab.id]: session };
+      const appState = state.appState
+        ? deriveActiveWorkspaceState(state.appState, state.workspaces, terminalTabs, tab.id)
+        : null;
+      persistTerminalState(state.workspaces, terminalTabs, tab.id, chatSessions);
+      return {
+        appState,
+        terminalTabs,
+        activeTerminalTabId: tab.id,
+        chatSessions,
+      };
+    });
+  },
+
+  cloneTerminalTab: (sourceTabId) => {
+    const current = get();
+    const sourceTab =
+      current.terminalTabs.find((tab) => tab.id === (sourceTabId ?? current.activeTerminalTabId)) ??
+      null;
+    if (!sourceTab || sourceTab.status === "streaming") return;
+
+    const workspace = current.workspaces.find((item) => item.id === sourceTab.workspaceId);
+    const sourceSession = current.chatSessions[sourceTab.id];
+    if (!workspace || !sourceSession) return;
+
+    const tab = createTerminalTab(workspace, {
+      title: nextClonedTabTitle(sourceTab.title || workspace.name, current.terminalTabs.map((item) => item.title)),
+      selectedCli: sourceTab.selectedCli,
+      planMode: sourceTab.planMode,
+      fastMode: sourceTab.fastMode,
+      effortLevel: sourceTab.effortLevel,
+      modelOverrides: { ...sourceTab.modelOverrides },
+      permissionOverrides: { ...sourceTab.permissionOverrides },
+      transportSessions: {},
+      draftPrompt: "",
+      status: "idle",
+    });
+    const session = createConversationSession(tab, workspace, {
+      messages: cloneConversationMessages(sourceSession.messages),
+    });
 
     set((state) => {
       const terminalTabs = [...state.terminalTabs, tab];

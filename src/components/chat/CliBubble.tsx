@@ -613,13 +613,28 @@ function RuntimeReasoningBlock({
 }: {
   block: Extract<ChatMessageBlock, { kind: "reasoning" }>;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const preview = useMemo(() => summarizeMultiline(block.text, 4, 360), [block.text]);
+  const showToggle = preview.truncated;
+
   return (
     <div className="rounded-[20px] border border-violet-200 bg-violet-50/80 px-4 py-3">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-violet-700">
-        Reasoning Summary
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-violet-700">
+          Reasoning Summary
+        </div>
+        {showToggle && (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="rounded-full border border-violet-200/90 bg-white/80 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-700 transition-colors hover:border-violet-300 hover:bg-white"
+          >
+            {expanded ? "Hide" : "Show"}
+          </button>
+        )}
       </div>
       <pre className="mt-2 whitespace-pre-wrap break-all font-mono text-[12px] leading-6 text-violet-950">
-        {block.text}
+        {showToggle && !expanded ? preview.preview : block.text}
       </pre>
     </div>
   );

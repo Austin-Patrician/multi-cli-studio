@@ -34,11 +34,22 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
-## Current Windows blocker
+## macOS notes
 
-The project now has a real Tauri host, but this machine still lacks the Microsoft C++ linker toolchain required by the `x86_64-pc-windows-msvc` Rust target.
+- `npm run tauri:dev` now uses a cross-platform launcher. On macOS it runs the local Tauri CLI directly instead of the Windows PowerShell wrapper.
+- The desktop host uses the native macOS shell path and supports folder selection through `osascript`.
+- You still need the normal macOS native prerequisites for Tauri: Xcode Command Line Tools and a recent Rust toolchain.
 
-You need Visual Studio Build Tools with the C++ workload before the native Tauri app can compile successfully.
+## Rust toolchain requirement
+
+The current Tauri dependency graph requires a newer Rust toolchain than the one that shipped on this machine. This repo now pins `rust-toolchain.toml` to Rust `1.88.0`.
+
+If your local toolchain is older, run:
+
+```bash
+rustup toolchain install 1.88.0
+rustup default 1.88.0
+```
 
 ## Validation performed
 

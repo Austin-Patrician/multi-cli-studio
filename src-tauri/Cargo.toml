@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Desktop orchestration shell for Codex, Claude, and Gemini CLIs."
 authors = ["OpenAI Codex"]
 edition = "2021"
+rust-version = "1.88"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
