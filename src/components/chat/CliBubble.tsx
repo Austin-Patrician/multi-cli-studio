@@ -4,6 +4,7 @@ import {
   ChatMessageBlock,
   AgentId,
   AssistantApprovalDecision,
+  AutoRouteAction,
 } from "../../lib/models";
 import {
   AssistantDisplayBlock,
@@ -916,6 +917,127 @@ function RuntimePlanBlock({
   );
 }
 
+function orchestrationStatusTone(status?: string | null) {
+  switch (status) {
+    case "completed":
+      return "success";
+    case "failed":
+      return "danger";
+    case "running":
+    case "synthesizing":
+      return "warning";
+    default:
+      return "neutral";
+  }
+}
+
+function orchestrationOwnerLabel(owner: AgentId) {
+  return owner === "claude" ? "Claude" : owner === "gemini" ? "Gemini" : "Codex";
+}
+
+function RuntimeOrchestrationPlanBlock({
+  block,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "orchestrationPlan" }>;
+}) {
+  return (
+    <div className="rounded-[20px] border border-slate-200 bg-slate-50/85 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-600">
+          Orchestration
+        </span>
+        <MetaPill tone={orchestrationStatusTone(block.status)}>
+          {block.status ?? "planning"}
+        </MetaPill>
+      </div>
+      <div className="mt-2 text-[13px] font-semibold text-slate-950">{block.title}</div>
+      <div className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-6 text-slate-700">
+        {block.goal}
+      </div>
+      {block.summary && (
+        <div className="mt-2 whitespace-pre-wrap break-words text-[12px] leading-6 text-slate-600">
+          {block.summary}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuntimeOrchestrationStepBlock({
+  block,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "orchestrationStep" }>;
+}) {
+  return (
+    <div className="rounded-[20px] border border-[#dbe4ef] bg-white px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+          {orchestrationOwnerLabel(block.owner)}
+        </span>
+        <MetaPill tone={orchestrationStatusTone(block.status)}>
+          {block.status ?? "planned"}
+        </MetaPill>
+      </div>
+      <div className="mt-2 text-[13px] font-semibold text-slate-950">{block.title}</div>
+      {block.summary && (
+        <div className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-6 text-slate-700">
+          {block.summary}
+        </div>
+      )}
+      {block.result && (
+        <div className="mt-2 whitespace-pre-wrap break-words rounded-[14px] bg-slate-50 px-3 py-2 text-[12px] leading-6 text-slate-600">
+          {block.result}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuntimeAutoRouteBlock({
+  block,
+  onAction,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "autoRoute" }>;
+  onAction?: ((action: AutoRouteAction) => void) | null;
+}) {
+  const pending = !block.state || block.state === "pending";
+  const statusLabel =
+    block.state === "accepted"
+      ? "Queued"
+      : block.state === "switched"
+        ? "Switched"
+        : block.state === "cancelled"
+          ? "Cancelled"
+          : "Pending";
+
+  return (
+    <div className="rounded-[20px] border border-sky-200 bg-sky-50/70 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-700">
+          Auto routing
+        </span>
+        <MetaPill tone={pending ? "warning" : "success"}>{statusLabel}</MetaPill>
+      </div>
+      <div className="mt-2 text-[13px] font-semibold text-sky-950">
+        {block.title}
+      </div>
+      <div className="mt-1 text-[12px] leading-6 text-sky-900">{block.reason}</div>
+      {block.modeHint && (
+        <div className="mt-1 text-[11px] uppercase tracking-[0.14em] text-sky-700/80">
+          {block.modeHint}
+        </div>
+      )}
+      {pending && onAction && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          <ApprovalActionButton label="Run now" onClick={() => onAction("run")} />
+          <ApprovalActionButton label="Switch CLI" onClick={() => onAction("switch")} />
+          <ApprovalActionButton label="Cancel" tone="danger" onClick={() => onAction("cancel")} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RuntimeStatusBlock({
   block,
 }: {
@@ -974,10 +1096,12 @@ function RuntimeStructuredBlocks({
   blocks,
   workspaceRoot,
   onApprovalDecision,
+  onAutoRouteAction,
 }: {
   blocks: ChatMessageBlock[];
   workspaceRoot?: string | null;
   onApprovalDecision?: ((requestId: string, decision: AssistantApprovalDecision) => void) | null;
+  onAutoRouteAction?: ((action: AutoRouteAction) => void) | null;
 }) {
   return (
     <div className="space-y-3">
@@ -1002,6 +1126,18 @@ function RuntimeStructuredBlocks({
                 onDecision={onApprovalDecision}
               />
             );
+          case "orchestrationPlan":
+            return <RuntimeOrchestrationPlanBlock key={key} block={block} />;
+          case "orchestrationStep":
+            return <RuntimeOrchestrationStepBlock key={key} block={block} />;
+          case "autoRoute":
+            return (
+              <RuntimeAutoRouteBlock
+                key={key}
+                block={block}
+                onAction={onAutoRouteAction}
+              />
+            );
           case "plan":
             return <RuntimePlanBlock key={key} block={block} />;
           case "status":
@@ -1020,6 +1156,7 @@ export function CliBubble({
   onRegenerate,
   onDelete,
   onApprovalDecision,
+  onAutoRouteAction,
   actionsDisabled = false,
 }: {
   message: ChatMessage;
@@ -1027,6 +1164,7 @@ export function CliBubble({
   onRegenerate?: (() => void) | null;
   onDelete?: ((messageId: string) => void) | null;
   onApprovalDecision?: ((requestId: string, decision: AssistantApprovalDecision) => void) | null;
+  onAutoRouteAction?: ((action: AutoRouteAction) => void) | null;
   actionsDisabled?: boolean;
 }) {
   const cli = message.cliId as AgentId;
@@ -1045,6 +1183,10 @@ export function CliBubble({
   const contentFormat = message.contentFormat ?? detectAssistantContentFormat(rawText);
   const parsed = useMemo(() => parseAssistantDisplayBlocks(rawText), [rawText]);
   const runtimeBlocks = message.blocks ?? null;
+  const hasOrchestrationBlocks =
+    runtimeBlocks?.some(
+      (block) => block.kind === "orchestrationPlan" || block.kind === "orchestrationStep"
+    ) ?? false;
   const formatLabel =
     runtimeBlocks?.length
       ? "structured"
@@ -1137,8 +1279,18 @@ export function CliBubble({
                 blocks={runtimeBlocks}
                 workspaceRoot={workspaceRoot}
                 onApprovalDecision={onApprovalDecision}
+                onAutoRouteAction={onAutoRouteAction}
               />
-              {message.isStreaming && message.content.trim() && (
+              {message.isStreaming && !hasOrchestrationBlocks && message.content.trim() && (
+                <AssistantMessageContent
+                  content={message.content}
+                  rawContent={message.rawContent}
+                  contentFormat={contentFormat}
+                  isStreaming={message.isStreaming}
+                  renderMode="rich"
+                />
+              )}
+              {!message.isStreaming && hasOrchestrationBlocks && message.content.trim() && (
                 <AssistantMessageContent
                   content={message.content}
                   rawContent={message.rawContent}

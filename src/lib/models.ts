@@ -124,11 +124,13 @@ export interface WorkspaceRef {
   lastSnapshot?: string | null;
 }
 
+export type TerminalCliId = AgentId | "auto";
+
 export interface TerminalTab {
   id: string;
   title: string;
   workspaceId: string;
-  selectedCli: AgentId;
+  selectedCli: TerminalCliId;
   planMode: boolean;
   fastMode: boolean;
   effortLevel: string | null;
@@ -266,7 +268,20 @@ export interface ChatPromptRequest {
   transportSession?: AgentTransportSession | null;
 }
 
+export interface AutoOrchestrationRequest {
+  terminalTabId: string;
+  prompt: string;
+  projectRoot: string;
+  recentTurns: ChatContextTurn[];
+  planMode: boolean;
+  fastMode: boolean;
+  effortLevel: string | null;
+  modelOverrides?: Partial<Record<AgentId, string>>;
+  permissionOverrides?: Partial<Record<AgentId, string>>;
+}
+
 export type AssistantApprovalDecision = "allowOnce" | "allowAlways" | "deny";
+export type AutoRouteAction = "run" | "switch" | "cancel";
 
 export type AssistantContentFormat = NonNullable<ChatMessage["contentFormat"]>;
 
@@ -377,6 +392,30 @@ export type ChatMessageBlock =
       summary?: string | null;
       persistentLabel?: string | null;
       state?: "pending" | "approved" | "approvedAlways" | "denied" | null;
+    }
+  | {
+      kind: "orchestrationPlan";
+      title: string;
+      goal: string;
+      summary?: string | null;
+      status?: "planning" | "running" | "synthesizing" | "completed" | "failed" | null;
+    }
+  | {
+      kind: "orchestrationStep";
+      stepId: string;
+      owner: AgentId;
+      title: string;
+      summary?: string | null;
+      result?: string | null;
+      status?: "planned" | "running" | "completed" | "failed" | "skipped" | null;
+    }
+  | {
+      kind: "autoRoute";
+      targetCli: AgentId;
+      title: string;
+      reason: string;
+      modeHint?: string | null;
+      state?: "pending" | "accepted" | "switched" | "cancelled" | null;
     }
   | {
       kind: "plan";

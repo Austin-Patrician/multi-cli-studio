@@ -2,6 +2,7 @@ import { browserRuntime } from "./browserRuntime";
 import {
   AgentId,
   AgentPromptRequest,
+  AutoOrchestrationRequest,
   AppSettings,
   AppState,
   ChatPromptRequest,
@@ -41,6 +42,7 @@ export interface RuntimeBridge {
   updateSettings: (settings: AppSettings) => Promise<AppSettings>;
   // Chat methods
   sendChatMessage: (request: ChatPromptRequest) => Promise<string>;
+  runAutoOrchestration: (request: AutoOrchestrationRequest) => Promise<string>;
   respondAssistantApproval: (requestId: string, decision: AssistantApprovalDecision) => Promise<boolean>;
   getGitPanel: (projectRoot: string) => Promise<GitPanelData>;
   getGitFileDiff: (projectRoot: string, path: string) => Promise<GitFileDiff>;
@@ -121,6 +123,10 @@ const tauriRuntime: RuntimeBridge = {
   async sendChatMessage(request) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<string>("send_chat_message", { request });
+  },
+  async runAutoOrchestration(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<string>("run_auto_orchestration", { request });
   },
   async respondAssistantApproval(requestId, decision) {
     const { invoke } = await import("@tauri-apps/api/core");

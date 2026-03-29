@@ -6,6 +6,7 @@ import {
   AgentRuntimeResources,
   AgentPromptRequest,
   AssistantApprovalDecision,
+  AutoOrchestrationRequest,
   ChatMessageBlock,
   TerminalEvent,
   TerminalLine,
@@ -605,6 +606,57 @@ export const browserRuntime = {
       emitted += chunkSize;
       emitStream({ terminalTabId, messageId, chunk, done: false });
     }, 100);
+
+    return messageId;
+  },
+  async runAutoOrchestration(request: AutoOrchestrationRequest) {
+    const messageId = createId("msg");
+    const startTime = Date.now();
+    const planBlocks: ChatMessageBlock[] = [
+      {
+        kind: "orchestrationPlan",
+        title: "Auto orchestration by Claude",
+        goal: request.prompt,
+        summary: "Browser fallback simulated an orchestration run.",
+        status: "running",
+      },
+      {
+        kind: "orchestrationStep",
+        stepId: "step-1",
+        owner: /ui|design|layout|css|frontend/i.test(request.prompt) ? "gemini" : "codex",
+        title: "Simulated worker execution",
+        summary: "This is a browser fallback preview of the orchestration UI.",
+        result: "No real CLI execution happened in browser mode.",
+        status: "completed",
+      },
+    ];
+    const finalOutput =
+      "Auto mode is only fully available in the Tauri runtime. This browser fallback simulates the orchestration trace.";
+
+    window.setTimeout(() => {
+      emitStream({
+        terminalTabId: request.terminalTabId,
+        messageId,
+        chunk: "",
+        done: true,
+        exitCode: 0,
+        durationMs: Date.now() - startTime,
+        finalContent: finalOutput,
+        contentFormat: "markdown",
+        transportKind: "browser-fallback",
+        transportSession: null,
+        blocks: [
+          {
+            kind: "orchestrationPlan",
+            title: "Auto orchestration by Claude",
+            goal: request.prompt,
+            summary: "Browser fallback completed the simulated run.",
+            status: "completed",
+          },
+          ...planBlocks.slice(1),
+        ],
+      });
+    }, 400);
 
     return messageId;
   },

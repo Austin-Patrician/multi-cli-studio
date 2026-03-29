@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { AgentId, AssistantApprovalDecision } from "../../lib/models";
+import { AgentId, AssistantApprovalDecision, AutoRouteAction } from "../../lib/models";
 import { useStore } from "../../lib/store";
 import { UserBubble } from "./UserBubble";
 import { CliBubble } from "./CliBubble";
@@ -85,6 +85,7 @@ export function ChatConversation() {
   const sendChatMessage = useStore((state) => state.sendChatMessage);
   const deleteChatMessage = useStore((state) => state.deleteChatMessage);
   const respondAssistantApproval = useStore((state) => state.respondAssistantApproval);
+  const respondAutoRoute = useStore((state) => state.respondAutoRoute);
 
   useEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -127,6 +128,11 @@ export function ChatConversation() {
 
   function handleAssistantApproval(requestId: string, decision: AssistantApprovalDecision) {
     void respondAssistantApproval(requestId, decision);
+  }
+
+  function handleAutoRoute(action: AutoRouteAction) {
+    if (!activeTab) return;
+    void respondAutoRoute(activeTab.id, action);
   }
 
   function handleScroll() {
@@ -213,6 +219,7 @@ export function ChatConversation() {
                 onDelete={!msg.isStreaming ? handleDeleteMessage : null}
                 actionsDisabled={activeTab.status === "streaming" || msg.isStreaming}
                 onApprovalDecision={handleAssistantApproval}
+                onAutoRouteAction={handleAutoRoute}
               />
             );
           });

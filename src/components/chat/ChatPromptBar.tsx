@@ -11,7 +11,7 @@ import {
   isPickerCommandKind,
   parseSlashCommand,
 } from "../../lib/acp";
-import { AgentId, FileMentionCandidate, TerminalTab } from "../../lib/models";
+import { AgentId, FileMentionCandidate, TerminalTab, TerminalCliId } from "../../lib/models";
 import { useStore } from "../../lib/store";
 import { CliSelector } from "./CliSelector";
 import { PromptOverlay, PromptOverlayItem, PromptOverlaySection } from "./PromptOverlay";
@@ -60,15 +60,25 @@ function findMentionToken(value: string, caret: number) {
   };
 }
 
-function titleCaseCli(cliId: AgentId) {
+function titleCaseCli(cliId: TerminalCliId) {
+  if (cliId === "auto") return "Auto";
   return cliId.charAt(0).toUpperCase() + cliId.slice(1);
 }
 
+function resolveConcreteCli(activeTab: TerminalTab | null, fallback: AgentId | undefined): AgentId {
+  if (activeTab?.selectedCli && activeTab.selectedCli !== "auto") {
+    return activeTab.selectedCli;
+  }
+  return fallback ?? "codex";
+}
+
 function currentModelLabel(tab: TerminalTab) {
+  if (tab.selectedCli === "auto") return "auto";
   return tab.modelOverrides[tab.selectedCli] ?? "default";
 }
 
 function currentPermissionLabel(tab: TerminalTab) {
+  if (tab.selectedCli === "auto") return "auto";
   return tab.permissionOverrides[tab.selectedCli] ?? (
     tab.selectedCli === "codex"
       ? "workspace-write"
@@ -131,7 +141,7 @@ function buildCommandListOverlay(
   query: string
 ): CommandOverlayState {
   const supportedCommands = ACP_COMMANDS.filter((command) =>
-    command.supportedClis.includes(activeTab.selectedCli)
+    activeTab.selectedCli === "auto" || command.supportedClis.includes(activeTab.selectedCli)
   ).filter((command) => {
     const normalized = query.toLowerCase();
     return (
@@ -182,7 +192,7 @@ function buildCommandListOverlay(
 
 function buildHelpOverlay(activeTab: TerminalTab): CommandOverlayState {
   const commands = ACP_COMMANDS.filter((command) =>
-    command.supportedClis.includes(activeTab.selectedCli)
+    activeTab.selectedCli === "auto" || command.supportedClis.includes(activeTab.selectedCli)
   );
   const sections: PromptOverlaySection[] = [];
 
@@ -379,6 +389,7 @@ export function ChatPromptBar() {
 
   const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
   const workspace = workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null;
+  const effectiveCli = resolveConcreteCli(activeTab, workspace?.activeAgent);
   const prompt = activeTab?.draftPrompt ?? "";
   const isStreaming = activeTab?.status === "streaming";
   const isBusy = busyAction === "checks" || busyAction?.startsWith("review-") || false;
@@ -392,8 +403,8 @@ export function ChatPromptBar() {
 
   useEffect(() => {
     if (!activeTab) return;
-    void loadAcpCapabilities(activeTab.selectedCli);
-  }, [activeTab, loadAcpCapabilities]);
+    void loadAcpCapabilities(effectiveCli);
+  }, [activeTab, effectiveCli, loadAcpCapabilities]);
 
   useEffect(() => {
     promptHistoryStateRef.current = {
@@ -456,8 +467,8 @@ export function ChatPromptBar() {
       return buildArgumentOverlay(
         activeTab,
         commandKind,
-        acpCapabilitiesByCli[activeTab.selectedCli],
-        acpCapabilityStatusByCli[activeTab.selectedCli],
+        acpCapabilitiesByCli[effectiveCli],
+        acpCapabilityStatusByCli[effectiveCli],
         pickerMatch[2] ?? ""
       );
     }
@@ -467,6 +478,7 @@ export function ChatPromptBar() {
     activeTab,
     acpCapabilitiesByCli,
     acpCapabilityStatusByCli,
+    effectiveCli,
     rawSlashPrompt,
     slashQuery,
   ]);
@@ -623,8 +635,8 @@ export function ChatPromptBar() {
         }
         appendChatSystemMessage(
           activeTab.id,
-          activeTab.selectedCli,
-          `No matching ${commandOverlay.commandKind} option for ${titleCaseCli(activeTab.selectedCli)}.`,
+          effectiveCli,
+          `No matching ${commandOverlay.commandKind} option for ${titleCaseCli(effectiveCli)}.`,
           1
         );
         return;
@@ -640,7 +652,7 @@ export function ChatPromptBar() {
 
   function selectCommand(command: AcpCommandDef) {
     if (!activeTab) return;
-    if (!command.supportedClis.includes(activeTab.selectedCli)) return;
+    if (!command.supportedClis.includes(effectiveCli)) return;
 
     if (command.kind === "help") {
       setPrompt("/help");
@@ -649,7 +661,7 @@ export function ChatPromptBar() {
     }
 
     if (isPickerCommandKind(command.kind)) {
-      void loadAcpCapabilities(activeTab.selectedCli);
+      void loadAcpCapabilities(effectiveCli);
       setPrompt(`${command.slash} `);
       requestAnimationFrame(() => textareaRef.current?.focus());
       return;
@@ -787,6 +799,7 @@ export function ChatPromptBar() {
 
   if (!activeTab || !workspace) return null;
   const cliLabel = titleCaseCli(activeTab.selectedCli);
+  const isAutoMode = activeTab.selectedCli === "auto";
 
   return (
     <div className="border-t border-border bg-[radial-gradient(circle_at_top,#f8fbff_0%,#ffffff_48%)] px-5 py-4">
@@ -913,7 +926,9 @@ export function ChatPromptBar() {
               placeholder={
                 isStreaming
                   ? "Waiting for response..."
-                  : `Message ${cliLabel}`
+                  : isAutoMode
+                    ? "Describe the task and Auto will let Claude plan and route the work"
+                    : `Message ${cliLabel}`
               }
               disabled={isStreaming}
               className="min-h-[3.5rem] w-full resize-none bg-transparent px-0 py-0 text-[15px] leading-8 text-text placeholder:text-secondary/65 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
@@ -925,6 +940,7 @@ export function ChatPromptBar() {
               <span>/ command center</span>
               <span>/help reference</span>
               <span>@ files</span>
+              {isAutoMode && <span>Claude orchestrates Codex and Gemini when needed</span>}
             </div>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <span>Enter sends or applies</span>

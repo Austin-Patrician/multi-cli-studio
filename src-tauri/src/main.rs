@@ -286,6 +286,23 @@ struct ChatPromptRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoOrchestrationRequest {
+    terminal_tab_id: String,
+    prompt: String,
+    project_root: String,
+    #[serde(default)]
+    recent_turns: Vec<ChatContextTurn>,
+    plan_mode: bool,
+    fast_mode: bool,
+    effort_level: Option<String>,
+    #[serde(default)]
+    model_overrides: BTreeMap<String, String>,
+    #[serde(default)]
+    permission_overrides: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct ClaudeApprovalResponseRequest {
     #[serde(alias = "requestId")]
     request_id: String,
@@ -373,6 +390,20 @@ enum ChatMessageBlock {
         persistent_label: Option<String>,
         state: Option<String>,
     },
+    OrchestrationPlan {
+        title: String,
+        goal: String,
+        summary: Option<String>,
+        status: Option<String>,
+    },
+    OrchestrationStep {
+        step_id: String,
+        owner: String,
+        title: String,
+        summary: Option<String>,
+        result: Option<String>,
+        status: Option<String>,
+    },
     Plan {
         text: String,
     },
@@ -410,6 +441,32 @@ struct ClaudeTurnOutcome {
     exit_code: Option<i32>,
     blocks: Vec<ChatMessageBlock>,
     transport_session: AgentTransportSession,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoPlanStep {
+    id: String,
+    owner: String,
+    title: String,
+    instruction: String,
+    #[serde(default)]
+    write: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoPlan {
+    goal: String,
+    summary: Option<String>,
+    #[serde(default)]
+    steps: Vec<AutoPlanStep>,
+}
+
+#[derive(Debug, Clone)]
+struct SilentAgentTurnOutcome {
+    final_content: String,
+    raw_output: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -519,6 +576,7 @@ enum ClaudeApprovalDecision {
 struct CodexStreamState {
     final_content: String,
     blocks: Vec<ChatMessageBlock>,
+    block_prefix: Vec<ChatMessageBlock>,
     delta_by_item: BTreeMap<String, String>,
     approval_block_by_request_id: BTreeMap<String, usize>,
     latest_plan_text: Option<String>,
@@ -532,6 +590,7 @@ struct GeminiStreamState {
     final_content: String,
     reasoning_text: String,
     blocks: Vec<ChatMessageBlock>,
+    block_prefix: Vec<ChatMessageBlock>,
     tool_calls: BTreeMap<String, GeminiToolCallState>,
     latest_plan_text: Option<String>,
     session_id: Option<String>,
@@ -1660,6 +1719,8 @@ fn handle_gemini_notification(
         return Ok(());
     }
 
+    let mut blocks_changed = false;
+
     if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
         stream_state.session_id = Some(session_id.to_string());
     }
@@ -1753,6 +1814,7 @@ fn handle_gemini_notification(
                     Some("completed") | Some("failed")
                 ) {
                     gemini_flush_tool_call(stream_state, tool_call_id);
+                    blocks_changed = true;
                 }
             }
         }
@@ -1762,8 +1824,22 @@ fn handle_gemini_notification(
                 stream_state.awaiting_current_user_prompt = false;
             }
             stream_state.latest_plan_text = gemini_plan_text(update);
+            if let Some(plan_text) = stream_state.latest_plan_text.clone() {
+                upsert_plan_block(&mut stream_state.blocks, &plan_text);
+                blocks_changed = true;
+            }
         }
         _ => {}
+    }
+
+    if blocks_changed {
+        emit_stream_block_update_with_prefix(
+            app,
+            terminal_tab_id,
+            message_id,
+            &stream_state.block_prefix,
+            &stream_state.blocks,
+        );
     }
 
     Ok(())
@@ -1921,6 +1997,25 @@ fn format_turn_plan(params: &Value) -> Option<String> {
     }
 }
 
+fn upsert_plan_block(blocks: &mut Vec<ChatMessageBlock>, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if let Some(index) = blocks
+        .iter()
+        .position(|block| matches!(block, ChatMessageBlock::Plan { .. }))
+    {
+        blocks[index] = ChatMessageBlock::Plan {
+            text: trimmed.to_string(),
+        };
+    } else {
+        blocks.push(ChatMessageBlock::Plan {
+            text: trimmed.to_string(),
+        });
+    }
+}
+
 fn codex_rpc_error_text(error: &Value) -> String {
     error
         .get("message")
@@ -2017,6 +2112,56 @@ fn render_chat_blocks(
                 }
                 if let Some(state) = state {
                     section.push_str(&format!("\nState: {}", state));
+                }
+                sections.push(section);
+            }
+            ChatMessageBlock::OrchestrationPlan {
+                title,
+                goal,
+                summary,
+                status,
+            } => {
+                let mut section = format!("{}:\n{}", title.trim(), goal.trim());
+                if let Some(summary) = summary {
+                    let trimmed = summary.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str(&format!("\n\n{}", trimmed));
+                    }
+                }
+                if let Some(status) = status {
+                    let trimmed = status.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str(&format!("\nStatus: {}", trimmed));
+                    }
+                }
+                sections.push(section);
+            }
+            ChatMessageBlock::OrchestrationStep {
+                owner,
+                title,
+                summary,
+                result,
+                status,
+                ..
+            } => {
+                let mut section = format!("Step [{}]: {}", owner, title.trim());
+                if let Some(summary) = summary {
+                    let trimmed = summary.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str(&format!("\n{}", trimmed));
+                    }
+                }
+                if let Some(result) = result {
+                    let trimmed = result.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str(&format!("\n\n{}", trimmed));
+                    }
+                }
+                if let Some(status) = status {
+                    let trimmed = status.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str(&format!("\nStatus: {}", trimmed));
+                    }
                 }
                 sections.push(section);
             }
@@ -2196,7 +2341,13 @@ fn handle_codex_server_request<W: Write>(
         summary,
         Some("pending".to_string()),
     );
-    emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
+    emit_stream_block_update_with_prefix(
+        app,
+        terminal_tab_id,
+        message_id,
+        &stream_state.block_prefix,
+        &stream_state.blocks,
+    );
 
     let (sender, receiver) = mpsc::channel::<ClaudeApprovalDecision>();
     {
@@ -2218,7 +2369,13 @@ fn handle_codex_server_request<W: Write>(
         None,
         Some(claude_approval_state(decision).to_string()),
     );
-    emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
+    emit_stream_block_update_with_prefix(
+        app,
+        terminal_tab_id,
+        message_id,
+        &stream_state.block_prefix,
+        &stream_state.blocks,
+    );
 
     write_jsonrpc_message(
         writer,
@@ -2576,7 +2733,13 @@ fn handle_codex_notification(
     }
 
     if blocks_changed {
-        emit_stream_block_update(app, terminal_tab_id, message_id, &stream_state.blocks);
+        emit_stream_block_update_with_prefix(
+            app,
+            terminal_tab_id,
+            message_id,
+            &stream_state.block_prefix,
+            &stream_state.blocks,
+        );
     }
 
     Ok(())
@@ -2593,6 +2756,7 @@ fn run_codex_app_server_turn(
     message_id: &str,
     write_mode: bool,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    block_prefix: Vec<ChatMessageBlock>,
 ) -> Result<CodexTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
     let mut cmd = batch_aware_command(
@@ -2643,6 +2807,7 @@ fn run_codex_app_server_turn(
     let mut reader = BufReader::new(stdout);
     let mut next_id = 1_u64;
     let mut stream_state = CodexStreamState::default();
+    stream_state.block_prefix = block_prefix;
     let permission_mode = codex_permission_mode(session, write_mode);
     let sandbox_mode = codex_sandbox_mode(&permission_mode);
     let requested_model = session.model.get("codex").cloned();
@@ -3409,6 +3574,24 @@ fn emit_stream_block_update(
     message_id: &str,
     blocks: &[ChatMessageBlock],
 ) {
+    emit_stream_block_update_with_prefix(app, terminal_tab_id, message_id, &[], blocks);
+}
+
+fn emit_stream_block_update_with_prefix(
+    app: &AppHandle,
+    terminal_tab_id: &str,
+    message_id: &str,
+    prefix: &[ChatMessageBlock],
+    blocks: &[ChatMessageBlock],
+) {
+    let merged_blocks = if prefix.is_empty() {
+        blocks.to_vec()
+    } else {
+        let mut merged = prefix.to_vec();
+        merged.extend_from_slice(blocks);
+        merged
+    };
+
     let _ = app.emit(
         "stream-chunk",
         StreamEvent {
@@ -3422,7 +3605,7 @@ fn emit_stream_block_update(
             content_format: None,
             transport_kind: None,
             transport_session: None,
-            blocks: Some(blocks.to_vec()),
+            blocks: Some(merged_blocks),
         },
     );
 }
@@ -3924,6 +4107,7 @@ fn run_gemini_acp_turn(
     message_id: &str,
     write_mode: bool,
     timeout_ms: u64,
+    block_prefix: Vec<ChatMessageBlock>,
 ) -> Result<GeminiTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
     let mut cmd = batch_aware_command(&resolved_command, &["--acp"]);
@@ -3968,6 +4152,7 @@ fn run_gemini_acp_turn(
     let mut reader = BufReader::new(stdout);
     let mut next_id = 1_u64;
     let mut stream_state = GeminiStreamState::default();
+    stream_state.block_prefix = block_prefix;
 
     let previous_session_id = previous_transport_session
         .as_ref()
@@ -4269,9 +4454,15 @@ fn run_gemini_acp_turn(
             text: stream_state.reasoning_text.trim().to_string(),
         });
     }
+    let has_plan_block = stream_state
+        .blocks
+        .iter()
+        .any(|block| matches!(block, ChatMessageBlock::Plan { .. }));
     blocks.extend(stream_state.blocks);
     if let Some(plan_text) = stream_state.latest_plan_text.clone() {
-        blocks.push(ChatMessageBlock::Plan { text: plan_text });
+        if !has_plan_block {
+            blocks.push(ChatMessageBlock::Plan { text: plan_text });
+        }
     }
 
     let stop_reason = stream_state
@@ -5056,6 +5247,7 @@ fn send_chat_message(
                 &msg_id,
                 turn_write_mode,
                 codex_pending_approvals,
+                Vec::new(),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -5170,6 +5362,7 @@ fn send_chat_message(
                 &msg_id,
                 turn_write_mode,
                 timeout_ms,
+                Vec::new(),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -5585,6 +5778,491 @@ fn send_chat_message(
         );
 
         // Update workspace metrics
+        if let Ok(mut state) = state_arc.lock() {
+            sync_workspace_metrics(&mut state);
+            let _ = persist_state(&state);
+            emit_state(&app_handle, &state);
+        }
+    });
+
+    Ok(message_id)
+}
+
+#[tauri::command]
+fn run_auto_orchestration(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    request: AutoOrchestrationRequest,
+) -> Result<String, String> {
+    let message_id = create_id("msg");
+    let shell = shell_path();
+    let timeout_ms = {
+        let settings = store.settings.lock().map_err(|err| err.to_string())?;
+        settings.process_timeout_ms
+    };
+
+    let mut state_snapshot = store.state.lock().map_err(|err| err.to_string())?.clone();
+    state_snapshot.workspace.project_root = request.project_root.clone();
+    state_snapshot.workspace.project_name = Path::new(&request.project_root)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+    state_snapshot.workspace.branch = git_output(&request.project_root, &["branch", "--show-current"])
+        .unwrap_or_else(|| "workspace".to_string());
+
+    let claude_wrapper_path = resolve_runtime_command(&state_snapshot, "claude")?;
+
+    let state_arc = store.state.clone();
+    let ctx_arc = store.context.clone();
+    let codex_pending_approvals = store.codex_pending_approvals.clone();
+    let app_handle = app.clone();
+    let terminal_tab_id = request.terminal_tab_id.clone();
+    let request_for_thread = request.clone();
+    let composed_state = state_snapshot.clone();
+    let msg_id = message_id.clone();
+
+    thread::spawn(move || {
+        let started_at = Instant::now();
+        let mut step_states: Vec<AutoExecutionStepState> = Vec::new();
+        let mut worker_trace_blocks: Vec<ChatMessageBlock> = Vec::new();
+        let seed_plan = AutoPlan {
+            goal: request_for_thread.prompt.clone(),
+            summary: Some("Claude is preparing the execution plan.".to_string()),
+            steps: Vec::new(),
+        };
+        emit_stream_block_update(
+            &app_handle,
+            &terminal_tab_id,
+            &msg_id,
+            &build_auto_orchestration_blocks(
+                &seed_plan,
+                "planning",
+                Some("Claude is preparing the execution plan."),
+                &step_states,
+            ),
+        );
+
+        let mut planner_session = acp::AcpSession::default();
+        planner_session.plan_mode = true;
+        planner_session.fast_mode = request_for_thread.fast_mode;
+        planner_session.effort_level = request_for_thread.effort_level.clone();
+        if let Some(model) = request_for_thread.model_overrides.get("claude") {
+            planner_session
+                .model
+                .insert("claude".to_string(), model.clone());
+        }
+        let planner_prompt = build_auto_plan_prompt(&composed_state, &request_for_thread);
+        let planner_result = run_silent_agent_turn_once(
+            &shell,
+            &request_for_thread.project_root,
+            "claude",
+            &claude_wrapper_path,
+            &planner_prompt,
+            false,
+            &planner_session,
+            timeout_ms,
+        );
+
+        let plan = match planner_result {
+            Ok(outcome) => {
+                let source = if outcome.final_content.trim().is_empty() {
+                    outcome.raw_output.as_str()
+                } else {
+                    outcome.final_content.as_str()
+                };
+                parse_auto_plan(source, &request_for_thread.prompt)
+            }
+            Err(_) => auto_plan_fallback(&request_for_thread.prompt),
+        };
+
+        step_states = plan
+            .steps
+            .iter()
+            .cloned()
+            .map(|step| AutoExecutionStepState {
+                step,
+                status: "planned".to_string(),
+                summary: None,
+                result: None,
+            })
+            .collect();
+
+        if request_for_thread.plan_mode {
+            let blocks = build_auto_orchestration_blocks(
+                &plan,
+                "completed",
+                Some("Plan mode is enabled, so no worker steps were executed."),
+                &step_states,
+            );
+            let final_content = if step_states.is_empty() {
+                "No executable steps were planned.".to_string()
+            } else {
+                let mut lines = vec!["Execution plan ready.".to_string(), String::new()];
+                for (index, step) in step_states.iter().enumerate() {
+                    lines.push(format!(
+                        "{}. {} ({})",
+                        index + 1,
+                        step.step.title,
+                        step.step.owner
+                    ));
+                    lines.push(format!("   {}", step.step.instruction));
+                }
+                lines.join("\n")
+            };
+
+            let _ = app_handle.emit(
+                "stream-chunk",
+                StreamEvent {
+                    terminal_tab_id,
+                    message_id: msg_id,
+                    chunk: String::new(),
+                    done: true,
+                    exit_code: Some(0),
+                    duration_ms: Some(started_at.elapsed().as_millis() as u64),
+                    final_content: Some(final_content.clone()),
+                    content_format: Some("markdown".to_string()),
+                    transport_kind: Some("claude-cli".to_string()),
+                    transport_session: None,
+                    blocks: Some(blocks),
+                },
+            );
+            return;
+        }
+
+        emit_stream_block_update(
+            &app_handle,
+            &terminal_tab_id,
+            &msg_id,
+            &build_auto_orchestration_blocks(
+                &plan,
+                "running",
+                Some("Executing the planned steps."),
+                &step_states,
+            ),
+        );
+
+        let mut encountered_failure = false;
+        for index in 0..step_states.len() {
+            if encountered_failure {
+                step_states[index].status = "skipped".to_string();
+                step_states[index].summary = Some("Skipped because an earlier step failed.".to_string());
+                continue;
+            }
+
+            step_states[index].status = "running".to_string();
+            step_states[index].summary = Some("Running step.".to_string());
+            emit_stream_block_update(
+                &app_handle,
+                &terminal_tab_id,
+                &msg_id,
+                &{
+                    let mut merged = build_auto_orchestration_blocks(
+                        &plan,
+                        "running",
+                        Some("Executing the planned steps."),
+                        &step_states,
+                    );
+                    merged.extend(worker_trace_blocks.clone());
+                    merged
+                },
+            );
+
+            let step = step_states[index].step.clone();
+            let wrapper_path = match resolve_runtime_command(&composed_state, &step.owner) {
+                Ok(path) => path,
+                Err(error) => {
+                    step_states[index].status = "failed".to_string();
+                    step_states[index].summary = Some("CLI runtime is unavailable.".to_string());
+                    step_states[index].result = Some(error);
+                    encountered_failure = true;
+                    continue;
+                }
+            };
+
+            let mut worker_session = acp::AcpSession::default();
+            worker_session.plan_mode = !step.write;
+            worker_session.fast_mode = request_for_thread.fast_mode;
+            worker_session.effort_level = request_for_thread.effort_level.clone();
+            if let Some(model) = request_for_thread.model_overrides.get(&step.owner) {
+                worker_session
+                    .model
+                    .insert(step.owner.clone(), model.clone());
+            }
+            if let Some(permission) = request_for_thread.permission_overrides.get(&step.owner) {
+                worker_session
+                    .permission_mode
+                    .insert(step.owner.clone(), permission.clone());
+            }
+
+            let worker_prompt = compose_tab_context_prompt(
+                &composed_state,
+                &step.owner,
+                &build_auto_worker_prompt(&request_for_thread.prompt, &step),
+                &request_for_thread.recent_turns,
+                step.write,
+            );
+
+            let block_prefix = {
+                let mut merged = build_auto_orchestration_blocks(
+                    &plan,
+                    "running",
+                    Some("Executing the planned steps."),
+                    &step_states,
+                );
+                merged.extend(worker_trace_blocks.clone());
+                merged
+            };
+
+            if step.owner == "codex" {
+                match run_codex_app_server_turn(
+                    &app_handle,
+                    &wrapper_path,
+                    &request_for_thread.project_root,
+                    &worker_prompt,
+                    &worker_session,
+                    None,
+                    &terminal_tab_id,
+                    &msg_id,
+                    step.write,
+                    codex_pending_approvals.clone(),
+                    block_prefix,
+                ) {
+                    Ok(outcome) => {
+                        worker_trace_blocks.extend(outcome.blocks.clone());
+                        step_states[index].status = "completed".to_string();
+                        step_states[index].summary = Some("Codex step completed.".to_string());
+                        step_states[index].result = Some(display_summary(if outcome.raw_output.trim().is_empty() {
+                            &outcome.final_content
+                        } else {
+                            &outcome.raw_output
+                        }));
+                    }
+                    Err(error) => {
+                        worker_trace_blocks.push(ChatMessageBlock::Status {
+                            level: "error".to_string(),
+                            text: error.clone(),
+                        });
+                        step_states[index].status = "failed".to_string();
+                        step_states[index].summary = Some("Codex step failed.".to_string());
+                        step_states[index].result = Some(display_summary(&error));
+                        encountered_failure = true;
+                    }
+                }
+            } else if step.owner == "gemini" {
+                match run_gemini_acp_turn(
+                    &app_handle,
+                    &wrapper_path,
+                    &request_for_thread.project_root,
+                    &worker_prompt,
+                    &worker_session,
+                    None,
+                    &terminal_tab_id,
+                    &msg_id,
+                    step.write,
+                    timeout_ms,
+                    block_prefix,
+                ) {
+                    Ok(outcome) => {
+                        worker_trace_blocks.extend(outcome.blocks.clone());
+                        step_states[index].status = "completed".to_string();
+                        step_states[index].summary = Some("Gemini step completed.".to_string());
+                        step_states[index].result = Some(display_summary(if outcome.raw_output.trim().is_empty() {
+                            &outcome.final_content
+                        } else {
+                            &outcome.raw_output
+                        }));
+                    }
+                    Err(error) => {
+                        worker_trace_blocks.push(ChatMessageBlock::Status {
+                            level: "error".to_string(),
+                            text: error.clone(),
+                        });
+                        step_states[index].status = "failed".to_string();
+                        step_states[index].summary = Some("Gemini step failed.".to_string());
+                        step_states[index].result = Some(display_summary(&error));
+                        encountered_failure = true;
+                    }
+                }
+            } else {
+                match run_silent_agent_turn_once(
+                    &shell,
+                    &request_for_thread.project_root,
+                    &step.owner,
+                    &wrapper_path,
+                    &worker_prompt,
+                    step.write,
+                    &worker_session,
+                    timeout_ms,
+                ) {
+                    Ok(outcome) => {
+                        step_states[index].status = "completed".to_string();
+                        step_states[index].summary = Some("Step completed.".to_string());
+                        step_states[index].result = Some(display_summary(if outcome.raw_output.trim().is_empty() {
+                            &outcome.final_content
+                        } else {
+                            &outcome.raw_output
+                        }));
+                    }
+                    Err(error) => {
+                        worker_trace_blocks.push(ChatMessageBlock::Status {
+                            level: "error".to_string(),
+                            text: error.clone(),
+                        });
+                        step_states[index].status = "failed".to_string();
+                        step_states[index].summary = Some("Step failed.".to_string());
+                        step_states[index].result = Some(display_summary(&error));
+                        encountered_failure = true;
+                    }
+                }
+            }
+
+            emit_stream_block_update(
+                &app_handle,
+                &terminal_tab_id,
+                &msg_id,
+                &{
+                    let mut merged = build_auto_orchestration_blocks(
+                        &plan,
+                        "running",
+                        Some("Executing the planned steps."),
+                        &step_states,
+                    );
+                    merged.extend(worker_trace_blocks.clone());
+                    merged
+                },
+            );
+        }
+
+        emit_stream_block_update(
+            &app_handle,
+            &terminal_tab_id,
+            &msg_id,
+            &{
+                let mut merged = build_auto_orchestration_blocks(
+                    &plan,
+                    "synthesizing",
+                    Some("Claude is synthesizing the final response."),
+                    &step_states,
+                );
+                merged.extend(worker_trace_blocks.clone());
+                merged
+            },
+        );
+
+        let mut synthesis_session = acp::AcpSession::default();
+        synthesis_session.plan_mode = true;
+        synthesis_session.fast_mode = request_for_thread.fast_mode;
+        synthesis_session.effort_level = request_for_thread.effort_level.clone();
+        if let Some(model) = request_for_thread.model_overrides.get("claude") {
+            synthesis_session
+                .model
+                .insert("claude".to_string(), model.clone());
+        }
+
+        let synthesis_prompt =
+            build_auto_synthesis_prompt(&request_for_thread.prompt, &plan, &step_states);
+        let synthesized = run_silent_agent_turn_once(
+            &shell,
+            &request_for_thread.project_root,
+            "claude",
+            &claude_wrapper_path,
+            &synthesis_prompt,
+            false,
+            &synthesis_session,
+            timeout_ms,
+        )
+        .ok()
+        .map(|outcome| {
+            if outcome.final_content.trim().is_empty() {
+                outcome.raw_output
+            } else {
+                outcome.final_content
+            }
+        });
+
+        let fallback_summary = {
+            let mut lines = Vec::new();
+            if encountered_failure {
+                lines.push("The workflow finished with at least one failed step.".to_string());
+            } else {
+                lines.push("The workflow completed successfully.".to_string());
+            }
+            lines.push(String::new());
+            for step in &step_states {
+                lines.push(format!(
+                    "- {} [{}]",
+                    step.step.title,
+                    step.status
+                ));
+                if let Some(result) = step.result.as_ref() {
+                    lines.push(format!("  {}", result));
+                }
+            }
+            lines.join("\n")
+        };
+        let final_content = synthesized.unwrap_or(fallback_summary);
+        let final_exit_code = if encountered_failure { Some(1) } else { Some(0) };
+        let final_blocks = build_auto_orchestration_blocks(
+            &plan,
+            if encountered_failure { "failed" } else { "completed" },
+            Some(if encountered_failure {
+                "Execution finished with failures."
+            } else {
+                "Execution completed."
+            }),
+            &step_states,
+        )
+        .into_iter()
+        .chain(worker_trace_blocks.clone())
+        .collect::<Vec<_>>();
+
+        if let Ok(mut ctx) = ctx_arc.lock() {
+            let max = ctx.max_turns_per_agent;
+            let turn = ConversationTurn {
+                id: create_id("turn"),
+                agent_id: "claude".to_string(),
+                timestamp: now_stamp(),
+                user_prompt: request_for_thread.prompt.clone(),
+                composed_prompt: planner_prompt,
+                raw_output: final_content.clone(),
+                output_summary: display_summary(&final_content),
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                exit_code: final_exit_code,
+                write_mode: true,
+            };
+            if let Some(agent_ctx) = ctx.agents.get_mut("claude") {
+                agent_ctx.conversation_history.push(turn.clone());
+                if agent_ctx.conversation_history.len() > max {
+                    let drain = agent_ctx.conversation_history.len() - max;
+                    agent_ctx.conversation_history.drain(0..drain);
+                }
+                agent_ctx.total_token_estimate += final_content.len() / 4;
+            }
+            ctx.conversation_history.push(turn);
+            if ctx.conversation_history.len() > max {
+                let drain = ctx.conversation_history.len() - max;
+                ctx.conversation_history.drain(0..drain);
+            }
+            let _ = persist_context(&ctx);
+        }
+
+        let _ = app_handle.emit(
+            "stream-chunk",
+            StreamEvent {
+                terminal_tab_id: terminal_tab_id.clone(),
+                message_id: msg_id.clone(),
+                chunk: String::new(),
+                done: true,
+                exit_code: final_exit_code,
+                duration_ms: Some(started_at.elapsed().as_millis() as u64),
+                final_content: Some(final_content),
+                content_format: Some("markdown".to_string()),
+                transport_kind: Some("claude-cli".to_string()),
+                transport_session: None,
+                blocks: Some(final_blocks),
+            },
+        );
+
         if let Ok(mut state) = state_arc.lock() {
             sync_workspace_metrics(&mut state);
             let _ = persist_state(&state);
@@ -6889,6 +7567,312 @@ fn compose_context_prompt(
     parts.push(format!("\n--- User request ---\n{}", prompt));
 
     parts.join("\n")
+}
+
+#[derive(Debug, Clone)]
+struct AutoExecutionStepState {
+    step: AutoPlanStep,
+    status: String,
+    summary: Option<String>,
+    result: Option<String>,
+}
+
+fn auto_plan_fallback(prompt: &str) -> AutoPlan {
+    let lowered = prompt.to_ascii_lowercase();
+    let owner = if [
+        "ui",
+        "design",
+        "layout",
+        "visual",
+        "spacing",
+        "typography",
+        "css",
+        "frontend",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+    {
+        "gemini"
+    } else {
+        "codex"
+    };
+
+    AutoPlan {
+        goal: prompt.trim().to_string(),
+        summary: Some("Fallback plan generated because the Claude planner did not return valid JSON.".to_string()),
+        steps: vec![AutoPlanStep {
+            id: "step-1".to_string(),
+            owner: owner.to_string(),
+            title: if owner == "gemini" {
+                "Design the requested UI changes".to_string()
+            } else {
+                "Implement the requested workspace changes".to_string()
+            },
+            instruction: prompt.trim().to_string(),
+            write: true,
+        }],
+    }
+}
+
+fn extract_json_object(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return Some(trimmed.to_string());
+    }
+
+    if let Some(start) = trimmed.find("```json") {
+        let rest = &trimmed[start + 7..];
+        if let Some(end) = rest.find("```") {
+            return Some(rest[..end].trim().to_string());
+        }
+    }
+
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    Some(trimmed[start..=end].to_string())
+}
+
+fn normalize_auto_plan(mut plan: AutoPlan, prompt: &str) -> AutoPlan {
+    if plan.goal.trim().is_empty() {
+        plan.goal = prompt.trim().to_string();
+    }
+
+    let mut normalized_steps = Vec::new();
+    for (index, step) in plan.steps.into_iter().take(4).enumerate() {
+        let owner = match step.owner.trim().to_ascii_lowercase().as_str() {
+            "claude" => "claude",
+            "gemini" => "gemini",
+            _ => "codex",
+        };
+        let title = if step.title.trim().is_empty() {
+            format!("Step {}", index + 1)
+        } else {
+            step.title.trim().to_string()
+        };
+        let instruction = if step.instruction.trim().is_empty() {
+            prompt.trim().to_string()
+        } else {
+            step.instruction.trim().to_string()
+        };
+        let id = if step.id.trim().is_empty() {
+            format!("step-{}", index + 1)
+        } else {
+            step.id.trim().to_string()
+        };
+        normalized_steps.push(AutoPlanStep {
+            id,
+            owner: owner.to_string(),
+            title,
+            instruction,
+            write: step.write,
+        });
+    }
+    plan.steps = normalized_steps;
+
+    if plan.steps.is_empty() {
+        return auto_plan_fallback(prompt);
+    }
+
+    plan
+}
+
+fn parse_auto_plan(text: &str, prompt: &str) -> AutoPlan {
+    extract_json_object(text)
+        .and_then(|payload| serde_json::from_str::<AutoPlan>(&payload).ok())
+        .map(|plan| normalize_auto_plan(plan, prompt))
+        .unwrap_or_else(|| auto_plan_fallback(prompt))
+}
+
+fn build_auto_plan_prompt(
+    state: &AppStateDto,
+    request: &AutoOrchestrationRequest,
+) -> String {
+    let mut parts = Vec::new();
+    parts.push(compose_tab_context_prompt(
+        state,
+        "claude",
+        &request.prompt,
+        &request.recent_turns,
+        false,
+    ));
+    parts.push(
+        "\n--- Auto orchestration contract ---\n\
+         You are the orchestration planner.\n\
+         Return JSON only with this exact shape:\n\
+         {\"goal\":\"string\",\"summary\":\"string\",\"steps\":[{\"id\":\"step-1\",\"owner\":\"claude|codex|gemini\",\"title\":\"string\",\"instruction\":\"string\",\"write\":true}]}\n\
+         Rules:\n\
+         - Use Claude for planning, analysis, and synthesis.\n\
+         - Use Codex for code changes, commands, debugging, fixes, and validation.\n\
+         - Use Gemini only when UI, visual design, layout, styling, or UX is materially involved.\n\
+         - Keep the plan to 1-4 steps.\n\
+         - Prefer the minimum number of steps.\n\
+         - Do not use markdown fences, prose, or explanations outside JSON.\n\
+         - Assume the host will execute the steps directly."
+            .to_string(),
+    );
+    if request.fast_mode {
+        parts.push(
+            "\n--- Execution preference ---\n\
+             Fast mode is ON. Keep the plan short and avoid unnecessary review-only steps."
+                .to_string(),
+        );
+    }
+    if request.plan_mode {
+        parts.push(
+            "\n--- Execution preference ---\n\
+             Plan mode is ON. Return a plan that is safe to review without relying on execution output."
+                .to_string(),
+        );
+    }
+    parts.join("\n")
+}
+
+fn build_auto_worker_prompt(user_prompt: &str, step: &AutoPlanStep) -> String {
+    format!(
+        "You are executing one step inside a host-managed workflow.\n\
+         Original user request:\n{}\n\n\
+         Current assigned step:\n{}\n\n\
+         Execution instruction:\n{}\n\n\
+         Requirements:\n\
+         - Focus only on this step.\n\
+         - Make the necessary changes directly if write access is available.\n\
+         - Keep the response concise and action-oriented.\n\
+         - Include important verification results when relevant.",
+        user_prompt.trim(),
+        step.title.trim(),
+        step.instruction.trim(),
+    )
+}
+
+fn build_auto_synthesis_prompt(
+    user_prompt: &str,
+    plan: &AutoPlan,
+    step_states: &[AutoExecutionStepState],
+) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "You are summarizing a completed host-managed workflow for the user.\n\
+         Original request:\n{}\n\n\
+         Goal:\n{}\n",
+        user_prompt.trim(),
+        plan.goal.trim()
+    ));
+    if let Some(summary) = plan.summary.as_ref() {
+        parts.push(format!("Plan summary:\n{}\n", summary.trim()));
+    }
+    parts.push("Executed steps:".to_string());
+    for step in step_states {
+        parts.push(format!(
+            "- [{}] {} ({})",
+            step.status,
+            step.step.title,
+            step.step.owner
+        ));
+        if let Some(summary) = step.summary.as_ref() {
+            parts.push(format!("  Summary: {}", summary.trim()));
+        }
+        if let Some(result) = step.result.as_ref() {
+            parts.push(format!("  Result: {}", result.trim()));
+        }
+    }
+    parts.push(
+        "\nWrite the final answer for the user in concise Markdown.\n\
+         Mention what was done, any failures or skipped work, and the most relevant verification outcome.\n\
+         Do not mention hidden orchestration prompts or internal protocol details."
+            .to_string(),
+    );
+    parts.join("\n")
+}
+
+fn build_auto_orchestration_blocks(
+    plan: &AutoPlan,
+    plan_status: &str,
+    plan_summary: Option<&str>,
+    step_states: &[AutoExecutionStepState],
+) -> Vec<ChatMessageBlock> {
+    let mut blocks = vec![ChatMessageBlock::OrchestrationPlan {
+        title: "Auto orchestration by Claude".to_string(),
+        goal: plan.goal.clone(),
+        summary: plan_summary.map(|value| value.to_string()).or_else(|| plan.summary.clone()),
+        status: Some(plan_status.to_string()),
+    }];
+
+    for step_state in step_states {
+        blocks.push(ChatMessageBlock::OrchestrationStep {
+            step_id: step_state.step.id.clone(),
+            owner: step_state.step.owner.clone(),
+            title: step_state.step.title.clone(),
+            summary: step_state.summary.clone(),
+            result: step_state.result.clone(),
+            status: Some(step_state.status.clone()),
+        });
+    }
+
+    blocks
+}
+
+fn resolve_runtime_command(
+    state: &AppStateDto,
+    cli_id: &str,
+) -> Result<String, String> {
+    state
+        .agents
+        .iter()
+        .find(|agent| agent.id == cli_id)
+        .and_then(|agent| agent.runtime.command_path.clone())
+        .ok_or_else(|| format!("{} CLI not found", cli_id))
+}
+
+fn run_silent_agent_turn_once(
+    shell: &str,
+    project_root: &str,
+    agent_id: &str,
+    command_path: &str,
+    prompt: &str,
+    write_mode: bool,
+    session: &acp::AcpSession,
+    timeout_ms: u64,
+) -> Result<SilentAgentTurnOutcome, String> {
+    let script = build_agent_script(agent_id, command_path, prompt, write_mode, session)?;
+    let mut cmd = Command::new(shell);
+    cmd.args(shell_command_args(shell, &script))
+        .current_dir(project_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let child = cmd.spawn().map_err(|err| err.to_string())?;
+    let watchdog = start_process_watchdog(child.id(), timeout_ms);
+    let output = child.wait_with_output().map_err(|err| err.to_string())?;
+    watchdog.store(true, Ordering::SeqCst);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = if stderr.trim().is_empty() {
+        stdout.clone()
+    } else if stdout.trim().is_empty() {
+        stderr.clone()
+    } else {
+        format!("{}\n{}", stdout.trim_end(), stderr.trim_end())
+    };
+
+    if output.status.success() {
+        Ok(SilentAgentTurnOutcome {
+            final_content: stdout.trim().to_string(),
+            raw_output: combined.trim().to_string(),
+        })
+    } else {
+        Err(if combined.trim().is_empty() {
+            format!("{} exited with {}", agent_id, output.status)
+        } else {
+            combined.trim().to_string()
+        })
+    }
 }
 
 // ── Shell execution ────────────────────────────────────────────────────
@@ -8375,6 +9359,7 @@ pub fn run() {
             get_context_store,
             get_conversation_history,
             send_chat_message,
+            run_auto_orchestration,
             respond_assistant_approval,
             get_git_panel,
             get_git_file_diff,

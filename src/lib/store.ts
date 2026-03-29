@@ -4,6 +4,7 @@ import {
   AgentId,
   AgentTransportKind,
   AgentTransportSession,
+  AutoRouteAction,
   AppSettings,
   AppState,
   AssistantApprovalDecision,
@@ -14,6 +15,7 @@ import {
   ConversationSession,
   FileMentionCandidate,
   GitPanelData,
+  TerminalCliId,
   TerminalLine,
   TerminalTab,
   WorkspacePickResult,
@@ -65,6 +67,13 @@ function defaultTransportKind(cliId: AgentId): AgentTransportKind {
   }
 }
 
+function resolveTerminalCliId(
+  cliId: TerminalCliId | undefined | null,
+  fallback: AgentId
+): AgentId {
+  return cliId === "auto" || !cliId ? fallback : cliId;
+}
+
 function createTransportSession(
   cliId: AgentId,
   partial?: Partial<AgentTransportSession>
@@ -77,6 +86,43 @@ function createTransportSession(
     model: partial?.model ?? null,
     permissionMode: partial?.permissionMode ?? null,
     lastSyncAt: partial?.lastSyncAt ?? null,
+  };
+}
+
+function normalizeAutoRouteTarget(value: string): AgentId {
+  if (value === "claude" || value === "gemini") return value;
+  return "codex";
+}
+
+function inferAutoRoute(
+  prompt: string
+): { targetCli: AgentId; reason: string; modeHint: string | null } {
+  const text = prompt.toLowerCase();
+
+  const wantsUi =
+    /(ui|design|layout|spacing|visual|style|landing page|page design|css|frontend)/.test(text);
+  if (wantsUi) {
+    return {
+      targetCli: "gemini",
+      reason: "UI and presentation work route best to Gemini.",
+      modeHint: null,
+    };
+  }
+
+  const wantsAnalysis =
+    /(review|analy[sz]e|why|reason|root cause|compare|tradeoff|architecture|refactor plan|investigate)/.test(text);
+  if (wantsAnalysis) {
+    return {
+      targetCli: "claude",
+      reason: "Analysis, review, and architecture requests route best to Claude.",
+      modeHint: "plan",
+    };
+  }
+
+  return {
+    targetCli: "codex",
+    reason: "Implementation and code-change requests route best to Codex.",
+    modeHint: "execute",
   };
 }
 
@@ -427,7 +473,7 @@ function deriveActiveWorkspaceState(
       projectRoot: activeWorkspace.rootPath,
       branch: activeWorkspace.branch,
       currentWriter: activeWorkspace.currentWriter,
-      activeAgent: activeTab?.selectedCli ?? activeWorkspace.activeAgent,
+      activeAgent: resolveTerminalCliId(activeTab?.selectedCli, activeWorkspace.activeAgent),
       dirtyFiles: activeWorkspace.dirtyFiles,
       failingChecks: activeWorkspace.failingChecks,
       handoffReady: activeWorkspace.handoffReady,
@@ -593,11 +639,12 @@ interface StoreState {
   cloneTerminalTab: (sourceTabId?: string) => void;
   closeTerminalTab: (tabId: string) => void;
   setActiveTerminalTab: (tabId: string) => void;
-  setTabSelectedCli: (tabId: string, cliId: AgentId) => void;
+  setTabSelectedCli: (tabId: string, cliId: TerminalCliId) => void;
   setTabDraftPrompt: (tabId: string, prompt: string) => void;
   togglePlanMode: (tabId?: string) => void;
 
   sendChatMessage: (tabId: string, prompt?: string) => Promise<void>;
+  respondAutoRoute: (tabId: string, action: AutoRouteAction) => Promise<void>;
   appendStreamChunk: (
     tabId: string,
     messageId: string,
@@ -927,12 +974,13 @@ export const useStore = create<StoreState>((set, get) => ({
     const activeTab = get().terminalTabs.find((tab) => tab.id === get().activeTerminalTabId);
     const workspace = get().workspaces.find((item) => item.id === activeTab?.workspaceId);
     if (!activeTab || !workspace) return;
+    const effectiveCli = resolveTerminalCliId(activeTab.selectedCli, workspace.activeAgent);
 
     const timestamp = nowIso();
     const systemMessage: ChatMessage = {
       id: createId("msg"),
       role: "system",
-      cliId: activeTab.selectedCli,
+      cliId: effectiveCli,
       timestamp,
       content: "Workspace snapshot captured and attached to this terminal session.",
       isStreaming: false,
@@ -969,11 +1017,12 @@ export const useStore = create<StoreState>((set, get) => ({
     const activeTab = get().terminalTabs.find((tab) => tab.id === get().activeTerminalTabId);
     const workspace = get().workspaces.find((item) => item.id === activeTab?.workspaceId);
     if (!activeTab || !workspace) return;
+    const effectiveCli = resolveTerminalCliId(activeTab.selectedCli, workspace.activeAgent);
 
     const intro: ChatMessage = {
       id: createId("msg"),
       role: "system",
-      cliId: activeTab.selectedCli,
+      cliId: effectiveCli,
       timestamp: nowIso(),
       content: `Running workspace checks for ${workspace.name}...`,
       isStreaming: false,
@@ -1000,7 +1049,7 @@ export const useStore = create<StoreState>((set, get) => ({
     });
 
     try {
-      await bridge.runChecks(workspace.rootPath, activeTab.selectedCli, activeTab.id);
+      await bridge.runChecks(workspace.rootPath, effectiveCli, activeTab.id);
       await get().refreshGitPanel(workspace.id);
     } finally {
       set({ busyAction: null });
@@ -1181,7 +1230,9 @@ export const useStore = create<StoreState>((set, get) => ({
       );
       const activeTab = terminalTabs.find((tab) => tab.id === tabId);
       const workspaces = state.workspaces.map((workspace) =>
-        workspace.id === activeTab?.workspaceId ? { ...workspace, activeAgent: cliId } : workspace
+        workspace.id === activeTab?.workspaceId && cliId !== "auto"
+          ? { ...workspace, activeAgent: cliId }
+          : workspace
       );
       const appState = state.appState
         ? deriveActiveWorkspaceState(state.appState, workspaces, terminalTabs, state.activeTerminalTabId)
@@ -1221,6 +1272,11 @@ export const useStore = create<StoreState>((set, get) => ({
         tab.id === targetTabId ? { ...tab, planMode: !tab.planMode } : tab
       );
       const activeTab = terminalTabs.find((tab) => tab.id === targetTabId);
+      const activeWorkspace = state.workspaces.find((workspace) => workspace.id === activeTab?.workspaceId);
+      const effectiveCli = resolveTerminalCliId(
+        activeTab?.selectedCli,
+        activeWorkspace?.activeAgent ?? "codex"
+      );
       const chatSessions = activeTab
         ? {
             ...state.chatSessions,
@@ -1231,7 +1287,7 @@ export const useStore = create<StoreState>((set, get) => ({
                 {
                   id: createId("msg"),
                   role: "system" as const,
-                  cliId: activeTab.selectedCli,
+                  cliId: effectiveCli,
                   timestamp: nowIso(),
                   content: `Plan mode: ${activeTab.planMode ? "ON" : "OFF"}`,
                   isStreaming: false,
@@ -1248,23 +1304,271 @@ export const useStore = create<StoreState>((set, get) => ({
     });
   },
 
+  respondAutoRoute: async (tabId, action) => {
+    const current = get();
+    const tab = current.terminalTabs.find((item) => item.id === tabId);
+    const session = current.chatSessions[tabId];
+    if (!tab || !session) return;
+
+    const pendingRoute = [...session.messages]
+      .reverse()
+      .find(
+        (message) =>
+          message.role === "assistant" &&
+          !message.isStreaming &&
+          message.blocks?.some(
+            (block) => block.kind === "autoRoute" && (!block.state || block.state === "pending")
+          )
+      );
+    if (!pendingRoute) return;
+
+    const routeBlock = pendingRoute.blocks?.find(
+      (block): block is Extract<ChatMessageBlock, { kind: "autoRoute" }> =>
+        block.kind === "autoRoute" && (!block.state || block.state === "pending")
+    );
+    if (!routeBlock) return;
+
+    const nextState =
+      action === "run" ? "accepted" : action === "switch" ? "switched" : "cancelled";
+
+    set((state) => {
+      const terminalTabs = state.terminalTabs.map((item) =>
+        item.id === tabId && action === "switch"
+          ? { ...item, selectedCli: routeBlock.targetCli }
+          : item
+      );
+      const chatSessions = {
+        ...state.chatSessions,
+        [tabId]: {
+          ...state.chatSessions[tabId],
+          messages: state.chatSessions[tabId].messages.map<ChatMessage>((message) =>
+            message.id === pendingRoute.id
+              ? {
+                  ...message,
+                  blocks:
+                    message.blocks?.map((block) =>
+                      block.kind === "autoRoute"
+                        ? { ...block, state: nextState }
+                        : block
+                    ) ?? message.blocks ?? null,
+                }
+              : message
+          ),
+          updatedAt: nowIso(),
+        },
+      };
+      persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, chatSessions);
+      return { terminalTabs, chatSessions };
+    });
+
+    if (action === "run") {
+      set((state) => {
+        const terminalTabs = state.terminalTabs.map((item) =>
+          item.id === tabId ? { ...item, selectedCli: routeBlock.targetCli } : item
+        );
+        persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
+        return { terminalTabs };
+      });
+      await get().sendChatMessage(tabId, pendingRoute.content);
+      return;
+    }
+
+    if (action === "switch") {
+      get().appendChatSystemMessage(
+        tabId,
+        routeBlock.targetCli,
+        `Switched to ${routeBlock.targetCli}.`
+      );
+      return;
+    }
+
+    get().appendChatSystemMessage(
+      tabId,
+      routeBlock.targetCli,
+      "Auto routing cancelled."
+    );
+  },
+
   sendChatMessage: async (tabId, prompt) => {
     const state = get();
     const tab = state.terminalTabs.find((item) => item.id === tabId);
     const workspace = state.workspaces.find((item) => item.id === tab?.workspaceId);
     const session = state.chatSessions[tabId];
     if (!tab || !workspace || !session) return;
+    const effectiveCli = resolveTerminalCliId(tab.selectedCli, workspace.activeAgent);
 
     const text = (prompt ?? tab.draftPrompt).trim();
     if (!text || tab.status === "streaming") return;
 
+    if (tab.selectedCli === "auto") {
       const userMessage: ChatMessage = {
         id: createId("msg"),
         role: "user",
-        cliId: tab.selectedCli,
+        cliId: null,
         timestamp: nowIso(),
         content: text,
-        transportKind: tab.transportSessions[tab.selectedCli]?.kind ?? defaultTransportKind(tab.selectedCli),
+        transportKind: null,
+        blocks: null,
+        isStreaming: false,
+        durationMs: null,
+        exitCode: null,
+      };
+      const pendingMessage: ChatMessage = {
+        id: createId("msg-pending"),
+        role: "assistant",
+        cliId: "claude",
+        timestamp: nowIso(),
+        content: "",
+        rawContent: "",
+        contentFormat: "plain",
+        transportKind: "claude-cli",
+        blocks: [
+          {
+            kind: "orchestrationPlan",
+            title: "Auto orchestration by Claude",
+            goal: text,
+            summary: "Preparing the execution plan.",
+            status: "planning",
+          },
+        ],
+        isStreaming: true,
+        durationMs: null,
+        exitCode: null,
+      };
+
+      set((current) => {
+        const terminalTabs = current.terminalTabs.map((item) =>
+          item.id === tabId ? { ...item, draftPrompt: "", status: "streaming" as const } : item
+        );
+        const chatSessions = {
+          ...current.chatSessions,
+          [tabId]: {
+            ...current.chatSessions[tabId],
+            messages: [
+              ...current.chatSessions[tabId].messages,
+              userMessage,
+              pendingMessage,
+            ],
+            updatedAt: nowIso(),
+          },
+        };
+        persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
+        return { busyAction: "chat", terminalTabs, chatSessions };
+      });
+
+      syncStreamingRecoveryWatch(
+        () => {
+          const current = get();
+          return {
+            workspaces: current.workspaces,
+            terminalTabs: current.terminalTabs,
+            activeTerminalTabId: current.activeTerminalTabId,
+            chatSessions: current.chatSessions,
+            settings: current.settings,
+            busyAction: current.busyAction,
+          };
+        },
+        (nextTerminalTabs, nextChatSessions) => {
+          set((state) => ({
+            terminalTabs: nextTerminalTabs,
+            chatSessions: nextChatSessions,
+            busyAction: state.busyAction === "chat" ? null : state.busyAction,
+          }));
+        }
+      );
+
+      try {
+        const messageId = await bridge.runAutoOrchestration({
+          terminalTabId: tab.id,
+          prompt: text,
+          projectRoot: workspace.rootPath,
+          recentTurns: buildRecentTabContextTurns(session.messages, "claude"),
+          planMode: tab.planMode,
+          fastMode: tab.fastMode,
+          effortLevel: tab.effortLevel,
+          modelOverrides: tab.modelOverrides,
+          permissionOverrides: tab.permissionOverrides,
+        });
+
+        set((current) => {
+          const chatSessions = {
+            ...current.chatSessions,
+            [tabId]: {
+              ...current.chatSessions[tabId],
+              messages: current.chatSessions[tabId].messages.map((message) =>
+                message.id === pendingMessage.id ? { ...message, id: messageId } : message
+              ),
+              updatedAt: nowIso(),
+            },
+          };
+          persistTerminalState(current.workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
+          return { chatSessions };
+        });
+      } catch {
+        set((current) => {
+          const terminalTabs = current.terminalTabs.map((item) =>
+            item.id === tabId ? { ...item, status: "idle" as const } : item
+          );
+          const chatSessions = {
+            ...current.chatSessions,
+            [tabId]: {
+              ...current.chatSessions[tabId],
+              messages: current.chatSessions[tabId].messages.map<ChatMessage>((message) =>
+                message.id === pendingMessage.id
+                  ? {
+                      ...message,
+                      content: "Error: failed to start auto orchestration",
+                      rawContent: "Error: failed to start auto orchestration",
+                      contentFormat: "log",
+                      blocks: [
+                        {
+                          kind: "status",
+                          level: "error",
+                          text: "Error: failed to start auto orchestration",
+                        },
+                      ] satisfies ChatMessageBlock[],
+                      isStreaming: false,
+                      exitCode: 1,
+                    }
+                  : message
+              ),
+              updatedAt: nowIso(),
+            },
+          };
+          persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
+          return { busyAction: null, terminalTabs, chatSessions };
+        });
+        syncStreamingRecoveryWatch(
+          () => {
+            const current = get();
+            return {
+              workspaces: current.workspaces,
+              terminalTabs: current.terminalTabs,
+              activeTerminalTabId: current.activeTerminalTabId,
+              chatSessions: current.chatSessions,
+              settings: current.settings,
+              busyAction: current.busyAction,
+            };
+          },
+          (nextTerminalTabs, nextChatSessions) => {
+            set((state) => ({
+              terminalTabs: nextTerminalTabs,
+              chatSessions: nextChatSessions,
+              busyAction: state.busyAction === "chat" ? null : state.busyAction,
+            }));
+          }
+        );
+      }
+      return;
+    }
+
+      const userMessage: ChatMessage = {
+        id: createId("msg"),
+        role: "user",
+        cliId: effectiveCli,
+        timestamp: nowIso(),
+        content: text,
+        transportKind: tab.transportSessions[effectiveCli]?.kind ?? defaultTransportKind(effectiveCli),
         blocks: null,
         isStreaming: false,
         durationMs: null,
@@ -1273,12 +1577,12 @@ export const useStore = create<StoreState>((set, get) => ({
     const pendingMessage: ChatMessage = {
       id: createId("msg-pending"),
       role: "assistant",
-      cliId: tab.selectedCli,
+      cliId: effectiveCli,
       timestamp: nowIso(),
       content: "",
       rawContent: "",
       contentFormat: "plain",
-      transportKind: tab.transportSessions[tab.selectedCli]?.kind ?? defaultTransportKind(tab.selectedCli),
+      transportKind: tab.transportSessions[effectiveCli]?.kind ?? defaultTransportKind(effectiveCli),
       blocks: null,
       isStreaming: true,
       durationMs: null,
@@ -1323,9 +1627,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
     try {
       const writeMode = !tab.planMode;
-      const recentTurns = buildRecentTabContextTurns(session.messages, tab.selectedCli);
+      const recentTurns = buildRecentTabContextTurns(session.messages, effectiveCli);
       const messageId = await bridge.sendChatMessage({
-        cliId: tab.selectedCli,
+        cliId: effectiveCli,
         terminalTabId: tab.id,
         prompt: text,
         projectRoot: workspace.rootPath,
@@ -1334,9 +1638,9 @@ export const useStore = create<StoreState>((set, get) => ({
         planMode: tab.planMode,
         fastMode: tab.fastMode,
         effortLevel: tab.effortLevel,
-        modelOverride: tab.modelOverrides[tab.selectedCli] ?? null,
-        permissionOverride: tab.permissionOverrides[tab.selectedCli] ?? null,
-        transportSession: tab.transportSessions[tab.selectedCli] ?? null,
+        modelOverride: tab.modelOverrides[effectiveCli] ?? null,
+        permissionOverride: tab.permissionOverrides[effectiveCli] ?? null,
+        transportSession: tab.transportSessions[effectiveCli] ?? null,
       });
 
       set((current) => {
@@ -1535,8 +1839,14 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   respondAssistantApproval: async (requestId, decision) => {
-    const approvalCli =
-      get().terminalTabs.find((tab) => tab.id === get().activeTerminalTabId)?.selectedCli ?? "codex";
+    const activeTabForApproval =
+      get().terminalTabs.find((tab) => tab.id === get().activeTerminalTabId) ?? null;
+    const activeWorkspaceForApproval =
+      get().workspaces.find((workspace) => workspace.id === activeTabForApproval?.workspaceId) ?? null;
+    const approvalCli = resolveTerminalCliId(
+      activeTabForApproval?.selectedCli,
+      activeWorkspaceForApproval?.activeAgent ?? "codex"
+    );
     const nextState =
       decision === "allowAlways"
         ? "approvedAlways"
@@ -1706,9 +2016,10 @@ export const useStore = create<StoreState>((set, get) => ({
     const tab = get().terminalTabs.find((item) => item.id === activeTabId);
     const workspace = get().workspaces.find((item) => item.id === tab?.workspaceId);
     if (!tab || !workspace) return;
+    const effectiveCli = resolveTerminalCliId(tab.selectedCli, workspace.activeAgent);
 
     const pushSystemMessage = (content: string, exitCode = 0) =>
-      get().appendChatSystemMessage(tab.id, tab.selectedCli, content, exitCode);
+      get().appendChatSystemMessage(tab.id, effectiveCli, content, exitCode);
 
     switch (command.kind) {
       case "plan": {
@@ -1719,7 +2030,7 @@ export const useStore = create<StoreState>((set, get) => ({
         const model = command.args[0]?.trim() ?? "";
         if (!model) {
           pushSystemMessage(
-            `Current model for ${tab.selectedCli}: ${tab.modelOverrides[tab.selectedCli] ?? "default"}`
+            `Current model for ${effectiveCli}: ${tab.modelOverrides[effectiveCli] ?? "default"}`
           );
           return;
         }
@@ -1730,7 +2041,7 @@ export const useStore = create<StoreState>((set, get) => ({
                   ...item,
                   modelOverrides: {
                     ...item.modelOverrides,
-                    [item.selectedCli]: model,
+                    [effectiveCli]: model,
                   },
                 }
               : item
@@ -1738,14 +2049,14 @@ export const useStore = create<StoreState>((set, get) => ({
           persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
           return { terminalTabs };
         });
-        pushSystemMessage(`Model for ${tab.selectedCli} set to: ${model}`);
+        pushSystemMessage(`Model for ${effectiveCli} set to: ${model}`);
         return;
       }
       case "permissions": {
         const mode = command.args[0]?.trim() ?? "";
         if (!mode) {
           pushSystemMessage(
-            `Current permission mode for ${tab.selectedCli}: ${tab.permissionOverrides[tab.selectedCli] ?? "default"}`
+            `Current permission mode for ${effectiveCli}: ${tab.permissionOverrides[effectiveCli] ?? "default"}`
           );
           return;
         }
@@ -1756,7 +2067,7 @@ export const useStore = create<StoreState>((set, get) => ({
                   ...item,
                   permissionOverrides: {
                     ...item.permissionOverrides,
-                    [item.selectedCli]: mode,
+                    [effectiveCli]: mode,
                   },
                 }
               : item
@@ -1764,7 +2075,7 @@ export const useStore = create<StoreState>((set, get) => ({
           persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
           return { terminalTabs };
         });
-        pushSystemMessage(`Permission mode for ${tab.selectedCli} set to: ${mode}`);
+        pushSystemMessage(`Permission mode for ${effectiveCli} set to: ${mode}`);
         return;
       }
       case "effort": {
@@ -1802,7 +2113,7 @@ export const useStore = create<StoreState>((set, get) => ({
                 {
                   id: createId("msg"),
                   role: "system" as const,
-                  cliId: tab.selectedCli,
+                  cliId: effectiveCli,
                   timestamp: nowIso(),
                   content: `Fast mode: ${nextTab?.fastMode ? "ON" : "OFF"}`,
                   isStreaming: false,
@@ -1819,15 +2130,15 @@ export const useStore = create<StoreState>((set, get) => ({
         return;
       }
       case "status": {
-        const runtime = get().appState?.agents.find((agent) => agent.id === tab.selectedCli)?.runtime;
+        const runtime = get().appState?.agents.find((agent) => agent.id === effectiveCli)?.runtime;
         pushSystemMessage(
           [
-            `CLI: ${tab.selectedCli}`,
+            `CLI: ${effectiveCli}`,
             `Workspace: ${workspace.name}`,
             `Installed: ${runtime?.installed ? "yes" : "no"}`,
             `Version: ${runtime?.version ?? "unknown"}`,
-            `Model: ${tab.modelOverrides[tab.selectedCli] ?? "default"}`,
-            `Permission mode: ${tab.permissionOverrides[tab.selectedCli] ?? "default"}`,
+            `Model: ${tab.modelOverrides[effectiveCli] ?? "default"}`,
+            `Permission mode: ${tab.permissionOverrides[effectiveCli] ?? "default"}`,
             `Plan mode: ${tab.planMode ? "ON" : "OFF"}`,
             `Fast mode: ${tab.fastMode ? "ON" : "OFF"}`,
             `Effort: ${tab.effortLevel ?? "default"}`,
@@ -1836,7 +2147,7 @@ export const useStore = create<StoreState>((set, get) => ({
         return;
       }
       case "help": {
-        pushSystemMessage(formatSlashHelp(tab.selectedCli));
+        pushSystemMessage(formatSlashHelp(effectiveCli));
         return;
       }
       case "diff": {
@@ -1845,7 +2156,7 @@ export const useStore = create<StoreState>((set, get) => ({
       }
       default: {
         try {
-          const result = await bridge.executeAcpCommand(command, tab.selectedCli);
+          const result = await bridge.executeAcpCommand(command, effectiveCli);
           pushSystemMessage(result.output, result.success ? 0 : 1);
           if (["clear", "compact", "rewind"].includes(command.kind)) {
             await get().loadContextStore();
