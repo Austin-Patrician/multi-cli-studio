@@ -879,10 +879,12 @@ export function ChatPromptBar() {
 
   function selectSkill(skill: CliSkillItem) {
     if (!activeTab) return;
-    const promptWithoutLeadingSkill = prompt.trimStart().replace(/^\$[A-Za-z0-9._-]+\s*/, "");
+    const promptWithoutLeadingSkill = prompt
+      .trimStart()
+      .replace(/^\$(?:[A-Za-z0-9._-]+)?\s*/, "");
     const nextPrompt = `$${skill.name}${promptWithoutLeadingSkill ? ` ${promptWithoutLeadingSkill}` : " "}`;
     setPrompt(nextPrompt);
-    setDismissedSkillKey(null);
+    setDismissedSkillKey(skillKey);
     requestAnimationFrame(() => {
       const el = textareaRef.current;
       if (!el) return;
