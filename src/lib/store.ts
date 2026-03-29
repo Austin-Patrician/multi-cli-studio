@@ -11,6 +11,7 @@ import {
   ChatMessage,
   ChatMessageBlock,
   ChatContextTurn,
+  CliSkillItem,
   ContextStore,
   ConversationSession,
   FileMentionCandidate,
@@ -72,6 +73,10 @@ function resolveTerminalCliId(
   fallback: AgentId
 ): AgentId {
   return cliId === "auto" || !cliId ? fallback : cliId;
+}
+
+function createCliSkillCacheKey(cliId: AgentId, workspaceId: string) {
+  return `${cliId}:${workspaceId}`;
 }
 
 function createTransportSession(
@@ -611,6 +616,8 @@ interface StoreState {
   busyAction: string | null;
   acpCapabilitiesByCli: Partial<Record<AgentId, AcpCliCapabilities>>;
   acpCapabilityStatusByCli: Partial<Record<AgentId, "idle" | "loading" | "ready" | "error">>;
+  cliSkillsByContext: Record<string, CliSkillItem[]>;
+  cliSkillStatusByContext: Record<string, "idle" | "loading" | "ready" | "error">;
 
   workspaces: WorkspaceRef[];
   terminalTabs: TerminalTab[];
@@ -665,6 +672,7 @@ interface StoreState {
   loadGitPanel: (workspaceId: string, projectRoot: string) => Promise<void>;
   refreshGitPanel: (workspaceId?: string) => Promise<void>;
   searchWorkspaceFiles: (workspaceId: string, query: string) => Promise<FileMentionCandidate[]>;
+  loadCliSkills: (cliId: AgentId, workspaceId: string, force?: boolean) => Promise<CliSkillItem[]>;
   loadAcpCapabilities: (cliId: AgentId, force?: boolean) => Promise<AcpCliCapabilities | null>;
   respondAssistantApproval: (requestId: string, decision: AssistantApprovalDecision) => Promise<void>;
 
@@ -678,6 +686,8 @@ export const useStore = create<StoreState>((set, get) => ({
   busyAction: null,
   acpCapabilitiesByCli: {},
   acpCapabilityStatusByCli: {},
+  cliSkillsByContext: {},
+  cliSkillStatusByContext: {},
   workspaces: [],
   terminalTabs: [],
   activeTerminalTabId: null,
@@ -1966,6 +1976,55 @@ export const useStore = create<StoreState>((set, get) => ({
     try {
       return await bridge.searchWorkspaceFiles(workspace.rootPath, query);
     } catch {
+      return [];
+    }
+  },
+
+  loadCliSkills: async (cliId, workspaceId, force = false) => {
+    const workspace = get().workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) return [];
+
+    const cacheKey = createCliSkillCacheKey(cliId, workspaceId);
+    const current = get();
+    const status = current.cliSkillStatusByContext[cacheKey];
+    if (!force && status === "ready") {
+      return current.cliSkillsByContext[cacheKey] ?? [];
+    }
+    if (!force && status === "loading") {
+      return current.cliSkillsByContext[cacheKey] ?? [];
+    }
+
+    set((state) => ({
+      cliSkillStatusByContext: {
+        ...state.cliSkillStatusByContext,
+        [cacheKey]: "loading",
+      },
+    }));
+
+    try {
+      const skills = await bridge.getCliSkills(cliId, workspace.rootPath);
+      set((state) => ({
+        cliSkillsByContext: {
+          ...state.cliSkillsByContext,
+          [cacheKey]: skills,
+        },
+        cliSkillStatusByContext: {
+          ...state.cliSkillStatusByContext,
+          [cacheKey]: "ready",
+        },
+      }));
+      return skills;
+    } catch {
+      set((state) => ({
+        cliSkillsByContext: {
+          ...state.cliSkillsByContext,
+          [cacheKey]: [],
+        },
+        cliSkillStatusByContext: {
+          ...state.cliSkillStatusByContext,
+          [cacheKey]: "error",
+        },
+      }));
       return [];
     }
   },

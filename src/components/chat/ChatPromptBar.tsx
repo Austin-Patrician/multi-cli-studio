@@ -11,15 +11,30 @@ import {
   isPickerCommandKind,
   parseSlashCommand,
 } from "../../lib/acp";
-import { AgentId, FileMentionCandidate, TerminalTab, TerminalCliId } from "../../lib/models";
+import {
+  AgentId,
+  CliSkillItem,
+  FileMentionCandidate,
+  TerminalTab,
+  TerminalCliId,
+} from "../../lib/models";
 import { useStore } from "../../lib/store";
 import { CliSelector } from "./CliSelector";
 import { PromptOverlay, PromptOverlayItem, PromptOverlaySection } from "./PromptOverlay";
 
 type InteractiveOverlayEntry =
   | { id: string; kind: "command"; command: AcpCommandDef }
+  | { id: string; kind: "skill"; skill: CliSkillItem }
   | { id: string; kind: "mention"; mention: FileMentionCandidate }
   | { id: string; kind: "option"; commandKind: AcpPickerCommandKind; option: AcpOptionDef };
+
+interface SkillOverlayState {
+  title: string;
+  description: string;
+  footer: string;
+  sections: PromptOverlaySection[];
+  entries: InteractiveOverlayEntry[];
+}
 
 type CommandOverlayState =
   | {
@@ -53,6 +68,19 @@ function findMentionToken(value: string, caret: number) {
   const match = prefix.match(/(?:^|\s)@([^\s@/]*)$/);
   if (!match || match.index == null) return null;
   const start = match.index + match[0].lastIndexOf("@");
+  return {
+    start,
+    end: caret,
+    query: match[1] ?? "",
+  };
+}
+
+function findSkillToken(value: string, caret: number) {
+  const prefix = value.slice(0, caret);
+  const match = prefix.match(/^\s*\$([A-Za-z0-9._-]*)$/);
+  if (!match || match.index == null) return null;
+  const start = prefix.lastIndexOf("$");
+  if (start < 0) return null;
   return {
     start,
     end: caret,
@@ -356,6 +384,124 @@ function buildArgumentOverlay(
   };
 }
 
+function skillChips(skill: CliSkillItem) {
+  return [skill.scope, skill.source].filter(
+    (value, index, values): value is string => Boolean(value) && values.indexOf(value) === index
+  );
+}
+
+function buildSkillOverlay(
+  cliId: AgentId,
+  query: string,
+  skills: CliSkillItem[],
+  status: "idle" | "loading" | "ready" | "error" | undefined
+): SkillOverlayState {
+  const normalized = query.trim().toLowerCase();
+  const filteredSkills = skills.filter((skill) => {
+    if (!normalized) return true;
+    return (
+      skill.name.toLowerCase().includes(normalized) ||
+      skill.displayName?.toLowerCase().includes(normalized) === true ||
+      skill.description?.toLowerCase().includes(normalized) === true
+    );
+  });
+
+  if (status === "loading" && skills.length === 0) {
+    return {
+      title: `${titleCaseCli(cliId)} Skills`,
+      description: `Loading the skills currently available for ${titleCaseCli(cliId)} in this workspace.`,
+      footer: "Type to narrow the list. Enter inserts the selected skill at the start of the prompt.",
+      sections: [
+        {
+          id: "loading",
+          items: [
+            {
+              id: "loading",
+              title: "Loading skills",
+              subtitle: "Inspecting the active CLI runtime and local skill directories.",
+              badge: "runtime",
+            },
+          ],
+        },
+      ],
+      entries: [],
+    };
+  }
+
+  if (status === "error") {
+    return {
+      title: `${titleCaseCli(cliId)} Skills`,
+      description: `Skill discovery failed for ${titleCaseCli(cliId)}.`,
+      footer: "Esc dismisses the picker.",
+      sections: [
+        {
+          id: "error",
+          items: [
+            {
+              id: "error",
+              title: "Unable to load skills",
+              subtitle: "Check the installed CLI runtime and local skill directories, then try again.",
+            },
+          ],
+        },
+      ],
+      entries: [],
+    };
+  }
+
+  if (filteredSkills.length === 0) {
+    return {
+      title: `${titleCaseCli(cliId)} Skills`,
+      description: `Select one skill to apply to the next ${titleCaseCli(cliId)} turn.`,
+      footer: "Esc dismisses the picker.",
+      sections: [
+        {
+          id: "empty",
+          items: [
+            {
+              id: "empty",
+              title: skills.length === 0 ? "No skills available" : "No matching skills",
+              subtitle:
+                skills.length === 0
+                  ? `${titleCaseCli(cliId)} does not expose any selectable skills for this workspace.`
+                  : "Refine the filter or press Esc to return to the composer.",
+            },
+          ],
+        },
+      ],
+      entries: [],
+    };
+  }
+
+  const sections: PromptOverlaySection[] = [];
+  const entries: InteractiveOverlayEntry[] = [];
+
+  filteredSkills.forEach((skill) => {
+    const sectionId = skill.scope ?? skill.source ?? "skills";
+    const sectionTitle = skill.scope ?? skill.source ?? "Skills";
+    const itemId = `skill:${skill.name}:${skill.path}`;
+    appendSectionItem(sections, sectionId, sectionTitle, {
+      id: itemId,
+      title: skill.displayName || skill.name,
+      subtitle: skill.description ?? skill.path,
+      meta:
+        skill.displayName && skill.displayName !== skill.name
+          ? skill.name
+          : undefined,
+      chips: skillChips(skill),
+    });
+    entries.push({ id: itemId, kind: "skill", skill });
+  });
+
+  return {
+    title: `${titleCaseCli(cliId)} Skills`,
+    description: `Select one skill to apply to the next ${titleCaseCli(cliId)} turn.`,
+    footer: "Arrow keys move, Enter inserts the skill, Esc dismisses.",
+    sections,
+    entries,
+  };
+}
+
 export function ChatPromptBar() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const actionMenuRef = useRef<HTMLDivElement>(null);
@@ -366,6 +512,7 @@ export function ChatPromptBar() {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [mentionItems, setMentionItems] = useState<FileMentionCandidate[]>([]);
   const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
+  const [dismissedSkillKey, setDismissedSkillKey] = useState<string | null>(null);
   const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
 
   const terminalTabs = useStore((s) => s.terminalTabs);
@@ -377,6 +524,8 @@ export function ChatPromptBar() {
   );
   const acpCapabilitiesByCli = useStore((s) => s.acpCapabilitiesByCli);
   const acpCapabilityStatusByCli = useStore((s) => s.acpCapabilityStatusByCli);
+  const cliSkillsByContext = useStore((s) => s.cliSkillsByContext);
+  const cliSkillStatusByContext = useStore((s) => s.cliSkillStatusByContext);
   const setTabDraftPrompt = useStore((s) => s.setTabDraftPrompt);
   const sendChatMessage = useStore((s) => s.sendChatMessage);
   const executeAcpCommand = useStore((s) => s.executeAcpCommand);
@@ -384,6 +533,7 @@ export function ChatPromptBar() {
   const runChecks = useStore((s) => s.runChecks);
   const togglePlanMode = useStore((s) => s.togglePlanMode);
   const searchWorkspaceFiles = useStore((s) => s.searchWorkspaceFiles);
+  const loadCliSkills = useStore((s) => s.loadCliSkills);
   const loadAcpCapabilities = useStore((s) => s.loadAcpCapabilities);
   const appendChatSystemMessage = useStore((s) => s.appendChatSystemMessage);
 
@@ -393,6 +543,11 @@ export function ChatPromptBar() {
   const prompt = activeTab?.draftPrompt ?? "";
   const isStreaming = activeTab?.status === "streaming";
   const isBusy = busyAction === "checks" || busyAction?.startsWith("review-") || false;
+  const cliSkillCacheKey = workspace ? `${effectiveCli}:${workspace.id}` : null;
+  const cliSkills = cliSkillCacheKey ? cliSkillsByContext[cliSkillCacheKey] ?? [] : [];
+  const cliSkillStatus = cliSkillCacheKey
+    ? cliSkillStatusByContext[cliSkillCacheKey] ?? "idle"
+    : "idle";
 
   const rawSlashPrompt = prompt.trimStart();
   const slashQuery = rawSlashPrompt.startsWith("/") ? rawSlashPrompt.slice(1).toLowerCase() : "";
@@ -417,8 +572,38 @@ export function ChatPromptBar() {
     const caret = textareaRef.current?.selectionStart ?? prompt.length;
     return findMentionToken(prompt, caret);
   }, [prompt]);
+  const skillToken = useMemo(() => {
+    const caret = textareaRef.current?.selectionStart ?? prompt.length;
+    return findSkillToken(prompt, caret);
+  }, [prompt]);
 
   const mentionKey = mentionToken ? `${mentionToken.start}:${mentionToken.query}` : null;
+  const skillKey = skillToken ? `${skillToken.start}:${skillToken.query}` : null;
+
+  useEffect(() => {
+    if (!activeTab || !workspace || rawSlashPrompt.startsWith("/") || activeTab.selectedCli === "auto") {
+      return;
+    }
+    if (!skillToken) {
+      setDismissedSkillKey(null);
+      return;
+    }
+
+    if (skillKey && dismissedSkillKey && skillKey !== dismissedSkillKey) {
+      setDismissedSkillKey(null);
+    }
+
+    void loadCliSkills(effectiveCli, workspace.id);
+  }, [
+    activeTab,
+    dismissedSkillKey,
+    effectiveCli,
+    loadCliSkills,
+    rawSlashPrompt,
+    skillKey,
+    skillToken,
+    workspace,
+  ]);
 
   useEffect(() => {
     if (!activeTab || !workspace || rawSlashPrompt.startsWith("/")) return;
@@ -483,14 +668,31 @@ export function ChatPromptBar() {
     slashQuery,
   ]);
 
+  const skillOverlay = useMemo<SkillOverlayState | null>(() => {
+    if (!skillToken || !workspace || !activeTab || activeTab.selectedCli === "auto" || commandOverlay) {
+      return null;
+    }
+    return buildSkillOverlay(effectiveCli, skillToken.query, cliSkills, cliSkillStatus);
+  }, [activeTab, cliSkillStatus, cliSkills, commandOverlay, effectiveCli, skillToken, workspace]);
+
+  const showSkillOverlay =
+    !commandOverlay &&
+    !!skillToken &&
+    activeTab?.selectedCli !== "auto" &&
+    skillKey !== dismissedSkillKey &&
+    !!skillOverlay;
+
   const showMentionOverlay =
     !commandOverlay &&
+    !showSkillOverlay &&
     !!mentionToken &&
     mentionItems.length > 0 &&
     mentionKey !== dismissedMentionKey;
 
   const activeSections = commandOverlay
     ? commandOverlay.sections
+    : showSkillOverlay && skillOverlay
+      ? skillOverlay.sections
     : showMentionOverlay
       ? [
           {
@@ -505,9 +707,11 @@ export function ChatPromptBar() {
       : [];
 
   const interactiveEntries = commandOverlay
-      ? "entries" in commandOverlay
+    ? "entries" in commandOverlay
       ? commandOverlay.entries
       : []
+    : showSkillOverlay && skillOverlay
+      ? skillOverlay.entries
     : showMentionOverlay
       ? mentionItems.map<InteractiveOverlayEntry>((mention) => ({
           id: mention.id,
@@ -520,7 +724,7 @@ export function ChatPromptBar() {
 
   useEffect(() => {
     setSelectedIndex(0);
-  }, [commandOverlay?.kind, rawSlashPrompt, mentionKey]);
+  }, [commandOverlay?.kind, rawSlashPrompt, mentionKey, skillKey]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -673,6 +877,21 @@ export function ChatPromptBar() {
     void executeAcpCommand(parsed, activeTab.id);
   }
 
+  function selectSkill(skill: CliSkillItem) {
+    if (!activeTab) return;
+    const promptWithoutLeadingSkill = prompt.trimStart().replace(/^\$[A-Za-z0-9._-]+\s*/, "");
+    const nextPrompt = `$${skill.name}${promptWithoutLeadingSkill ? ` ${promptWithoutLeadingSkill}` : " "}`;
+    setPrompt(nextPrompt);
+    setDismissedSkillKey(null);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const nextCaret = `$${skill.name} `.length;
+      el.focus();
+      el.setSelectionRange(nextCaret, nextCaret);
+    });
+  }
+
   function selectMention(item: FileMentionCandidate) {
     if (!activeTab || !mentionToken) return;
     const next = `${prompt.slice(0, mentionToken.start)}@${item.relativePath} ${prompt.slice(mentionToken.end)}`;
@@ -707,6 +926,10 @@ export function ChatPromptBar() {
       selectCommand(entry.command);
       return;
     }
+    if (entry.kind === "skill") {
+      selectSkill(entry.skill);
+      return;
+    }
     if (entry.kind === "mention") {
       selectMention(entry.mention);
       return;
@@ -722,6 +945,11 @@ export function ChatPromptBar() {
 
     if (commandOverlay?.kind === "command-list") {
       setPrompt("");
+      return;
+    }
+
+    if (showSkillOverlay && skillKey) {
+      setDismissedSkillKey(skillKey);
       return;
     }
 
@@ -743,7 +971,7 @@ export function ChatPromptBar() {
     const atPromptStart = !hasSelection && selectionStart === 0;
     const atPromptEnd = !hasSelection && selectionEnd === event.currentTarget.value.length;
 
-    if (event.key === "Tab" && event.shiftKey && activeTab && !commandOverlay && !showMentionOverlay) {
+    if (event.key === "Tab" && event.shiftKey && activeTab && !commandOverlay && !showSkillOverlay && !showMentionOverlay) {
       event.preventDefault();
       togglePlanMode(activeTab.id);
       return;
@@ -772,7 +1000,7 @@ export function ChatPromptBar() {
       }
     }
 
-    if (!commandOverlay && !showMentionOverlay && !isActionMenuOpen) {
+    if (!commandOverlay && !showSkillOverlay && !showMentionOverlay && !isActionMenuOpen) {
       if (event.key === "ArrowUp" && atPromptStart) {
         event.preventDefault();
         navigatePromptHistory(-1);
@@ -785,7 +1013,7 @@ export function ChatPromptBar() {
       }
     }
 
-    if (event.key === "Escape" && (commandOverlay || showMentionOverlay || isActionMenuOpen)) {
+    if (event.key === "Escape" && (commandOverlay || showSkillOverlay || showMentionOverlay || isActionMenuOpen)) {
       event.preventDefault();
       handleEscape();
       return;
@@ -805,14 +1033,17 @@ export function ChatPromptBar() {
     <div className="border-t border-border bg-[radial-gradient(circle_at_top,#f8fbff_0%,#ffffff_48%)] px-5 py-4">
       <div className="mx-auto max-w-5xl">
         <div className="relative overflow-visible">
-          {(commandOverlay || showMentionOverlay) && (
+          {(commandOverlay || showSkillOverlay || showMentionOverlay) && (
             <PromptOverlay
-              title={commandOverlay?.title}
-              description={commandOverlay?.description}
+              title={commandOverlay?.title ?? (showSkillOverlay ? skillOverlay?.title : undefined)}
+              description={
+                commandOverlay?.description ??
+                (showSkillOverlay ? skillOverlay?.description : undefined)
+              }
               sections={activeSections}
               selectedIndex={safeSelectedIndex}
               interactive={interactiveEntries.length > 0}
-              footer={commandOverlay?.footer}
+              footer={commandOverlay?.footer ?? (showSkillOverlay ? skillOverlay?.footer : undefined)}
               onBack={
                 commandOverlay?.kind === "command-argument" || commandOverlay?.kind === "command-help"
                   ? () => setPrompt("/")
@@ -836,6 +1067,7 @@ export function ChatPromptBar() {
                   type="button"
                   onClick={() => {
                     setDismissedMentionKey(null);
+                    setDismissedSkillKey(null);
                     setIsActionMenuOpen((current) => !current);
                   }}
                   disabled={isStreaming || isBusy}
@@ -939,6 +1171,7 @@ export function ChatPromptBar() {
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <span>/ command center</span>
               <span>/help reference</span>
+              {!isAutoMode && <span>$ skills</span>}
               <span>@ files</span>
               {isAutoMode && <span>Claude orchestrates Codex and Gemini when needed</span>}
             </div>

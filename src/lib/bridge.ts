@@ -9,6 +9,7 @@ import {
   AssistantApprovalDecision,
   ContextStore,
   ConversationTurn,
+  CliSkillItem,
   FileMentionCandidate,
   GitFileDiff,
   GitPanelData,
@@ -50,6 +51,7 @@ export interface RuntimeBridge {
   onStream: (listener: (event: StreamEvent) => void) => Promise<Unlisten>;
   pickWorkspaceFolder: () => Promise<WorkspacePickResult | null>;
   searchWorkspaceFiles: (projectRoot: string, query: string) => Promise<FileMentionCandidate[]>;
+  getCliSkills: (cliId: AgentId, projectRoot: string) => Promise<CliSkillItem[]>;
   // ACP methods
   executeAcpCommand: (command: AcpCommand, cliId: AgentId) => Promise<AcpCommandResult>;
   getAcpCommands: (cliId: AgentId) => Promise<AcpCommandDef[]>;
@@ -165,6 +167,10 @@ const tauriRuntime: RuntimeBridge = {
   async searchWorkspaceFiles(projectRoot, query) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<FileMentionCandidate[]>("search_workspace_files", { projectRoot, query });
+  },
+  async getCliSkills(cliId, projectRoot) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<CliSkillItem[]>("get_cli_skills", { cliId, projectRoot });
   },
   async executeAcpCommand(command, cliId) {
     const { invoke } = await import("@tauri-apps/api/core");

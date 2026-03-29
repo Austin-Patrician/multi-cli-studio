@@ -509,6 +509,32 @@ struct FileMentionCandidate {
     absolute_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliSkillItem {
+    name: String,
+    display_name: Option<String>,
+    description: Option<String>,
+    path: String,
+    scope: Option<String>,
+    source: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LocalSkillManifest {
+    name: Option<String>,
+    description: Option<String>,
+    user_invocable: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalSkillDescriptor {
+    name: String,
+    description: Option<String>,
+    path: String,
+    user_invocable: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitFileChange {
@@ -734,6 +760,289 @@ fn codex_sandbox_policy(permission_mode: &str, project_root: &str) -> Value {
             "writableRoots": [project_root]
         }),
     }
+}
+
+fn parse_leading_skill_reference(prompt: &str) -> Option<(String, String)> {
+    let trimmed = prompt.trim_start();
+    let skill_prompt = trimmed.strip_prefix('$')?;
+    let skill_name_len = skill_prompt
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .count();
+    if skill_name_len == 0 {
+        return None;
+    }
+
+    let skill_name = skill_prompt[..skill_name_len].to_string();
+    let remainder = skill_prompt[skill_name_len..].trim_start().to_string();
+    Some((skill_name, remainder))
+}
+
+fn resolve_codex_prompt_and_skills(
+    app: &AppHandle,
+    command_path: &str,
+    project_root: &str,
+    prompt: &str,
+) -> (String, Vec<CliSkillItem>) {
+    let Some((skill_name, remainder)) = parse_leading_skill_reference(prompt) else {
+        return (prompt.to_string(), Vec::new());
+    };
+
+    let skills = list_codex_skills_for_workspace(app, command_path, project_root)
+        .unwrap_or_else(|_| list_codex_fallback_skills(project_root));
+    if let Some(skill) = skills
+        .into_iter()
+        .find(|item| item.name.eq_ignore_ascii_case(&skill_name))
+    {
+        return (remainder, vec![skill]);
+    }
+
+    (prompt.to_string(), Vec::new())
+}
+
+fn resolve_claude_prompt_and_skill(
+    project_root: &str,
+    prompt: &str,
+) -> (String, Option<CliSkillItem>) {
+    let Some((skill_name, remainder)) = parse_leading_skill_reference(prompt) else {
+        return (prompt.to_string(), None);
+    };
+
+    let skills = list_claude_skills_for_workspace(project_root);
+    if let Some(skill) = skills
+        .into_iter()
+        .find(|item| item.name.eq_ignore_ascii_case(&skill_name))
+    {
+        return (remainder, Some(skill));
+    }
+
+    (prompt.to_string(), None)
+}
+
+fn list_codex_skills_for_workspace(
+    app: &AppHandle,
+    command_path: &str,
+    project_root: &str,
+) -> Result<Vec<CliSkillItem>, String> {
+    let resolved_command = resolve_direct_command_path(command_path);
+    let mut cmd = batch_aware_command(&resolved_command, &["app-server", "--listen", "stdio://"]);
+    cmd.current_dir(project_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| format!("Failed to start Codex app-server: {}", err))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Failed to open Codex app-server stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to open Codex app-server stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to open Codex app-server stderr".to_string())?;
+
+    let stderr_buffer = Arc::new(Mutex::new(String::new()));
+    let stderr_sink = stderr_buffer.clone();
+    let stderr_handle = thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
+            if let Ok(mut buffer) = stderr_sink.lock() {
+                buffer.push_str(&line);
+                buffer.push('\n');
+            }
+        }
+    });
+
+    let mut reader = BufReader::new(stdout);
+    let mut next_id = 1_u64;
+    let mut stream_state = CodexStreamState::default();
+    let approvals = Arc::new(Mutex::new(BTreeMap::new()));
+
+    let result = (|| {
+        codex_rpc_call(
+            &mut reader,
+            &mut stdin,
+            &mut next_id,
+            "initialize",
+            json!({
+                "clientInfo": {
+                    "name": "multi-cli-studio",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }),
+            app,
+            "",
+            "",
+            &mut stream_state,
+            &approvals,
+        )?;
+
+        write_jsonrpc_message(&mut stdin, &json!({ "method": "initialized" }))?;
+
+        let response = codex_rpc_call(
+            &mut reader,
+            &mut stdin,
+            &mut next_id,
+            "skills/list",
+            json!({
+                "cwds": [project_root],
+                "forceReload": true
+            }),
+            app,
+            "",
+            "",
+            &mut stream_state,
+            &approvals,
+        )?;
+        Ok(parse_codex_skills_list(&response))
+    })();
+
+    drop(stdin);
+    match child.try_wait() {
+        Ok(Some(_)) => {}
+        _ => {
+            terminate_process_tree(child.id());
+            let _ = child.wait();
+        }
+    }
+    let _ = stderr_handle.join();
+    let stderr_output = stderr_buffer
+        .lock()
+        .map(|buffer| buffer.clone())
+        .unwrap_or_default();
+
+    match result {
+        Ok(items) => Ok(items),
+        Err(err) => {
+            let trimmed_stderr = stderr_output.trim();
+            if trimmed_stderr.is_empty() {
+                Err(err)
+            } else {
+                Err(format!("{}\n\nstderr:\n{}", err, trimmed_stderr))
+            }
+        }
+    }
+}
+
+fn parse_codex_skills_list(value: &Value) -> Vec<CliSkillItem> {
+    let mut items = Vec::new();
+    if let Some(entries) = value.get("data").and_then(Value::as_array) {
+        for entry in entries {
+            let scope_label = entry
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(|cwd| if cwd.is_empty() { "workspace".to_string() } else { path_label(cwd) });
+            if let Some(skills) = entry.get("skills").and_then(Value::as_array) {
+                for skill in skills {
+                    if skill
+                        .get("enabled")
+                        .and_then(Value::as_bool)
+                        .is_some_and(|value| !value)
+                    {
+                        continue;
+                    }
+
+                    let Some(name) = skill.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(path) = skill.get("path").and_then(Value::as_str) else {
+                        continue;
+                    };
+
+                    let interface = skill.get("interface").unwrap_or(&Value::Null);
+                    items.push(CliSkillItem {
+                        name: name.to_string(),
+                        display_name: interface
+                            .get("displayName")
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string()),
+                        description: interface
+                            .get("shortDescription")
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string())
+                            .or_else(|| {
+                                skill.get("shortDescription")
+                                    .and_then(Value::as_str)
+                                    .map(|value| value.to_string())
+                            })
+                            .or_else(|| {
+                                skill.get("description")
+                                    .and_then(Value::as_str)
+                                    .map(|value| value.to_string())
+                            }),
+                        path: path.to_string(),
+                        scope: skill
+                            .get("scope")
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string()),
+                        source: scope_label.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    dedupe_cli_skill_items(items)
+}
+
+fn list_codex_fallback_skills(project_root: &str) -> Vec<CliSkillItem> {
+    let home = user_home_dir();
+    let project_root = PathBuf::from(project_root);
+    let roots = [
+        (
+            project_root.join(".codex").join("skills"),
+            Some("project"),
+            Some("repo"),
+        ),
+        (
+            home.join(".codex").join("skills"),
+            Some("user"),
+            Some("user"),
+        ),
+        (
+            home.join(".codex").join("skills").join(".system"),
+            Some("built-in"),
+            Some("system"),
+        ),
+    ];
+
+    let root_refs = roots
+        .iter()
+        .map(|(path, source, scope)| (path.as_path(), *source, *scope))
+        .collect::<Vec<_>>();
+    list_local_cli_skills(&root_refs, true)
+}
+
+fn list_claude_skills_for_workspace(project_root: &str) -> Vec<CliSkillItem> {
+    let home = user_home_dir();
+    let project_root = PathBuf::from(project_root);
+    let roots = [
+        (
+            project_root.join(".claude").join("skills"),
+            Some("project"),
+            Some("project"),
+        ),
+        (
+            home.join(".claude").join("skills"),
+            Some("user"),
+            Some("user"),
+        ),
+    ];
+
+    let root_refs = roots
+        .iter()
+        .map(|(path, source, scope)| (path.as_path(), *source, *scope))
+        .collect::<Vec<_>>();
+    list_local_cli_skills(&root_refs, true)
 }
 
 fn resolve_direct_command_path(command_path: &str) -> String {
@@ -2750,6 +3059,7 @@ fn run_codex_app_server_turn(
     command_path: &str,
     project_root: &str,
     prompt: &str,
+    selected_skills: &[CliSkillItem],
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
     terminal_tab_id: &str,
@@ -2940,6 +3250,22 @@ fn run_codex_app_server_turn(
         .thread_id
         .clone()
         .ok_or_else(|| "Codex app-server did not return a thread id".to_string())?;
+    let mut turn_input = selected_skills
+        .iter()
+        .map(|skill| {
+            json!({
+                "type": "skill",
+                "name": skill.name,
+                "path": skill.path,
+            })
+        })
+        .collect::<Vec<_>>();
+    if !prompt.trim().is_empty() || turn_input.is_empty() {
+        turn_input.push(json!({
+            "type": "text",
+            "text": prompt
+        }));
+    }
 
     let _turn_start = match codex_rpc_call(
         &mut reader,
@@ -2954,12 +3280,7 @@ fn run_codex_app_server_turn(
             "sandboxPolicy": codex_sandbox_policy(&permission_mode, project_root),
             "effort": effort_override,
             "summary": "detailed",
-            "input": [
-                {
-                    "type": "text",
-                    "text": prompt
-                }
-            ]
+            "input": turn_input
         }),
         app,
         terminal_tab_id,
@@ -5202,8 +5523,22 @@ fn send_chat_message(
         (wrapper, shell_path(), settings.process_timeout_ms)
     };
 
+    let (prompt_for_context, selected_codex_skills, selected_claude_skill) = match cli_id.as_str() {
+        "codex" => {
+            let (runtime_prompt, selected_skills) =
+                resolve_codex_prompt_and_skills(&app, &wrapper_path, &project_root, &prompt);
+            (runtime_prompt, selected_skills, None)
+        }
+        "claude" => {
+            let (runtime_prompt, selected_skill) =
+                resolve_claude_prompt_and_skill(&project_root, &prompt);
+            (runtime_prompt, Vec::new(), selected_skill)
+        }
+        _ => (prompt.clone(), Vec::new(), None),
+    };
+
     // Build script with tab-scoped context
-    let composed_prompt = {
+    let composed_prompt_base = {
         let mut state = store.state.lock().map_err(|e| e.to_string())?.clone();
         state.workspace.project_root = project_root.clone();
         state.workspace.project_name = Path::new(&project_root)
@@ -5212,7 +5547,18 @@ fn send_chat_message(
             .unwrap_or_else(|| "workspace".to_string());
         state.workspace.branch = git_output(&project_root, &["branch", "--show-current"])
             .unwrap_or_else(|| "workspace".to_string());
-        compose_tab_context_prompt(&state, &cli_id, &prompt, &recent_turns, write_mode)
+        compose_tab_context_prompt(
+            &state,
+            &cli_id,
+            &prompt_for_context,
+            &recent_turns,
+            write_mode,
+        )
+    };
+    let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
+        format!("/{} {}", skill.name, composed_prompt_base)
+    } else {
+        composed_prompt_base
     };
 
     let msg_id = message_id.clone();
@@ -5226,6 +5572,7 @@ fn send_chat_message(
     let turn_write_mode = write_mode;
     let composed_prompt_for_history = composed_prompt.clone();
     let request_session_for_thread = request_session.clone();
+    let selected_codex_skills_for_thread = selected_codex_skills.clone();
 
     if cli_id == "codex" {
         let codex_wrapper_path = wrapper_path.clone();
@@ -5241,6 +5588,7 @@ fn send_chat_message(
                 &codex_wrapper_path,
                 &codex_project_root,
                 &composed_prompt,
+                &selected_codex_skills_for_thread,
                 &request_session_for_thread,
                 codex_requested_transport_session.clone(),
                 &stream_tab_id,
@@ -6019,6 +6367,7 @@ fn run_auto_orchestration(
                     &wrapper_path,
                     &request_for_thread.project_root,
                     &worker_prompt,
+                    &[],
                     &worker_session,
                     None,
                     &terminal_tab_id,
@@ -7258,6 +7607,35 @@ fn pick_workspace_folder() -> Result<Option<WorkspacePickResult>, String> {
 }
 
 #[tauri::command]
+fn get_cli_skills(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    cli_id: String,
+    project_root: String,
+) -> Result<Vec<CliSkillItem>, String> {
+    match cli_id.as_str() {
+        "codex" => {
+            let wrapper_path = {
+                let state = store.state.lock().map_err(|err| err.to_string())?;
+                state
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == cli_id)
+                    .and_then(|agent| agent.runtime.command_path.clone())
+                    .ok_or_else(|| "codex CLI not found".to_string())?
+            };
+
+            Ok(
+                list_codex_skills_for_workspace(&app, &wrapper_path, &project_root)
+                    .unwrap_or_else(|_| list_codex_fallback_skills(&project_root)),
+            )
+        }
+        "claude" => Ok(list_claude_skills_for_workspace(&project_root)),
+        _ => Ok(Vec::new()),
+    }
+}
+
+#[tauri::command]
 fn search_workspace_files(
     project_root: String,
     query: String,
@@ -8430,12 +8808,16 @@ fn list_skill_items(root: &Path, source: Option<&str>) -> Vec<AgentResourceItem>
             continue;
         }
 
+        let descriptor = read_local_skill_descriptor(&path, &name);
         items.push(resource_item(
-            name,
+            descriptor
+                .as_ref()
+                .map(|skill| skill.name.clone())
+                .unwrap_or(name),
             true,
             None,
             source.map(|value| value.to_string()),
-            None,
+            descriptor.and_then(|skill| skill.description),
         ));
     }
 
@@ -8443,24 +8825,235 @@ fn list_skill_items(root: &Path, source: Option<&str>) -> Vec<AgentResourceItem>
 }
 
 fn looks_like_skill_dir(path: &Path, name: &str) -> bool {
-    if path.join("SKILL.md").exists() || path.join(format!("{}.md", name)).exists() {
-        return true;
+    find_skill_markdown_path(path, name).is_some()
+}
+
+fn list_local_cli_skills(
+    roots: &[(&Path, Option<&str>, Option<&str>)],
+    user_invocable_only: bool,
+) -> Vec<CliSkillItem> {
+    let mut items = Vec::new();
+
+    for (root, source, scope) in roots {
+        items.extend(list_cli_skill_items_from_root(root, *source, *scope, user_invocable_only));
     }
 
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let child = entry.path();
-            if child.is_file() {
-                if let Some(extension) = child.extension().and_then(|value| value.to_str()) {
-                    if extension.eq_ignore_ascii_case("md") {
-                        return true;
-                    }
-                }
-            }
+    dedupe_cli_skill_items(items)
+}
+
+fn list_cli_skill_items_from_root(
+    root: &Path,
+    source: Option<&str>,
+    scope: Option<&str>,
+    user_invocable_only: bool,
+) -> Vec<CliSkillItem> {
+    let mut items = Vec::new();
+    if !root.exists() {
+        return items;
+    }
+
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return items,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || !path.is_dir() {
+            continue;
+        }
+
+        let Some(descriptor) = read_local_skill_descriptor(&path, &name) else {
+            continue;
+        };
+        if user_invocable_only && !descriptor.user_invocable {
+            continue;
+        }
+
+        items.push(CliSkillItem {
+            name: descriptor.name,
+            display_name: None,
+            description: descriptor.description,
+            path: descriptor.path,
+            scope: scope.map(|value| value.to_string()),
+            source: source.map(|value| value.to_string()),
+        });
+    }
+
+    items
+}
+
+fn read_local_skill_descriptor(path: &Path, name: &str) -> Option<LocalSkillDescriptor> {
+    let markdown_path = find_skill_markdown_path(path, name)?;
+    let raw = fs::read_to_string(&markdown_path).ok();
+    let manifest = raw
+        .as_deref()
+        .map(parse_local_skill_manifest)
+        .unwrap_or_default();
+    let skill_name = manifest
+        .name
+        .unwrap_or_else(|| name.to_string())
+        .trim()
+        .to_string();
+    let normalized_name = if skill_name.is_empty() {
+        name.to_string()
+    } else {
+        skill_name
+    };
+
+    Some(LocalSkillDescriptor {
+        name: normalized_name,
+        description: manifest
+            .description
+            .or_else(|| raw.as_deref().and_then(extract_skill_summary)),
+        path: path.to_string_lossy().to_string(),
+        user_invocable: manifest.user_invocable.unwrap_or(true),
+    })
+}
+
+fn find_skill_markdown_path(path: &Path, name: &str) -> Option<PathBuf> {
+    let preferred = [path.join("SKILL.md"), path.join(format!("{}.md", name))];
+    for candidate in preferred {
+        if candidate.exists() {
+            return Some(candidate);
         }
     }
 
-    false
+    let entries = fs::read_dir(path).ok()?;
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if child.is_file()
+            && child
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("md"))
+        {
+            return Some(child);
+        }
+    }
+
+    None
+}
+
+fn parse_local_skill_manifest(raw: &str) -> LocalSkillManifest {
+    let mut manifest = LocalSkillManifest::default();
+    let mut lines = raw.lines();
+    if !matches!(lines.next().map(str::trim), Some("---")) {
+        return manifest;
+    }
+
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let normalized_key = key.trim().to_ascii_lowercase().replace('_', "-");
+        let scalar = trim_yaml_scalar(value);
+        match normalized_key.as_str() {
+            "name" => {
+                if !scalar.is_empty() {
+                    manifest.name = Some(scalar);
+                }
+            }
+            "description" => {
+                if !scalar.is_empty() {
+                    manifest.description = Some(scalar);
+                }
+            }
+            "user-invocable" => {
+                manifest.user_invocable = parse_skill_bool(&scalar);
+            }
+            _ => {}
+        }
+    }
+
+    manifest
+}
+
+fn trim_yaml_scalar(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 {
+        let first = trimmed.chars().next().unwrap_or_default();
+        let last = trimmed.chars().last().unwrap_or_default();
+        if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+            return trimmed[1..trimmed.len() - 1].trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn parse_skill_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" => Some(true),
+        "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn extract_skill_summary(raw: &str) -> Option<String> {
+    let body = if raw.trim_start().starts_with("---") {
+        let mut marker_count = 0;
+        let mut body_lines = Vec::new();
+        for line in raw.lines() {
+            if line.trim() == "---" {
+                marker_count += 1;
+                continue;
+            }
+            if marker_count < 2 {
+                continue;
+            }
+            body_lines.push(line);
+        }
+        body_lines.join("\n")
+    } else {
+        raw.to_string()
+    };
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with('-')
+            || trimmed.starts_with('*')
+        {
+            continue;
+        }
+        return Some(trimmed.to_string());
+    }
+
+    None
+}
+
+fn dedupe_cli_skill_items(items: Vec<CliSkillItem>) -> Vec<CliSkillItem> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+
+    for item in items {
+        let key = item.name.to_lowercase();
+        if seen.insert(key) {
+            deduped.push(item);
+        }
+    }
+
+    deduped.sort_by(|left, right| {
+        let left_label = left
+            .display_name
+            .clone()
+            .unwrap_or_else(|| left.name.clone());
+        let right_label = right
+            .display_name
+            .clone()
+            .unwrap_or_else(|| right.name.clone());
+        left_label.cmp(&right_label)
+    });
+    deduped
 }
 
 fn dedupe_resource_items(items: Vec<AgentResourceItem>) -> Vec<AgentResourceItem> {
@@ -9365,6 +9958,7 @@ pub fn run() {
             get_git_file_diff,
             open_workspace_file,
             pick_workspace_folder,
+            get_cli_skills,
             search_workspace_files,
             get_settings,
             update_settings,

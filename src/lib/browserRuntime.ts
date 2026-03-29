@@ -8,6 +8,7 @@ import {
   AssistantApprovalDecision,
   AutoOrchestrationRequest,
   ChatMessageBlock,
+  CliSkillItem,
   TerminalEvent,
   TerminalLine,
   ContextStore,
@@ -95,6 +96,42 @@ function fallbackResources(agentId: AgentId): AgentRuntimeResources {
         skill: defaultResourceGroup(true),
       };
   }
+}
+
+function fallbackCliSkills(cliId: AgentId): CliSkillItem[] {
+  const itemsByCli: Record<AgentId, CliSkillItem[]> = {
+    codex: [
+      {
+        name: "frontend-design",
+        displayName: "frontend-design",
+        description: "Polished frontend interface design workflow.",
+        path: "~/.codex/skills/frontend-design",
+        scope: "user",
+        source: "browser-fallback",
+      },
+      {
+        name: "frontend-skill",
+        displayName: "frontend-skill",
+        description: "Minimal, structured UI composition workflow.",
+        path: "~/.codex/skills/frontend-skill",
+        scope: "user",
+        source: "browser-fallback",
+      },
+    ],
+    claude: [
+      {
+        name: "frontend-design",
+        displayName: "frontend-design",
+        description: "Polished frontend interface design workflow.",
+        path: "~/.claude/skills/frontend-design",
+        scope: "user",
+        source: "browser-fallback",
+      },
+    ],
+    gemini: [],
+  };
+
+  return itemsByCli[cliId];
 }
 
 function normalizeResources(
@@ -693,6 +730,10 @@ export const browserRuntime = {
         relativePath,
         absolutePath: null,
       }));
+  },
+
+  async getCliSkills(cliId: AgentId, _projectRoot: string): Promise<CliSkillItem[]> {
+    return structuredClone(fallbackCliSkills(cliId));
   },
 
   async getGitPanel(_projectRoot: string): Promise<GitPanelData> {

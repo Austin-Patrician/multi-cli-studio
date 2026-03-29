@@ -307,6 +307,15 @@ export interface FileMentionCandidate {
   absolutePath?: string | null;
 }
 
+export interface CliSkillItem {
+  name: string;
+  displayName?: string | null;
+  description?: string | null;
+  path: string;
+  scope?: string | null;
+  source?: string | null;
+}
+
 export interface WorkspacePickResult {
   name: string;
   rootPath: string;
