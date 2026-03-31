@@ -225,10 +225,14 @@ function loadStoredSettings(): AppSettings {
   const raw = window.localStorage.getItem(SETTINGS_KEY);
   if (!raw) return defaultSettings();
   try {
-    return JSON.parse(raw) as AppSettings;
+    return normalizeSettings(JSON.parse(raw));
   } catch {
     return defaultSettings();
   }
+}
+
+function parsePositiveNumber(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function createSeedContext(): ContextStore {
@@ -252,6 +256,31 @@ function defaultSettings(): AppSettings {
     maxTurnsPerAgent: 50,
     maxOutputCharsPerTurn: 100000,
     processTimeoutMs: 300000,
+    notifyOnTerminalCompletion: false,
+  };
+}
+
+function normalizeSettings(value: unknown): AppSettings {
+  const defaults = defaultSettings();
+  if (!value || typeof value !== "object") return defaults;
+
+  const raw = value as Partial<AppSettings> & {
+    cliPaths?: Partial<AppSettings["cliPaths"]>;
+  };
+
+  return {
+    cliPaths: {
+      ...defaults.cliPaths,
+      ...(raw.cliPaths ?? {}),
+    },
+    projectRoot:
+      typeof raw.projectRoot === "string" && raw.projectRoot.trim()
+        ? raw.projectRoot
+        : defaults.projectRoot,
+    maxTurnsPerAgent: parsePositiveNumber(raw.maxTurnsPerAgent, defaults.maxTurnsPerAgent),
+    maxOutputCharsPerTurn: parsePositiveNumber(raw.maxOutputCharsPerTurn, defaults.maxOutputCharsPerTurn),
+    processTimeoutMs: parsePositiveNumber(raw.processTimeoutMs, defaults.processTimeoutMs),
+    notifyOnTerminalCompletion: raw.notifyOnTerminalCompletion === true,
   };
 }
 
@@ -579,7 +608,7 @@ export const browserRuntime = {
   },
 
   async updateSettings(newSettings: AppSettings) {
-    settings = { ...newSettings };
+    settings = normalizeSettings(newSettings);
     contextStore.maxTurnsPerAgent = settings.maxTurnsPerAgent;
     contextStore.maxOutputCharsPerTurn = settings.maxOutputCharsPerTurn;
     persistSettings();

@@ -220,6 +220,7 @@ export interface AppSettings {
   maxTurnsPerAgent: number;
   maxOutputCharsPerTurn: number;
   processTimeoutMs: number;
+  notifyOnTerminalCompletion: boolean;
 }
 
 // ── New chat types ──────────────────────────────────────────────────────

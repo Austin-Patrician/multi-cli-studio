@@ -246,6 +246,8 @@ struct AppSettings {
     max_turns_per_agent: usize,
     max_output_chars_per_turn: usize,
     process_timeout_ms: u64,
+    #[serde(default)]
+    notify_on_terminal_completion: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9555,6 +9557,7 @@ fn seed_settings(project_root: &str) -> AppSettings {
         max_turns_per_agent: DEFAULT_MAX_TURNS,
         max_output_chars_per_turn: DEFAULT_MAX_OUTPUT_CHARS,
         process_timeout_ms: DEFAULT_TIMEOUT_MS,
+        notify_on_terminal_completion: false,
     }
 }
 
@@ -9930,6 +9933,7 @@ fn default_project_root() -> String {
 pub fn run() {
     let project_root = default_project_root();
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(AppStore {
             state: Arc::new(Mutex::new(seed_state(&project_root))),
             context: Arc::new(Mutex::new(seed_context())),

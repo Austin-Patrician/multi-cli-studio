@@ -28,6 +28,7 @@ import {
   normalizeAssistantContent,
   summarizeForContext,
 } from "./messageFormatting";
+import { notifyTerminalCompletion, type TerminalCompletionNotice } from "./desktopNotifications";
 
 const TERMINAL_STATE_KEY = "multi-cli-studio::terminal-state";
 const DEFAULT_PROCESS_TIMEOUT_MS = 300000;
@@ -606,6 +607,38 @@ function appendSystemMessageToSession(
       ],
       updatedAt: nowIso(),
     },
+  };
+}
+
+function buildTerminalCompletionNotice(
+  state: Pick<StoreState, "settings" | "terminalTabs" | "workspaces" | "chatSessions">,
+  tabId: string,
+  messageId: string,
+  exitCode: number | null,
+  durationMs: number,
+  finalContent?: string | null
+): TerminalCompletionNotice | null {
+  if (!state.settings?.notifyOnTerminalCompletion) return null;
+
+  const session = state.chatSessions[tabId];
+  if (!session) return null;
+
+  const targetMessageId = resolveStreamingAssistantMessageId(session, messageId);
+  if (!targetMessageId) return null;
+
+  const message = session.messages.find((item) => item.id === targetMessageId);
+  const tab = state.terminalTabs.find((item) => item.id === tabId);
+  const workspace = state.workspaces.find((item) => item.id === tab?.workspaceId);
+  if (!message || message.role !== "assistant" || !tab || !workspace) return null;
+
+  const fallbackCli = resolveTerminalCliId(tab.selectedCli, workspace.activeAgent);
+  return {
+    cliId: (message.cliId ?? fallbackCli) as AgentId,
+    workspaceName: workspace.name || basename(workspace.rootPath),
+    tabTitle: tab.title,
+    exitCode,
+    content: finalContent ?? message.rawContent ?? message.content,
+    durationMs,
   };
 }
 
@@ -1765,6 +1798,15 @@ export const useStore = create<StoreState>((set, get) => ({
     transportSession,
     transportKind
   ) => {
+    const completionNotice = buildTerminalCompletionNotice(
+      get(),
+      tabId,
+      messageId,
+      exitCode,
+      durationMs,
+      finalContent
+    );
+
     set((state) => {
       const session = state.chatSessions[tabId];
       if (!session) return {};
@@ -1845,6 +1887,9 @@ export const useStore = create<StoreState>((set, get) => ({
     if (tab) {
       void get().refreshGitPanel(tab.workspaceId);
       void get().loadContextStore();
+    }
+    if (completionNotice) {
+      void notifyTerminalCompletion(completionNotice);
     }
   },
 
