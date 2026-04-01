@@ -1,18 +1,32 @@
 import {
   AppState,
   AgentId,
+  AutomationGoal,
+  AutomationGoalDraft,
+  AutomationGoalRuleConfig,
+  AutomationGoalStatus,
+  AutomationRuleProfile,
+  AutomationRun,
+  AutomationRunStatus,
   AgentTransportKind,
   AgentTransportSession,
   AgentRuntimeResources,
   AgentPromptRequest,
   AssistantApprovalDecision,
   AutoOrchestrationRequest,
+  ChatMessageBlocksUpdateRequest,
+  ChatMessageDeleteRequest,
+  ChatMessageFinalizeRequest,
   ChatMessageBlock,
+  ChatMessagesAppendRequest,
+  ChatMessageStreamUpdateRequest,
+  CliHandoffRequest,
   CliSkillItem,
   TerminalEvent,
   TerminalLine,
   ContextStore,
   ConversationTurn,
+  CreateAutomationRunRequest,
   AppSettings,
   EnrichedHandoff,
   ChatPromptRequest,
@@ -21,6 +35,7 @@ import {
   StreamEvent,
   GitPanelData,
   GitFileChange,
+  PersistedTerminalState,
   WorkspacePickResult,
 } from "./models";
 import {
@@ -41,11 +56,24 @@ type StreamListener = (event: StreamEvent) => void;
 const STORAGE_KEY = "multi-cli-studio::state";
 const CONTEXT_KEY = "multi-cli-studio::context";
 const SETTINGS_KEY = "multi-cli-studio::settings";
+const TERMINAL_STATE_KEY = "multi-cli-studio::terminal-state";
+const AUTOMATION_RUNS_KEY = "multi-cli-studio::automation-runs";
+const AUTOMATION_RULE_KEY = "multi-cli-studio::automation-rule";
 
 let state: AppState = loadStoredState();
 let contextStore: ContextStore = loadStoredContext();
 let settings: AppSettings = loadStoredSettings();
 let acpSession: AcpSession = defaultAcpSession();
+let automationRuns: AutomationRun[] = loadStoredAutomationRuns();
+let automationRuleProfile: AutomationRuleProfile = loadStoredAutomationRuleProfile();
+
+automationRuns
+  .filter((run) => run.status === "scheduled")
+  .forEach((run) => {
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => scheduleBrowserAutomationRun(run.id), 0);
+    }
+  });
 
 const stateListeners = new Set<StateListener>();
 const terminalListeners = new Set<TerminalListener>();
@@ -231,6 +259,16 @@ function loadStoredSettings(): AppSettings {
   }
 }
 
+function loadStoredTerminalState(): PersistedTerminalState | null {
+  const raw = window.localStorage.getItem(TERMINAL_STATE_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as PersistedTerminalState;
+  } catch {
+    return null;
+  }
+}
+
 function parsePositiveNumber(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
@@ -284,6 +322,99 @@ function normalizeSettings(value: unknown): AppSettings {
   };
 }
 
+function loadStoredAutomationRuns(): AutomationRun[] {
+  const raw = window.localStorage.getItem(AUTOMATION_RUNS_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as Partial<AutomationRun>[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((run) => ({
+      id: run.id ?? createId("auto-run"),
+      workspaceId: run.workspaceId ?? "",
+      projectRoot: run.projectRoot ?? "",
+      projectName: run.projectName ?? "workspace",
+      ruleProfileId: run.ruleProfileId ?? "safe-autonomy-v1",
+      status: (run.status as AutomationRunStatus | undefined) ?? "draft",
+      scheduledStartAt: run.scheduledStartAt ?? null,
+      startedAt: run.startedAt ?? null,
+      completedAt: run.completedAt ?? null,
+      summary: run.summary ?? null,
+      createdAt: run.createdAt ?? nowISO(),
+      updatedAt: run.updatedAt ?? nowISO(),
+      goals: (run.goals ?? []).map((goal, index) => ({
+        id: goal.id ?? createId("auto-goal"),
+        runId: goal.runId ?? run.id ?? createId("auto-run"),
+        title: goal.title ?? "Untitled goal",
+        goal: goal.goal ?? "",
+        expectedOutcome: goal.expectedOutcome ?? "",
+        status: (goal.status as AutomationGoalStatus | undefined) ?? "queued",
+        position: goal.position ?? index,
+        roundCount: goal.roundCount ?? 0,
+        consecutiveFailureCount: goal.consecutiveFailureCount ?? 0,
+        noProgressRounds: goal.noProgressRounds ?? 0,
+        ruleConfig: normalizeAutomationGoalRuleConfig(goal.ruleConfig ?? defaultAutomationRuleProfile()),
+        lastOwnerCli: goal.lastOwnerCli ?? null,
+        resultSummary: goal.resultSummary ?? null,
+        latestProgressSummary: goal.latestProgressSummary ?? null,
+        nextInstruction: goal.nextInstruction ?? null,
+        requiresAttentionReason: goal.requiresAttentionReason ?? null,
+        relevantFiles: goal.relevantFiles ?? [],
+        syntheticTerminalTabId: goal.syntheticTerminalTabId ?? createId("auto-tab"),
+        lastExitCode: goal.lastExitCode ?? null,
+        startedAt: goal.startedAt ?? null,
+        completedAt: goal.completedAt ?? null,
+        updatedAt: goal.updatedAt ?? nowISO(),
+      })),
+      events: run.events ?? [],
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function defaultAutomationRuleProfile(): AutomationRuleProfile {
+  return {
+    id: "safe-autonomy-v1",
+    label: "Safe Autonomy",
+    allowAutoSelectStrategy: true,
+    allowSafeWorkspaceEdits: true,
+    allowSafeChecks: true,
+    pauseOnCredentials: true,
+    pauseOnExternalInstalls: true,
+    pauseOnDestructiveCommands: true,
+    pauseOnGitPush: true,
+    maxRoundsPerGoal: 3,
+    maxConsecutiveFailures: 2,
+    maxNoProgressRounds: 1,
+  };
+}
+
+function normalizeAutomationRuleProfile(profile: AutomationRuleProfile): AutomationRuleProfile {
+  const defaults = defaultAutomationRuleProfile();
+  return {
+    ...defaults,
+    ...profile,
+    id: profile.id?.trim() ? profile.id : defaults.id,
+    label: profile.label?.trim() ? profile.label : defaults.label,
+    maxRoundsPerGoal: Math.min(8, Math.max(1, Number(profile.maxRoundsPerGoal) || defaults.maxRoundsPerGoal)),
+    maxConsecutiveFailures: Math.min(
+      5,
+      Math.max(1, Number(profile.maxConsecutiveFailures) || defaults.maxConsecutiveFailures)
+    ),
+    maxNoProgressRounds: Math.min(5, Math.max(0, Number(profile.maxNoProgressRounds) || defaults.maxNoProgressRounds)),
+  };
+}
+
+function loadStoredAutomationRuleProfile(): AutomationRuleProfile {
+  const raw = window.localStorage.getItem(AUTOMATION_RULE_KEY);
+  if (!raw) return defaultAutomationRuleProfile();
+  try {
+    return normalizeAutomationRuleProfile(JSON.parse(raw) as AutomationRuleProfile);
+  } catch {
+    return defaultAutomationRuleProfile();
+  }
+}
+
 function persist() {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
@@ -294,6 +425,18 @@ function persistContext() {
 
 function persistSettings() {
   window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function persistTerminalState(state: PersistedTerminalState) {
+  window.localStorage.setItem(TERMINAL_STATE_KEY, JSON.stringify(state));
+}
+
+function persistAutomationRuns() {
+  window.localStorage.setItem(AUTOMATION_RUNS_KEY, JSON.stringify(automationRuns));
+}
+
+function persistAutomationRuleProfile() {
+  window.localStorage.setItem(AUTOMATION_RULE_KEY, JSON.stringify(automationRuleProfile));
 }
 
 function nowTime() {
@@ -316,6 +459,164 @@ function basename(path: string) {
   const normalized = path.replace(/[\\/]+$/, "");
   const parts = normalized.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? path;
+}
+
+function pushAutomationEvent(
+  run: AutomationRun,
+  level: "info" | "success" | "warning" | "error",
+  title: string,
+  detail: string,
+  goalId?: string | null
+) {
+  run.events.unshift({
+    id: createId("auto-event"),
+    runId: run.id,
+    goalId: goalId ?? null,
+    level,
+    title,
+    detail,
+    createdAt: nowISO(),
+  });
+  run.events = run.events.slice(0, 200);
+}
+
+function deriveAutomationGoalTitle(raw: string) {
+  const compact = raw.replace(/\s+/g, " ").trim();
+  if (!compact) return "Untitled goal";
+  return compact.length <= 64 ? compact : `${compact.slice(0, 63).trimEnd()}…`;
+}
+
+function createAutomationGoal(runId: string, draft: AutomationGoalDraft, position: number): AutomationGoal {
+  return {
+    id: createId("auto-goal"),
+    runId,
+    title: draft.title?.trim() || deriveAutomationGoalTitle(draft.goal),
+    goal: draft.goal,
+    expectedOutcome: draft.expectedOutcome,
+    status: "queued",
+    position,
+    roundCount: 0,
+    consecutiveFailureCount: 0,
+    noProgressRounds: 0,
+    ruleConfig: normalizeAutomationGoalRuleConfig(draft.ruleConfig ?? defaultAutomationRuleProfile()),
+    lastOwnerCli: null,
+    resultSummary: null,
+    latestProgressSummary: null,
+    nextInstruction: null,
+    requiresAttentionReason: null,
+    relevantFiles: [],
+    syntheticTerminalTabId: createId("auto-tab"),
+    lastExitCode: null,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: nowISO(),
+  };
+}
+
+function normalizeAutomationGoalRuleConfig(config: AutomationGoalRuleConfig): AutomationGoalRuleConfig {
+  const defaults = defaultAutomationRuleProfile();
+  return {
+    allowAutoSelectStrategy: config.allowAutoSelectStrategy ?? defaults.allowAutoSelectStrategy,
+    allowSafeWorkspaceEdits: config.allowSafeWorkspaceEdits ?? defaults.allowSafeWorkspaceEdits,
+    allowSafeChecks: config.allowSafeChecks ?? defaults.allowSafeChecks,
+    pauseOnCredentials: config.pauseOnCredentials ?? defaults.pauseOnCredentials,
+    pauseOnExternalInstalls: config.pauseOnExternalInstalls ?? defaults.pauseOnExternalInstalls,
+    pauseOnDestructiveCommands: config.pauseOnDestructiveCommands ?? defaults.pauseOnDestructiveCommands,
+    pauseOnGitPush: config.pauseOnGitPush ?? defaults.pauseOnGitPush,
+    maxRoundsPerGoal: Math.min(8, Math.max(1, Number(config.maxRoundsPerGoal) || defaults.maxRoundsPerGoal)),
+    maxConsecutiveFailures: Math.min(5, Math.max(1, Number(config.maxConsecutiveFailures) || defaults.maxConsecutiveFailures)),
+    maxNoProgressRounds: Math.min(5, Math.max(0, Number(config.maxNoProgressRounds) || defaults.maxNoProgressRounds)),
+  };
+}
+
+function summarizeBrowserRun(run: AutomationRun) {
+  const completed = run.goals.filter((goal) => goal.status === "completed").length;
+  const failed = run.goals.filter((goal) => goal.status === "failed").length;
+  const paused = run.goals.filter((goal) => goal.status === "paused").length;
+  return `${completed}/${run.goals.length} completed • ${failed} failed • ${paused} paused`;
+}
+
+function inferBrowserGoalStatus(goal: AutomationGoal): AutomationGoalStatus {
+  const text = `${goal.goal}\n${goal.expectedOutcome}`.toLowerCase();
+  if (/approval|confirm|credential|login|manual/.test(text)) return "paused";
+  if (/fail|broken|error/.test(text)) return "failed";
+  return "completed";
+}
+
+function scheduleBrowserAutomationRun(runId: string) {
+  const run = automationRuns.find((item) => item.id === runId);
+  if (!run || run.status !== "scheduled") return;
+
+  const scheduledMs = run.scheduledStartAt ? Date.parse(run.scheduledStartAt) : Date.now();
+  const waitMs = Number.isFinite(scheduledMs) ? Math.max(0, scheduledMs - Date.now()) : 0;
+
+  window.setTimeout(() => {
+    const target = automationRuns.find((item) => item.id === runId);
+    if (!target || target.status !== "scheduled") return;
+    target.status = "running";
+    target.startedAt = target.startedAt ?? nowISO();
+    target.updatedAt = nowISO();
+    pushAutomationEvent(target, "info", "Run started", "Browser fallback started the automation run.");
+    persistAutomationRuns();
+
+    let offset = 400;
+    target.goals
+      .filter((goal) => goal.status === "queued")
+      .sort((left, right) => left.position - right.position)
+      .forEach((goal) => {
+        window.setTimeout(() => {
+          const liveRun = automationRuns.find((item) => item.id === runId);
+          const liveGoal = liveRun?.goals.find((item) => item.id === goal.id);
+          if (!liveRun || !liveGoal || liveRun.status === "cancelled") return;
+
+          const nextStatus = inferBrowserGoalStatus(liveGoal);
+          liveGoal.status = nextStatus;
+          liveGoal.roundCount = Math.min(automationRuleProfile.maxRoundsPerGoal, liveGoal.roundCount + 1);
+          liveGoal.lastOwnerCli = /ui|design|css|frontend/i.test(liveGoal.goal) ? "gemini" : "codex";
+          liveGoal.resultSummary =
+            nextStatus === "completed"
+              ? "Browser fallback marked this goal as completed."
+              : nextStatus === "paused"
+                ? "Browser fallback paused this goal for manual attention."
+                : "Browser fallback marked this goal as failed.";
+          liveGoal.latestProgressSummary = liveGoal.resultSummary;
+          liveGoal.nextInstruction = nextStatus === "completed" ? null : "Review this goal in the desktop runtime.";
+          liveGoal.requiresAttentionReason =
+            nextStatus === "paused" ? "Needs human review in browser fallback mode." : null;
+          liveGoal.lastExitCode = nextStatus === "completed" ? 0 : 1;
+          liveGoal.startedAt = liveGoal.startedAt ?? nowISO();
+          liveGoal.completedAt = nowISO();
+          liveGoal.updatedAt = nowISO();
+          pushAutomationEvent(
+            liveRun,
+            nextStatus === "completed" ? "success" : nextStatus === "paused" ? "warning" : "error",
+            nextStatus === "completed" ? "Goal completed" : nextStatus === "paused" ? "Goal paused" : "Goal failed",
+            liveGoal.resultSummary,
+            liveGoal.id
+          );
+
+          const remainingQueued = liveRun.goals.some((item) => item.status === "queued");
+          if (!remainingQueued) {
+            liveRun.status = liveRun.goals.some((item) => item.status === "paused")
+              ? "paused"
+              : liveRun.goals.some((item) => item.status === "failed")
+                ? "failed"
+                : "completed";
+            liveRun.completedAt = nowISO();
+            liveRun.summary = summarizeBrowserRun(liveRun);
+            pushAutomationEvent(
+              liveRun,
+              liveRun.status === "completed" ? "success" : "warning",
+              liveRun.status === "completed" ? "Run completed" : "Run finished",
+              liveRun.summary
+            );
+          }
+
+          persistAutomationRuns();
+        }, offset);
+        offset += 600;
+      });
+  }, waitMs);
 }
 
 function emitState() {
@@ -614,6 +915,144 @@ export const browserRuntime = {
     persistSettings();
     persistContext();
     return structuredClone(settings);
+  },
+
+  async loadTerminalState() {
+    return structuredClone(loadStoredTerminalState());
+  },
+
+  async saveTerminalState(nextState: PersistedTerminalState) {
+    persistTerminalState(nextState);
+  },
+  async switchCliForTask(_request: CliHandoffRequest) {
+    return;
+  },
+  async appendChatMessages(_request: ChatMessagesAppendRequest) {
+    return;
+  },
+  async updateChatMessageStream(_request: ChatMessageStreamUpdateRequest) {
+    return;
+  },
+  async finalizeChatMessage(_request: ChatMessageFinalizeRequest) {
+    return;
+  },
+  async deleteChatMessage(_request: ChatMessageDeleteRequest) {
+    return;
+  },
+  async deleteChatSessionByTab(_terminalTabId: string) {
+    return;
+  },
+  async updateChatMessageBlocks(_request: ChatMessageBlocksUpdateRequest) {
+    return;
+  },
+  async getAutomationRuleProfile() {
+    return structuredClone(automationRuleProfile);
+  },
+  async updateAutomationRuleProfile(profile: AutomationRuleProfile) {
+    automationRuleProfile = normalizeAutomationRuleProfile(profile);
+    persistAutomationRuleProfile();
+    return structuredClone(automationRuleProfile);
+  },
+  async updateAutomationGoalRuleConfig(goalId: string, ruleConfig: AutomationGoalRuleConfig) {
+    const run = automationRuns.find((item) => item.goals.some((goal) => goal.id === goalId));
+    const goal = run?.goals.find((item) => item.id === goalId);
+    if (!run || !goal) throw new Error("Automation goal not found.");
+    goal.ruleConfig = normalizeAutomationGoalRuleConfig(ruleConfig);
+    goal.updatedAt = nowISO();
+    pushAutomationEvent(run, "info", "目标规则已更新", "该目标的自动化规则已更新。", goalId);
+    persistAutomationRuns();
+    return structuredClone(run);
+  },
+  async listAutomationRuns() {
+    return structuredClone(automationRuns);
+  },
+  async createAutomationRun(request: CreateAutomationRunRequest) {
+    const runId = createId("auto-run");
+    const status: AutomationRunStatus = request.scheduledStartAt ? "scheduled" : "draft";
+    const run: AutomationRun = {
+      id: runId,
+      workspaceId: request.workspaceId,
+      projectRoot: request.projectRoot,
+      projectName: request.projectName,
+      ruleProfileId: request.ruleProfileId ?? "safe-autonomy-v1",
+      status,
+      scheduledStartAt: request.scheduledStartAt ?? null,
+      startedAt: null,
+      completedAt: null,
+      summary: null,
+      createdAt: nowISO(),
+      updatedAt: nowISO(),
+      goals: request.goals.map((goal, index) => createAutomationGoal(runId, goal, index)),
+      events: [],
+    };
+    pushAutomationEvent(
+      run,
+      "info",
+      "Run created",
+      status === "scheduled"
+        ? "Browser fallback queued the run for its scheduled start."
+        : "Browser fallback saved the run as a draft."
+    );
+    automationRuns = [run, ...automationRuns];
+    persistAutomationRuns();
+    if (status === "scheduled") {
+      scheduleBrowserAutomationRun(run.id);
+    }
+    return structuredClone(run);
+  },
+  async startAutomationRun(runId: string) {
+    const run = automationRuns.find((item) => item.id === runId);
+    if (!run) throw new Error("Automation run not found.");
+    run.status = "scheduled";
+    run.scheduledStartAt = nowISO();
+    run.updatedAt = nowISO();
+    pushAutomationEvent(run, "info", "Run scheduled", "Browser fallback queued the run to start immediately.");
+    persistAutomationRuns();
+    scheduleBrowserAutomationRun(runId);
+    return structuredClone(run);
+  },
+  async pauseAutomationGoal(goalId: string) {
+    const run = automationRuns.find((item) => item.goals.some((goal) => goal.id === goalId));
+    const goal = run?.goals.find((item) => item.id === goalId);
+    if (!run || !goal) throw new Error("Automation goal not found.");
+    goal.status = "paused";
+    goal.requiresAttentionReason = "Paused manually.";
+    goal.updatedAt = nowISO();
+    run.status = "paused";
+    run.updatedAt = nowISO();
+    pushAutomationEvent(run, "warning", "Goal paused", "Browser fallback paused the selected goal.", goalId);
+    persistAutomationRuns();
+    return structuredClone(run);
+  },
+  async resumeAutomationGoal(goalId: string) {
+    const run = automationRuns.find((item) => item.goals.some((goal) => goal.id === goalId));
+    const goal = run?.goals.find((item) => item.id === goalId);
+    if (!run || !goal) throw new Error("Automation goal not found.");
+    goal.status = "queued";
+    goal.requiresAttentionReason = null;
+    goal.updatedAt = nowISO();
+    run.status = "scheduled";
+    run.scheduledStartAt = nowISO();
+    run.updatedAt = nowISO();
+    pushAutomationEvent(run, "info", "Goal resumed", "Browser fallback re-queued the paused goal.", goalId);
+    persistAutomationRuns();
+    scheduleBrowserAutomationRun(run.id);
+    return structuredClone(run);
+  },
+  async cancelAutomationRun(runId: string) {
+    const run = automationRuns.find((item) => item.id === runId);
+    if (!run) throw new Error("Automation run not found.");
+    run.status = "cancelled";
+    run.completedAt = nowISO();
+    run.updatedAt = nowISO();
+    run.goals = run.goals.map((goal) =>
+      goal.status === "completed" || goal.status === "failed"
+        ? goal
+        : { ...goal, status: "cancelled", updatedAt: nowISO(), completedAt: nowISO() }
+    );
+    pushAutomationEvent(run, "warning", "Run cancelled", "Browser fallback cancelled the automation run.");
+    persistAutomationRuns();
+    return structuredClone(run);
   },
 
   async sendChatMessage(request: ChatPromptRequest) {

@@ -4,6 +4,7 @@ import { useStore } from "../lib/store";
 const navItems = [
   { to: "/", label: "Dashboard", icon: DashboardIcon },
   { to: "/terminal", label: "Terminal", icon: TerminalIcon },
+  { to: "/automation", label: "自动化", icon: AutomationIcon },
   { to: "/handoff", label: "Handoff", icon: HandoffIcon },
 ];
 
@@ -84,6 +85,16 @@ function HandoffIcon() {
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M2 8h12" />
       <path d="M10 4l4 4-4 4" />
+    </svg>
+  );
+}
+
+function AutomationIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 3.5h10v3H3z" />
+      <path d="M5 8.5h6v4H5z" />
+      <path d="M8 6.5v2" />
     </svg>
   );
 }

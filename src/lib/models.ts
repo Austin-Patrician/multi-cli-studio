@@ -223,6 +223,112 @@ export interface AppSettings {
   notifyOnTerminalCompletion: boolean;
 }
 
+export type AutomationRunStatus =
+  | "draft"
+  | "scheduled"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type AutomationGoalStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type AutomationEventLevel = "info" | "success" | "warning" | "error";
+
+export interface AutomationGoalDraft {
+  title?: string | null;
+  goal: string;
+  expectedOutcome: string;
+  ruleConfig?: AutomationGoalRuleConfig | null;
+}
+
+export interface AutomationEvent {
+  id: string;
+  runId: string;
+  goalId?: string | null;
+  level: AutomationEventLevel;
+  title: string;
+  detail: string;
+  createdAt: string;
+}
+
+export interface AutomationGoal {
+  id: string;
+  runId: string;
+  title: string;
+  goal: string;
+  expectedOutcome: string;
+  status: AutomationGoalStatus;
+  position: number;
+  roundCount: number;
+  consecutiveFailureCount: number;
+  noProgressRounds: number;
+  ruleConfig: AutomationGoalRuleConfig;
+  lastOwnerCli?: AgentId | null;
+  resultSummary?: string | null;
+  latestProgressSummary?: string | null;
+  nextInstruction?: string | null;
+  requiresAttentionReason?: string | null;
+  relevantFiles: string[];
+  syntheticTerminalTabId: string;
+  lastExitCode?: number | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  updatedAt: string;
+}
+
+export interface AutomationRun {
+  id: string;
+  workspaceId: string;
+  projectRoot: string;
+  projectName: string;
+  ruleProfileId: string;
+  status: AutomationRunStatus;
+  scheduledStartAt?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  summary?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  goals: AutomationGoal[];
+  events: AutomationEvent[];
+}
+
+export interface AutomationGoalRuleConfig {
+  allowAutoSelectStrategy: boolean;
+  allowSafeWorkspaceEdits: boolean;
+  allowSafeChecks: boolean;
+  pauseOnCredentials: boolean;
+  pauseOnExternalInstalls: boolean;
+  pauseOnDestructiveCommands: boolean;
+  pauseOnGitPush: boolean;
+  maxRoundsPerGoal: number;
+  maxConsecutiveFailures: number;
+  maxNoProgressRounds: number;
+}
+
+export interface AutomationRuleProfile {
+  id: string;
+  label: string;
+}
+export interface AutomationRuleProfile extends AutomationGoalRuleConfig {}
+
+export interface CreateAutomationRunRequest {
+  workspaceId: string;
+  projectRoot: string;
+  projectName: string;
+  scheduledStartAt?: string | null;
+  ruleProfileId?: string | null;
+  goals: AutomationGoalDraft[];
+}
+
 // ── New chat types ──────────────────────────────────────────────────────
 
 /** A single chat message in the unified conversation */
@@ -253,12 +359,66 @@ export interface ConversationSession {
   updatedAt: string;
 }
 
+export interface PersistedTerminalState {
+  workspaces: WorkspaceRef[];
+  terminalTabs: TerminalTab[];
+  activeTerminalTabId: string | null;
+  chatSessions: Record<string, ConversationSession>;
+}
+
+export interface ChatSessionSeed {
+  terminalTabId: string;
+  session: ConversationSession;
+  messages: ChatMessage[];
+}
+
+export interface ChatMessagesAppendRequest {
+  seeds: ChatSessionSeed[];
+}
+
+export interface ChatMessageStreamUpdateRequest {
+  terminalTabId: string;
+  messageId: string;
+  rawContent: string;
+  content: string;
+  contentFormat?: ChatMessage["contentFormat"];
+  blocks?: ChatMessageBlock[] | null;
+  updatedAt: string;
+}
+
+export interface ChatMessageFinalizeRequest {
+  terminalTabId: string;
+  messageId: string;
+  rawContent: string;
+  content: string;
+  contentFormat?: ChatMessage["contentFormat"];
+  blocks?: ChatMessageBlock[] | null;
+  transportKind?: AgentTransportKind | null;
+  transportSession?: AgentTransportSession | null;
+  exitCode: number | null;
+  durationMs: number | null;
+  updatedAt: string;
+}
+
+export interface ChatMessageDeleteRequest {
+  terminalTabId: string;
+  messageId: string;
+}
+
+export interface ChatMessageBlocksUpdateRequest {
+  messageId: string;
+  blocks?: ChatMessageBlock[] | null;
+}
+
 /** Replaces AgentPromptRequest for chat */
 export interface ChatPromptRequest {
   cliId: AgentId;
   terminalTabId: string;
+  workspaceId: string;
+  assistantMessageId: string;
   prompt: string;
   projectRoot: string;
+  projectName: string;
   recentTurns: ChatContextTurn[];
   writeMode: boolean;
   planMode: boolean;
@@ -271,14 +431,30 @@ export interface ChatPromptRequest {
 
 export interface AutoOrchestrationRequest {
   terminalTabId: string;
+  workspaceId: string;
+  assistantMessageId: string;
   prompt: string;
   projectRoot: string;
+  projectName: string;
   recentTurns: ChatContextTurn[];
   planMode: boolean;
   fastMode: boolean;
   effortLevel: string | null;
   modelOverrides?: Partial<Record<AgentId, string>>;
   permissionOverrides?: Partial<Record<AgentId, string>>;
+}
+
+export interface CliHandoffRequest {
+  terminalTabId: string;
+  workspaceId: string;
+  projectRoot: string;
+  projectName: string;
+  fromCli: AgentId;
+  toCli: AgentId;
+  reason?: string | null;
+  latestUserPrompt?: string | null;
+  latestAssistantSummary?: string | null;
+  relevantFiles?: string[];
 }
 
 export type AssistantApprovalDecision = "allowOnce" | "allowAlways" | "deny";

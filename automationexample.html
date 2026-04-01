@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>自动化 - 极简控制台</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Lucide 图标库 -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* 自定义开关样式 */
+        .toggle-checkbox:checked {
+            right: 0;
+            border-color: #10B981; /* 激活时的绿色 */
+        }
+        .toggle-checkbox:checked + .toggle-label {
+            background-color: #10B981;
+        }
+        .toggle-checkbox {
+            right: 0;
+            z-index: 1;
+            border-color: #e5e7eb;
+            transition: all 0.3s;
+        }
+        .toggle-label {
+            width: 2.25rem;
+            height: 1.25rem;
+            background-color: #e5e7eb;
+            border-radius: 9999px;
+            position: relative;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .toggle-checkbox:checked {
+            transform: translateX(100%);
+        }
+    </style>
+</head>
+<body class="bg-[#FCFCFC] text-gray-800 font-sans antialiased min-h-screen selection:bg-gray-200">
+
+    <!-- 顶部导航栏 (极简) -->
+    <nav class="border-b border-gray-100 bg-white">
+        <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+            <div class="flex items-center space-x-2 text-gray-900 font-medium">
+                <i data-lucide="layers" class="w-5 h-5"></i>
+                <span>我的工作台</span>
+            </div>
+            <div class="flex items-center space-x-4 text-sm text-gray-500">
+                <a href="#" class="hover:text-gray-900 transition-colors">概览</a>
+                <a href="#" class="text-gray-900 font-medium">自动化</a>
+                <a href="#" class="hover:text-gray-900 transition-colors">设置</a>
+                <div class="w-8 h-8 rounded-full bg-gray-200 border border-gray-300 ml-4 flex items-center justify-center text-xs">管理员</div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- 主内容区 -->
+    <main class="max-w-6xl mx-auto px-6 py-10">
+        
+        <!-- 页面头部 -->
+        <header class="flex flex-col md:flex-row md:items-end justify-between mb-8">
+            <div>
+                <h1 class="text-2xl font-semibold text-gray-900 tracking-tight">自动化规则</h1>
+                <p class="text-sm text-gray-500 mt-1">管理您的后台工作流、定时任务与事件响应触发器。</p>
+            </div>
+            <div class="mt-4 md:mt-0 flex items-center space-x-3">
+                <div class="relative">
+                    <i data-lucide="search" class="w-4 h-4 text-gray-400 absolute left-3 top-1/2 transform -translate-y-1/2"></i>
+                    <input type="text" placeholder="搜索规则..." class="pl-9 pr-4 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-gray-200 focus:border-gray-300 w-64 bg-white transition-all">
+                </div>
+                <button class="bg-gray-900 hover:bg-gray-800 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center shadow-sm">
+                    <i data-lucide="plus" class="w-4 h-4 mr-1"></i>
+                    新建规则
+                </button>
+            </div>
+        </header>
+
+        <!-- 状态过滤器 (极简的文字标签，非大号Tab) -->
+        <div class="flex items-center space-x-6 border-b border-gray-100 mb-6 pb-3 text-sm">
+            <button class="text-gray-900 font-medium border-b-2 border-gray-900 pb-3 -mb-[14px]">全部 (12)</button>
+            <button class="text-gray-500 hover:text-gray-800 transition-colors pb-3 -mb-[14px]">运行中 (8)</button>
+            <button class="text-gray-500 hover:text-gray-800 transition-colors pb-3 -mb-[14px]">已停用 (3)</button>
+            <button class="text-red-500 hover:text-red-600 transition-colors pb-3 -mb-[14px]">异常 (1)</button>
+        </div>
+
+        <!-- 极简列表容器 (无明显卡片阴影，仅用细边框隔离) -->
+        <div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+            
+            <!-- 列表表头 -->
+            <div class="grid grid-cols-12 gap-4 px-6 py-3 bg-gray-50/50 border-b border-gray-100 text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <div class="col-span-1 flex items-center">状态</div>
+                <div class="col-span-3">规则信息</div>
+                <div class="col-span-3">触发条件</div>
+                <div class="col-span-3">执行动作</div>
+                <div class="col-span-2 text-right">最近运行 / 操作</div>
+            </div>
+
+            <!-- 列表项分组 -->
+            <ul class="divide-y divide-gray-100">
+                
+                <!-- 行项 1 -->
+                <li class="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-gray-50/80 transition-colors group">
+                    <!-- 状态开关 -->
+                    <div class="col-span-1">
+                        <div class="relative inline-block w-9 align-middle select-none transition duration-200 ease-in">
+                            <input type="checkbox" name="toggle" id="toggle1" class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 appearance-none cursor-pointer" checked/>
+                            <label for="toggle1" class="toggle-label block overflow-hidden h-5 rounded-full bg-gray-300 cursor-pointer"></label>
+                        </div>
+                    </div>
+                    <!-- 规则信息 -->
+                    <div class="col-span-3">
+                        <div class="text-sm font-medium text-gray-900">新用户欢迎邮件</div>
+                        <div class="text-xs text-gray-500 mt-0.5 truncate pr-4">当有新用户完成注册时发送 onboarding 邮件</div>
+                    </div>
+                    <!-- 触发条件 -->
+                    <div class="col-span-3 flex items-start space-x-2 text-sm text-gray-600">
+                        <i data-lucide="zap" class="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0"></i>
+                        <span>用户事件: 注册成功</span>
+                    </div>
+                    <!-- 执行动作 -->
+                    <div class="col-span-3 flex items-start space-x-2 text-sm text-gray-600">
+                        <i data-lucide="mail" class="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0"></i>
+                        <span>发送邮件: 欢迎模板 v2</span>
+                    </div>
+                    <!-- 操作与时间 -->
+                    <div class="col-span-2 flex flex-col items-end justify-center">
+                        <div class="text-xs text-gray-400 mb-1">10 分钟前</div>
+                        <div class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-2">
+                            <button class="p-1 text-gray-400 hover:text-gray-800 rounded transition-colors" title="编辑"><i data-lucide="edit-2" class="w-3.5 h-3.5"></i></button>
+                            <button class="p-1 text-gray-400 hover:text-gray-800 rounded transition-colors" title="运行记录"><i data-lucide="activity" class="w-3.5 h-3.5"></i></button>
+                            <button class="p-1 text-gray-400 hover:text-red-600 rounded transition-colors" title="删除"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+                        </div>
+                    </div>
+                </li>
+
+                <!-- 行项 2 -->
+                <li class="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-gray-50/80 transition-colors group">
+                    <div class="col-span-1">
+                        <div class="relative inline-block w-9 align-middle select-none transition duration-200 ease-in">
+                            <input type="checkbox" name="toggle" id="toggle2" class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 appearance-none cursor-pointer" checked/>
+                            <label for="toggle2" class="toggle-label block overflow-hidden h-5 rounded-full bg-gray-300 cursor-pointer"></label>
+                        </div>
+                    </div>
+                    <div class="col-span-3">
+                        <div class="text-sm font-medium text-gray-900">核心数据库每日备份</div>
+                        <div class="text-xs text-gray-500 mt-0.5 truncate pr-4">备份生产环境数据库至 S3 存储桶</div>
+                    </div>
+                    <div class="col-span-3 flex items-start space-x-2 text-sm text-gray-600">
+                        <i data-lucide="clock" class="w-4 h-4 text-indigo-500 mt-0.5 flex-shrink-0"></i>
+                        <span>定时任务: 每天 02:00</span>
+                    </div>
+                    <div class="col-span-3 flex items-start space-x-2 text-sm text-gray-600">
+                        <i data-lucide="database" class="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0"></i>
+                        <span>执行脚本: db_backup.sh</span>
+                    </div>
+                    <div class="col-span-2 flex flex-col items-end justify-center">
+                        <div class="text-xs text-gray-400 mb-1">今天 02:00</div>
+                        <div class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-2">
+                            <button class="p-1 text-gray-400 hover:text-gray-800 rounded transition-colors"><i data-lucide="edit-2" class="w-3.5 h-3.5"></i></button>
+                            <button class="p-1 text-gray-400 hover:text-gray-800 rounded transition-colors"><i data-lucide="activity" class="w-3.5 h-3.5"></i></button>
+                            <button class="p-1 text-gray-400 hover:text-red-600 rounded transition-colors"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+                        </div>
+                    </div>
+                </li>
+
+                <!-- 行项 3 (停用状态) -->
+                <li class="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-gray-50/80 transition-colors group opacity-75">
+                    <div class="col-span-1">
+                        <div class="relative inline-block w-9 align-middle select-none transition duration-200 ease-in">
+                            <input type="checkbox" name="toggle" id="toggle3" class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 appearance-none cursor-pointer"/>
+                            <label for="toggle3" class="toggle-label block overflow-hidden h-5 rounded-full bg-gray-300 cursor-pointer"></label>
+                        </div>
+                    </div>
+                    <div class="col-span-3">
+                        <div class="text-sm font-medium text-gray-500">闲置资源自动回收</div>
+                        <div class="text-xs text-gray-400 mt-0.5 truncate pr-4">清理超过 30 天未使用的沙箱实例</div>
+                    </div>
+                    <div class="col-span-3 flex items-start space-x-2 text-sm text-gray-500">
+                        <i data-lucide="clock" class="w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0"></i>
+                        <span>定时任务: 每周日 00:00</span>
+                    </div>
+                    <div class="col-span-3 flex items-start space-x-2 text-sm text-gray-500">
+                        <i data-lucide="server" class="w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0"></i>
+                        <span>调用 API: TerminateInstance</span>
+                    </div>
+                    <div class="col-span-2 flex flex-col items-end justify-center">
+                        <div class="text-xs text-gray-400 mb-1">-</div>
+                        <div class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-2">
+                            <button class="p-1 text-gray-400 hover:text-gray-800 rounded transition-colors"><i data-lucide="edit-2" class="w-3.5 h-3.5"></i></button>
+                            <button class="p-1 text-gray-400 hover:text-gray-800 rounded transition-colors"><i data-lucide="activity" class="w-3.5 h-3.5"></i></button>
+                            <button class="p-1 text-gray-400 hover:text-red-600 rounded transition-colors"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+                        </div>
+                    </div>
+                </li>
+
+                <!-- 行项 4 (异常状态) -->
+                <li class="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-gray-50/80 transition-colors group bg-red-50/30">
+                    <div class="col-span-1">
+                        <div class="relative inline-block w-9 align-middle select-none transition duration-200 ease-in">
+                            <input type="checkbox" name="toggle" id="toggle4" class="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 appearance-none cursor-pointer" checked/>
+                            <label for="toggle4" class="toggle-label block overflow-hidden h-5 rounded-full bg-gray-300 cursor-pointer"></label>
+                        </div>
+                    </div>
+                    <div class="col-span-3">
+                        <div class="text-sm font-medium text-gray-900 flex items-center">
+                            支付失败预警 
+                            <span class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-100 text-red-800">执行失败</span>
+                        </div>
+                        <div class="text-xs text-gray-500 mt-0.5 truncate pr-4">支付接口调用失败时通知开发组</div>
+                    </div>
+                    <div class="col-span-3 flex items-start space-x-2 text-sm text-gray-600">
+                        <i data-lucide="alert-circle" class="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0"></i>
+                        <span>系统警报: 错误率 > 5%</span>
+                    </div>
+                    <div class="col-span-3 flex items-start space-x-2 text-sm text-gray-600">
+                        <i data-lucide="message-square" class="w-4 h-4 text-teal-500 mt-0.5 flex-shrink-0"></i>
+                        <span>发送消息: 飞书群组</span>
+                    </div>
+                    <div class="col-span-2 flex flex-col items-end justify-center">
+                        <div class="text-xs text-red-500 mb-1 font-medium">刚刚</div>
+                        <div class="opacity-0 group-hover:opacity-100 transition-opacity flex items-center space-x-2">
+                            <button class="p-1 text-gray-400 hover:text-gray-800 rounded transition-colors"><i data-lucide="edit-2" class="w-3.5 h-3.5"></i></button>
+                            <button class="p-1 text-red-500 hover:text-red-700 rounded transition-colors" title="查看错误日志"><i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i></button>
+                            <button class="p-1 text-gray-400 hover:text-red-600 rounded transition-colors"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+                        </div>
+                    </div>
+                </li>
+
+            </ul>
+        </div>
+        
+        <!-- 分页 (极简) -->
+        <div class="flex items-center justify-between mt-6 text-sm text-gray-500">
+            <div>显示 1 到 4 条，共 12 条规则</div>
+            <div class="flex space-x-1">
+                <button class="px-3 py-1 border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-50" disabled>上一页</button>
+                <button class="px-3 py-1 border border-gray-200 rounded hover:bg-gray-50">下一页</button>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- 初始化 Icons -->
+    <script>
+        lucide.createIcons();
+    </script>
+</body>
+</html>

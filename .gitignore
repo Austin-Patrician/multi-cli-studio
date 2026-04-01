@@ -4,3 +4,5 @@ dist
 .vite
 *.log
 src-tauri/target
+
+claude-code-main

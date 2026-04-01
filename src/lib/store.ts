@@ -16,6 +16,7 @@ import {
   ConversationSession,
   FileMentionCandidate,
   GitPanelData,
+  PersistedTerminalState,
   TerminalCliId,
   TerminalLine,
   TerminalTab,
@@ -229,13 +230,6 @@ function cloneConversationMessages(messages: ChatMessage[]) {
     }));
 }
 
-interface PersistedTerminalState {
-  workspaces: WorkspaceRef[];
-  terminalTabs: TerminalTab[];
-  activeTerminalTabId: string | null;
-  chatSessions: Record<string, ConversationSession>;
-}
-
 type PersistableTerminalState = Pick<
   PersistedTerminalState,
   "workspaces" | "terminalTabs" | "activeTerminalTabId" | "chatSessions"
@@ -243,8 +237,12 @@ type PersistableTerminalState = Pick<
 
 let draftPromptPersistTimer: number | null = null;
 let streamingRecoveryInterval: number | null = null;
+let terminalStatePersistInFlight = false;
+let queuedTerminalState: PersistedTerminalState | null = null;
+let messagePersistenceInFlight = false;
+const queuedMessagePersistence: Array<() => Promise<void>> = [];
 
-function loadPersistedTerminalState(): PersistedTerminalState | null {
+function loadLegacyPersistedTerminalState(): PersistedTerminalState | null {
   if (typeof window === "undefined") return null;
   const raw = window.localStorage.getItem(TERMINAL_STATE_KEY);
   if (!raw) return null;
@@ -255,20 +253,54 @@ function loadPersistedTerminalState(): PersistedTerminalState | null {
   }
 }
 
+async function flushTerminalStatePersistence() {
+  while (queuedTerminalState) {
+    const snapshot = queuedTerminalState;
+    queuedTerminalState = null;
+    try {
+      await bridge.saveTerminalState(snapshot);
+    } catch {
+      // backend persistence is best-effort; in-memory state remains authoritative for this runtime
+    }
+  }
+  terminalStatePersistInFlight = false;
+}
+
+async function flushMessagePersistenceQueue() {
+  while (queuedMessagePersistence.length > 0) {
+    const next = queuedMessagePersistence.shift();
+    if (!next) continue;
+    try {
+      await next();
+    } catch {
+      // message persistence is best-effort; UI state remains available for the active runtime
+    }
+  }
+  messagePersistenceInFlight = false;
+}
+
+function enqueueMessagePersistence(operation: () => Promise<void>) {
+  queuedMessagePersistence.push(operation);
+  if (messagePersistenceInFlight) return;
+  messagePersistenceInFlight = true;
+  void flushMessagePersistenceQueue();
+}
+
 function persistTerminalState(
   workspaces: WorkspaceRef[],
   terminalTabs: TerminalTab[],
   activeTerminalTabId: string | null,
   chatSessions: Record<string, ConversationSession>
 ) {
-  if (typeof window === "undefined") return;
-  const payload: PersistedTerminalState = {
+  queuedTerminalState = {
     workspaces,
     terminalTabs,
     activeTerminalTabId,
     chatSessions,
   };
-  window.localStorage.setItem(TERMINAL_STATE_KEY, JSON.stringify(payload));
+  if (terminalStatePersistInFlight) return;
+  terminalStatePersistInFlight = true;
+  void flushTerminalStatePersistence();
 }
 
 function scheduleDraftPromptPersistence(getState: () => PersistableTerminalState) {
@@ -558,6 +590,54 @@ function buildRecentTabContextTurns(
   return turns.slice(-limit);
 }
 
+function extractLatestTaskContext(
+  messages: ChatMessage[],
+  fallbackCli: AgentId
+): {
+  latestUserPrompt: string | null;
+  latestAssistantSummary: string | null;
+  relevantFiles: string[];
+} {
+  let latestUserPrompt: string | null = null;
+  let latestAssistantSummary: string | null = null;
+  let relevantFiles: string[] = [];
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      !latestAssistantSummary &&
+      message.role === "assistant" &&
+      !message.isStreaming &&
+      (!message.exitCode || message.exitCode === 0)
+    ) {
+      latestAssistantSummary = summarizeForContext(message.rawContent ?? message.content);
+      relevantFiles =
+        message.blocks
+          ?.filter(
+            (block): block is Extract<ChatMessageBlock, { kind: "fileChange" }> =>
+              block.kind === "fileChange"
+          )
+          .map((block) => block.path) ?? [];
+
+      for (let userIndex = index - 1; userIndex >= 0; userIndex -= 1) {
+        const candidate = messages[userIndex];
+        if (candidate.role === "user") {
+          latestUserPrompt = candidate.content;
+          break;
+        }
+      }
+      break;
+    }
+  }
+
+  if (!latestUserPrompt) {
+    const latestUser = [...messages].reverse().find((message) => message.role === "user");
+    latestUserPrompt = latestUser?.content ?? null;
+  }
+
+  return { latestUserPrompt, latestAssistantSummary, relevantFiles };
+}
+
 function resolveStreamingAssistantMessageId(
   session: ConversationSession,
   messageId: string
@@ -607,6 +687,18 @@ function appendSystemMessageToSession(
       ],
       updatedAt: nowIso(),
     },
+  };
+}
+
+function toPersistedSessionSeed(
+  session: ConversationSession,
+  terminalTabId: string,
+  messages: ChatMessage[]
+) {
+  return {
+    terminalTabId,
+    session,
+    messages,
   };
 }
 
@@ -755,17 +847,40 @@ export const useStore = create<StoreState>((set, get) => ({
   setBusyAction: (action) => set({ busyAction: action }),
 
   appendChatSystemMessage: (tabId, cliId, content, exitCode = 0) => {
+    const message: ChatMessage = {
+      id: createId("msg"),
+      role: "system",
+      cliId,
+      timestamp: nowIso(),
+      content,
+      transportKind: defaultTransportKind(cliId),
+      blocks: null,
+      isStreaming: false,
+      durationMs: null,
+      exitCode,
+    };
     set((state) => {
-      const chatSessions = appendSystemMessageToSession(
-        state.chatSessions,
-        tabId,
-        cliId,
-        content,
-        exitCode
-      );
+      const session = state.chatSessions[tabId];
+      if (!session) return {};
+      const chatSessions = {
+        ...state.chatSessions,
+        [tabId]: {
+          ...session,
+          messages: [...session.messages, message],
+          updatedAt: message.timestamp,
+        },
+      };
       persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
       return { chatSessions };
     });
+    const session = get().chatSessions[tabId];
+    if (session) {
+      enqueueMessagePersistence(() =>
+        bridge.appendChatMessages({
+          seeds: [toPersistedSessionSeed(session, tabId, [message])],
+        })
+      );
+    }
   },
 
   deleteChatMessage: (tabId, messageId) => {
@@ -790,6 +905,12 @@ export const useStore = create<StoreState>((set, get) => ({
       persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
       return { chatSessions };
     });
+    enqueueMessagePersistence(() =>
+      bridge.deleteChatMessage({
+        terminalTabId: tabId,
+        messageId,
+      })
+    );
   },
 
   loadInitialState: async (projectRoot) => {
@@ -798,8 +919,9 @@ export const useStore = create<StoreState>((set, get) => ({
     let terminalTabs: TerminalTab[] = [];
     let chatSessions: Record<string, ConversationSession> = {};
     let activeTerminalTabId: string | null = null;
+    let shouldSeedSessions = false;
 
-    const persisted = loadPersistedTerminalState();
+    const persisted = (await bridge.loadTerminalState()) ?? loadLegacyPersistedTerminalState();
     if (persisted && persisted.workspaces.length > 0 && persisted.terminalTabs.length > 0) {
       workspaces = persisted.workspaces;
       terminalTabs = persisted.terminalTabs.map((tab) =>
@@ -834,6 +956,7 @@ export const useStore = create<StoreState>((set, get) => ({
       terminalTabs = [tab];
       activeTerminalTabId = tab.id;
       chatSessions = { [tab.id]: session };
+      shouldSeedSessions = true;
     }
 
     workspaces = workspaces.map((workspace) => {
@@ -902,6 +1025,12 @@ export const useStore = create<StoreState>((set, get) => ({
     });
 
     persistTerminalState(workspaces, terminalTabs, activeTerminalTabId, chatSessions);
+    if (shouldSeedSessions) {
+      const seeds = Object.entries(chatSessions).map(([terminalTabId, session]) =>
+        toPersistedSessionSeed(session, terminalTabId, session.messages)
+      );
+      enqueueMessagePersistence(() => bridge.appendChatMessages({ seeds }));
+    }
     syncStreamingRecoveryWatch(
       () => {
         const current = get();
@@ -1054,6 +1183,14 @@ export const useStore = create<StoreState>((set, get) => ({
       persistTerminalState(workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
       return { workspaces, chatSessions, appState };
     });
+    const session = get().chatSessions[activeTab.id];
+    if (session) {
+      enqueueMessagePersistence(() =>
+        bridge.appendChatMessages({
+          seeds: [toPersistedSessionSeed(session, activeTab.id, [systemMessage])],
+        })
+      );
+    }
   },
 
   runChecks: async () => {
@@ -1090,6 +1227,14 @@ export const useStore = create<StoreState>((set, get) => ({
       );
       return { busyAction: "checks", chatSessions };
     });
+    const seededSession = get().chatSessions[activeTab.id];
+    if (seededSession) {
+      enqueueMessagePersistence(() =>
+        bridge.appendChatMessages({
+          seeds: [toPersistedSessionSeed(seededSession, activeTab.id, [intro])],
+        })
+      );
+    }
 
     try {
       await bridge.runChecks(workspace.rootPath, effectiveCli, activeTab.id);
@@ -1147,6 +1292,11 @@ export const useStore = create<StoreState>((set, get) => ({
         chatSessions,
       };
     });
+    enqueueMessagePersistence(() =>
+      bridge.appendChatMessages({
+        seeds: [toPersistedSessionSeed(session, tab.id, session.messages)],
+      })
+    );
 
     await get().loadGitPanel(workspace.id, workspace.rootPath);
   },
@@ -1181,6 +1331,11 @@ export const useStore = create<StoreState>((set, get) => ({
         chatSessions,
       };
     });
+    enqueueMessagePersistence(() =>
+      bridge.appendChatMessages({
+        seeds: [toPersistedSessionSeed(session, tab.id, session.messages)],
+      })
+    );
   },
 
   cloneTerminalTab: (sourceTabId) => {
@@ -1224,6 +1379,11 @@ export const useStore = create<StoreState>((set, get) => ({
         chatSessions,
       };
     });
+    enqueueMessagePersistence(() =>
+      bridge.appendChatMessages({
+        seeds: [toPersistedSessionSeed(session, tab.id, session.messages)],
+      })
+    );
   },
 
   closeTerminalTab: (tabId) => {
@@ -1251,6 +1411,7 @@ export const useStore = create<StoreState>((set, get) => ({
         chatSessions,
       };
     });
+    enqueueMessagePersistence(() => bridge.deleteChatSessionByTab(tabId));
   },
 
   setActiveTerminalTab: (tabId) => {
@@ -1267,21 +1428,44 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setTabSelectedCli: (tabId, cliId) => {
+    const current = get();
+    const currentTab = current.terminalTabs.find((tab) => tab.id === tabId);
+    const workspace = current.workspaces.find((item) => item.id === currentTab?.workspaceId) ?? null;
+    const session = current.chatSessions[tabId] ?? null;
+    const fromCli = resolveTerminalCliId(currentTab?.selectedCli, workspace?.activeAgent ?? "codex");
+    const targetCli = cliId === "auto" ? null : cliId;
+
     set((state) => {
       const terminalTabs = state.terminalTabs.map((tab) =>
         tab.id === tabId ? { ...tab, selectedCli: cliId } : tab
       );
       const activeTab = terminalTabs.find((tab) => tab.id === tabId);
-      const workspaces = state.workspaces.map((workspace) =>
-        workspace.id === activeTab?.workspaceId && cliId !== "auto"
-          ? { ...workspace, activeAgent: cliId }
-          : workspace
+      const workspaces = state.workspaces.map((nextWorkspace) =>
+        nextWorkspace.id === activeTab?.workspaceId && cliId !== "auto"
+          ? { ...nextWorkspace, activeAgent: cliId }
+          : nextWorkspace
       );
       const appState = state.appState
         ? deriveActiveWorkspaceState(state.appState, workspaces, terminalTabs, state.activeTerminalTabId)
         : null;
       persistTerminalState(workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
       return { appState, workspaces, terminalTabs };
+    });
+
+    if (!workspace || !session || !targetCli || targetCli === fromCli) return;
+
+    const latest = extractLatestTaskContext(session.messages, fromCli);
+    void bridge.switchCliForTask({
+      terminalTabId: tabId,
+      workspaceId: workspace.id,
+      projectRoot: workspace.rootPath,
+      projectName: workspace.name,
+      fromCli,
+      toCli: targetCli,
+      reason: "manual-switch",
+      latestUserPrompt: latest.latestUserPrompt,
+      latestAssistantSummary: latest.latestAssistantSummary,
+      relevantFiles: latest.relevantFiles,
     });
   },
 
@@ -1310,6 +1494,7 @@ export const useStore = create<StoreState>((set, get) => ({
   togglePlanMode: (tabId) => {
     const targetTabId = tabId ?? get().activeTerminalTabId;
     if (!targetTabId) return;
+    let systemMessage: ChatMessage | null = null;
     set((state) => {
       const terminalTabs = state.terminalTabs.map((tab) =>
         tab.id === targetTabId ? { ...tab, planMode: !tab.planMode } : tab
@@ -1320,6 +1505,18 @@ export const useStore = create<StoreState>((set, get) => ({
         activeTab?.selectedCli,
         activeWorkspace?.activeAgent ?? "codex"
       );
+      if (activeTab) {
+        systemMessage = {
+          id: createId("msg"),
+          role: "system" as const,
+          cliId: effectiveCli,
+          timestamp: nowIso(),
+          content: `Plan mode: ${activeTab.planMode ? "ON" : "OFF"}`,
+          isStreaming: false,
+          durationMs: null,
+          exitCode: 0,
+        };
+      }
       const chatSessions = activeTab
         ? {
             ...state.chatSessions,
@@ -1327,16 +1524,7 @@ export const useStore = create<StoreState>((set, get) => ({
               ...state.chatSessions[targetTabId],
               messages: [
                 ...state.chatSessions[targetTabId].messages,
-                {
-                  id: createId("msg"),
-                  role: "system" as const,
-                  cliId: effectiveCli,
-                  timestamp: nowIso(),
-                  content: `Plan mode: ${activeTab.planMode ? "ON" : "OFF"}`,
-                  isStreaming: false,
-                  durationMs: null,
-                  exitCode: 0,
-                },
+                systemMessage!,
               ],
               updatedAt: nowIso(),
             },
@@ -1345,6 +1533,14 @@ export const useStore = create<StoreState>((set, get) => ({
       persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, chatSessions);
       return { terminalTabs, chatSessions };
     });
+    const session = get().chatSessions[targetTabId];
+    if (session && systemMessage) {
+      enqueueMessagePersistence(() =>
+        bridge.appendChatMessages({
+          seeds: [toPersistedSessionSeed(session, targetTabId, [systemMessage!])],
+        })
+      );
+    }
   },
 
   respondAutoRoute: async (tabId, action) => {
@@ -1375,11 +1571,7 @@ export const useStore = create<StoreState>((set, get) => ({
       action === "run" ? "accepted" : action === "switch" ? "switched" : "cancelled";
 
     set((state) => {
-      const terminalTabs = state.terminalTabs.map((item) =>
-        item.id === tabId && action === "switch"
-          ? { ...item, selectedCli: routeBlock.targetCli }
-          : item
-      );
+      const terminalTabs = state.terminalTabs;
       const chatSessions = {
         ...state.chatSessions,
         [tabId]: {
@@ -1403,20 +1595,26 @@ export const useStore = create<StoreState>((set, get) => ({
       persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, chatSessions);
       return { terminalTabs, chatSessions };
     });
+    const updatedMessage = get()
+      .chatSessions[tabId]
+      ?.messages.find((message) => message.id === pendingRoute.id);
+    if (updatedMessage) {
+      enqueueMessagePersistence(() =>
+        bridge.updateChatMessageBlocks({
+          messageId: updatedMessage.id,
+          blocks: updatedMessage.blocks ?? null,
+        })
+      );
+    }
 
     if (action === "run") {
-      set((state) => {
-        const terminalTabs = state.terminalTabs.map((item) =>
-          item.id === tabId ? { ...item, selectedCli: routeBlock.targetCli } : item
-        );
-        persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
-        return { terminalTabs };
-      });
+      get().setTabSelectedCli(tabId, routeBlock.targetCli);
       await get().sendChatMessage(tabId, pendingRoute.content);
       return;
     }
 
     if (action === "switch") {
+      get().setTabSelectedCli(tabId, routeBlock.targetCli);
       get().appendChatSystemMessage(
         tabId,
         routeBlock.targetCli,
@@ -1457,7 +1655,7 @@ export const useStore = create<StoreState>((set, get) => ({
         exitCode: null,
       };
       const pendingMessage: ChatMessage = {
-        id: createId("msg-pending"),
+        id: createId("msg"),
         role: "assistant",
         cliId: "claude",
         timestamp: nowIso(),
@@ -1498,6 +1696,14 @@ export const useStore = create<StoreState>((set, get) => ({
         persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
         return { busyAction: "chat", terminalTabs, chatSessions };
       });
+      const seededSession = get().chatSessions[tabId];
+      if (seededSession) {
+        enqueueMessagePersistence(() =>
+          bridge.appendChatMessages({
+            seeds: [toPersistedSessionSeed(seededSession, tabId, [userMessage, pendingMessage])],
+          })
+        );
+      }
 
       syncStreamingRecoveryWatch(
         () => {
@@ -1523,8 +1729,11 @@ export const useStore = create<StoreState>((set, get) => ({
       try {
         const messageId = await bridge.runAutoOrchestration({
           terminalTabId: tab.id,
+          workspaceId: workspace.id,
+          assistantMessageId: pendingMessage.id,
           prompt: text,
           projectRoot: workspace.rootPath,
+          projectName: workspace.name,
           recentTurns: buildRecentTabContextTurns(session.messages, "claude"),
           planMode: tab.planMode,
           fastMode: tab.fastMode,
@@ -1533,20 +1742,22 @@ export const useStore = create<StoreState>((set, get) => ({
           permissionOverrides: tab.permissionOverrides,
         });
 
-        set((current) => {
-          const chatSessions = {
-            ...current.chatSessions,
-            [tabId]: {
-              ...current.chatSessions[tabId],
-              messages: current.chatSessions[tabId].messages.map((message) =>
-                message.id === pendingMessage.id ? { ...message, id: messageId } : message
-              ),
-              updatedAt: nowIso(),
-            },
-          };
-          persistTerminalState(current.workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
-          return { chatSessions };
-        });
+        if (messageId !== pendingMessage.id) {
+          set((current) => {
+            const chatSessions = {
+              ...current.chatSessions,
+              [tabId]: {
+                ...current.chatSessions[tabId],
+                messages: current.chatSessions[tabId].messages.map((message) =>
+                  message.id === pendingMessage.id ? { ...message, id: messageId } : message
+                ),
+                updatedAt: nowIso(),
+              },
+            };
+            persistTerminalState(current.workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
+            return { chatSessions };
+          });
+        }
       } catch {
         set((current) => {
           const terminalTabs = current.terminalTabs.map((item) =>
@@ -1581,6 +1792,26 @@ export const useStore = create<StoreState>((set, get) => ({
           persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
           return { busyAction: null, terminalTabs, chatSessions };
         });
+        const failureSession = get().chatSessions[tabId];
+        const failureMessage =
+          failureSession?.messages.find((message) => message.id === pendingMessage.id) ?? null;
+        if (failureSession && failureMessage) {
+          enqueueMessagePersistence(() =>
+            bridge.finalizeChatMessage({
+              terminalTabId: tabId,
+              messageId: failureMessage.id,
+              rawContent: failureMessage.rawContent ?? failureMessage.content,
+              content: failureMessage.content,
+              contentFormat: failureMessage.contentFormat ?? null,
+              blocks: failureMessage.blocks ?? null,
+              transportKind: failureMessage.transportKind ?? null,
+              transportSession: null,
+              exitCode: failureMessage.exitCode,
+              durationMs: failureMessage.durationMs,
+              updatedAt: failureSession.updatedAt,
+            })
+          );
+        }
         syncStreamingRecoveryWatch(
           () => {
             const current = get();
@@ -1618,7 +1849,7 @@ export const useStore = create<StoreState>((set, get) => ({
         exitCode: null,
     };
     const pendingMessage: ChatMessage = {
-      id: createId("msg-pending"),
+      id: createId("msg"),
       role: "assistant",
       cliId: effectiveCli,
       timestamp: nowIso(),
@@ -1647,6 +1878,14 @@ export const useStore = create<StoreState>((set, get) => ({
       persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
       return { busyAction: "chat", terminalTabs, chatSessions };
     });
+    const seededSession = get().chatSessions[tabId];
+    if (seededSession) {
+      enqueueMessagePersistence(() =>
+        bridge.appendChatMessages({
+          seeds: [toPersistedSessionSeed(seededSession, tabId, [userMessage, pendingMessage])],
+        })
+      );
+    }
     syncStreamingRecoveryWatch(
       () => {
         const current = get();
@@ -1674,8 +1913,11 @@ export const useStore = create<StoreState>((set, get) => ({
       const messageId = await bridge.sendChatMessage({
         cliId: effectiveCli,
         terminalTabId: tab.id,
+        workspaceId: workspace.id,
+        assistantMessageId: pendingMessage.id,
         prompt: text,
         projectRoot: workspace.rootPath,
+        projectName: workspace.name,
         recentTurns,
         writeMode,
         planMode: tab.planMode,
@@ -1686,20 +1928,22 @@ export const useStore = create<StoreState>((set, get) => ({
         transportSession: tab.transportSessions[effectiveCli] ?? null,
       });
 
-      set((current) => {
-        const chatSessions = {
-          ...current.chatSessions,
-          [tabId]: {
-            ...current.chatSessions[tabId],
-            messages: current.chatSessions[tabId].messages.map((message) =>
-              message.id === pendingMessage.id ? { ...message, id: messageId } : message
-            ),
-            updatedAt: nowIso(),
-          },
-        };
-        persistTerminalState(current.workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
-        return { chatSessions };
-      });
+      if (messageId !== pendingMessage.id) {
+        set((current) => {
+          const chatSessions = {
+            ...current.chatSessions,
+            [tabId]: {
+              ...current.chatSessions[tabId],
+              messages: current.chatSessions[tabId].messages.map((message) =>
+                message.id === pendingMessage.id ? { ...message, id: messageId } : message
+              ),
+              updatedAt: nowIso(),
+            },
+          };
+          persistTerminalState(current.workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
+          return { chatSessions };
+        });
+      }
     } catch {
       set((current) => {
         const terminalTabs = current.terminalTabs.map((item) =>
@@ -1734,6 +1978,26 @@ export const useStore = create<StoreState>((set, get) => ({
         persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
         return { busyAction: null, terminalTabs, chatSessions };
       });
+      const failureSession = get().chatSessions[tabId];
+      const failureMessage =
+        failureSession?.messages.find((message) => message.id === pendingMessage.id) ?? null;
+      if (failureSession && failureMessage) {
+        enqueueMessagePersistence(() =>
+          bridge.finalizeChatMessage({
+            terminalTabId: tabId,
+            messageId: failureMessage.id,
+            rawContent: failureMessage.rawContent ?? failureMessage.content,
+            content: failureMessage.content,
+            contentFormat: failureMessage.contentFormat ?? null,
+            blocks: failureMessage.blocks ?? null,
+            transportKind: failureMessage.transportKind ?? null,
+            transportSession: null,
+            exitCode: failureMessage.exitCode,
+            durationMs: failureMessage.durationMs,
+            updatedAt: failureSession.updatedAt,
+          })
+        );
+      }
       syncStreamingRecoveryWatch(
         () => {
           const current = get();
@@ -1785,6 +2049,23 @@ export const useStore = create<StoreState>((set, get) => ({
       };
       return { chatSessions };
     });
+    const session = get().chatSessions[tabId];
+    if (!session) return;
+    const targetMessageId = resolveStreamingAssistantMessageId(session, messageId);
+    if (!targetMessageId) return;
+    const message = session.messages.find((item) => item.id === targetMessageId);
+    if (!message) return;
+    enqueueMessagePersistence(() =>
+      bridge.updateChatMessageStream({
+        terminalTabId: tabId,
+        messageId: targetMessageId,
+        rawContent: message.rawContent ?? message.content,
+        content: message.content,
+        contentFormat: message.contentFormat ?? null,
+        blocks: message.blocks ?? null,
+        updatedAt: session.updatedAt,
+      })
+    );
   },
 
   finalizeStream: (
@@ -1862,6 +2143,30 @@ export const useStore = create<StoreState>((set, get) => ({
       persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, chatSessions);
       return { busyAction: null, terminalTabs, chatSessions };
     });
+    const session = get().chatSessions[tabId];
+    if (session) {
+      const targetMessageId = resolveStreamingAssistantMessageId(session, messageId);
+      const message = targetMessageId
+        ? session.messages.find((item) => item.id === targetMessageId) ?? null
+        : null;
+      if (message) {
+        enqueueMessagePersistence(() =>
+          bridge.finalizeChatMessage({
+            terminalTabId: tabId,
+            messageId: message.id,
+            rawContent: message.rawContent ?? message.content,
+            content: message.content,
+            contentFormat: message.contentFormat ?? null,
+            blocks: message.blocks ?? null,
+            transportKind: message.transportKind ?? null,
+            transportSession: transportSession ?? null,
+            exitCode,
+            durationMs,
+            updatedAt: session.updatedAt,
+          })
+        );
+      }
+    }
     syncStreamingRecoveryWatch(
       () => {
         const current = get();
@@ -1933,6 +2238,26 @@ export const useStore = create<StoreState>((set, get) => ({
       });
 
     updateApprovalState(nextState);
+    const messagesToUpdate = Object.values(get().chatSessions).flatMap((session) =>
+      session.messages.filter((message) =>
+        message.blocks?.some(
+          (block) => block.kind === "approvalRequest" && block.requestId === requestId
+        )
+      )
+    );
+    messagesToUpdate.forEach((message) => {
+      enqueueMessagePersistence(() =>
+        bridge.updateChatMessageBlocks({
+          messageId: message.id,
+          blocks:
+            message.blocks?.map((block) =>
+              block.kind === "approvalRequest" && block.requestId === requestId
+                ? { ...block, state: nextState }
+                : block
+            ) ?? null,
+        })
+      );
+    });
 
     try {
       const applied = await bridge.respondAssistantApproval(requestId, decision);
@@ -2203,27 +2528,29 @@ export const useStore = create<StoreState>((set, get) => ({
         return;
       }
       case "fast": {
+        let systemMessage: ChatMessage | null = null;
         set((state) => {
           const terminalTabs = state.terminalTabs.map((item) =>
             item.id === tab.id ? { ...item, fastMode: !item.fastMode } : item
           );
           const nextTab = terminalTabs.find((item) => item.id === tab.id);
+          systemMessage = {
+            id: createId("msg"),
+            role: "system" as const,
+            cliId: effectiveCli,
+            timestamp: nowIso(),
+            content: `Fast mode: ${nextTab?.fastMode ? "ON" : "OFF"}`,
+            isStreaming: false,
+            durationMs: null,
+            exitCode: 0,
+          };
           const chatSessions = {
             ...state.chatSessions,
             [tab.id]: {
               ...state.chatSessions[tab.id],
               messages: [
                 ...state.chatSessions[tab.id].messages,
-                {
-                  id: createId("msg"),
-                  role: "system" as const,
-                  cliId: effectiveCli,
-                  timestamp: nowIso(),
-                  content: `Fast mode: ${nextTab?.fastMode ? "ON" : "OFF"}`,
-                  isStreaming: false,
-                  durationMs: null,
-                  exitCode: 0,
-                },
+                systemMessage!,
               ],
               updatedAt: nowIso(),
             },
@@ -2231,6 +2558,14 @@ export const useStore = create<StoreState>((set, get) => ({
           persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, chatSessions);
           return { terminalTabs, chatSessions };
         });
+        const session = get().chatSessions[tab.id];
+        if (session && systemMessage) {
+          enqueueMessagePersistence(() =>
+            bridge.appendChatMessages({
+              seeds: [toPersistedSessionSeed(session, tab.id, [systemMessage!])],
+            })
+          );
+        }
         return;
       }
       case "status": {

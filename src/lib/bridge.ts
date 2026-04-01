@@ -2,17 +2,28 @@ import { browserRuntime } from "./browserRuntime";
 import {
   AgentId,
   AgentPromptRequest,
+  AutomationGoalRuleConfig,
+  AutomationRun,
+  AutomationRuleProfile,
   AutoOrchestrationRequest,
   AppSettings,
   AppState,
+  ChatMessageBlocksUpdateRequest,
+  ChatMessageDeleteRequest,
+  ChatMessageFinalizeRequest,
+  ChatMessagesAppendRequest,
+  ChatMessageStreamUpdateRequest,
   ChatPromptRequest,
   AssistantApprovalDecision,
+  CliHandoffRequest,
   ContextStore,
   ConversationTurn,
+  CreateAutomationRunRequest,
   CliSkillItem,
   FileMentionCandidate,
   GitFileDiff,
   GitPanelData,
+  PersistedTerminalState,
   StreamEvent,
   TerminalEvent,
   WorkspacePickResult,
@@ -41,6 +52,24 @@ export interface RuntimeBridge {
   getConversationHistory: (agentId: AgentId) => Promise<ConversationTurn[]>;
   getSettings: () => Promise<AppSettings>;
   updateSettings: (settings: AppSettings) => Promise<AppSettings>;
+  loadTerminalState: () => Promise<PersistedTerminalState | null>;
+  saveTerminalState: (state: PersistedTerminalState) => Promise<void>;
+  switchCliForTask: (request: CliHandoffRequest) => Promise<void>;
+  appendChatMessages: (request: ChatMessagesAppendRequest) => Promise<void>;
+  updateChatMessageStream: (request: ChatMessageStreamUpdateRequest) => Promise<void>;
+  finalizeChatMessage: (request: ChatMessageFinalizeRequest) => Promise<void>;
+  deleteChatMessage: (request: ChatMessageDeleteRequest) => Promise<void>;
+  deleteChatSessionByTab: (terminalTabId: string) => Promise<void>;
+  updateChatMessageBlocks: (request: ChatMessageBlocksUpdateRequest) => Promise<void>;
+  listAutomationRuns: () => Promise<AutomationRun[]>;
+  getAutomationRuleProfile: () => Promise<AutomationRuleProfile>;
+  updateAutomationRuleProfile: (profile: AutomationRuleProfile) => Promise<AutomationRuleProfile>;
+  updateAutomationGoalRuleConfig: (goalId: string, ruleConfig: AutomationGoalRuleConfig) => Promise<AutomationRun>;
+  createAutomationRun: (request: CreateAutomationRunRequest) => Promise<AutomationRun>;
+  startAutomationRun: (runId: string) => Promise<AutomationRun>;
+  pauseAutomationGoal: (goalId: string) => Promise<AutomationRun>;
+  resumeAutomationGoal: (goalId: string) => Promise<AutomationRun>;
+  cancelAutomationRun: (runId: string) => Promise<AutomationRun>;
   // Chat methods
   sendChatMessage: (request: ChatPromptRequest) => Promise<string>;
   runAutoOrchestration: (request: AutoOrchestrationRequest) => Promise<string>;
@@ -121,6 +150,78 @@ const tauriRuntime: RuntimeBridge = {
   async updateSettings(settings) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AppSettings>("update_settings", { settings });
+  },
+  async loadTerminalState() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<PersistedTerminalState | null>("load_terminal_state");
+  },
+  async saveTerminalState(state) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("save_terminal_state", { state });
+  },
+  async switchCliForTask(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("switch_cli_for_task", { request });
+  },
+  async appendChatMessages(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("append_chat_messages", { request });
+  },
+  async updateChatMessageStream(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("update_chat_message_stream", { request });
+  },
+  async finalizeChatMessage(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("finalize_chat_message", { request });
+  },
+  async deleteChatMessage(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("delete_chat_message_record", { request });
+  },
+  async deleteChatSessionByTab(terminalTabId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("delete_chat_session_by_tab", { terminalTabId });
+  },
+  async updateChatMessageBlocks(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("update_chat_message_blocks", { request });
+  },
+  async listAutomationRuns() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRun[]>("list_automation_runs");
+  },
+  async getAutomationRuleProfile() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRuleProfile>("get_automation_rule_profile");
+  },
+  async updateAutomationRuleProfile(profile) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRuleProfile>("update_automation_rule_profile", { profile });
+  },
+  async updateAutomationGoalRuleConfig(goalId, ruleConfig) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRun>("update_automation_goal_rule_config", { goalId, ruleConfig });
+  },
+  async createAutomationRun(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRun>("create_automation_run", { request });
+  },
+  async startAutomationRun(runId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRun>("start_automation_run", { runId });
+  },
+  async pauseAutomationGoal(goalId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRun>("pause_automation_goal", { goalId });
+  },
+  async resumeAutomationGoal(goalId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRun>("resume_automation_goal", { goalId });
+  },
+  async cancelAutomationRun(runId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRun>("cancel_automation_run", { runId });
   },
   async sendChatMessage(request) {
     const { invoke } = await import("@tauri-apps/api/core");
