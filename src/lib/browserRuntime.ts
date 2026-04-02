@@ -347,6 +347,7 @@ function loadStoredAutomationRuns(): AutomationRun[] {
         title: goal.title ?? "Untitled goal",
         goal: goal.goal ?? "",
         expectedOutcome: goal.expectedOutcome ?? "",
+        executionMode: goal.executionMode ?? "auto",
         status: (goal.status as AutomationGoalStatus | undefined) ?? "queued",
         position: goal.position ?? index,
         roundCount: goal.roundCount ?? 0,
@@ -493,6 +494,7 @@ function createAutomationGoal(runId: string, draft: AutomationGoalDraft, positio
     title: draft.title?.trim() || deriveAutomationGoalTitle(draft.goal),
     goal: draft.goal,
     expectedOutcome: draft.expectedOutcome,
+    executionMode: draft.executionMode ?? "auto",
     status: "queued",
     position,
     roundCount: 0,
@@ -1011,6 +1013,63 @@ export const browserRuntime = {
     scheduleBrowserAutomationRun(runId);
     return structuredClone(run);
   },
+  async pauseAutomationRun(runId: string) {
+    const run = automationRuns.find((item) => item.id === runId);
+    if (!run) throw new Error("Automation run not found.");
+    run.status = "paused";
+    run.updatedAt = nowISO();
+    pushAutomationEvent(run, "warning", "批次已暂停", "浏览器预览已暂停该批次。");
+    persistAutomationRuns();
+    return structuredClone(run);
+  },
+  async resumeAutomationRun(runId: string) {
+    const run = automationRuns.find((item) => item.id === runId);
+    if (!run) throw new Error("Automation run not found.");
+    run.status = "scheduled";
+    run.scheduledStartAt = nowISO();
+    run.updatedAt = nowISO();
+    run.goals = run.goals.map((goal) =>
+      goal.status === "paused"
+        ? { ...goal, status: "queued", requiresAttentionReason: null, updatedAt: nowISO() }
+        : goal
+    );
+    pushAutomationEvent(run, "info", "批次继续执行", "浏览器预览已恢复该批次。");
+    persistAutomationRuns();
+    scheduleBrowserAutomationRun(run.id);
+    return structuredClone(run);
+  },
+  async restartAutomationRun(runId: string) {
+    const run = automationRuns.find((item) => item.id === runId);
+    if (!run) throw new Error("Automation run not found.");
+    run.status = "scheduled";
+    run.scheduledStartAt = nowISO();
+    run.startedAt = null;
+    run.completedAt = null;
+    run.summary = null;
+    run.updatedAt = nowISO();
+    run.goals = run.goals.map((goal) => ({
+      ...goal,
+      status: "queued",
+      roundCount: 0,
+      consecutiveFailureCount: 0,
+      noProgressRounds: 0,
+      lastOwnerCli: null,
+      resultSummary: null,
+      latestProgressSummary: null,
+      nextInstruction: null,
+      requiresAttentionReason: null,
+      relevantFiles: [],
+      syntheticTerminalTabId: createId("auto-tab"),
+      lastExitCode: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: nowISO(),
+    }));
+    pushAutomationEvent(run, "info", "批次重新运行", "浏览器预览已将批次重置并重新排队。");
+    persistAutomationRuns();
+    scheduleBrowserAutomationRun(run.id);
+    return structuredClone(run);
+  },
   async pauseAutomationGoal(goalId: string) {
     const run = automationRuns.find((item) => item.goals.some((goal) => goal.id === goalId));
     const goal = run?.goals.find((item) => item.id === goalId);
@@ -1053,6 +1112,15 @@ export const browserRuntime = {
     pushAutomationEvent(run, "warning", "Run cancelled", "Browser fallback cancelled the automation run.");
     persistAutomationRuns();
     return structuredClone(run);
+  },
+  async deleteAutomationRun(runId: string) {
+    const run = automationRuns.find((item) => item.id === runId);
+    if (!run) throw new Error("Automation run not found.");
+    if (run.status === "running") {
+      throw new Error("Running automation runs must be paused or cancelled before deletion.");
+    }
+    automationRuns = automationRuns.filter((item) => item.id !== runId);
+    persistAutomationRuns();
   },
 
   async sendChatMessage(request: ChatPromptRequest) {

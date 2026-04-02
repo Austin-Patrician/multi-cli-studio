@@ -240,13 +240,12 @@ function ToggleButton({
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex h-7 items-center gap-1 rounded-full border border-slate-200/90 bg-[linear-gradient(180deg,rgba(255,255,255,0.96)_0%,rgba(248,250,252,0.96)_100%)] px-2.5 text-[9.5px] font-semibold tracking-[0.08em] text-slate-500 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all hover:border-slate-300 hover:bg-white hover:text-slate-800 active:scale-[0.98]"
+      className="flex h-5 w-5 items-center justify-center rounded-full border border-slate-200 text-slate-400 transition-all hover:border-slate-300 hover:bg-slate-50 hover:text-slate-600 active:scale-95 shadow-sm"
       aria-expanded={expanded}
+      title={label}
+      aria-label={label}
     >
-      <span>{label}</span>
-      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-100/90 text-slate-500">
-        <ChevronIcon expanded={expanded} />
-      </span>
+      <ChevronIcon expanded={expanded} />
     </button>
   );
 }
@@ -571,9 +570,10 @@ function LogBlock({ block }: { block: Extract<AssistantDisplayBlock, { kind: "lo
           <button
             type="button"
             onClick={() => setExpanded((value) => !value)}
-            className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-300 transition-colors hover:border-white/20 hover:bg-white/6 hover:text-white"
+            className="flex h-5 w-5 items-center justify-center rounded-full border border-white/10 text-slate-400 transition-all hover:border-white/30 hover:bg-white/10 hover:text-white active:scale-95"
+            aria-label={expanded ? "Hide logs" : "Show logs"}
           >
-            {expanded ? "Hide" : "Show"}
+            <ChevronIcon expanded={expanded} />
           </button>
         )}
       </div>
@@ -633,9 +633,10 @@ function RuntimeReasoningBlock({
           <button
             type="button"
             onClick={() => setExpanded((value) => !value)}
-            className="rounded-full border border-violet-200/90 bg-white/80 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-700 transition-colors hover:border-violet-300 hover:bg-white"
+            className="flex h-5 w-5 items-center justify-center rounded-full border border-violet-200/60 text-violet-500 transition-all hover:border-violet-300 hover:bg-white active:scale-95 shadow-sm"
+            aria-label={expanded ? "Hide reasoning" : "Show reasoning"}
           >
-            {expanded ? "Hide" : "Show"}
+            <ChevronIcon expanded={expanded} />
           </button>
         )}
       </div>
@@ -716,7 +717,7 @@ function RuntimeFileChangeBlock({
         </div>
         <ToggleButton
           expanded={expanded}
-          label="Patch"
+          label=""
           onClick={() => setExpanded((value) => !value)}
         />
       </div>

@@ -20,7 +20,8 @@
       "Bash(cd \"C:\\\\Users\\\\admin\\\\source\\\\repos\\\\multi-cli-studio\" && npx tsc --noEmit 2>&1 | head -50)",
       "Bash(cd \"C:\\\\Users\\\\admin\\\\source\\\\repos\\\\multi-cli-studio\\\\src-tauri\" && cargo check 2>&1 | tail -30)",
       "Bash(cd \"C:\\\\Users\\\\admin\\\\source\\\\repos\\\\multi-cli-studio\" && npx vite build 2>&1 | tail -10)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(grep -E \"\\\\.\\(ts|js\\)$\")"
     ]
   }
 }

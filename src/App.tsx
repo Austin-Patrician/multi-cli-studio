@@ -3,7 +3,6 @@ import { useEffect } from "react";
 import { AppLayout } from "./layouts/AppLayout";
 import { DashboardPage } from "./pages/DashboardPage";
 import { TerminalPage } from "./pages/TerminalPage";
-import { HandoffPage } from "./pages/HandoffPage";
 import { AutomationPage } from "./pages/AutomationPage";
 import { AutomationComposerPage } from "./pages/AutomationComposerPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -119,7 +118,6 @@ function App() {
         <Route path="/terminal" element={<TerminalPage />} />
         <Route path="/automation" element={<AutomationPage />} />
         <Route path="/automation/new" element={<AutomationComposerPage />} />
-        <Route path="/handoff" element={<HandoffPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
     </Routes>

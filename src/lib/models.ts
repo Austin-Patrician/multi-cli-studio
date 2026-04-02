@@ -241,11 +241,13 @@ export type AutomationGoalStatus =
   | "cancelled";
 
 export type AutomationEventLevel = "info" | "success" | "warning" | "error";
+export type AutomationExecutionMode = TerminalCliId;
 
 export interface AutomationGoalDraft {
   title?: string | null;
   goal: string;
   expectedOutcome: string;
+  executionMode?: AutomationExecutionMode | null;
   ruleConfig?: AutomationGoalRuleConfig | null;
 }
 
@@ -265,6 +267,7 @@ export interface AutomationGoal {
   title: string;
   goal: string;
   expectedOutcome: string;
+  executionMode: AutomationExecutionMode;
   status: AutomationGoalStatus;
   position: number;
   roundCount: number;

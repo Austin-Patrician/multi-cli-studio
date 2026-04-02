@@ -67,9 +67,13 @@ export interface RuntimeBridge {
   updateAutomationGoalRuleConfig: (goalId: string, ruleConfig: AutomationGoalRuleConfig) => Promise<AutomationRun>;
   createAutomationRun: (request: CreateAutomationRunRequest) => Promise<AutomationRun>;
   startAutomationRun: (runId: string) => Promise<AutomationRun>;
+  pauseAutomationRun: (runId: string) => Promise<AutomationRun>;
+  resumeAutomationRun: (runId: string) => Promise<AutomationRun>;
+  restartAutomationRun: (runId: string) => Promise<AutomationRun>;
   pauseAutomationGoal: (goalId: string) => Promise<AutomationRun>;
   resumeAutomationGoal: (goalId: string) => Promise<AutomationRun>;
   cancelAutomationRun: (runId: string) => Promise<AutomationRun>;
+  deleteAutomationRun: (runId: string) => Promise<void>;
   // Chat methods
   sendChatMessage: (request: ChatPromptRequest) => Promise<string>;
   runAutoOrchestration: (request: AutoOrchestrationRequest) => Promise<string>;
@@ -88,8 +92,15 @@ export interface RuntimeBridge {
   getAcpCapabilities: (cliId: AgentId) => Promise<AcpCliCapabilities>;
 }
 
-function isTauriRuntime() {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export function isTauriRuntime() {
+  return (
+    typeof window !== "undefined" &&
+    ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
+  );
+}
+
+function getRuntimeBridge() {
+  return isTauriRuntime() ? tauriRuntime : browserRuntime;
 }
 
 const tauriRuntime: RuntimeBridge = {
@@ -211,6 +222,18 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AutomationRun>("start_automation_run", { runId });
   },
+  async pauseAutomationRun(runId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRun>("pause_automation_run", { runId });
+  },
+  async resumeAutomationRun(runId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRun>("resume_automation_run", { runId });
+  },
+  async restartAutomationRun(runId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRun>("restart_automation_run", { runId });
+  },
   async pauseAutomationGoal(goalId) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AutomationRun>("pause_automation_goal", { goalId });
@@ -222,6 +245,10 @@ const tauriRuntime: RuntimeBridge = {
   async cancelAutomationRun(runId) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AutomationRun>("cancel_automation_run", { runId });
+  },
+  async deleteAutomationRun(runId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("delete_automation_run", { runId });
   },
   async sendChatMessage(request) {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -291,4 +318,14 @@ const tauriRuntime: RuntimeBridge = {
   },
 };
 
-export const bridge: RuntimeBridge = isTauriRuntime() ? tauriRuntime : browserRuntime;
+export const bridge = new Proxy({} as RuntimeBridge, {
+  get(_target, prop) {
+    const runtime = getRuntimeBridge() as Record<PropertyKey, unknown>;
+    const value = runtime[prop];
+    if (typeof value === "function") {
+      return (...args: unknown[]) =>
+        (value as (...innerArgs: unknown[]) => unknown).apply(runtime, args);
+    }
+    return value;
+  },
+}) as RuntimeBridge;

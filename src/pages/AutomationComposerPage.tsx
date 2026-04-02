@@ -1,12 +1,57 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { bridge } from "../lib/bridge";
 import type { AutomationGoalDraft, AutomationGoalRuleConfig, AutomationRuleProfile, CreateAutomationRunRequest } from "../lib/models";
 import { useStore } from "../lib/store";
 
-const TITLE_FONT = {
-  fontFamily: '"Noto Serif SC", "Songti SC", "STSong", serif',
-} as const;
+// --- Icons ---
+const ArrowLeftIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+  </svg>
+);
+
+const PlusIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+  </svg>
+);
+
+const TrashIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+  </svg>
+);
+
+const CogIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12a7.5 7.5 0 1115 0 7.5 7.5 0 01-15 0z" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m0 0v3.75m0-3.75h3.75m-3.75 0H8.25" />
+  </svg>
+);
+
+const FolderIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
+  </svg>
+);
+
+const ClockIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+  </svg>
+);
+
+const RocketIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M15.59 14.37a6 6 0 01-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 006.16-12.12A14.98 14.98 0 009.631 8.41m5.96 5.96a14.926 14.926 0 01-5.841 2.58m-.119-8.54a6 6 0 00-7.381 5.84h4.8m2.581-5.84a14.927 14.927 0 00-2.58 5.841m1.861-4.413a10.12 10.12 0 00-3.446 3.446m4.033-3.59a10.047 10.047 0 012.705 2.705" />
+  </svg>
+);
+
+// --- Utilities ---
+function cn(...values: Array<string | false | null | undefined>) {
+  return values.filter(Boolean).join(" ");
+}
 
 function emptyRuleConfig(defaults?: AutomationRuleProfile | null): AutomationGoalRuleConfig {
   return {
@@ -24,7 +69,7 @@ function emptyRuleConfig(defaults?: AutomationRuleProfile | null): AutomationGoa
 }
 
 function emptyGoalDraft(defaults?: AutomationRuleProfile | null): AutomationGoalDraft {
-  return { title: "", goal: "", expectedOutcome: "", ruleConfig: emptyRuleConfig(defaults) };
+  return { title: "", goal: "", expectedOutcome: "", executionMode: "auto", ruleConfig: emptyRuleConfig(defaults) };
 }
 
 function toIsoOrNull(value: string) {
@@ -38,9 +83,34 @@ function summarizeRuleConfig(config: AutomationGoalRuleConfig) {
     config.allowAutoSelectStrategy ? "自动选方案" : "遇分支停下",
     config.allowSafeWorkspaceEdits ? "允许改文件" : "只读",
     config.allowSafeChecks ? "允许校验" : "禁用校验",
-    `最多 ${config.maxRoundsPerGoal} 轮`,
+    `${config.maxRoundsPerGoal} 轮上限`,
   ];
 }
+
+const EXECUTION_OPTIONS = [
+  { value: "auto", label: "自动模式" },
+  { value: "codex", label: "Codex" },
+  { value: "claude", label: "Claude" },
+  { value: "gemini", label: "Gemini" },
+] as const;
+
+function executionModeLabel(value?: string | null) {
+  return EXECUTION_OPTIONS.find((option) => option.value === value)?.label ?? "自动模式";
+}
+
+// --- Components ---
+
+function FieldLabel({ children, required }: { children: ReactNode; required?: boolean }) {
+  return (
+    <label className="block text-[13px] font-bold text-slate-700 uppercase tracking-widest mb-2">
+      {children}
+      {required && <span className="text-rose-500 ml-1">*</span>}
+    </label>
+  );
+}
+
+const INPUT_CLASS = "w-full rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm shadow-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all";
+const TEXTAREA_CLASS = "w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all resize-none leading-relaxed";
 
 function GoalRuleEditor({
   value,
@@ -60,19 +130,54 @@ function GoalRuleEditor({
   ];
 
   return (
-    <div className="grid gap-3 border-t border-gray-100 px-4 py-4 md:grid-cols-[minmax(0,1fr)_300px]">
-      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+    <div className="grid gap-6 bg-slate-50/50 px-6 py-6 border-t border-slate-100">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {toggles.map(([key, label]) => (
-          <label key={String(key)} className="flex items-center justify-between gap-3 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+          <label key={String(key)} className="group flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-[13px] font-medium text-slate-700 shadow-sm transition-all hover:border-indigo-200 hover:ring-1 hover:ring-indigo-100 cursor-pointer">
             <span>{label}</span>
-            <input type="checkbox" checked={Boolean(value[key])} onChange={(event) => onChange({ ...value, [key]: event.target.checked })} className="h-4 w-4 accent-gray-900" />
+            <input 
+              type="checkbox" 
+              checked={Boolean(value[key])} 
+              onChange={(event) => onChange({ ...value, [key]: event.target.checked })} 
+              className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" 
+            />
           </label>
         ))}
       </div>
-      <div className="grid gap-2 sm:grid-cols-3 md:grid-cols-1">
-        <input type="number" min={1} max={8} value={value.maxRoundsPerGoal} onChange={(event) => onChange({ ...value, maxRoundsPerGoal: Number.parseInt(event.target.value, 10) || 1 })} className="rounded-md border border-gray-200 px-3 py-2 text-sm" />
-        <input type="number" min={1} max={5} value={value.maxConsecutiveFailures} onChange={(event) => onChange({ ...value, maxConsecutiveFailures: Number.parseInt(event.target.value, 10) || 1 })} className="rounded-md border border-gray-200 px-3 py-2 text-sm" />
-        <input type="number" min={0} max={5} value={value.maxNoProgressRounds} onChange={(event) => onChange({ ...value, maxNoProgressRounds: Math.max(0, Number.parseInt(event.target.value, 10) || 0) })} className="rounded-md border border-gray-200 px-3 py-2 text-sm" />
+      <div className="grid gap-4 sm:grid-cols-3">
+        <div className="space-y-1.5">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 ml-1">最大执行轮次</span>
+          <input 
+            type="number" 
+            min={1} 
+            max={8} 
+            value={value.maxRoundsPerGoal} 
+            onChange={(event) => onChange({ ...value, maxRoundsPerGoal: Number.parseInt(event.target.value, 10) || 1 })} 
+            className={INPUT_CLASS} 
+          />
+        </div>
+        <div className="space-y-1.5">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 ml-1">最大失败阈值</span>
+          <input 
+            type="number" 
+            min={1} 
+            max={5} 
+            value={value.maxConsecutiveFailures} 
+            onChange={(event) => onChange({ ...value, maxConsecutiveFailures: Number.parseInt(event.target.value, 10) || 1 })} 
+            className={INPUT_CLASS} 
+          />
+        </div>
+        <div className="space-y-1.5">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 ml-1">无进展容忍轮数</span>
+          <input 
+            type="number" 
+            min={0} 
+            max={5} 
+            value={value.maxNoProgressRounds} 
+            onChange={(event) => onChange({ ...value, maxNoProgressRounds: Math.max(0, Number.parseInt(event.target.value, 10) || 0) })} 
+            className={INPUT_CLASS} 
+          />
+        </div>
       </div>
     </div>
   );
@@ -89,6 +194,11 @@ export function AutomationComposerPage() {
   const [defaultRuleProfile, setDefaultRuleProfile] = useState<AutomationRuleProfile | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const workspaceOptions = useMemo(() => {
     if (workspaces.length > 0) return workspaces;
@@ -117,6 +227,7 @@ export function AutomationComposerPage() {
         title: goal.title?.trim() ?? "",
         goal: goal.goal.trim(),
         expectedOutcome: goal.expectedOutcome.trim(),
+        executionMode: goal.executionMode ?? "auto",
         ruleConfig: goal.ruleConfig ?? emptyRuleConfig(defaultRuleProfile),
       }))
       .filter((goal) => goal.goal && goal.expectedOutcome);
@@ -145,75 +256,241 @@ export function AutomationComposerPage() {
     }
   }
 
+  function stageStyle(delay: number): CSSProperties {
+    return {
+      opacity: mounted ? 1 : 0,
+      transform: mounted ? "none" : "translateY(12px)",
+      transition: `opacity 400ms cubic-bezier(0.16, 1, 0.3, 1) ${delay}ms, transform 400ms cubic-bezier(0.16, 1, 0.3, 1) ${delay}ms`,
+    };
+  }
+
   return (
-    <div className="min-h-full bg-[#fcfcfc] px-6 py-8 text-gray-800">
-      <div className="mx-auto max-w-7xl space-y-6">
-        <section className="border-b border-gray-100 pb-6">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+    <div className="min-h-full bg-[#f8fafc] px-6 py-10 sm:px-8 lg:px-12 text-slate-800 relative overflow-x-hidden">
+      {/* Soft background ambient glow */}
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-[1200px] h-[600px] bg-[radial-gradient(ellipse_at_top,rgba(79,70,229,0.06),transparent_70%)] pointer-events-none" />
+
+      <div className="relative mx-auto max-w-5xl space-y-8">
+        <header className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between" style={stageStyle(0)}>
+          <div>
+            <button 
+              onClick={() => navigate("/automation")} 
+              className="group inline-flex items-center gap-2 text-sm font-semibold text-slate-500 hover:text-indigo-600 transition-colors mb-4"
+            >
+              <ArrowLeftIcon className="w-4 h-4 transition-transform group-hover:-translate-x-1" />
+              返回自动化批次
+            </button>
+            <h1 className="text-4xl font-bold tracking-tight text-slate-900 drop-shadow-sm">新建批次</h1>
+            <p className="mt-2 text-[15px] text-slate-500">配置工作区、执行时间，并定义需要顺序执行的自动化目标。</p>
+          </div>
+          <div className="flex items-center gap-3 bg-white/50 p-1.5 rounded-2xl ring-1 ring-slate-200/50 backdrop-blur-md shadow-sm">
+            <button 
+              onClick={() => void handleCreateRun(false)} 
+              disabled={busy === "create-run"}
+              className="rounded-xl px-5 py-2.5 text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-50"
+            >
+              保存草稿
+            </button>
+            <button 
+              onClick={() => void handleCreateRun(true)} 
+              disabled={busy === "create-run"}
+              className="flex items-center gap-2 rounded-xl bg-slate-900 px-6 py-2.5 text-sm font-bold text-white hover:bg-slate-800 shadow-lg shadow-slate-900/10 transition-all active:scale-[0.98] disabled:opacity-50"
+            >
+              <RocketIcon className="w-4 h-4" />
+              立即开始执行
+            </button>
+          </div>
+        </header>
+
+        {error ? (
+          <div className="flex items-center gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 text-sm font-medium text-rose-700 shadow-sm animate-in fade-in slide-in-from-top-4" style={stageStyle(50)}>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+            </svg>
+            {error}
+          </div>
+        ) : null}
+
+        {/* Global Batch Settings */}
+        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm ring-1 ring-slate-100" style={stageStyle(100)}>
+          <div className="grid gap-6 p-6 sm:grid-cols-2">
             <div>
-              <div className="text-[11px] uppercase tracking-[0.22em] text-gray-400">自动化</div>
-              <h1 className="mt-2 text-3xl font-semibold tracking-tight text-gray-900" style={TITLE_FONT}>新建批次</h1>
-              <p className="mt-2 text-sm text-gray-500">在独立页面配置工作区、开始时间、目标与目标级规则。</p>
+              <FieldLabel required>执行工作区</FieldLabel>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                  <FolderIcon className="h-4 w-4 text-slate-400" />
+                </div>
+                <select 
+                  value={workspaceId} 
+                  onChange={(event) => setWorkspaceId(event.target.value)} 
+                  className={cn(INPUT_CLASS, "pl-10 appearance-none")}
+                >
+                  {workspaceOptions.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
+                </select>
+                <div className="absolute inset-y-0 right-0 pr-3.5 flex items-center pointer-events-none text-slate-400">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                  </svg>
+                </div>
+              </div>
             </div>
-            <div className="flex gap-3">
-              <button onClick={() => navigate("/automation")} className="rounded-md border border-gray-200 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50">返回列表</button>
-              <button onClick={() => void handleCreateRun(false)} disabled={busy === "create-run"} className="rounded-md border border-gray-200 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50">保存草稿</button>
-              <button onClick={() => void handleCreateRun(true)} disabled={busy === "create-run"} className="rounded-md bg-gray-900 px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">立即开始</button>
+            <div>
+              <FieldLabel>计划开始时间 (可选)</FieldLabel>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                  <ClockIcon className="h-4 w-4" />
+                </div>
+                <input 
+                  type="datetime-local" 
+                  value={scheduledLocal} 
+                  onChange={(event) => setScheduledLocal(event.target.value)} 
+                  className={cn(INPUT_CLASS, "pl-10")} 
+                />
+              </div>
             </div>
           </div>
         </section>
 
-        {error ? <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
-
-        <section className="overflow-hidden rounded-lg border border-gray-200 bg-white">
-          <div className="grid grid-cols-12 gap-4 border-b border-gray-100 bg-gray-50/60 px-5 py-3 text-xs font-medium uppercase tracking-[0.18em] text-gray-500">
-            <div className="col-span-2">目标标题</div>
-            <div className="col-span-4">目标说明</div>
-            <div className="col-span-3">期望结果</div>
-            <div className="col-span-2">目标规则</div>
-            <div className="col-span-1 text-right">操作</div>
+        {/* Goals Configuration */}
+        <div className="space-y-6">
+          <div className="flex items-center justify-between px-2" style={stageStyle(150)}>
+            <h2 className="text-xl font-bold text-slate-900">执行目标</h2>
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">{goalDrafts.length} 个目标已添加</span>
           </div>
-          <div className="divide-y divide-gray-100">
+
+          <div className="space-y-6">
             {goalDrafts.map((goal, index) => (
-              <div key={`draft-${index}`}>
-                <div className="grid grid-cols-12 gap-4 px-5 py-4">
-                  <div className="col-span-12 md:col-span-2">
-                    <input value={goal.title ?? ""} onChange={(event) => setGoalDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item))} placeholder="可选标题" className="w-full rounded-md border border-gray-200 px-3 py-2 text-sm" />
-                  </div>
-                  <div className="col-span-12 md:col-span-4">
-                    <textarea value={goal.goal} onChange={(event) => setGoalDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, goal: event.target.value } : item))} placeholder="描述这个自动化目标" rows={3} className="w-full rounded-md border border-gray-200 px-3 py-2 text-sm" />
-                  </div>
-                  <div className="col-span-12 md:col-span-3">
-                    <textarea value={goal.expectedOutcome} onChange={(event) => setGoalDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, expectedOutcome: event.target.value } : item))} placeholder="描述完成标准" rows={3} className="w-full rounded-md border border-gray-200 px-3 py-2 text-sm" />
-                  </div>
-                  <div className="col-span-12 md:col-span-2">
-                    <div className="flex flex-wrap gap-2">
-                      {summarizeRuleConfig(goal.ruleConfig ?? emptyRuleConfig(defaultRuleProfile)).map((item) => <span key={`${index}-${item}`} className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] text-gray-600">{item}</span>)}
+              <section 
+                key={`draft-${index}`} 
+                className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm ring-1 ring-slate-100 transition-all hover:shadow-md"
+                style={stageStyle(200 + index * 50)}
+              >
+                <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/50 px-6 py-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white text-sm font-bold text-indigo-600 ring-1 ring-slate-200 shadow-sm">
+                      {index + 1}
                     </div>
-                    <button onClick={() => setExpandedGoalIndex((current) => current === index ? null : index)} className="mt-3 text-xs font-medium text-gray-600 hover:text-gray-900">
-                      {expandedGoalIndex === index ? "收起规则" : "展开规则"}
-                    </button>
+                    <span className="text-sm font-bold text-slate-700">配置目标 {index + 1}</span>
                   </div>
-                  <div className="col-span-12 md:col-span-1 flex justify-end">
-                    {goalDrafts.length > 1 ? <button onClick={() => setGoalDrafts((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="text-sm text-gray-400 hover:text-red-600">删除</button> : null}
+                  <div className="flex items-center gap-3">
+                    {goalDrafts.length > 1 && (
+                      <button 
+                        onClick={() => setGoalDrafts((current) => current.filter((_, itemIndex) => itemIndex !== index))} 
+                        className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-500 transition-all"
+                      >
+                        <TrashIcon className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                 </div>
-                {expandedGoalIndex === index ? (
-                  <GoalRuleEditor value={goal.ruleConfig ?? emptyRuleConfig(defaultRuleProfile)} onChange={(next) => setGoalDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ruleConfig: next } : item))} />
-                ) : null}
-              </div>
+
+                <div className="p-6 space-y-6">
+                  <div className="grid gap-6 md:grid-cols-[240px_1fr]">
+                    <div className="space-y-4">
+                      <div>
+                        <FieldLabel>目标标题</FieldLabel>
+                        <input 
+                          value={goal.title ?? ""} 
+                          onChange={(event) => setGoalDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item))} 
+                          placeholder="例如：重构 API 模块" 
+                          className={INPUT_CLASS} 
+                        />
+                      </div>
+                      <div>
+                        <FieldLabel>执行模式</FieldLabel>
+                        <select
+                          value={goal.executionMode ?? "auto"}
+                          onChange={(event) =>
+                            setGoalDrafts((current) =>
+                              current.map((item, itemIndex) =>
+                                itemIndex === index
+                                  ? {
+                                      ...item,
+                                      executionMode: event.target.value as typeof EXECUTION_OPTIONS[number]["value"],
+                                    }
+                                  : item
+                              )
+                            )
+                          }
+                          className={INPUT_CLASS}
+                        >
+                          {EXECUTION_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="pt-2">
+                        <FieldLabel>目标级规则</FieldLabel>
+                        <div className="flex flex-wrap gap-2 mb-3">
+                          <span className="rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-600 ring-1 ring-indigo-100 whitespace-nowrap">
+                            {executionModeLabel(goal.executionMode)}
+                          </span>
+                          {summarizeRuleConfig(goal.ruleConfig ?? emptyRuleConfig(defaultRuleProfile)).map((item) => (
+                            <span key={`${index}-${item}`} className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold text-slate-500 ring-1 ring-white whitespace-nowrap">
+                              {item}
+                            </span>
+                          ))}
+                        </div>
+                        <button 
+                          onClick={() => setExpandedGoalIndex((current) => current === index ? null : index)} 
+                          className={cn(
+                            "flex items-center gap-2 rounded-xl px-3 py-1.5 text-xs font-bold transition-all ring-1 ring-inset",
+                            expandedGoalIndex === index ? "bg-indigo-600 text-white ring-indigo-600" : "bg-white text-slate-600 ring-slate-200 hover:bg-slate-50"
+                          )}
+                        >
+                          <CogIcon className="w-4 h-4" />
+                          {expandedGoalIndex === index ? "隐藏规则配置" : "配置目标规则"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-6 sm:grid-cols-2">
+                      <div className="flex flex-col">
+                        <FieldLabel required>目标详细描述</FieldLabel>
+                        <textarea 
+                          value={goal.goal} 
+                          onChange={(event) => setGoalDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, goal: event.target.value } : item))} 
+                          placeholder="描述这个自动化目标需要完成的具体任务..." 
+                          className={cn(TEXTAREA_CLASS, "flex-1 min-h-[140px]")} 
+                        />
+                      </div>
+                      <div className="flex flex-col">
+                        <FieldLabel required>期望结果产出</FieldLabel>
+                        <textarea 
+                          value={goal.expectedOutcome} 
+                          onChange={(event) => setGoalDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, expectedOutcome: event.target.value } : item))} 
+                          placeholder="描述完成该目标后的预期状态或交付物..." 
+                          className={cn(TEXTAREA_CLASS, "flex-1 min-h-[140px]")} 
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {expandedGoalIndex === index && (
+                  <div className="animate-in slide-in-from-top-4 duration-300">
+                    <GoalRuleEditor 
+                      value={goal.ruleConfig ?? emptyRuleConfig(defaultRuleProfile)} 
+                      onChange={(next) => setGoalDrafts((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ruleConfig: next } : item))} 
+                    />
+                  </div>
+                )}
+              </section>
             ))}
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 bg-gray-50/50 px-5 py-4">
-            <div className="flex items-center gap-3">
-              <select value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} className="rounded-md border border-gray-200 px-3 py-2 text-sm">
-                {workspaceOptions.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
-              </select>
-              <input type="datetime-local" value={scheduledLocal} onChange={(event) => setScheduledLocal(event.target.value)} className="rounded-md border border-gray-200 px-3 py-2 text-sm" />
+
+          <button 
+            onClick={() => setGoalDrafts((current) => [...current, emptyGoalDraft(defaultRuleProfile)])} 
+            className="group flex w-full items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-slate-200 bg-white/50 p-8 text-sm font-bold text-slate-500 transition-all hover:border-indigo-300 hover:bg-indigo-50/30 hover:text-indigo-600"
+            style={stageStyle(300)}
+          >
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 group-hover:bg-indigo-100 transition-colors">
+              <PlusIcon className="w-5 h-5" />
             </div>
-            <button onClick={() => setGoalDrafts((current) => [...current, emptyGoalDraft(defaultRuleProfile)])} className="rounded-md border border-gray-200 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50">新增目标</button>
-          </div>
-        </section>
+            添加下一个执行目标
+          </button>
+        </div>
       </div>
     </div>
   );

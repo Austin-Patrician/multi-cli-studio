@@ -2,6 +2,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../../lib/store";
 
 export function ProjectBar() {
+  const persistenceIssue = useStore((state) => state.persistenceIssue);
   const activeTab = useStore(
     useShallow((state) => {
       const tab = state.terminalTabs.find((item) => item.id === state.activeTerminalTabId);
@@ -54,6 +55,11 @@ export function ProjectBar() {
               )}
             </div>
             <div className="truncate text-xs text-muted">{workspace.rootPath}</div>
+            {persistenceIssue ? (
+              <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                Persistence warning: {persistenceIssue}
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

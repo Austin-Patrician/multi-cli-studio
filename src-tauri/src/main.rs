@@ -447,6 +447,13 @@ enum ChatMessageBlock {
         result: Option<String>,
         status: Option<String>,
     },
+    AutoRoute {
+        target_cli: String,
+        title: String,
+        reason: String,
+        mode_hint: Option<String>,
+        state: Option<String>,
+    },
     Plan {
         text: String,
     },
@@ -2550,6 +2557,32 @@ fn render_chat_blocks(
                     let trimmed = status.trim();
                     if !trimmed.is_empty() {
                         section.push_str(&format!("\nStatus: {}", trimmed));
+                    }
+                }
+                sections.push(section);
+            }
+            ChatMessageBlock::AutoRoute {
+                target_cli,
+                title,
+                reason,
+                mode_hint,
+                state,
+            } => {
+                let mut section = format!("Route suggestion [{}]: {}", target_cli, title.trim());
+                let trimmed_reason = reason.trim();
+                if !trimmed_reason.is_empty() {
+                    section.push_str(&format!("\n{}", trimmed_reason));
+                }
+                if let Some(mode_hint) = mode_hint {
+                    let trimmed = mode_hint.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str(&format!("\nMode: {}", trimmed));
+                    }
+                }
+                if let Some(state) = state {
+                    let trimmed = state.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str(&format!("\nState: {}", trimmed));
                     }
                 }
                 sections.push(section);
@@ -5538,6 +5571,138 @@ fn start_automation_run(
 }
 
 #[tauri::command]
+fn pause_automation_run(
+    store: State<'_, AppStore>,
+    run_id: String,
+) -> Result<AutomationRun, String> {
+    let updated = {
+        let mut runs = store
+            .automation_runs
+            .lock()
+            .map_err(|err| err.to_string())?;
+        let run = runs
+            .iter_mut()
+            .find(|item| item.id == run_id)
+            .ok_or_else(|| "Automation run not found.".to_string())?;
+        if matches!(run.status.as_str(), "completed" | "cancelled" | "failed") {
+            return Err("This automation run can no longer be paused.".to_string());
+        }
+        let now = now_stamp();
+        run.status = "paused".to_string();
+        run.updated_at = now.clone();
+        for goal in &mut run.goals {
+            if goal.status == "running" {
+                goal.requires_attention_reason =
+                    Some("批次已手动暂停，将在当前轮次结束后停止继续。".to_string());
+                goal.updated_at = now.clone();
+            }
+        }
+        push_event(run, None, "warning", "Run paused", "The automation run was paused.");
+        let snapshot = run.clone();
+        persist_automation_runs_to_disk(&runs)?;
+        snapshot
+    };
+    Ok(updated)
+}
+
+#[tauri::command]
+fn resume_automation_run(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    run_id: String,
+) -> Result<AutomationRun, String> {
+    let updated = {
+        let mut runs = store
+            .automation_runs
+            .lock()
+            .map_err(|err| err.to_string())?;
+        let run = runs
+            .iter_mut()
+            .find(|item| item.id == run_id)
+            .ok_or_else(|| "Automation run not found.".to_string())?;
+        if run.status != "paused" {
+            return Err("Only paused runs can be resumed.".to_string());
+        }
+        let now = now_stamp();
+        run.status = "scheduled".to_string();
+        run.scheduled_start_at = Some(now.clone());
+        run.completed_at = None;
+        run.updated_at = now.clone();
+        for goal in &mut run.goals {
+            if goal.status == "paused" {
+                goal.status = "queued".to_string();
+                goal.requires_attention_reason = None;
+                goal.updated_at = now.clone();
+            }
+        }
+        push_event(run, None, "info", "Run resumed", "The automation run was re-queued.");
+        let snapshot = run.clone();
+        persist_automation_runs_to_disk(&runs)?;
+        snapshot
+    };
+
+    schedule_automation_run(app, &store, run_id);
+    Ok(updated)
+}
+
+#[tauri::command]
+fn restart_automation_run(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    run_id: String,
+) -> Result<AutomationRun, String> {
+    let updated = {
+        let mut runs = store
+            .automation_runs
+            .lock()
+            .map_err(|err| err.to_string())?;
+        let run = runs
+            .iter_mut()
+            .find(|item| item.id == run_id)
+            .ok_or_else(|| "Automation run not found.".to_string())?;
+        let now = now_stamp();
+
+        for goal in &run.goals {
+            let _ = store
+                .terminal_storage
+                .delete_chat_session_by_tab(&goal.synthetic_terminal_tab_id);
+        }
+
+        run.status = "scheduled".to_string();
+        run.scheduled_start_at = Some(now.clone());
+        run.started_at = None;
+        run.completed_at = None;
+        run.summary = None;
+        run.updated_at = now.clone();
+        for goal in &mut run.goals {
+            goal.status = "queued".to_string();
+            goal.round_count = 0;
+            goal.consecutive_failure_count = 0;
+            goal.no_progress_rounds = 0;
+            goal.last_owner_cli = None;
+            goal.result_summary = None;
+            goal.latest_progress_summary = None;
+            goal.next_instruction = None;
+            goal.requires_attention_reason = None;
+            goal.relevant_files.clear();
+            goal.synthetic_terminal_tab_id = create_id("auto-tab");
+            goal.last_exit_code = None;
+            goal.started_at = None;
+            goal.completed_at = None;
+            goal.updated_at = now.clone();
+        }
+
+        push_event(run, None, "info", "Run restarted", "The automation run was reset and queued again.");
+        let snapshot = run.clone();
+        persist_automation_runs_to_disk(&runs)?;
+        snapshot
+    };
+
+    schedule_automation_run(app, &store, run_id);
+    Ok(updated)
+}
+
+#[tauri::command]
 fn pause_automation_goal(
     store: State<'_, AppStore>,
     goal_id: String,
@@ -5672,6 +5837,40 @@ fn cancel_automation_run(
         snapshot
     };
     Ok(updated)
+}
+
+#[tauri::command]
+fn delete_automation_run(
+    store: State<'_, AppStore>,
+    run_id: String,
+) -> Result<(), String> {
+    let run = {
+        let mut runs = store
+            .automation_runs
+            .lock()
+            .map_err(|err| err.to_string())?;
+        let Some(index) = runs.iter().position(|item| item.id == run_id) else {
+            return Err("Automation run not found.".to_string());
+        };
+        if runs[index].status == "running" {
+            return Err("Running automation runs must be paused or cancelled before deletion.".to_string());
+        }
+        let snapshot = runs.remove(index);
+        persist_automation_runs_to_disk(&runs)?;
+        snapshot
+    };
+
+    if let Ok(mut active) = store.automation_active_runs.lock() {
+        active.remove(&run_id);
+    }
+
+    for goal in &run.goals {
+        let _ = store
+            .terminal_storage
+            .delete_chat_session_by_tab(&goal.synthetic_terminal_tab_id);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -6720,7 +6919,6 @@ fn run_auto_orchestration(
     request: AutoOrchestrationRequest,
 ) -> Result<String, String> {
     let message_id = request.assistant_message_id.clone();
-    let shell = shell_path();
     let timeout_ms = {
         let settings = store.settings.lock().map_err(|err| err.to_string())?;
         settings.process_timeout_ms
@@ -6779,7 +6977,6 @@ fn run_auto_orchestration(
         let planner_prompt =
             build_auto_plan_prompt(&composed_state, &terminal_storage, &request_for_thread);
         let planner_result = run_silent_agent_turn_once(
-            &shell,
             &request_for_thread.project_root,
             "claude",
             &claude_wrapper_path,
@@ -7015,7 +7212,6 @@ fn run_auto_orchestration(
                 }
             } else {
                 match run_silent_agent_turn_once(
-                    &shell,
                     &request_for_thread.project_root,
                     &step.owner,
                     &wrapper_path,
@@ -7083,7 +7279,6 @@ fn run_auto_orchestration(
         let synthesis_prompt =
             build_auto_synthesis_prompt(&request_for_thread.prompt, &plan, &step_states);
         let synthesized = run_silent_agent_turn_once(
-            &shell,
             &request_for_thread.project_root,
             "claude",
             &claude_wrapper_path,
@@ -8436,6 +8631,99 @@ fn build_agent_script(
     Ok(script)
 }
 
+fn build_agent_args(
+    agent_id: &str,
+    prompt: &str,
+    write_mode: bool,
+    session: &acp::AcpSession,
+) -> Result<Vec<String>, String> {
+    let args = match agent_id {
+        "codex" => {
+            let sandbox = if write_mode {
+                session
+                    .permission_mode
+                    .get("codex")
+                    .cloned()
+                    .unwrap_or_else(|| "workspace-write".to_string())
+            } else {
+                "read-only".to_string()
+            };
+            let mut args = vec![
+                "--ask-for-approval".to_string(),
+                "never".to_string(),
+                "exec".to_string(),
+                "--skip-git-repo-check".to_string(),
+                "--sandbox".to_string(),
+                sandbox,
+                "--color".to_string(),
+                "never".to_string(),
+            ];
+            if let Some(model) = session.model.get("codex") {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+            args.push(prompt.to_string());
+            args
+        }
+        "claude" => {
+            let perm = session
+                .permission_mode
+                .get("claude")
+                .cloned()
+                .unwrap_or_else(|| "acceptEdits".to_string());
+            let permission_mode = if session.plan_mode || !write_mode {
+                "plan".to_string()
+            } else {
+                perm
+            };
+            let mut args = vec![
+                "-p".to_string(),
+                prompt.to_string(),
+                "--output-format".to_string(),
+                "text".to_string(),
+                "--permission-mode".to_string(),
+                permission_mode,
+            ];
+            if let Some(model) = session.model.get("claude") {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+            if let Some(effort) = session.effort_level.as_ref() {
+                args.push("--effort".to_string());
+                args.push(effort.clone());
+            }
+            args
+        }
+        "gemini" => {
+            let approval = if session.plan_mode || !write_mode {
+                "plan".to_string()
+            } else {
+                session
+                    .permission_mode
+                    .get("gemini")
+                    .cloned()
+                    .unwrap_or_else(|| "auto_edit".to_string())
+            };
+            let mut args = vec![
+                "-p".to_string(),
+                prompt.to_string(),
+                "--output-format".to_string(),
+                "text".to_string(),
+                "--approval-mode".to_string(),
+                approval,
+            ];
+            if let Some(model) = session.model.get("gemini") {
+                args.push("-m".to_string());
+                args.push(model.clone());
+            }
+            args
+        }
+        _ => return Err("Unknown agent".to_string()),
+    };
+
+    Ok(args)
+}
+
 fn build_review_prompt(state: &AppStateDto, agent_id: &str) -> String {
     format!(
         "Review the current workspace from the perspective of {}. Focus on the active work, the main risks, and the next best move.\n\nCurrent writer: {}\nActive agent: {}\nDirty files: {}\nFailing checks: {}\nLatest handoff: {}\nLatest artifact: {}",
@@ -8834,7 +9122,6 @@ fn resolve_runtime_command(state: &AppStateDto, cli_id: &str) -> Result<String, 
 }
 
 fn run_silent_agent_turn_once(
-    shell: &str,
     project_root: &str,
     agent_id: &str,
     command_path: &str,
@@ -8843,9 +9130,11 @@ fn run_silent_agent_turn_once(
     session: &acp::AcpSession,
     timeout_ms: u64,
 ) -> Result<SilentAgentTurnOutcome, String> {
-    let script = build_agent_script(agent_id, command_path, prompt, write_mode, session)?;
-    let mut cmd = Command::new(shell);
-    cmd.args(shell_command_args(shell, &script))
+    let resolved_command = resolve_direct_command_path(command_path);
+    let args = build_agent_args(agent_id, prompt, write_mode, session)?;
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut cmd = batch_aware_command(&resolved_command, &arg_refs);
+    cmd.stdin(Stdio::null())
         .current_dir(project_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -8944,6 +9233,13 @@ fn normalize_automation_owner(value: Option<&str>, fallback: &str) -> String {
         "gemini" => "gemini".to_string(),
         _ => "codex".to_string(),
     }
+}
+
+fn automation_goal_target_cli(goal: &AutomationGoal) -> String {
+    if goal.execution_mode != "auto" {
+        return goal.execution_mode.clone();
+    }
+    infer_automation_owner(goal)
 }
 
 fn build_automation_goal_prompt(
@@ -9254,7 +9550,6 @@ fn normalize_automation_judge_response(
 }
 
 fn evaluate_automation_round(
-    shell: &str,
     state_snapshot: &AppStateDto,
     settings_arc: &Arc<Mutex<AppSettings>>,
     run: &AutomationRun,
@@ -9289,7 +9584,6 @@ fn evaluate_automation_round(
         exit_code,
     );
     let result = run_silent_agent_turn_once(
-        shell,
         &run.project_root,
         "claude",
         &wrapper_path,
@@ -9312,6 +9606,268 @@ fn evaluate_automation_round(
                 .unwrap_or_else(|| fallback_automation_judge_response(goal, owner_cli, &source, exit_code))
         }
         Err(_) => fallback_automation_judge_response(goal, owner_cli, raw_output, exit_code),
+    }
+}
+
+fn execute_auto_mode_goal(
+    app: &AppHandle,
+    state_snapshot: &AppStateDto,
+    _settings_arc: &Arc<Mutex<AppSettings>>,
+    terminal_storage: &TerminalStorage,
+    claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    run: &AutomationRun,
+    goal: &AutomationGoal,
+    automation_prompt: &str,
+    timeout_ms: u64,
+) -> AutomationExecutionOutcome {
+    let claude_wrapper_path = match resolve_runtime_command(state_snapshot, "claude") {
+        Ok(path) => path,
+        Err(error) => {
+            return AutomationExecutionOutcome {
+                owner_cli: "claude".to_string(),
+                raw_output: error.clone(),
+                summary: error,
+                exit_code: Some(1),
+                relevant_files: Vec::new(),
+            };
+        }
+    };
+
+    let recent_turns = terminal_storage
+        .load_prompt_turns_for_terminal_tab(&goal.synthetic_terminal_tab_id, "claude", 4)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|turn| ChatContextTurn {
+            cli_id: turn.cli_id,
+            user_prompt: turn.user_prompt,
+            assistant_reply: turn.assistant_reply,
+            timestamp: turn.timestamp,
+        })
+        .collect::<Vec<_>>();
+
+    let request = AutoOrchestrationRequest {
+        terminal_tab_id: goal.synthetic_terminal_tab_id.clone(),
+        workspace_id: run.workspace_id.clone(),
+        assistant_message_id: create_id("auto-msg"),
+        prompt: automation_prompt.to_string(),
+        project_root: run.project_root.clone(),
+        project_name: run.project_name.clone(),
+        recent_turns,
+        plan_mode: false,
+        fast_mode: false,
+        effort_level: None,
+        model_overrides: BTreeMap::new(),
+        permission_overrides: BTreeMap::new(),
+    };
+
+    let mut planner_session = acp::AcpSession::default();
+    planner_session.plan_mode = true;
+    let planner_prompt = build_auto_plan_prompt(state_snapshot, terminal_storage, &request);
+    let planner_result = run_silent_agent_turn_once(
+        &request.project_root,
+        "claude",
+        &claude_wrapper_path,
+        &planner_prompt,
+        false,
+        &planner_session,
+        timeout_ms,
+    );
+
+    let plan = match planner_result {
+        Ok(outcome) => {
+            let source = if outcome.final_content.trim().is_empty() {
+                outcome.raw_output.as_str()
+            } else {
+                outcome.final_content.as_str()
+            };
+            parse_auto_plan(source, &request.prompt)
+        }
+        Err(_) => auto_plan_fallback(&request.prompt),
+    };
+
+    let mut step_states: Vec<AutoExecutionStepState> = plan
+        .steps
+        .iter()
+        .cloned()
+        .map(|step| AutoExecutionStepState {
+            step,
+            status: "planned".to_string(),
+            summary: None,
+            result: None,
+        })
+        .collect();
+
+    let mut encountered_failure = false;
+    let mut collected_files = BTreeSet::new();
+
+    for index in 0..step_states.len() {
+        if encountered_failure {
+            step_states[index].status = "skipped".to_string();
+            step_states[index].summary = Some("Skipped because an earlier step failed.".to_string());
+            continue;
+        }
+
+        let step = step_states[index].step.clone();
+        let wrapper_path = match resolve_runtime_command(state_snapshot, &step.owner) {
+            Ok(path) => path,
+            Err(error) => {
+                step_states[index].status = "failed".to_string();
+                step_states[index].summary = Some("CLI runtime is unavailable.".to_string());
+                step_states[index].result = Some(error);
+                encountered_failure = true;
+                continue;
+            }
+        };
+
+        let mut worker_session = acp::AcpSession::default();
+        worker_session.plan_mode = !step.write;
+        if step.owner == "claude" {
+            worker_session
+                .permission_mode
+                .insert("claude".to_string(), if step.write { "acceptEdits".to_string() } else { "plan".to_string() });
+        } else if step.owner == "gemini" {
+            worker_session
+                .permission_mode
+                .insert("gemini".to_string(), if step.write { "auto_edit".to_string() } else { "plan".to_string() });
+        } else {
+            worker_session
+                .permission_mode
+                .insert("codex".to_string(), if step.write { "workspace-write".to_string() } else { "read-only".to_string() });
+        }
+
+        let worker_prompt = compose_tab_context_prompt(
+            state_snapshot,
+            terminal_storage,
+            &step.owner,
+            &request.terminal_tab_id,
+            &request.workspace_id,
+            &request.project_root,
+            &request.project_name,
+            &build_auto_worker_prompt(&request.prompt, &step),
+            &request.recent_turns,
+            step.write,
+        );
+
+        let message_id = create_id("auto-step");
+        let worker_result = if step.owner == "codex" {
+            run_codex_app_server_turn(
+                app,
+                &wrapper_path,
+                &request.project_root,
+                &worker_prompt,
+                &[],
+                &worker_session,
+                None,
+                &request.terminal_tab_id,
+                &message_id,
+                step.write,
+                codex_pending_approvals.clone(),
+                Vec::new(),
+            )
+            .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks))
+        } else if step.owner == "gemini" {
+            run_gemini_acp_turn(
+                app,
+                &wrapper_path,
+                &request.project_root,
+                &worker_prompt,
+                &worker_session,
+                None,
+                &request.terminal_tab_id,
+                &message_id,
+                step.write,
+                timeout_ms,
+                Vec::new(),
+            )
+            .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks))
+        } else {
+            run_claude_headless_turn(
+                app,
+                &wrapper_path,
+                &request.project_root,
+                &worker_prompt,
+                &worker_session,
+                None,
+                &request.terminal_tab_id,
+                &message_id,
+                step.write,
+                timeout_ms,
+                claude_approval_rules.clone(),
+                claude_pending_approvals.clone(),
+            )
+            .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks))
+        };
+
+        match worker_result {
+            Ok((raw_output, final_content, _exit_code, blocks)) => {
+                for file in collect_relevant_files_from_blocks(&blocks) {
+                    collected_files.insert(file);
+                }
+                let summary = display_summary(if raw_output.trim().is_empty() {
+                    &final_content
+                } else {
+                    &raw_output
+                });
+                step_states[index].status = "completed".to_string();
+                step_states[index].summary = Some("Step completed.".to_string());
+                step_states[index].result = Some(summary);
+            }
+            Err(error) => {
+                step_states[index].status = "failed".to_string();
+                step_states[index].summary = Some("Step failed.".to_string());
+                step_states[index].result = Some(display_summary(&error));
+                encountered_failure = true;
+            }
+        }
+    }
+
+    let mut synthesis_session = acp::AcpSession::default();
+    synthesis_session.plan_mode = true;
+    let synthesis_prompt = build_auto_synthesis_prompt(&request.prompt, &plan, &step_states);
+    let synthesized = run_silent_agent_turn_once(
+        &request.project_root,
+        "claude",
+        &claude_wrapper_path,
+        &synthesis_prompt,
+        false,
+        &synthesis_session,
+        timeout_ms,
+    )
+    .ok()
+    .map(|outcome| {
+        if outcome.final_content.trim().is_empty() {
+            outcome.raw_output
+        } else {
+            outcome.final_content
+        }
+    });
+
+    let fallback_summary = {
+        let mut lines = Vec::new();
+        lines.push(if encountered_failure {
+            "本轮自动模式执行包含失败步骤。".to_string()
+        } else {
+            "本轮自动模式执行完成。".to_string()
+        });
+        lines.push(String::new());
+        for step in &step_states {
+            lines.push(format!("- {} [{}]", step.step.title, step.status));
+            if let Some(result) = step.result.as_ref() {
+                lines.push(format!("  {}", result));
+            }
+        }
+        lines.join("\n")
+    };
+
+    let final_content = synthesized.unwrap_or(fallback_summary);
+    AutomationExecutionOutcome {
+        owner_cli: "claude".to_string(),
+        raw_output: final_content.clone(),
+        summary: display_summary(&final_content),
+        exit_code: Some(if encountered_failure { 1 } else { 0 }),
+        relevant_files: collected_files.into_iter().collect(),
     }
 }
 
@@ -9342,6 +9898,9 @@ fn schedule_automation_run(app: AppHandle, store: &State<'_, AppStore>, run_id: 
         store.context.clone(),
         store.settings.clone(),
         store.terminal_storage.clone(),
+        store.claude_approval_rules.clone(),
+        store.claude_pending_approvals.clone(),
+        store.codex_pending_approvals.clone(),
         store.automation_runs.clone(),
         store.automation_active_runs.clone(),
         run_id,
@@ -9354,6 +9913,9 @@ fn schedule_automation_run_with_handles(
     context_arc: Arc<Mutex<ContextStore>>,
     settings_arc: Arc<Mutex<AppSettings>>,
     terminal_storage: TerminalStorage,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
     active_runs: Arc<Mutex<BTreeSet<String>>>,
     run_id: String,
@@ -9398,6 +9960,9 @@ fn schedule_automation_run_with_handles(
             &context_arc,
             &settings_arc,
             &terminal_storage,
+            &claude_approval_rules,
+            &claude_pending_approvals,
+            &codex_pending_approvals,
             &automation_runs,
             &run_id,
         );
@@ -9414,6 +9979,9 @@ fn schedule_existing_automation_runs(
     context_arc: Arc<Mutex<ContextStore>>,
     settings_arc: Arc<Mutex<AppSettings>>,
     terminal_storage: TerminalStorage,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
     active_runs: Arc<Mutex<BTreeSet<String>>>,
 ) {
@@ -9433,6 +10001,9 @@ fn schedule_existing_automation_runs(
             context_arc.clone(),
             settings_arc.clone(),
             terminal_storage.clone(),
+            claude_approval_rules.clone(),
+            claude_pending_approvals.clone(),
+            codex_pending_approvals.clone(),
             automation_runs.clone(),
             active_runs.clone(),
             run_id,
@@ -9441,9 +10012,13 @@ fn schedule_existing_automation_runs(
 }
 
 fn execute_automation_goal(
+    app: &AppHandle,
     state_arc: &Arc<Mutex<AppStateDto>>,
     settings_arc: &Arc<Mutex<AppSettings>>,
     terminal_storage: &TerminalStorage,
+    claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     run: &AutomationRun,
     goal: &AutomationGoal,
     profile: &AutomationGoalRuleConfig,
@@ -9452,7 +10027,6 @@ fn execute_automation_goal(
     prior_progress: Option<&str>,
     next_instruction: Option<&str>,
 ) -> AutomationExecutionOutcome {
-    let shell = shell_path();
     let timeout_ms = settings_arc
         .lock()
         .map(|settings| settings.process_timeout_ms)
@@ -9513,7 +10087,47 @@ fn execute_automation_goal(
         }
     }
 
-    let prompt = compose_tab_context_prompt(
+    let automation_prompt = build_automation_goal_prompt(
+        run,
+        goal,
+        profile,
+        owner_cli,
+        round_index,
+        prior_progress,
+        next_instruction,
+    );
+
+    if goal.execution_mode == "auto" {
+        return execute_auto_mode_goal(
+            app,
+            &state_snapshot,
+            settings_arc,
+            terminal_storage,
+            claude_approval_rules,
+            claude_pending_approvals,
+            codex_pending_approvals,
+            run,
+            goal,
+            &automation_prompt,
+            timeout_ms,
+        );
+    }
+
+    let (prompt_for_context, selected_codex_skills, selected_claude_skill) = match owner_cli {
+        "codex" => {
+            let (runtime_prompt, selected_skills) =
+                resolve_codex_prompt_and_skills(app, &wrapper_path, &run.project_root, &automation_prompt);
+            (runtime_prompt, selected_skills, None)
+        }
+        "claude" => {
+            let (runtime_prompt, selected_skill) =
+                resolve_claude_prompt_and_skill(&run.project_root, &automation_prompt);
+            (runtime_prompt, Vec::new(), selected_skill)
+        }
+        _ => (automation_prompt, Vec::new(), None),
+    };
+
+    let composed_prompt_base = compose_tab_context_prompt(
         &state_snapshot,
         terminal_storage,
         &owner_cli,
@@ -9521,33 +10135,77 @@ fn execute_automation_goal(
         &run.workspace_id,
         &run.project_root,
         &run.project_name,
-        &build_automation_goal_prompt(
-            run,
-            goal,
-            profile,
-            owner_cli,
-            round_index,
-            prior_progress,
-            next_instruction,
-        ),
+        &prompt_for_context,
         &recent_turns,
         profile.allow_safe_workspace_edits,
     );
+    let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
+        format!("/{} {}", skill.name, composed_prompt_base)
+    } else {
+        composed_prompt_base
+    };
 
     let before_files = get_git_panel(run.project_root.clone())
         .map(|panel| panel.recent_changes.into_iter().map(|change| change.path).collect::<BTreeSet<_>>())
         .unwrap_or_default();
 
-    let execution = run_silent_agent_turn_once(
-        &shell,
-        &run.project_root,
-        &owner_cli,
-        &wrapper_path,
-        &prompt,
-        true,
-        &session,
-        timeout_ms,
-    );
+    let message_id = create_id("auto-msg");
+    let execution = match owner_cli {
+        "codex" => run_codex_app_server_turn(
+            app,
+            &wrapper_path,
+            &run.project_root,
+            &composed_prompt,
+            &selected_codex_skills,
+            &session,
+            None,
+            &goal.synthetic_terminal_tab_id,
+            &message_id,
+            true,
+            codex_pending_approvals.clone(),
+            Vec::new(),
+        )
+        .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks)),
+        "claude" => run_claude_headless_turn(
+            app,
+            &wrapper_path,
+            &run.project_root,
+            &composed_prompt,
+            &session,
+            None,
+            &goal.synthetic_terminal_tab_id,
+            &message_id,
+            true,
+            timeout_ms,
+            claude_approval_rules.clone(),
+            claude_pending_approvals.clone(),
+        )
+        .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks)),
+        "gemini" => run_gemini_acp_turn(
+            app,
+            &wrapper_path,
+            &run.project_root,
+            &composed_prompt,
+            &session,
+            None,
+            &goal.synthetic_terminal_tab_id,
+            &message_id,
+            true,
+            timeout_ms,
+            Vec::new(),
+        )
+        .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks)),
+        _ => run_silent_agent_turn_once(
+            &run.project_root,
+            &owner_cli,
+            &wrapper_path,
+            &composed_prompt,
+            true,
+            &session,
+            timeout_ms,
+        )
+        .map(|outcome| (outcome.raw_output, outcome.final_content, Some(0), Vec::new())),
+    };
 
     let after_files = get_git_panel(run.project_root.clone())
         .map(|panel| panel.recent_changes.into_iter().map(|change| change.path).collect::<BTreeSet<_>>())
@@ -9558,18 +10216,27 @@ fn execute_automation_goal(
         .collect::<Vec<_>>();
 
     match execution {
-        Ok(outcome) => {
-            let raw = if outcome.raw_output.trim().is_empty() {
-                outcome.final_content.clone()
+        Ok((raw_output, final_content, exit_code, blocks)) => {
+            let raw = if raw_output.trim().is_empty() {
+                final_content.clone()
             } else {
-                outcome.raw_output.clone()
+                raw_output.clone()
             };
             AutomationExecutionOutcome {
                 owner_cli: owner_cli.to_string(),
                 raw_output: raw.clone(),
                 summary: display_summary(&raw),
-                exit_code: Some(0),
-                relevant_files,
+                exit_code,
+                relevant_files: if blocks.is_empty() {
+                    relevant_files
+                } else {
+                    collect_relevant_files_from_blocks(&blocks)
+                        .into_iter()
+                        .chain(relevant_files.into_iter())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect()
+                },
             }
         }
         Err(error) => AutomationExecutionOutcome {
@@ -9588,6 +10255,9 @@ fn execute_automation_run_loop(
     context_arc: &Arc<Mutex<ContextStore>>,
     settings_arc: &Arc<Mutex<AppSettings>>,
     terminal_storage: &TerminalStorage,
+    claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_runs: &Arc<Mutex<Vec<AutomationRun>>>,
     run_id: &str,
 ) {
@@ -9605,6 +10275,11 @@ fn execute_automation_run_loop(
             let run = &mut runs[run_index];
 
             if run.status == "cancelled" {
+                run.summary = Some(summarize_automation_run(run));
+                let _ = persist_automation_runs_to_disk(&runs);
+                return;
+            }
+            if run.status == "paused" {
                 run.summary = Some(summarize_automation_run(run));
                 let _ = persist_automation_runs_to_disk(&runs);
                 return;
@@ -9685,8 +10360,12 @@ fn execute_automation_run_loop(
 
         let mut working_goal = goal_snapshot.clone();
         let mut current_owner = normalize_automation_owner(
-            working_goal.last_owner_cli.as_deref(),
-            &infer_automation_owner(&working_goal),
+            if working_goal.execution_mode == "auto" {
+                working_goal.last_owner_cli.as_deref()
+            } else {
+                Some(working_goal.execution_mode.as_str())
+            },
+            &automation_goal_target_cli(&working_goal),
         );
         let mut prior_progress = working_goal.latest_progress_summary.clone();
         let mut next_instruction = working_goal.next_instruction.clone();
@@ -9697,9 +10376,13 @@ fn execute_automation_run_loop(
         loop {
             let round_index = working_goal.round_count + 1;
             let outcome = execute_automation_goal(
+                app,
                 state_arc,
                 settings_arc,
                 terminal_storage,
+                claude_approval_rules,
+                claude_pending_approvals,
+                codex_pending_approvals,
                 &run_snapshot,
                 &working_goal,
                 &working_goal.rule_config,
@@ -9753,7 +10436,6 @@ fn execute_automation_run_loop(
                     .unwrap_or_else(|| "workspace".to_string());
                 sync_agent_runtime(&mut state_snapshot);
                 evaluate_automation_round(
-                    &shell_path(),
                     &state_snapshot,
                     settings_arc,
                     &run_snapshot,
@@ -9788,6 +10470,15 @@ fn execute_automation_run_loop(
 
             let mut decision = judgement.decision.clone();
             let mut reason = judgement.reason.clone();
+            let pause_requested = automation_runs
+                .lock()
+                .ok()
+                .and_then(|runs| runs.iter().find(|item| item.id == run_id).map(|run| run.status == "paused"))
+                .unwrap_or(false);
+            if decision == "continue" && pause_requested {
+                decision = "pause".to_string();
+                reason = "批次已手动暂停，当前轮次结束后停止继续。".to_string();
+            }
             if decision == "continue" && round_index >= working_goal.rule_config.max_rounds_per_goal {
                 decision = "fail".to_string();
                 reason = "Stopped because the goal hit the maximum unattended round budget.".to_string();
@@ -9872,10 +10563,14 @@ fn execute_automation_run_loop(
             if decision == "continue" {
                 prior_progress = Some(judgement.progress_summary.clone());
                 next_instruction = judgement.next_instruction.clone();
-                current_owner = normalize_automation_owner(
-                    judgement.next_owner_cli.as_deref(),
-                    &current_owner,
-                );
+                current_owner = if working_goal.execution_mode == "auto" {
+                    normalize_automation_owner(
+                        judgement.next_owner_cli.as_deref(),
+                        &current_owner,
+                    )
+                } else {
+                    working_goal.execution_mode.clone()
+                };
                 continue;
             }
 
@@ -11643,6 +12338,14 @@ pub fn run() {
     let scheduler_storage = terminal_storage.clone();
     let scheduler_runs = automation_runs.clone();
     let scheduler_active = automation_active_runs.clone();
+    let claude_approval_rules = Arc::new(Mutex::new(
+        load_or_seed_claude_approval_rules().unwrap_or_default(),
+    ));
+    let claude_pending_approvals = Arc::new(Mutex::new(BTreeMap::new()));
+    let codex_pending_approvals = Arc::new(Mutex::new(BTreeMap::new()));
+    let scheduler_claude_approval_rules = claude_approval_rules.clone();
+    let scheduler_claude_pending_approvals = claude_pending_approvals.clone();
+    let scheduler_codex_pending_approvals = codex_pending_approvals.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .manage(AppStore {
@@ -11654,11 +12357,9 @@ pub fn run() {
             automation_active_runs,
             automation_rule_profile,
             acp_session: Arc::new(Mutex::new(acp::AcpSession::default())),
-            claude_approval_rules: Arc::new(Mutex::new(
-                load_or_seed_claude_approval_rules().unwrap_or_default(),
-            )),
-            claude_pending_approvals: Arc::new(Mutex::new(BTreeMap::new())),
-            codex_pending_approvals: Arc::new(Mutex::new(BTreeMap::new())),
+            claude_approval_rules,
+            claude_pending_approvals,
+            codex_pending_approvals,
         })
         .setup(move |app| {
             schedule_existing_automation_runs(
@@ -11667,6 +12368,9 @@ pub fn run() {
                 scheduler_context.clone(),
                 scheduler_settings.clone(),
                 scheduler_storage.clone(),
+                scheduler_claude_approval_rules.clone(),
+                scheduler_claude_pending_approvals.clone(),
+                scheduler_codex_pending_approvals.clone(),
                 scheduler_runs.clone(),
                 scheduler_active.clone(),
             );
@@ -11696,9 +12400,13 @@ pub fn run() {
             update_automation_goal_rule_config,
             create_automation_run,
             start_automation_run,
+            pause_automation_run,
+            resume_automation_run,
+            restart_automation_run,
             pause_automation_goal,
             resume_automation_goal,
             cancel_automation_run,
+            delete_automation_run,
             switch_cli_for_task,
             send_chat_message,
             run_auto_orchestration,

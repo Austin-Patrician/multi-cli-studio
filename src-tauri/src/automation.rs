@@ -13,6 +13,8 @@ pub struct AutomationGoalDraft {
     pub title: Option<String>,
     pub goal: String,
     pub expected_outcome: String,
+    #[serde(default = "default_execution_mode")]
+    pub execution_mode: String,
     #[serde(default)]
     pub rule_config: Option<AutomationGoalRuleConfig>,
 }
@@ -58,6 +60,8 @@ pub struct AutomationGoal {
     pub title: String,
     pub goal: String,
     pub expected_outcome: String,
+    #[serde(default = "default_execution_mode")]
+    pub execution_mode: String,
     pub status: String,
     pub position: usize,
     #[serde(default)]
@@ -267,6 +271,7 @@ pub fn normalize_runs_on_startup(runs: &mut [AutomationRun]) {
         }
 
         for goal in &mut run.goals {
+            goal.execution_mode = normalize_execution_mode(&goal.execution_mode);
             if goal.status == "running" {
                 goal.status = "queued".to_string();
                 goal.updated_at = now.clone();
@@ -298,6 +303,7 @@ pub fn build_run_from_request(request: CreateAutomationRunRequest) -> Automation
                 .unwrap_or_else(|| derive_goal_title(&goal.goal)),
             goal: goal.goal,
             expected_outcome: goal.expected_outcome,
+            execution_mode: normalize_execution_mode(&goal.execution_mode),
             status: "queued".to_string(),
             position: index,
             round_count: 0,
@@ -351,6 +357,19 @@ pub fn build_run_from_request(request: CreateAutomationRunRequest) -> Automation
         },
     );
     run
+}
+
+pub fn default_execution_mode() -> String {
+    "auto".to_string()
+}
+
+pub fn normalize_execution_mode(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "codex" => "codex".to_string(),
+        "claude" => "claude".to_string(),
+        "gemini" => "gemini".to_string(),
+        _ => "auto".to_string(),
+    }
 }
 
 pub fn push_event(

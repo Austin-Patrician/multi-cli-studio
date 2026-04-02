@@ -31,13 +31,14 @@ import {
 } from "./messageFormatting";
 import { notifyTerminalCompletion, type TerminalCompletionNotice } from "./desktopNotifications";
 
-const TERMINAL_STATE_KEY = "multi-cli-studio::terminal-state";
 const DEFAULT_PROCESS_TIMEOUT_MS = 300000;
 const STREAM_RUNTIME_STALE_GRACE_MS = 10000;
 const STREAM_RUNTIME_STALE_MIN_MS = 60000;
 const STREAM_STALE_CHECK_MS = 3000;
 const INTERRUPTED_STREAM_TEXT = "Response interrupted before completion. You can retry this prompt.";
 const PARTIAL_STREAM_TEXT = "Streaming stopped before completion. This response may be partial.";
+
+type PersistenceScope = "terminalState" | "chatMessages";
 
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -241,16 +242,30 @@ let terminalStatePersistInFlight = false;
 let queuedTerminalState: PersistedTerminalState | null = null;
 let messagePersistenceInFlight = false;
 const queuedMessagePersistence: Array<() => Promise<void>> = [];
+const persistenceIssues = new Map<PersistenceScope, string>();
+let persistenceIssueReporter: ((message: string | null) => void) | null = null;
 
-function loadLegacyPersistedTerminalState(): PersistedTerminalState | null {
-  if (typeof window === "undefined") return null;
-  const raw = window.localStorage.getItem(TERMINAL_STATE_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as PersistedTerminalState;
-  } catch {
-    return null;
+function formatPersistenceError(scope: PersistenceScope, error: unknown) {
+  const detail =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "Unknown persistence error";
+  return `${scope === "terminalState" ? "Terminal state" : "Chat persistence"} failed: ${detail}`;
+}
+
+function updatePersistenceIssue(scope: PersistenceScope, error: unknown | null) {
+  if (error == null) {
+    persistenceIssues.delete(scope);
+  } else {
+    const message = formatPersistenceError(scope, error);
+    persistenceIssues.set(scope, message);
+    console.error(`[multi-cli-studio] ${message}`, error);
   }
+  persistenceIssueReporter?.(
+    persistenceIssues.size > 0 ? Array.from(persistenceIssues.values()).join(" | ") : null
+  );
 }
 
 async function flushTerminalStatePersistence() {
@@ -259,8 +274,9 @@ async function flushTerminalStatePersistence() {
     queuedTerminalState = null;
     try {
       await bridge.saveTerminalState(snapshot);
-    } catch {
-      // backend persistence is best-effort; in-memory state remains authoritative for this runtime
+      updatePersistenceIssue("terminalState", null);
+    } catch (error) {
+      updatePersistenceIssue("terminalState", error);
     }
   }
   terminalStatePersistInFlight = false;
@@ -272,8 +288,9 @@ async function flushMessagePersistenceQueue() {
     if (!next) continue;
     try {
       await next();
-    } catch {
-      // message persistence is best-effort; UI state remains available for the active runtime
+      updatePersistenceIssue("chatMessages", null);
+    } catch (error) {
+      updatePersistenceIssue("chatMessages", error);
     }
   }
   messagePersistenceInFlight = false;
@@ -739,6 +756,7 @@ interface StoreState {
   contextStore: ContextStore | null;
   settings: AppSettings | null;
   busyAction: string | null;
+  persistenceIssue: string | null;
   acpCapabilitiesByCli: Partial<Record<AgentId, AcpCliCapabilities>>;
   acpCapabilityStatusByCli: Partial<Record<AgentId, "idle" | "loading" | "ready" | "error">>;
   cliSkillsByContext: Record<string, CliSkillItem[]>;
@@ -765,6 +783,7 @@ interface StoreState {
   setBusyAction: (action: string | null) => void;
   appendChatSystemMessage: (tabId: string, cliId: AgentId, content: string, exitCode?: number) => void;
   deleteChatMessage: (tabId: string, messageId: string) => void;
+  hydrateTerminalSession: (tabId: string) => Promise<void>;
 
   openWorkspaceFolder: () => Promise<void>;
   createTerminalTab: (workspaceId?: string) => void;
@@ -804,11 +823,17 @@ interface StoreState {
   executeAcpCommand: (command: AcpCommand, tabId?: string) => Promise<void>;
 }
 
-export const useStore = create<StoreState>((set, get) => ({
+export const useStore = create<StoreState>((set, get) => {
+  persistenceIssueReporter = (message) => {
+    set((state) => (state.persistenceIssue === message ? {} : { persistenceIssue: message }));
+  };
+
+  return {
   appState: null,
   contextStore: null,
   settings: null,
   busyAction: null,
+  persistenceIssue: null,
   acpCapabilitiesByCli: {},
   acpCapabilityStatusByCli: {},
   cliSkillsByContext: {},
@@ -913,6 +938,33 @@ export const useStore = create<StoreState>((set, get) => ({
     );
   },
 
+  hydrateTerminalSession: async (tabId) => {
+    try {
+      const persisted = await bridge.loadTerminalState();
+      updatePersistenceIssue("terminalState", null);
+      const persistedSession = persisted?.chatSessions?.[tabId] ?? null;
+      if (!persistedSession) return;
+
+      set((state) => {
+        const currentSession = state.chatSessions[tabId] ?? null;
+        const shouldReplace =
+          !currentSession ||
+          persistedSession.messages.length > currentSession.messages.length ||
+          Date.parse(persistedSession.updatedAt) > Date.parse(currentSession.updatedAt);
+
+        if (!shouldReplace) return {};
+
+        const chatSessions = {
+          ...state.chatSessions,
+          [tabId]: persistedSession,
+        };
+        return { chatSessions };
+      });
+    } catch (error) {
+      updatePersistenceIssue("terminalState", error);
+    }
+  },
+
   loadInitialState: async (projectRoot) => {
     const state = await bridge.loadAppState(projectRoot);
     let workspaces: WorkspaceRef[] = [];
@@ -921,7 +973,13 @@ export const useStore = create<StoreState>((set, get) => ({
     let activeTerminalTabId: string | null = null;
     let shouldSeedSessions = false;
 
-    const persisted = (await bridge.loadTerminalState()) ?? loadLegacyPersistedTerminalState();
+    let persisted: PersistedTerminalState | null = null;
+    try {
+      persisted = await bridge.loadTerminalState();
+      updatePersistenceIssue("terminalState", null);
+    } catch (error) {
+      updatePersistenceIssue("terminalState", error);
+    }
     if (persisted && persisted.workspaces.length > 0 && persisted.terminalTabs.length > 0) {
       workspaces = persisted.workspaces;
       terminalTabs = persisted.terminalTabs.map((tab) =>
@@ -1425,6 +1483,7 @@ export const useStore = create<StoreState>((set, get) => ({
       persistTerminalState(state.workspaces, terminalTabs, tabId, state.chatSessions);
       return { appState, terminalTabs, activeTerminalTabId: tabId };
     });
+    void get().hydrateTerminalSession(tabId);
   },
 
   setTabSelectedCli: (tabId, cliId) => {
@@ -2606,4 +2665,5 @@ export const useStore = create<StoreState>((set, get) => ({
       }
     }
   },
-}));
+  };
+});

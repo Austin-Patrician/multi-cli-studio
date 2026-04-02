@@ -1164,22 +1164,11 @@ export function ChatPromptBar() {
                     setIsActionMenuOpen((current) => !current);
                   }}
                   disabled={isStreaming || isBusy}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-[#dbe4ef] bg-white/90 px-2.5 py-1 text-[11px] font-semibold text-secondary transition-colors hover:border-accent/35 hover:text-text disabled:cursor-not-allowed disabled:opacity-45"
+                  className="flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 bg-white/90 text-slate-400 transition-all hover:border-indigo-300 hover:text-indigo-600 active:scale-95 shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
+                  title="快捷操作"
                 >
-                  More
-                  <svg
-                    className={`h-3 w-3 transition-transform ${isActionMenuOpen ? "rotate-180" : ""}`}
-                    viewBox="0 0 20 20"
-                    fill="none"
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="M5 7.5L10 12.5L15 7.5"
-                      stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={`w-4 h-4 transition-transform duration-300 ${isActionMenuOpen ? 'rotate-45 text-indigo-600' : ''}`}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
                   </svg>
                 </button>
 
@@ -1260,19 +1249,43 @@ export function ChatPromptBar() {
             />
           </div>
 
-          <div className="mt-3 flex flex-col gap-1 text-[11px] text-muted md:flex-row md:items-center md:justify-between">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <span>/ command center</span>
-              <span>/help reference</span>
-              {!isAutoMode && <span>/skills picker</span>}
-              {!isAutoMode && <span>$ skills</span>}
-              <span>@ files</span>
-              {isAutoMode && <span>Claude orchestrates Codex and Gemini when needed</span>}
+          <div className="mt-4 flex flex-col gap-4 border-t border-slate-100 pt-4 text-[10px] font-medium text-slate-400 select-none md:flex-row md:items-center md:justify-between">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+              <div className="flex items-center gap-2">
+                <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">/</kbd>
+                <span className="tracking-tight">指令中心</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">@</kbd>
+                <span className="tracking-tight">引用文件</span>
+              </div>
+              {!isAutoMode && (
+                <div className="flex items-center gap-2">
+                  <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">$</kbd>
+                  <span className="tracking-tight">调用技能</span>
+                </div>
+              )}
+              {isAutoMode && (
+                <div className="flex items-center gap-2 text-indigo-500/80">
+                  <div className="h-1 w-1 rounded-full bg-indigo-400 animate-pulse" />
+                  <span className="font-semibold tracking-tight">Auto 模式已激活</span>
+                </div>
+              )}
             </div>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <span>Enter sends or applies</span>
-              <span>Shift+Enter for newline</span>
-              <span>Up/Down recalls prompts</span>
+            
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-slate-100 md:border-l md:pl-5">
+              <div className="flex items-center gap-2">
+                <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">ENTER</kbd>
+                <span className="tracking-tight">发送</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">SHIFT + ↵</kbd>
+                <span className="tracking-tight">换行</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">↑ ↓</kbd>
+                <span className="tracking-tight">历史记录</span>
+              </div>
             </div>
           </div>
         </div>
