@@ -21,7 +21,16 @@
       "Bash(cd \"C:\\\\Users\\\\admin\\\\source\\\\repos\\\\multi-cli-studio\\\\src-tauri\" && cargo check 2>&1 | tail -30)",
       "Bash(cd \"C:\\\\Users\\\\admin\\\\source\\\\repos\\\\multi-cli-studio\" && npx vite build 2>&1 | tail -10)",
       "WebSearch",
-      "Bash(grep -E \"\\\\.\\(ts|js\\)$\")"
+      "Bash(grep -E \"\\\\.\\(ts|js\\)$\")",
+      "Bash(npx tsc:*)",
+      "Bash(cargo check:*)",
+      "WebFetch(domain:microsoft.github.io)",
+      "mcp__plugin_context7_context7__query-docs",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:www.microsoft.com)",
+      "WebFetch(domain:docs.crewai.com)",
+      "Bash(cargo build:*)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

@@ -2,14 +2,7 @@ import { useMemo } from "react";
 import type { EChartsOption } from "echarts";
 import ReactECharts from "echarts-for-react";
 import { useStore } from "../lib/store";
-import type {
-  ActivityItem,
-  AgentCard,
-  AgentId,
-  AgentResourceGroup,
-  AgentResourceKind,
-  AgentRuntimeResources,
-} from "../lib/models";
+import type { ActivityItem, AgentCard, AgentId } from "../lib/models";
 
 const DISPLAY_FONT = {
   fontFamily: '"Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif',
@@ -48,80 +41,12 @@ const CLI_THEME: Record<
   },
 };
 
-const RESOURCE_ORDER: AgentResourceKind[] = ["mcp", "skill", "plugin", "extension"];
-
-const RESOURCE_LABEL: Record<AgentResourceKind, string> = {
-  mcp: "MCP",
-  skill: "Skills",
-  plugin: "Plugins",
-  extension: "Extensions",
-};
-
-function fallbackGroup(supported: boolean): AgentResourceGroup {
-  return { supported, items: [], error: null };
-}
-
-function fallbackResources(agentId: AgentId): AgentRuntimeResources {
-  switch (agentId) {
-    case "codex":
-      return {
-        mcp: fallbackGroup(true),
-        skill: fallbackGroup(true),
-        plugin: fallbackGroup(false),
-        extension: fallbackGroup(false),
-      };
-    case "claude":
-      return {
-        mcp: fallbackGroup(true),
-        skill: fallbackGroup(true),
-        plugin: fallbackGroup(true),
-        extension: fallbackGroup(false),
-      };
-    default:
-      return {
-        mcp: fallbackGroup(true),
-        skill: fallbackGroup(true),
-        plugin: fallbackGroup(false),
-        extension: fallbackGroup(true),
-      };
-  }
-}
-
-function runtimeResources(agent: AgentCard): AgentRuntimeResources {
-  const fallback = fallbackResources(agent.id);
-  const current = agent.runtime.resources;
-  return {
-    mcp: current?.mcp ?? fallback.mcp,
-    skill: current?.skill ?? fallback.skill,
-    plugin: current?.plugin ?? fallback.plugin,
-    extension: current?.extension ?? fallback.extension,
-  };
-}
-
-function totalResources(agent: AgentCard) {
-  const resources = runtimeResources(agent);
-  return RESOURCE_ORDER.reduce((sum, kind) => {
-    const group = resources[kind];
-    return sum + (group.supported ? group.items.length : 0);
-  }, 0);
-}
-
-function supportedSurfaceCount(agent: AgentCard) {
-  const resources = runtimeResources(agent);
-  return RESOURCE_ORDER.filter((kind) => resources[kind].supported).length;
-}
-
 function terminalVolume(lines: { content: string }[] | undefined) {
   return lines?.length ?? 0;
 }
 
 function totalTrafficLines(agents: AgentCard[], terminalByAgent: Record<AgentId, { content: string }[]>) {
   return agents.reduce((sum, agent) => sum + terminalVolume(terminalByAgent[agent.id]), 0);
-}
-
-function runtimeLabel(agent: AgentCard) {
-  if (!agent.runtime.installed) return "Missing";
-  return agent.runtime.version?.trim() || "Installed";
 }
 
 function activityToneBreakdown(activity: ActivityItem[]) {
@@ -134,26 +59,6 @@ function shortPath(path: string) {
   const parts = path.split(/[\\/]/).filter(Boolean);
   if (parts.length <= 4) return path;
   return ["...", ...parts.slice(-4)].join("\\");
-}
-
-function resourceNames(group: AgentResourceGroup) {
-  if (!group.supported) return "Unavailable";
-  if (group.error) return group.error;
-  if (group.items.length === 0) return "None";
-  return group.items.map((item) => (item.enabled ? item.name : `${item.name} (off)`)).join(" • ");
-}
-
-function toneChipClass(tone: ActivityItem["tone"]) {
-  switch (tone) {
-    case "success":
-      return "bg-emerald-50 text-emerald-700";
-    case "warning":
-      return "bg-amber-50 text-amber-700";
-    case "danger":
-      return "bg-rose-50 text-rose-700";
-    default:
-      return "bg-slate-100 text-slate-700";
-  }
 }
 
 function PanelHeader({
@@ -248,8 +153,33 @@ function TrafficChartPanel({
 
 function SignalMixPanel({ activity }: { activity: ActivityItem[] }) {
   const tones = activityToneBreakdown(activity);
-  const latest = activity.slice(0, 4);
   const hasSignals = Object.values(tones).some((value) => value > 0);
+  const toneRows = [
+    {
+      label: "Info",
+      value: tones.info,
+      helper: "Neutral system notes and context changes",
+      dotClass: "bg-slate-400",
+    },
+    {
+      label: "Success",
+      value: tones.success,
+      helper: "Completed actions and healthy workflow signals",
+      dotClass: "bg-emerald-500",
+    },
+    {
+      label: "Warning",
+      value: tones.warning,
+      helper: "Paused flows, retries, or operator attention needed",
+      dotClass: "bg-amber-500",
+    },
+    {
+      label: "Danger",
+      value: tones.danger,
+      helper: "Errors and broken execution paths",
+      dotClass: "bg-rose-500",
+    },
+  ] as const;
 
   const option = useMemo<EChartsOption>(
     () => ({
@@ -280,7 +210,7 @@ function SignalMixPanel({ activity }: { activity: ActivityItem[] }) {
 
   return (
     <section className="rounded-[30px] border border-slate-200 bg-white px-6 py-6 shadow-[0_20px_60px_rgba(15,23,42,0.05)]">
-      <PanelHeader eyebrow="Signals" title="Activity mix" detail="Recent activity tones and latest operational events." />
+      <PanelHeader eyebrow="Signals" title="Activity mix" detail="Recent activity tone distribution without verbose event details." />
       <div className="mt-6 grid gap-6 xl:grid-cols-[300px_minmax(0,1fr)] xl:items-center">
         <div className="relative rounded-[24px] border border-slate-200 bg-slate-50/60 p-3">
           <ReactECharts option={option} style={{ height: 280, width: "100%" }} opts={{ renderer: "svg" }} />
@@ -291,21 +221,26 @@ function SignalMixPanel({ activity }: { activity: ActivityItem[] }) {
         </div>
 
         <div className="grid gap-3">
-          {latest.length === 0 ? (
+          {activity.length === 0 ? (
             <div className="rounded-[22px] border border-dashed border-slate-200 px-4 py-5 text-sm text-slate-400">
               No activity recorded yet.
             </div>
           ) : (
-            latest.map((item) => (
-              <div key={item.id} className="rounded-[22px] border border-slate-200 bg-slate-50/50 px-4 py-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-sm font-semibold text-slate-950">{item.title}</div>
-                  <span className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] ${toneChipClass(item.tone)}`}>
-                    {item.tone}
-                  </span>
+            toneRows.map((tone) => (
+              <div key={tone.label} className="rounded-[22px] border border-slate-200 bg-slate-50/50 px-4 py-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-3">
+                      <span className={`h-2.5 w-2.5 rounded-full ${tone.dotClass}`} />
+                      <div className="text-sm font-semibold text-slate-950">{tone.label}</div>
+                    </div>
+                    <div className="mt-2 text-sm leading-6 text-slate-600">{tone.helper}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[28px] font-semibold tracking-[-0.05em] text-slate-950">{tone.value}</div>
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">events</div>
+                  </div>
                 </div>
-                <div className="mt-2 text-sm leading-6 text-slate-600">{item.detail}</div>
-                <div className="mt-3 text-[11px] uppercase tracking-[0.18em] text-slate-400">{item.time}</div>
               </div>
             ))
           )}
@@ -315,65 +250,8 @@ function SignalMixPanel({ activity }: { activity: ActivityItem[] }) {
   );
 }
 
-function CliInventoryPanel({ agent }: { agent: AgentCard }) {
-  const resources = runtimeResources(agent);
-  const theme = CLI_THEME[agent.id];
-
-  return (
-    <section className="rounded-[28px] border border-slate-200 bg-white px-5 py-5 shadow-[0_18px_48px_rgba(15,23,42,0.04)]">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-3">
-            <span className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl text-sm font-semibold uppercase ${theme.chip}`}>
-              {agent.label.slice(0, 2)}
-            </span>
-            <div className="min-w-0">
-              <div className="truncate text-[18px] font-semibold tracking-[-0.03em] text-slate-950">{agent.label}</div>
-              <div className="truncate text-sm text-slate-500">{agent.specialty}</div>
-            </div>
-          </div>
-        </div>
-
-        <div className="text-right">
-          <div className="text-[26px] font-semibold tracking-[-0.05em] text-slate-950">{totalResources(agent)}</div>
-          <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400">{supportedSurfaceCount(agent)} surfaces</div>
-        </div>
-      </div>
-
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">Runtime {runtimeLabel(agent)}</span>
-        <span className={`rounded-full bg-slate-50 px-2.5 py-1 text-[11px] font-medium ${theme.text}`}>Local inventory</span>
-      </div>
-
-      <div className="mt-5 space-y-4">
-        {RESOURCE_ORDER.map((kind) => (
-          <div key={`${agent.id}-${kind}`} className="border-t border-slate-200 pt-4 first:border-t-0 first:pt-0">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-[12px] font-semibold uppercase tracking-[0.18em] text-slate-400">{RESOURCE_LABEL[kind]}</div>
-              <div className="text-[11px] text-slate-400">
-                {resources[kind].supported ? resources[kind].items.length : "N/A"}
-              </div>
-            </div>
-            <div className="mt-2 text-sm leading-7 text-slate-600">{resourceNames(resources[kind])}</div>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
 export function DashboardPage() {
   const appState = useStore((s) => s.appState);
-
-  const installedCliCount = useMemo(
-    () => appState?.agents.filter((agent) => agent.runtime.installed).length ?? 0,
-    [appState]
-  );
-
-  const inventoryCount = useMemo(
-    () => appState?.agents.reduce((sum, agent) => sum + totalResources(agent), 0) ?? 0,
-    [appState]
-  );
 
   if (!appState) {
     return <div className="flex h-full items-center justify-center text-muted">Loading...</div>;
@@ -393,7 +271,7 @@ export function DashboardPage() {
                 {workspace.projectName}
               </div>
               <div className="mt-4 max-w-3xl text-[15px] leading-7 text-slate-500">
-                A quieter dashboard focused on runtime usage, signal quality, and CLI inventory clarity.
+                A quieter dashboard focused on workspace health, signal quality, and live terminal movement.
               </div>
               <div className="mt-6 rounded-[24px] border border-slate-200 bg-slate-950 px-4 py-4 text-slate-100">
                 <div className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-400">Project Root</div>
@@ -402,8 +280,8 @@ export function DashboardPage() {
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2">
-              <MetricCell label="Installed" value={String(installedCliCount)} helper="CLI runtimes detected on this machine" />
-              <MetricCell label="Inventory" value={String(inventoryCount)} helper="MCP, skills, plugins, and extensions" />
+              <MetricCell label="Dirty Files" value={String(workspace.dirtyFiles)} helper="Tracked workspace changes waiting for review" />
+              <MetricCell label="Checks" value={String(workspace.failingChecks)} helper="Failing workspace validations or repo checks" />
               <MetricCell label="Events" value={String(activity.length)} helper="Recent timeline signals in memory" />
               <MetricCell label="Traffic" value={String(totalTraffic)} helper="Terminal output lines across all lanes" />
             </div>
@@ -413,12 +291,6 @@ export function DashboardPage() {
         <section className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
           <TrafficChartPanel agents={agents} terminalByAgent={terminalByAgent} />
           <SignalMixPanel activity={activity} />
-        </section>
-
-        <section className="mt-6 grid gap-6 md:grid-cols-2 2xl:grid-cols-3">
-          {agents.map((agent) => (
-            <CliInventoryPanel key={agent.id} agent={agent} />
-          ))}
         </section>
       </div>
     </div>

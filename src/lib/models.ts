@@ -214,6 +214,19 @@ export interface ContextStore {
 }
 
 /** User-configurable settings */
+export interface NotificationConfig {
+  notifyOnCompletion: boolean;
+  webhookUrl: string;
+  webhookEnabled: boolean;
+  smtpEnabled: boolean;
+  smtpHost: string;
+  smtpPort: number;
+  smtpUsername: string;
+  smtpPassword: string;
+  smtpFrom: string;
+  emailRecipients: string[];
+}
+
 export interface AppSettings {
   cliPaths: { codex: string; claude: string; gemini: string };
   projectRoot: string;
@@ -221,6 +234,7 @@ export interface AppSettings {
   maxOutputCharsPerTurn: number;
   processTimeoutMs: number;
   notifyOnTerminalCompletion: boolean;
+  notificationConfig: NotificationConfig;
 }
 
 export type AutomationRunStatus =
@@ -350,6 +364,43 @@ export interface ChatMessage {
   exitCode: number | null;
 }
 
+// ── Compaction types ──────────────────────────────────────────────────
+
+/** Structured summary produced by compacting a conversation segment */
+export interface CompactedSummary {
+  id: string;
+  sourceTabId: string;
+  sourceCli: AgentId;
+  timestamp: string;
+  /** User's primary goal / intent */
+  intent: string;
+  /** Files, functions, architecture decisions involved */
+  technicalContext: string;
+  /** File paths modified during the compacted segment */
+  changedFiles: string[];
+  /** Errors encountered and how they were resolved */
+  errorsAndFixes: string;
+  /** Where work stood when segment was compacted */
+  currentState: string;
+  /** Remaining work / next actions */
+  nextSteps: string;
+  /** Rough token count of the summary itself */
+  tokenEstimate: number;
+  /** Monotonic version — bumped on re-compaction */
+  version: number;
+}
+
+/** A cross-tab context entry published by one tab for consumption by siblings */
+export interface SharedContextEntry {
+  id: string;
+  sourceTabId: string;
+  sourceTabTitle: string;
+  sourceCli: AgentId;
+  summary: CompactedSummary;
+  /** When the entry was last refreshed */
+  updatedAt: string;
+}
+
 /** Project-scoped conversation session */
 export interface ConversationSession {
   id: string;
@@ -358,6 +409,12 @@ export interface ConversationSession {
   projectRoot: string;
   projectName: string;
   messages: ChatMessage[];
+  /** Compacted summaries from earlier conversation segments */
+  compactedSummaries: CompactedSummary[];
+  /** ISO timestamp of last compaction, null if never compacted */
+  lastCompactedAt: string | null;
+  /** Estimated total token count for prompt-construction budgeting */
+  estimatedTokens: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -430,6 +487,10 @@ export interface ChatPromptRequest {
   modelOverride?: string | null;
   permissionOverride?: string | null;
   transportSession?: AgentTransportSession | null;
+  /** Compacted history from this tab's earlier conversation segments */
+  compactedSummaries?: CompactedSummary[] | null;
+  /** Summaries from sibling tabs in the same workspace */
+  crossTabContext?: SharedContextEntry[] | null;
 }
 
 export interface AutoOrchestrationRequest {
@@ -458,6 +519,10 @@ export interface CliHandoffRequest {
   latestUserPrompt?: string | null;
   latestAssistantSummary?: string | null;
   relevantFiles?: string[];
+  /** Compressed history from the outgoing CLI */
+  compactedHistory?: CompactedSummary | null;
+  /** Summaries from sibling tabs */
+  crossTabContext?: SharedContextEntry[] | null;
 }
 
 export type AssistantApprovalDecision = "allowOnce" | "allowAlways" | "deny";

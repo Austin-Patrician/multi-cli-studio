@@ -263,6 +263,8 @@ struct AppSettings {
     process_timeout_ms: u64,
     #[serde(default)]
     notify_on_terminal_completion: bool,
+    #[serde(default)]
+    notification_config: NotificationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,7 +275,82 @@ struct CliPaths {
     gemini: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotificationConfig {
+    #[serde(default)]
+    notify_on_completion: bool,
+    #[serde(default)]
+    webhook_url: String,
+    #[serde(default)]
+    webhook_enabled: bool,
+    #[serde(default)]
+    smtp_enabled: bool,
+    #[serde(default)]
+    smtp_host: String,
+    #[serde(default = "default_smtp_port")]
+    smtp_port: u16,
+    #[serde(default)]
+    smtp_username: String,
+    #[serde(default)]
+    smtp_password: String,
+    #[serde(default)]
+    smtp_from: String,
+    #[serde(default)]
+    email_recipients: Vec<String>,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            notify_on_completion: false,
+            webhook_url: String::new(),
+            webhook_enabled: false,
+            smtp_enabled: false,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 587,
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            smtp_from: String::new(),
+            email_recipients: Vec::new(),
+        }
+    }
+}
+
+fn default_smtp_port() -> u16 {
+    587
+}
+
 // ── Chat types ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactedSummary {
+    id: String,
+    source_tab_id: String,
+    source_cli: String,
+    timestamp: String,
+    intent: String,
+    technical_context: String,
+    #[serde(default)]
+    changed_files: Vec<String>,
+    errors_and_fixes: String,
+    current_state: String,
+    next_steps: String,
+    token_estimate: usize,
+    version: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedContextEntry {
+    id: String,
+    source_tab_id: String,
+    source_tab_title: String,
+    source_cli: String,
+    summary: CompactedSummary,
+    updated_at: String,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -303,6 +380,10 @@ struct ChatPromptRequest {
     model_override: Option<String>,
     permission_override: Option<String>,
     transport_session: Option<AgentTransportSession>,
+    #[serde(default)]
+    compacted_summaries: Option<Vec<CompactedSummary>>,
+    #[serde(default)]
+    cross_tab_context: Option<Vec<SharedContextEntry>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -347,6 +428,9 @@ struct CliHandoffRequest {
     latest_assistant_summary: Option<String>,
     #[serde(default)]
     relevant_files: Vec<String>,
+    compacted_history: Option<CompactedSummary>,
+    #[serde(default)]
+    cross_tab_context: Option<Vec<SharedContextEntry>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5553,7 +5637,25 @@ fn start_automation_run(
         }
         run.status = "scheduled".to_string();
         run.scheduled_start_at = Some(now.clone());
-        run.updated_at = now;
+        run.updated_at = now.clone();
+        // Reset goal states when starting a paused run
+        for goal in &mut run.goals {
+            if goal.status == "paused" || goal.status == "running" {
+                goal.status = "queued".to_string();
+                goal.round_count = 0;
+                goal.consecutive_failure_count = 0;
+                goal.no_progress_rounds = 0;
+                goal.last_owner_cli = None;
+                goal.result_summary = None;
+                goal.latest_progress_summary = None;
+                goal.next_instruction = None;
+                goal.requires_attention_reason = None;
+                goal.last_exit_code = None;
+                goal.started_at = None;
+                goal.completed_at = None;
+                goal.updated_at = now.clone();
+            }
+        }
         push_event(
             run,
             None,
@@ -6250,6 +6352,8 @@ fn send_chat_message(
             &prompt_for_context,
             &recent_turns,
             write_mode,
+            request.compacted_summaries.as_ref(),
+            request.cross_tab_context.as_ref(),
         )
     };
     let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
@@ -7124,6 +7228,8 @@ fn run_auto_orchestration(
                 &build_auto_worker_prompt(&request_for_thread.prompt, &step),
                 &request_for_thread.recent_turns,
                 step.write,
+                None,
+                None,
             );
 
             let block_prefix = {
@@ -8440,6 +8546,18 @@ fn search_workspace_files(
     Ok(results)
 }
 
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
+}
+
 /// Builds a unified context prompt including conversation history from all CLIs
 fn compose_tab_context_prompt(
     state: &AppStateDto,
@@ -8452,6 +8570,8 @@ fn compose_tab_context_prompt(
     prompt: &str,
     recent_turns: &[ChatContextTurn],
     write_mode: bool,
+    compacted_summaries: Option<&Vec<CompactedSummary>>,
+    cross_tab_context: Option<&Vec<SharedContextEntry>>,
 ) -> String {
     let workspace_preamble = format!(
         "You are operating inside Multi CLI Studio.\n\
@@ -8471,7 +8591,7 @@ fn compose_tab_context_prompt(
         },
     );
 
-    let rules = 
+    let rules =
         "\n--- Response rules ---\n\
          - Focus on the current request.\n\
          - Do not repeat or quote the conversation history unless the user explicitly asks.\n\
@@ -8479,11 +8599,47 @@ fn compose_tab_context_prompt(
          - Answer directly in clean Markdown when it improves readability.\n\
          - Use fenced code blocks only for commands, code, patches, or logs.";
 
+    // Build compacted history section
+    let compacted_section = match compacted_summaries {
+        Some(summaries) if !summaries.is_empty() => {
+            let entries: Vec<String> = summaries.iter().enumerate().map(|(i, s)| {
+                let mut lines = vec![format!("[Compacted segment {} (v{})]", i + 1, s.version)];
+                if !s.intent.is_empty() { lines.push(format!("Intent: {}", s.intent)); }
+                if !s.technical_context.is_empty() { lines.push(format!("Context: {}", s.technical_context)); }
+                if !s.changed_files.is_empty() { lines.push(format!("Changed files: {}", s.changed_files.join(", "))); }
+                if !s.errors_and_fixes.is_empty() { lines.push(format!("Errors/Fixes: {}", s.errors_and_fixes)); }
+                if !s.current_state.is_empty() { lines.push(format!("State: {}", s.current_state)); }
+                if !s.next_steps.is_empty() { lines.push(format!("Next steps: {}", s.next_steps)); }
+                lines.join("\n")
+            }).collect();
+            format!("\n\n<compacted-history>\n{}\n</compacted-history>", entries.join("\n\n"))
+        }
+        _ => String::new(),
+    };
+
+    // Build cross-tab context section
+    let cross_tab_section = match cross_tab_context {
+        Some(entries) if !entries.is_empty() => {
+            let blocks: Vec<String> = entries.iter().take(4).map(|e| {
+                let mut lines = vec![format!("[Tab \"{}\" ({}, {})]", e.source_tab_title, e.source_cli, e.updated_at)];
+                let s = &e.summary;
+                if !s.intent.is_empty() { lines.push(format!("Intent: {}", truncate_str(&s.intent, 300))); }
+                if !s.changed_files.is_empty() { lines.push(format!("Changed: {}", s.changed_files.iter().take(10).cloned().collect::<Vec<_>>().join(", "))); }
+                if !s.current_state.is_empty() { lines.push(format!("State: {}", truncate_str(&s.current_state, 300))); }
+                lines.join("\n")
+            }).collect();
+            format!("\n\n<cross-tab-context>\n{}\n</cross-tab-context>", blocks.join("\n\n"))
+        }
+        _ => String::new(),
+    };
+
     let workspace_tail = format!(
-        "{}\n\n--- Current workspace ---\n\
+        "{}{}{}\n\n--- Current workspace ---\n\
          Dirty files: {}\n\
          Failing checks: {}",
         rules,
+        compacted_section,
+        cross_tab_section,
         state.workspace.dirty_files, state.workspace.failing_checks,
     );
 
@@ -8995,6 +9151,8 @@ fn build_auto_plan_prompt(
         &request.prompt,
         &request.recent_turns,
         false,
+        None,
+        None,
     ));
     parts.push(
         "\n--- Auto orchestration contract ---\n\
@@ -9479,13 +9637,13 @@ fn fallback_automation_judge_response(
 
     if likely_complete {
         return AutomationJudgeResponse {
-            decision: "complete".to_string(),
-            reason: "Fallback heuristic judged the expected outcome as likely met.".to_string(),
+            decision: "continue".to_string(),
+            reason: "Fallback heuristic found evidence but not enough confidence to mark complete, continuing.".to_string(),
             progress_summary: display_summary(raw_output),
             next_instruction: None,
             next_owner_cli: Some(owner_cli.to_string()),
             made_progress: true,
-            expected_outcome_met: true,
+            expected_outcome_met: false,
         };
     }
 
@@ -9748,6 +9906,8 @@ fn execute_auto_mode_goal(
             &build_auto_worker_prompt(&request.prompt, &step),
             &request.recent_turns,
             step.write,
+            None,
+            None,
         );
 
         let message_id = create_id("auto-step");
@@ -9889,6 +10049,82 @@ fn summarize_automation_run(run: &AutomationRun) -> String {
         "{} of {} completed • {} failed • {} paused",
         completed, total, failed, paused
     )
+}
+
+// ── Webhook notification structs ────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct WebhookGoalInfo {
+    title: String,
+    status: String,
+    round_count: usize,
+}
+
+#[derive(Serialize)]
+struct WebhookRunInfo {
+    id: String,
+    project_name: String,
+    status: String,
+    summary: Option<String>,
+    completed_at: Option<String>,
+    goals: Vec<WebhookGoalInfo>,
+}
+
+#[derive(Serialize)]
+struct WebhookPayload {
+    event: String,
+    timestamp: String,
+    run: WebhookRunInfo,
+}
+
+fn send_webhook_notification(url: &str, payload: &WebhookPayload) {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = client.post(url).json(payload).send();
+}
+
+fn send_email_notification(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    from: &str,
+    recipients: &[String],
+    subject: &str,
+    body: &str,
+) -> Result<(), String> {
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{Message, SmtpTransport, Transport};
+
+    let credentials = Credentials::new(username.to_string(), password.to_string());
+
+    // Use relay() which handles STARTTLS automatically on port 587
+    let mailer = SmtpTransport::relay(host)
+        .map_err(|e| e.to_string())?
+        .port(port)
+        .credentials(credentials)
+        .build();
+
+    let to_addrs = recipients
+        .iter()
+        .map(|r| r.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let email = Message::builder()
+        .from(from.parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
+        .to(to_addrs.parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
+        .subject(subject)
+        .body(String::from(body))
+        .map_err(|e| e.to_string())?;
+
+    mailer.send(&email).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn schedule_automation_run(app: AppHandle, store: &State<'_, AppStore>, run_id: String) {
@@ -10138,6 +10374,8 @@ fn execute_automation_goal(
         &prompt_for_context,
         &recent_turns,
         profile.allow_safe_workspace_edits,
+        None,
+        None,
     );
     let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
         format!("/{} {}", skill.name, composed_prompt_base)
@@ -10337,6 +10575,7 @@ fn execute_automation_run_loop(
                     &format!("Automation {}", snapshot.status),
                     &format!("{} • {}", snapshot.project_name, detail),
                 );
+
                 let _ = mutate_store_arc(state_arc, |state| {
                     append_activity(
                         state,
@@ -10350,6 +10589,80 @@ fn execute_automation_run_loop(
                     let _ = persist_state(state);
                     emit_state(app, state);
                 }
+
+                // Send webhook and email notifications if configured (after all state is persisted)
+                let notification_config = settings_arc.lock().ok().map(|s| s.notification_config.clone());
+                if let Some(cfg) = notification_config {
+                    if cfg.notify_on_completion {
+                        let run_id = snapshot.id.clone();
+                        let project_name = snapshot.project_name.clone();
+                        let status = snapshot.status.clone();
+                        let summary = snapshot.summary.clone();
+                        let completed_at = snapshot.completed_at.clone();
+                        let goals = snapshot
+                            .goals
+                            .iter()
+                            .map(|g| WebhookGoalInfo {
+                                title: g.title.clone(),
+                                status: g.status.clone(),
+                                round_count: g.round_count,
+                            })
+                            .collect::<Vec<_>>();
+
+                        // Webhook notification
+                        if cfg.webhook_enabled && !cfg.webhook_url.is_empty() {
+                            let url = cfg.webhook_url.clone();
+                            let payload = WebhookPayload {
+                                event: "automation_completed".to_string(),
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                run: WebhookRunInfo {
+                                    id: run_id.clone(),
+                                    project_name: project_name.clone(),
+                                    status: status.clone(),
+                                    summary: summary.clone(),
+                                    completed_at: completed_at.clone(),
+                                    goals,
+                                },
+                            };
+                            std::thread::spawn(move || {
+                                send_webhook_notification(&url, &payload);
+                            });
+                        }
+
+                        // Email notification
+                        if cfg.smtp_enabled
+                            && !cfg.email_recipients.is_empty()
+                            && !cfg.smtp_host.is_empty()
+                            && !cfg.smtp_username.is_empty()
+                        {
+                            let host = cfg.smtp_host.clone();
+                            let port = cfg.smtp_port;
+                            let username = cfg.smtp_username.clone();
+                            let password = cfg.smtp_password.clone();
+                            let from = cfg.smtp_from.clone();
+                            let recipients = cfg.email_recipients.clone();
+                            let subject = format!(
+                                "[{}] Automation {} - {}",
+                                project_name,
+                                status,
+                                &run_id[..8.min(run_id.len())]
+                            );
+                            let body = format!(
+                                "Project: {}\nStatus: {}\nSummary: {}\nRun ID: {}\n\nThis notification was sent by Multi CLI Studio.",
+                                project_name,
+                                status,
+                                summary.unwrap_or_default(),
+                                run_id
+                            );
+                            std::thread::spawn(move || {
+                                let _ = send_email_notification(
+                                    &host, port, &username, &password, &from, &recipients, &subject, &body,
+                                );
+                            });
+                        }
+                    }
+                }
+
                 return;
             }
         };
@@ -10453,7 +10766,7 @@ fn execute_automation_run_loop(
             } else {
                 working_goal.consecutive_failure_count + 1
             };
-            let new_no_progress = if judgement.made_progress {
+            let new_no_progress = if judgement.made_progress || judgement.expected_outcome_met {
                 0
             } else {
                 working_goal.no_progress_rounds + 1
@@ -10470,6 +10783,14 @@ fn execute_automation_run_loop(
 
             let mut decision = judgement.decision.clone();
             let mut reason = judgement.reason.clone();
+            // If judge says complete but expected outcome not met, force continue to keep iterating
+            if decision == "complete" && !judgement.expected_outcome_met {
+                decision = "continue".to_string();
+                reason = format!(
+                    "Expected outcome not yet met (judge marked complete=false), continuing iteration. Reason: {}",
+                    judgement.reason
+                );
+            }
             let pause_requested = automation_runs
                 .lock()
                 .ok()
@@ -10560,6 +10881,7 @@ fn execute_automation_run_loop(
                 let _ = persist_automation_runs_to_disk(&runs);
             }
 
+
             if decision == "continue" {
                 prior_progress = Some(judgement.progress_summary.clone());
                 next_instruction = judgement.next_instruction.clone();
@@ -10571,6 +10893,7 @@ fn execute_automation_run_loop(
                 } else {
                     working_goal.execution_mode.clone()
                 };
+                working_goal.round_count = round_index;
                 continue;
             }
 
@@ -11937,6 +12260,18 @@ fn seed_settings(project_root: &str) -> AppSettings {
         max_output_chars_per_turn: DEFAULT_MAX_OUTPUT_CHARS,
         process_timeout_ms: DEFAULT_TIMEOUT_MS,
         notify_on_terminal_completion: false,
+        notification_config: NotificationConfig {
+            notify_on_completion: false,
+            webhook_url: String::new(),
+            webhook_enabled: false,
+            smtp_enabled: false,
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_port: 587,
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            smtp_from: String::new(),
+            email_recipients: Vec::new(),
+        },
     }
 }
 

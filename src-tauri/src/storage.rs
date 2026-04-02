@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{AgentTransportSession, ChatMessageBlock};
+use crate::{AgentTransportSession, ChatMessageBlock, CompactedSummary};
 
 const COMPACT_KEEP_TURNS: usize = 4;
 const AUTO_COMPACT_MAX_HOT_TURNS: usize = 8;
@@ -66,6 +66,10 @@ pub struct PersistedConversationSession {
     pub project_root: String,
     pub project_name: String,
     pub messages: Vec<PersistedChatMessage>,
+    /// Accepts `CompactedSummary[]` from TypeScript; serialized to JSON for storage.
+    #[serde(default)]
+    pub compacted_summaries: Vec<CompactedSummary>,
+    pub last_compacted_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -714,6 +718,8 @@ impl TerminalStorage {
                 workspace_id TEXT NOT NULL,
                 project_root TEXT NOT NULL,
                 project_name TEXT NOT NULL,
+                compacted_summaries_json TEXT NOT NULL DEFAULT '[]',
+                last_compacted_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -838,6 +844,22 @@ impl TerminalStorage {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS compacted_summaries (
+                id TEXT PRIMARY KEY,
+                terminal_tab_id TEXT NOT NULL,
+                source_cli TEXT NOT NULL,
+                intent TEXT NOT NULL DEFAULT '',
+                technical_context TEXT NOT NULL DEFAULT '',
+                changed_files TEXT NOT NULL DEFAULT '[]',
+                errors_and_fixes TEXT NOT NULL DEFAULT '',
+                current_state TEXT NOT NULL DEFAULT '',
+                next_steps TEXT NOT NULL DEFAULT '',
+                token_estimate INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_terminal_tabs_workspace ON terminal_tabs(workspace_id);
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session_order
                 ON chat_messages(session_id, message_order);
@@ -858,6 +880,8 @@ impl TerminalStorage {
                 ON context_package_logs(task_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_compact_boundaries_task_created
                 ON compact_boundaries(task_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_compacted_summaries_tab
+                ON compacted_summaries(terminal_tab_id, created_at DESC);
             ",
         )
         .map_err(|err| err.to_string())
@@ -931,7 +955,8 @@ impl TerminalStorage {
     ) -> Result<BTreeMap<String, PersistedConversationSession>, String> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, terminal_tab_id, workspace_id, project_root, project_name, created_at, updated_at
+                "SELECT id, terminal_tab_id, workspace_id, project_root, project_name,
+                        compacted_summaries_json, last_compacted_at, created_at, updated_at
                  FROM conversation_sessions",
             )
             .map_err(|err| err.to_string())?;
@@ -941,15 +966,20 @@ impl TerminalStorage {
         while let Some(row) = rows.next().map_err(|err| err.to_string())? {
             let session_id: String = row.get(0).map_err(|err| err.to_string())?;
             let terminal_tab_id: String = row.get(1).map_err(|err| err.to_string())?;
+            let compacted_json: String = row.get(5).map_err(|err| err.to_string())?;
+            let compacted_summaries: Vec<CompactedSummary> =
+                serde_json::from_str(&compacted_json).unwrap_or_default();
             let session = PersistedConversationSession {
                 id: session_id.clone(),
                 terminal_tab_id: terminal_tab_id.clone(),
                 workspace_id: row.get(2).map_err(|err| err.to_string())?,
                 project_root: row.get(3).map_err(|err| err.to_string())?,
                 project_name: row.get(4).map_err(|err| err.to_string())?,
+                compacted_summaries,
+                last_compacted_at: row.get(6).map_err(|err| err.to_string())?,
                 messages: self.load_messages(conn, &session_id)?,
-                created_at: row.get(5).map_err(|err| err.to_string())?,
-                updated_at: row.get(6).map_err(|err| err.to_string())?,
+                created_at: row.get(7).map_err(|err| err.to_string())?,
+                updated_at: row.get(8).map_err(|err| err.to_string())?,
             };
             sessions.insert(terminal_tab_id, session);
         }
@@ -1003,7 +1033,8 @@ impl TerminalStorage {
     ) -> Result<Option<PersistedConversationSession>, String> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, terminal_tab_id, workspace_id, project_root, project_name, created_at, updated_at
+                "SELECT id, terminal_tab_id, workspace_id, project_root, project_name,
+                        compacted_summaries_json, last_compacted_at, created_at, updated_at
                  FROM conversation_sessions
                  WHERE terminal_tab_id = ?1
                  LIMIT 1",
@@ -1016,15 +1047,20 @@ impl TerminalStorage {
             return Ok(None);
         };
         let session_id: String = row.get(0).map_err(|err| err.to_string())?;
+        let compacted_json: String = row.get(5).map_err(|err| err.to_string())?;
+        let compacted_summaries: Vec<CompactedSummary> =
+            serde_json::from_str(&compacted_json).unwrap_or_default();
         Ok(Some(PersistedConversationSession {
             id: session_id.clone(),
             terminal_tab_id: row.get(1).map_err(|err| err.to_string())?,
             workspace_id: row.get(2).map_err(|err| err.to_string())?,
             project_root: row.get(3).map_err(|err| err.to_string())?,
             project_name: row.get(4).map_err(|err| err.to_string())?,
+            compacted_summaries,
+            last_compacted_at: row.get(6).map_err(|err| err.to_string())?,
             messages: self.load_messages(conn, &session_id)?,
-            created_at: row.get(5).map_err(|err| err.to_string())?,
-            updated_at: row.get(6).map_err(|err| err.to_string())?,
+            created_at: row.get(7).map_err(|err| err.to_string())?,
+            updated_at: row.get(8).map_err(|err| err.to_string())?,
         }))
     }
 
@@ -1392,15 +1428,19 @@ impl TerminalStorage {
         tx: &Connection,
         session: &PersistedConversationSession,
     ) -> Result<(), String> {
+        let compacted_json = to_json(&session.compacted_summaries)?;
         tx.execute(
             "INSERT INTO conversation_sessions (
-                id, terminal_tab_id, workspace_id, project_root, project_name, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                id, terminal_tab_id, workspace_id, project_root, project_name,
+                compacted_summaries_json, last_compacted_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(terminal_tab_id) DO UPDATE SET
                 id = excluded.id,
                 workspace_id = excluded.workspace_id,
                 project_root = excluded.project_root,
                 project_name = excluded.project_name,
+                compacted_summaries_json = excluded.compacted_summaries_json,
+                last_compacted_at = excluded.last_compacted_at,
                 created_at = excluded.created_at,
                 updated_at = excluded.updated_at",
             params![
@@ -1409,6 +1449,8 @@ impl TerminalStorage {
                 session.workspace_id,
                 session.project_root,
                 session.project_name,
+                compacted_json,
+                session.last_compacted_at,
                 session.created_at,
                 session.updated_at,
             ],

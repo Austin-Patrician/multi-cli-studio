@@ -17,12 +17,20 @@ import {
   FileMentionCandidate,
   GitPanelData,
   PersistedTerminalState,
+  SharedContextEntry,
   TerminalCliId,
   TerminalLine,
   TerminalTab,
   WorkspacePickResult,
   WorkspaceRef,
 } from "./models";
+import {
+  autoCompact,
+  buildSharedContextEntry,
+  formatCrossTabContext,
+  formatCompactedSummaries,
+} from "./compaction";
+import { estimateSessionTokens } from "./tokenEstimation";
 import { ACP_COMMANDS, AcpCliCapabilities, AcpCommand } from "./acp";
 import {
   detectAssistantContentFormat,
@@ -199,9 +207,37 @@ function createConversationSession(
           exitCode: null,
         },
       ],
+    compactedSummaries: partial?.compactedSummaries ?? [],
+    lastCompactedAt: partial?.lastCompactedAt ?? null,
+    estimatedTokens: partial?.estimatedTokens ?? 0,
     createdAt: partial?.createdAt ?? nowIso(),
     updatedAt: partial?.updatedAt ?? nowIso(),
   };
+}
+
+function normalizeConversationSession(
+  tab: TerminalTab,
+  workspace: WorkspaceRef | null | undefined,
+  partial?: Partial<ConversationSession> | null
+): ConversationSession {
+  const resolvedWorkspace =
+    workspace ??
+    createWorkspaceRef(partial?.projectRoot ?? tab.workspaceId, {
+      id: partial?.workspaceId ?? tab.workspaceId,
+      name: partial?.projectName ?? tab.title,
+      rootPath: partial?.projectRoot ?? tab.workspaceId,
+    });
+
+  return createConversationSession(tab, resolvedWorkspace, {
+    ...partial,
+    terminalTabId: tab.id,
+    workspaceId: resolvedWorkspace.id,
+    projectRoot: resolvedWorkspace.rootPath,
+    projectName: resolvedWorkspace.name,
+    compactedSummaries: partial?.compactedSummaries ?? [],
+    lastCompactedAt: partial?.lastCompactedAt ?? null,
+    estimatedTokens: partial?.estimatedTokens ?? 0,
+  });
 }
 
 function nextClonedTabTitle(baseTitle: string, existingTitles: string[]) {
@@ -767,6 +803,7 @@ interface StoreState {
   activeTerminalTabId: string | null;
   chatSessions: Record<string, ConversationSession>;
   gitPanelsByWorkspace: Record<string, GitPanelData>;
+  sharedContext: Record<string, SharedContextEntry>;
 
   loadInitialState: (projectRoot?: string) => Promise<void>;
   switchAgent: (agentId: AgentId) => Promise<void>;
@@ -821,6 +858,10 @@ interface StoreState {
   respondAssistantApproval: (requestId: string, decision: AssistantApprovalDecision) => Promise<void>;
 
   executeAcpCommand: (command: AcpCommand, tabId?: string) => Promise<void>;
+
+  publishTabContext: (tabId: string) => void;
+  getRelatedTabContexts: (tabId: string) => SharedContextEntry[];
+  runAutoCompact: (tabId: string) => void;
 }
 
 export const useStore = create<StoreState>((set, get) => {
@@ -843,6 +884,7 @@ export const useStore = create<StoreState>((set, get) => {
   activeTerminalTabId: null,
   chatSessions: {},
   gitPanelsByWorkspace: {},
+  sharedContext: {},
 
   setAppState: (state) =>
     set((current) => ({
@@ -944,19 +986,24 @@ export const useStore = create<StoreState>((set, get) => {
       updatePersistenceIssue("terminalState", null);
       const persistedSession = persisted?.chatSessions?.[tabId] ?? null;
       if (!persistedSession) return;
+      const current = get();
+      const tab = current.terminalTabs.find((item) => item.id === tabId);
+      if (!tab) return;
+      const workspace = current.workspaces.find((item) => item.id === tab.workspaceId) ?? null;
+      const normalizedSession = normalizeConversationSession(tab, workspace, persistedSession);
 
       set((state) => {
         const currentSession = state.chatSessions[tabId] ?? null;
         const shouldReplace =
           !currentSession ||
-          persistedSession.messages.length > currentSession.messages.length ||
-          Date.parse(persistedSession.updatedAt) > Date.parse(currentSession.updatedAt);
+          normalizedSession.messages.length > currentSession.messages.length ||
+          Date.parse(normalizedSession.updatedAt) > Date.parse(currentSession.updatedAt);
 
         if (!shouldReplace) return {};
 
         const chatSessions = {
           ...state.chatSessions,
-          [tabId]: persistedSession,
+          [tabId]: normalizedSession,
         };
         return { chatSessions };
       });
@@ -1046,14 +1093,19 @@ export const useStore = create<StoreState>((set, get) => {
       }
     }
 
-    terminalTabs.forEach((tab) => {
-      if (!chatSessions[tab.id]) {
+    chatSessions = Object.fromEntries(
+      terminalTabs.flatMap((tab) => {
         const workspace = workspaces.find((item) => item.id === tab.workspaceId);
-        if (workspace) {
-          chatSessions[tab.id] = createConversationSession(tab, workspace);
-        }
-      }
-    });
+        if (!workspace) return [];
+        const persistedSession = chatSessions[tab.id] ?? null;
+        return [[
+          tab.id,
+          persistedSession
+            ? normalizeConversationSession(tab, workspace, persistedSession)
+            : createConversationSession(tab, workspace),
+        ]];
+      })
+    );
 
     const recoveredStreamingState = recoverStaleStreamingSessions(
       terminalTabs,
@@ -1514,6 +1566,10 @@ export const useStore = create<StoreState>((set, get) => {
     if (!workspace || !session || !targetCli || targetCli === fromCli) return;
 
     const latest = extractLatestTaskContext(session.messages, fromCli);
+    const compactedHistory = session.compactedSummaries.length > 0
+      ? session.compactedSummaries[session.compactedSummaries.length - 1]
+      : null;
+    const crossTabContextEntries = get().getRelatedTabContexts(tabId);
     void bridge.switchCliForTask({
       terminalTabId: tabId,
       workspaceId: workspace.id,
@@ -1525,6 +1581,8 @@ export const useStore = create<StoreState>((set, get) => {
       latestUserPrompt: latest.latestUserPrompt,
       latestAssistantSummary: latest.latestAssistantSummary,
       relevantFiles: latest.relevantFiles,
+      compactedHistory,
+      crossTabContext: crossTabContextEntries.length > 0 ? crossTabContextEntries : null,
     });
   },
 
@@ -1969,6 +2027,7 @@ export const useStore = create<StoreState>((set, get) => {
     try {
       const writeMode = !tab.planMode;
       const recentTurns = buildRecentTabContextTurns(session.messages, effectiveCli);
+      const crossTabContextEntries = get().getRelatedTabContexts(tab.id);
       const messageId = await bridge.sendChatMessage({
         cliId: effectiveCli,
         terminalTabId: tab.id,
@@ -1985,6 +2044,8 @@ export const useStore = create<StoreState>((set, get) => {
         modelOverride: tab.modelOverrides[effectiveCli] ?? null,
         permissionOverride: tab.permissionOverrides[effectiveCli] ?? null,
         transportSession: tab.transportSessions[effectiveCli] ?? null,
+        compactedSummaries: session.compactedSummaries.length > 0 ? session.compactedSummaries : null,
+        crossTabContext: crossTabContextEntries.length > 0 ? crossTabContextEntries : null,
       });
 
       if (messageId !== pendingMessage.id) {
@@ -2249,6 +2310,9 @@ export const useStore = create<StoreState>((set, get) => {
 
     const tab = get().terminalTabs.find((item) => item.id === tabId);
     if (tab) {
+      // Run auto-compaction and publish cross-tab context after stream finalization
+      get().runAutoCompact(tabId);
+      get().publishTabContext(tabId);
       void get().refreshGitPanel(tab.workspaceId);
       void get().loadContextStore();
     }
@@ -2664,6 +2728,66 @@ export const useStore = create<StoreState>((set, get) => {
         }
       }
     }
+  },
+
+  publishTabContext: (tabId) => {
+    const session = get().chatSessions[tabId];
+    const tab = get().terminalTabs.find((t) => t.id === tabId);
+    const workspace = get().workspaces.find((w) => w.id === tab?.workspaceId);
+    if (!session || !tab || !workspace) return;
+
+    const effectiveCli = resolveTerminalCliId(tab.selectedCli, workspace.activeAgent);
+    const entry = buildSharedContextEntry(session, tab, effectiveCli);
+    if (!entry) return;
+
+    set((state) => ({
+      sharedContext: {
+        ...state.sharedContext,
+        [tabId]: entry,
+      },
+    }));
+  },
+
+  getRelatedTabContexts: (tabId) => {
+    const state = get();
+    const tab = state.terminalTabs.find((t) => t.id === tabId);
+    if (!tab) return [];
+
+    // Return entries from other tabs in the same workspace
+    return Object.values(state.sharedContext).filter(
+      (entry) => {
+        if (entry.sourceTabId === tabId) return false;
+        const sourceTab = state.terminalTabs.find((t) => t.id === entry.sourceTabId);
+        return sourceTab?.workspaceId === tab.workspaceId;
+      }
+    );
+  },
+
+  runAutoCompact: (tabId) => {
+    const session = get().chatSessions[tabId];
+    const tab = get().terminalTabs.find((t) => t.id === tabId);
+    const workspace = get().workspaces.find((w) => w.id === tab?.workspaceId);
+    if (!session || !tab || !workspace) return;
+
+    const effectiveCli = resolveTerminalCliId(tab.selectedCli, workspace.activeAgent);
+    const result = autoCompact(session, effectiveCli);
+    if (!result) return;
+
+    set((state) => {
+      const chatSessions = {
+        ...state.chatSessions,
+        [tabId]: {
+          ...state.chatSessions[tabId],
+          messages: result.messages,
+          compactedSummaries: result.compactedSummaries,
+          lastCompactedAt: result.lastCompactedAt,
+          estimatedTokens: result.estimatedTokens,
+          updatedAt: nowIso(),
+        },
+      };
+      persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
+      return { chatSessions };
+    });
   },
   };
 });

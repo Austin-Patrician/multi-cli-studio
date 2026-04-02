@@ -782,10 +782,6 @@ export function AutomationPage() {
                       <div className="col-span-2">
                         <div className="text-[15px] font-bold text-slate-900 group-hover/row:text-indigo-600 transition-colors">{goal.title}</div>
                         <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                          <div className="inline-flex items-center gap-1.5 rounded-lg bg-slate-100/80 px-2 py-0.5 text-[11px] font-bold text-slate-500 ring-1 ring-slate-200/50">
-                             <div className="h-1.5 w-1.5 rounded-full bg-slate-400" />
-                             {goal.lastOwnerCli ?? "未分配"}
-                          </div>
                           <span className="rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-600 ring-1 ring-indigo-100">
                             {executionModeLabel(goal.executionMode)}
                           </span>
