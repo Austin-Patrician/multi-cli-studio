@@ -1363,6 +1363,14 @@ impl TerminalStorage {
         }))
     }
 
+    pub fn load_conversation_session_by_terminal_tab(
+        &self,
+        terminal_tab_id: &str,
+    ) -> Result<Option<PersistedConversationSession>, String> {
+        let conn = self.open_connection()?;
+        self.load_chat_session_by_terminal_tab(&conn, terminal_tab_id)
+    }
+
     pub fn compact_active_context(&self) -> Result<Option<CompactContextResult>, String> {
         let mut conn = self.open_connection()?;
         let tx = conn

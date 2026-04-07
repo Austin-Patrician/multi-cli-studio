@@ -10,6 +10,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
@@ -19,21 +20,28 @@ use std::{
 };
 
 use chrono::Local;
+use cron::Schedule;
 use dirs::data_local_dir;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri_plugin_notification::NotificationExt;
 use automation::{
-    build_run_from_request, default_rule_profile, load_rule_profile,
-    load_runs as load_automation_runs_from_disk, normalize_goal_rule_config, normalize_rule_profile,
-    normalize_runs_on_startup, persist_rule_profile,
-    persist_runs as persist_automation_runs_to_disk, push_event, AutomationGoal, AutomationGoalRuleConfig,
-    AutomationRuleProfile, AutomationRun, CreateAutomationRunRequest,
+    build_job_from_draft, build_run_from_job, build_run_from_request, default_rule_profile,
+    display_parameter_value, load_jobs as load_automation_jobs_from_disk, load_rule_profile,
+    load_runs as load_automation_runs_from_disk, normalize_goal_rule_config,
+    normalize_permission_profile, normalize_rule_profile, normalize_scheduled_start_at,
+    normalize_runs_on_startup, persist_jobs as persist_automation_jobs_to_disk, persist_rule_profile,
+    persist_runs as persist_automation_runs_to_disk, push_event, sync_goal_status_fields,
+    sync_run_status_fields, update_job_from_draft, AutomationGoal, AutomationGoalRuleConfig,
+    AutomationJob, AutomationJobDraft, AutomationJudgeAssessment, AutomationObjectiveSignals,
+    AutomationRuleProfile, AutomationRun, display_status_from_dimensions,
+    CreateAutomationRunFromJobRequest, CreateAutomationRunRequest,
 };
 use storage::{
     default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest,
     MessageBlocksUpdateRequest, MessageDeleteRequest, MessageEventsAppendRequest,
-    MessageFinalizeRequest, MessageStreamUpdateRequest, PersistedTerminalState, TaskRecentTurn,
+    MessageFinalizeRequest, MessageSessionSeed, MessageStreamUpdateRequest, PersistedChatMessage,
+    PersistedConversationSession, PersistedTerminalState, TaskContextBundle, TaskRecentTurn,
     TerminalStorage,
 };
 use tauri::{AppHandle, Emitter, State};
@@ -684,6 +692,10 @@ struct GitFileDiff {
     status: String,
     previous_path: Option<String>,
     diff: String,
+    original_content: Option<String>,
+    modified_content: Option<String>,
+    language: Option<String>,
+    is_binary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -701,6 +713,7 @@ struct AppStore {
     context: Arc<Mutex<ContextStore>>,
     settings: Arc<Mutex<AppSettings>>,
     terminal_storage: TerminalStorage,
+    automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
     automation_active_runs: Arc<Mutex<BTreeSet<String>>>,
     automation_rule_profile: Arc<Mutex<AutomationRuleProfile>>,
@@ -860,6 +873,28 @@ fn codex_permission_mode(session: &acp::AcpSession, write_mode: bool) -> String 
             .get("codex")
             .cloned()
             .unwrap_or_else(|| "workspace-write".to_string())
+    }
+}
+
+fn automation_permission_mode_for_cli(permission_profile: &str, cli_id: &str, write_mode: bool) -> String {
+    if !write_mode {
+        return match cli_id {
+            "claude" | "gemini" => "plan".to_string(),
+            _ => "read-only".to_string(),
+        };
+    }
+
+    match (cli_id, normalize_permission_profile(permission_profile).as_str()) {
+        ("codex", "full-access") => "danger-full-access".to_string(),
+        ("codex", "read-only") => "read-only".to_string(),
+        ("codex", _) => "workspace-write".to_string(),
+        ("claude", "full-access") => "bypassPermissions".to_string(),
+        ("claude", "read-only") => "plan".to_string(),
+        ("claude", _) => "acceptEdits".to_string(),
+        ("gemini", "full-access") => "yolo".to_string(),
+        ("gemini", "read-only") => "plan".to_string(),
+        ("gemini", _) => "auto_edit".to_string(),
+        (_, _) => "workspace-write".to_string(),
     }
 }
 
@@ -5512,6 +5547,308 @@ fn update_chat_message_blocks(
     store.terminal_storage.update_chat_message_blocks(&request)
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomationRunRecord {
+    id: String,
+    job_id: Option<String>,
+    job_name: String,
+    project_name: String,
+    project_root: String,
+    workspace_id: String,
+    execution_mode: String,
+    permission_profile: String,
+    trigger_source: String,
+    run_number: Option<usize>,
+    status: String,
+    display_status: String,
+    lifecycle_status: String,
+    outcome_status: String,
+    attention_status: String,
+    resolution_code: String,
+    status_summary: Option<String>,
+    summary: Option<String>,
+    requires_attention_reason: Option<String>,
+    objective_signals: AutomationObjectiveSignals,
+    judge_assessment: AutomationJudgeAssessment,
+    relevant_files: Vec<String>,
+    last_exit_code: Option<i32>,
+    terminal_tab_id: Option<String>,
+    parameter_values: BTreeMap<String, Value>,
+    scheduled_start_at: Option<String>,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomationRunDetailDto {
+    run: AutomationRunRecord,
+    job: Option<AutomationJob>,
+    rule_config: AutomationGoalRuleConfig,
+    goal: String,
+    expected_outcome: String,
+    events: Vec<automation::AutomationEvent>,
+    conversation_session: Option<PersistedConversationSession>,
+    task_context: Option<TaskContextBundle>,
+}
+
+fn primary_goal(run: &AutomationRun) -> Option<&AutomationGoal> {
+    run.goals
+        .iter()
+        .min_by_key(|goal| goal.position)
+        .or_else(|| run.goals.first())
+}
+
+fn automation_run_record(run: &AutomationRun) -> AutomationRunRecord {
+    let goal = primary_goal(run);
+    AutomationRunRecord {
+        id: run.id.clone(),
+        job_id: run.job_id.clone(),
+        job_name: run
+            .job_name
+            .clone()
+            .or_else(|| goal.map(|item| item.title.clone()))
+            .unwrap_or_else(|| run.project_name.clone()),
+        project_name: run.project_name.clone(),
+        project_root: run.project_root.clone(),
+        workspace_id: run.workspace_id.clone(),
+        execution_mode: goal
+            .map(|item| item.execution_mode.clone())
+            .unwrap_or_else(|| "auto".to_string()),
+        permission_profile: run.permission_profile.clone(),
+        trigger_source: run
+            .trigger_source
+            .clone()
+            .unwrap_or_else(|| "manual".to_string()),
+        run_number: run.run_number,
+        status: run.status.clone(),
+        display_status: display_status_from_dimensions(
+            &run.lifecycle_status,
+            &run.outcome_status,
+            &run.attention_status,
+        ),
+        lifecycle_status: run.lifecycle_status.clone(),
+        outcome_status: run.outcome_status.clone(),
+        attention_status: run.attention_status.clone(),
+        resolution_code: run.resolution_code.clone(),
+        status_summary: run.status_summary.clone(),
+        summary: run.summary.clone(),
+        requires_attention_reason: goal.and_then(|item| item.requires_attention_reason.clone()),
+        objective_signals: run.objective_signals.clone(),
+        judge_assessment: run.judge_assessment.clone(),
+        relevant_files: goal.map(|item| item.relevant_files.clone()).unwrap_or_default(),
+        last_exit_code: goal.and_then(|item| item.last_exit_code),
+        terminal_tab_id: goal.map(|item| item.synthetic_terminal_tab_id.clone()),
+        parameter_values: run.parameter_values.clone(),
+        scheduled_start_at: run.scheduled_start_at.clone(),
+        started_at: run.started_at.clone(),
+        completed_at: run.completed_at.clone(),
+        created_at: run.created_at.clone(),
+        updated_at: run.updated_at.clone(),
+    }
+}
+
+fn transport_kind_for_cli(cli_id: &str) -> String {
+    match cli_id {
+        "claude" => "claude-cli".to_string(),
+        "gemini" => "gemini-acp".to_string(),
+        "codex" => "codex-app-server".to_string(),
+        _ => "browser-fallback".to_string(),
+    }
+}
+
+fn ensure_automation_conversation_session(
+    terminal_storage: &TerminalStorage,
+    run: &AutomationRun,
+    goal: &AutomationGoal,
+) -> Result<PersistedConversationSession, String> {
+    if let Some(existing) =
+        terminal_storage.load_conversation_session_by_terminal_tab(&goal.synthetic_terminal_tab_id)?
+    {
+        return Ok(existing);
+    }
+
+    let now = now_stamp();
+    Ok(PersistedConversationSession {
+        id: create_id("session"),
+        terminal_tab_id: goal.synthetic_terminal_tab_id.clone(),
+        workspace_id: run.workspace_id.clone(),
+        project_root: run.project_root.clone(),
+        project_name: run.project_name.clone(),
+        messages: Vec::new(),
+        compacted_summaries: Vec::new(),
+        last_compacted_at: None,
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+fn append_automation_turn_seed(
+    terminal_storage: &TerminalStorage,
+    run: &AutomationRun,
+    goal: &AutomationGoal,
+    owner_cli: &str,
+    prompt: &str,
+    message_id: &str,
+) -> Result<(), String> {
+    let now = now_stamp();
+    let session = ensure_automation_conversation_session(terminal_storage, run, goal)?;
+    let request = MessageEventsAppendRequest {
+        seeds: vec![MessageSessionSeed {
+            terminal_tab_id: goal.synthetic_terminal_tab_id.clone(),
+            session,
+            messages: vec![
+                PersistedChatMessage {
+                    id: create_id("auto-user"),
+                    role: "user".to_string(),
+                    cli_id: None,
+                    timestamp: now.clone(),
+                    content: prompt.to_string(),
+                    raw_content: Some(prompt.to_string()),
+                    content_format: Some("plain".to_string()),
+                    transport_kind: None,
+                    blocks: None,
+                    is_streaming: false,
+                    duration_ms: None,
+                    exit_code: None,
+                },
+                PersistedChatMessage {
+                    id: message_id.to_string(),
+                    role: "assistant".to_string(),
+                    cli_id: Some(owner_cli.to_string()),
+                    timestamp: now.clone(),
+                    content: String::new(),
+                    raw_content: Some(String::new()),
+                    content_format: Some("log".to_string()),
+                    transport_kind: Some(transport_kind_for_cli(owner_cli)),
+                    blocks: None,
+                    is_streaming: true,
+                    duration_ms: None,
+                    exit_code: None,
+                },
+            ],
+        }],
+    };
+    terminal_storage.append_chat_messages(&request)
+}
+
+fn finalize_automation_turn_message(
+    terminal_storage: &TerminalStorage,
+    goal: &AutomationGoal,
+    message_id: &str,
+    outcome: &AutomationExecutionOutcome,
+) -> Result<(), String> {
+    terminal_storage.finalize_chat_message(&MessageFinalizeRequest {
+        terminal_tab_id: goal.synthetic_terminal_tab_id.clone(),
+        message_id: message_id.to_string(),
+        raw_content: outcome.raw_output.clone(),
+        content: outcome.raw_output.clone(),
+        content_format: Some("log".to_string()),
+        blocks: if outcome.blocks.is_empty() {
+            None
+        } else {
+            Some(outcome.blocks.clone())
+        },
+        transport_kind: outcome
+            .transport_session
+            .as_ref()
+            .map(|session| session.kind.clone()),
+        transport_session: outcome.transport_session.clone(),
+        exit_code: outcome.exit_code,
+        duration_ms: None,
+        updated_at: now_stamp(),
+    })
+}
+
+#[tauri::command]
+fn list_automation_jobs(store: State<'_, AppStore>) -> Result<Vec<AutomationJob>, String> {
+    let mut jobs = store
+        .automation_jobs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone();
+    jobs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    Ok(jobs)
+}
+
+#[tauri::command]
+fn get_automation_job(store: State<'_, AppStore>, job_id: String) -> Result<AutomationJob, String> {
+    store
+        .automation_jobs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .find(|job| job.id == job_id)
+        .cloned()
+        .ok_or_else(|| "Automation job not found.".to_string())
+}
+
+#[tauri::command]
+fn create_automation_job(
+    store: State<'_, AppStore>,
+    job: AutomationJobDraft,
+) -> Result<AutomationJob, String> {
+    let created = build_job_from_draft(job)?;
+    let mut jobs = store
+        .automation_jobs
+        .lock()
+        .map_err(|err| err.to_string())?;
+    jobs.insert(0, created.clone());
+    persist_automation_jobs_to_disk(&jobs)?;
+    Ok(created)
+}
+
+#[tauri::command]
+fn update_automation_job(
+    store: State<'_, AppStore>,
+    job_id: String,
+    job: AutomationJobDraft,
+) -> Result<AutomationJob, String> {
+    let mut jobs = store
+        .automation_jobs
+        .lock()
+        .map_err(|err| err.to_string())?;
+    let index = jobs
+        .iter()
+        .position(|item| item.id == job_id)
+        .ok_or_else(|| "Automation job not found.".to_string())?;
+    let updated = update_job_from_draft(&jobs[index], job)?;
+    jobs[index] = updated.clone();
+    persist_automation_jobs_to_disk(&jobs)?;
+    Ok(updated)
+}
+
+#[tauri::command]
+fn delete_automation_job(store: State<'_, AppStore>, job_id: String) -> Result<(), String> {
+    if store
+        .automation_runs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .any(|run| {
+            run.job_id.as_deref() == Some(job_id.as_str())
+                && matches!(run.status.as_str(), "running" | "scheduled" | "paused")
+        })
+    {
+        return Err("This job has active runs and cannot be deleted yet.".to_string());
+    }
+
+    let mut jobs = store
+        .automation_jobs
+        .lock()
+        .map_err(|err| err.to_string())?;
+    let index = jobs
+        .iter()
+        .position(|item| item.id == job_id)
+        .ok_or_else(|| "Automation job not found.".to_string())?;
+    jobs.remove(index);
+    persist_automation_jobs_to_disk(&jobs)?;
+    Ok(())
+}
+
 #[tauri::command]
 fn list_automation_runs(store: State<'_, AppStore>) -> Result<Vec<AutomationRun>, String> {
     let mut runs = store
@@ -5521,6 +5858,72 @@ fn list_automation_runs(store: State<'_, AppStore>) -> Result<Vec<AutomationRun>
         .clone();
     runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
     Ok(runs)
+}
+
+#[tauri::command]
+fn list_automation_job_runs(
+    store: State<'_, AppStore>,
+    job_id: Option<String>,
+) -> Result<Vec<AutomationRunRecord>, String> {
+    let mut runs = store
+        .automation_runs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone()
+        .into_iter()
+        .filter(|run| match job_id.as_deref() {
+            Some(needle) => run.job_id.as_deref() == Some(needle),
+            None => true,
+        })
+        .map(|run| automation_run_record(&run))
+        .collect::<Vec<_>>();
+    runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(runs)
+}
+
+#[tauri::command]
+fn get_automation_run_detail(
+    store: State<'_, AppStore>,
+    run_id: String,
+) -> Result<AutomationRunDetailDto, String> {
+    let run = store
+        .automation_runs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .find(|item| item.id == run_id)
+        .cloned()
+        .ok_or_else(|| "Automation run not found.".to_string())?;
+    let goal = primary_goal(&run)
+        .cloned()
+        .ok_or_else(|| "Automation run has no goal.".to_string())?;
+    let session = store
+        .terminal_storage
+        .load_conversation_session_by_terminal_tab(&goal.synthetic_terminal_tab_id)?;
+    let task_context = store
+        .terminal_storage
+        .load_task_context_bundle(&goal.synthetic_terminal_tab_id)?;
+    let job = match run.job_id.as_deref() {
+        Some(job_id) => store
+            .automation_jobs
+            .lock()
+            .map_err(|err| err.to_string())?
+            .iter()
+            .find(|item| item.id == job_id)
+            .cloned(),
+        None => None,
+    };
+
+    Ok(AutomationRunDetailDto {
+        run: automation_run_record(&run),
+        job,
+        rule_config: goal.rule_config.clone(),
+        goal: goal.goal.clone(),
+        expected_outcome: goal.expected_outcome.clone(),
+        events: run.events.clone(),
+        conversation_session: session,
+        task_context,
+    })
 }
 
 #[tauri::command]
@@ -5593,11 +5996,12 @@ fn update_automation_goal_rule_config(
 fn create_automation_run(
     app: AppHandle,
     store: State<'_, AppStore>,
-    request: CreateAutomationRunRequest,
+    mut request: CreateAutomationRunRequest,
 ) -> Result<AutomationRun, String> {
     if request.goals.is_empty() {
         return Err("At least one automation goal is required.".to_string());
     }
+    request.scheduled_start_at = normalize_scheduled_start_at(request.scheduled_start_at.clone());
 
     let run = build_run_from_request(request);
     {
@@ -5614,6 +6018,29 @@ fn create_automation_run(
     }
 
     Ok(run)
+}
+
+#[tauri::command]
+fn create_automation_run_from_job(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    request: CreateAutomationRunFromJobRequest,
+) -> Result<AutomationRunRecord, String> {
+    create_automation_run_from_job_with_handles(
+        app,
+        store.state.clone(),
+        store.context.clone(),
+        store.settings.clone(),
+        store.terminal_storage.clone(),
+        store.claude_approval_rules.clone(),
+        store.claude_pending_approvals.clone(),
+        store.codex_pending_approvals.clone(),
+        store.automation_jobs.clone(),
+        store.automation_runs.clone(),
+        store.automation_active_runs.clone(),
+        request,
+        "manual",
+    )
 }
 
 #[tauri::command]
@@ -5635,12 +6062,33 @@ fn start_automation_run(
         if matches!(run.status.as_str(), "completed" | "cancelled") {
             return Err("This automation run can no longer be started.".to_string());
         }
+        run.lifecycle_status = "queued".to_string();
+        run.outcome_status = "unknown".to_string();
+        run.attention_status = "none".to_string();
+        run.resolution_code = "scheduled".to_string();
+        run.status_summary = Some("Queued to start.".to_string());
+        run.objective_signals = AutomationObjectiveSignals::default();
+        run.judge_assessment = AutomationJudgeAssessment::default();
         run.status = "scheduled".to_string();
+        run.lifecycle_status = "queued".to_string();
+        run.outcome_status = "unknown".to_string();
+        run.attention_status = "none".to_string();
+        run.resolution_code = "scheduled".to_string();
+        run.status_summary = Some("Reset and queued again.".to_string());
+        run.objective_signals = AutomationObjectiveSignals::default();
+        run.judge_assessment = AutomationJudgeAssessment::default();
         run.scheduled_start_at = Some(now.clone());
         run.updated_at = now.clone();
         // Reset goal states when starting a paused run
         for goal in &mut run.goals {
             if goal.status == "paused" || goal.status == "running" {
+                goal.lifecycle_status = "queued".to_string();
+                goal.outcome_status = "unknown".to_string();
+                goal.attention_status = "none".to_string();
+                goal.resolution_code = "scheduled".to_string();
+                goal.status_summary = Some("Queued to start.".to_string());
+                goal.objective_signals = AutomationObjectiveSignals::default();
+                goal.judge_assessment = AutomationJudgeAssessment::default();
                 goal.status = "queued".to_string();
                 goal.round_count = 0;
                 goal.consecutive_failure_count = 0;
@@ -5654,8 +6102,10 @@ fn start_automation_run(
                 goal.started_at = None;
                 goal.completed_at = None;
                 goal.updated_at = now.clone();
+                sync_goal_status_fields(goal);
             }
         }
+        sync_run_status_fields(run);
         push_event(
             run,
             None,
@@ -5690,15 +6140,25 @@ fn pause_automation_run(
             return Err("This automation run can no longer be paused.".to_string());
         }
         let now = now_stamp();
+        run.lifecycle_status = "stopped".to_string();
+        run.attention_status = "waiting_human".to_string();
+        run.resolution_code = "manual_pause_requested".to_string();
+        run.status_summary = Some("Paused manually.".to_string());
         run.status = "paused".to_string();
         run.updated_at = now.clone();
         for goal in &mut run.goals {
             if goal.status == "running" {
+                goal.lifecycle_status = "stopped".to_string();
+                goal.attention_status = "waiting_human".to_string();
+                goal.resolution_code = "manual_pause_requested".to_string();
+                goal.status_summary = Some("Paused manually while a round was in progress.".to_string());
                 goal.requires_attention_reason =
                     Some("批次已手动暂停，将在当前轮次结束后停止继续。".to_string());
                 goal.updated_at = now.clone();
+                sync_goal_status_fields(goal);
             }
         }
+        sync_run_status_fields(run);
         push_event(run, None, "warning", "Run paused", "The automation run was paused.");
         let snapshot = run.clone();
         persist_automation_runs_to_disk(&runs)?;
@@ -5726,17 +6186,27 @@ fn resume_automation_run(
             return Err("Only paused runs can be resumed.".to_string());
         }
         let now = now_stamp();
+        run.lifecycle_status = "queued".to_string();
+        run.attention_status = "none".to_string();
+        run.resolution_code = "scheduled".to_string();
+        run.status_summary = Some("Re-queued after pause.".to_string());
         run.status = "scheduled".to_string();
         run.scheduled_start_at = Some(now.clone());
         run.completed_at = None;
         run.updated_at = now.clone();
         for goal in &mut run.goals {
             if goal.status == "paused" {
+                goal.lifecycle_status = "queued".to_string();
+                goal.attention_status = "none".to_string();
+                goal.resolution_code = "scheduled".to_string();
+                goal.status_summary = Some("Re-queued after pause.".to_string());
                 goal.status = "queued".to_string();
                 goal.requires_attention_reason = None;
                 goal.updated_at = now.clone();
+                sync_goal_status_fields(goal);
             }
         }
+        sync_run_status_fields(run);
         push_event(run, None, "info", "Run resumed", "The automation run was re-queued.");
         let snapshot = run.clone();
         persist_automation_runs_to_disk(&runs)?;
@@ -5777,6 +6247,13 @@ fn restart_automation_run(
         run.summary = None;
         run.updated_at = now.clone();
         for goal in &mut run.goals {
+            goal.lifecycle_status = "queued".to_string();
+            goal.outcome_status = "unknown".to_string();
+            goal.attention_status = "none".to_string();
+            goal.resolution_code = "scheduled".to_string();
+            goal.status_summary = Some("Reset and queued again.".to_string());
+            goal.objective_signals = AutomationObjectiveSignals::default();
+            goal.judge_assessment = AutomationJudgeAssessment::default();
             goal.status = "queued".to_string();
             goal.round_count = 0;
             goal.consecutive_failure_count = 0;
@@ -5792,8 +6269,10 @@ fn restart_automation_run(
             goal.started_at = None;
             goal.completed_at = None;
             goal.updated_at = now.clone();
+            sync_goal_status_fields(goal);
         }
 
+        sync_run_status_fields(run);
         push_event(run, None, "info", "Run restarted", "The automation run was reset and queued again.");
         let snapshot = run.clone();
         persist_automation_runs_to_disk(&runs)?;
@@ -5829,11 +6308,21 @@ fn pause_automation_goal(
         if matches!(goal.status.as_str(), "completed" | "failed" | "cancelled") {
             return Err("This automation goal can no longer be paused.".to_string());
         }
+        goal.lifecycle_status = "stopped".to_string();
+        goal.attention_status = "waiting_human".to_string();
+        goal.resolution_code = "manual_pause_requested".to_string();
+        goal.status_summary = Some("Paused manually.".to_string());
         goal.status = "paused".to_string();
         goal.requires_attention_reason = Some("Paused manually.".to_string());
         goal.updated_at = now_stamp();
+        sync_goal_status_fields(goal);
+        run.lifecycle_status = "stopped".to_string();
+        run.attention_status = "waiting_human".to_string();
+        run.resolution_code = "manual_pause_requested".to_string();
+        run.status_summary = Some("Paused manually.".to_string());
         run.status = "paused".to_string();
         run.updated_at = goal.updated_at.clone();
+        sync_run_status_fields(run);
         push_event(
             run,
             Some(&goal_id),
@@ -5872,13 +6361,23 @@ fn resume_automation_goal(
             return Err("Only paused goals can be resumed.".to_string());
         }
         let now = now_stamp();
+        goal.lifecycle_status = "queued".to_string();
+        goal.attention_status = "none".to_string();
+        goal.resolution_code = "scheduled".to_string();
+        goal.status_summary = Some("Re-queued after pause.".to_string());
         goal.status = "queued".to_string();
         goal.requires_attention_reason = None;
         goal.updated_at = now.clone();
+        sync_goal_status_fields(goal);
+        run.lifecycle_status = "queued".to_string();
+        run.attention_status = "none".to_string();
+        run.resolution_code = "scheduled".to_string();
+        run.status_summary = Some("Re-queued after pause.".to_string());
         run.status = "scheduled".to_string();
         run.scheduled_start_at = Some(now.clone());
         run.completed_at = None;
         run.updated_at = now;
+        sync_run_status_fields(run);
         push_event(
             run,
             Some(&goal_id),
@@ -5918,15 +6417,27 @@ fn cancel_automation_run(
             .find(|item| item.id == run_id)
             .ok_or_else(|| "Automation run not found.".to_string())?;
         let now = now_stamp();
+        run.lifecycle_status = "stopped".to_string();
+        run.outcome_status = "failed".to_string();
+        run.attention_status = "none".to_string();
+        run.resolution_code = "cancelled".to_string();
+        run.status_summary = Some("Cancelled manually.".to_string());
         run.status = "cancelled".to_string();
         run.completed_at = Some(now.clone());
         run.updated_at = now.clone();
         for goal in &mut run.goals {
             if !matches!(goal.status.as_str(), "completed" | "failed" | "cancelled") {
+                goal.lifecycle_status = "stopped".to_string();
+                goal.outcome_status = "failed".to_string();
+                goal.attention_status = "none".to_string();
+                goal.resolution_code = "cancelled".to_string();
+                goal.status_summary = Some("Cancelled manually.".to_string());
                 goal.status = "cancelled".to_string();
                 goal.updated_at = now.clone();
+                sync_goal_status_fields(goal);
             }
         }
+        sync_run_status_fields(run);
         push_event(
             run,
             None,
@@ -8390,12 +8901,19 @@ fn get_git_file_diff(project_root: String, path: String) -> Result<GitFileDiff, 
     } else {
         diff
     };
+    let original_path = change.previous_path.as_deref().unwrap_or(change.path.as_str());
+    let (original_content, modified_content, is_binary) =
+        git_diff_editor_contents(&project_root, original_path, &change.path, &change.status);
 
     Ok(GitFileDiff {
         path: change.path,
         status: change.status,
         previous_path: change.previous_path,
         diff: final_diff,
+        original_content,
+        modified_content,
+        language: Some(monaco_language_for_path(&path)),
+        is_binary,
     })
 }
 
@@ -8472,6 +8990,95 @@ fn build_untracked_file_diff(project_root: &str, path: &str) -> String {
     }
 
     diff
+}
+
+fn git_diff_editor_contents(
+    project_root: &str,
+    original_path: &str,
+    modified_path: &str,
+    status: &str,
+) -> (Option<String>, Option<String>, bool) {
+    let original_bytes = match status {
+        "added" => Some(Vec::new()),
+        _ => read_git_blob_bytes(project_root, original_path),
+    };
+    let modified_bytes = match status {
+        "deleted" => Some(Vec::new()),
+        _ => read_workspace_file_bytes(project_root, modified_path),
+    };
+
+    let is_binary = original_bytes
+        .as_deref()
+        .map(is_binary_blob)
+        .unwrap_or(false)
+        || modified_bytes
+            .as_deref()
+            .map(is_binary_blob)
+            .unwrap_or(false);
+
+    if is_binary {
+        return (None, None, true);
+    }
+
+    (
+        original_bytes.map(normalize_text_bytes),
+        modified_bytes.map(normalize_text_bytes),
+        false,
+    )
+}
+
+fn read_git_blob_bytes(project_root: &str, path: &str) -> Option<Vec<u8>> {
+    let git_path = path.replace('\\', "/");
+    let output = Command::new("git")
+        .args(["show", &format!("HEAD:{}", git_path)])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        Some(output.stdout)
+    } else {
+        None
+    }
+}
+
+fn read_workspace_file_bytes(project_root: &str, path: &str) -> Option<Vec<u8>> {
+    fs::read(Path::new(project_root).join(path)).ok()
+}
+
+fn is_binary_blob(bytes: &[u8]) -> bool {
+    bytes.contains(&0)
+}
+
+fn normalize_text_bytes(bytes: Vec<u8>) -> String {
+    String::from_utf8_lossy(&bytes).replace("\r\n", "\n")
+}
+
+fn monaco_language_for_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    if normalized.ends_with(".tsx") || normalized.ends_with(".ts") {
+        "typescript".to_string()
+    } else if normalized.ends_with(".jsx") || normalized.ends_with(".js") {
+        "javascript".to_string()
+    } else if normalized.ends_with(".rs") {
+        "rust".to_string()
+    } else if normalized.ends_with(".json") {
+        "json".to_string()
+    } else if normalized.ends_with(".md") {
+        "markdown".to_string()
+    } else if normalized.ends_with(".css") {
+        "css".to_string()
+    } else if normalized.ends_with(".html") || normalized.ends_with(".htm") {
+        "html".to_string()
+    } else if normalized.ends_with(".yml") || normalized.ends_with(".yaml") {
+        "yaml".to_string()
+    } else if normalized.ends_with(".toml") {
+        "toml".to_string()
+    } else if normalized.ends_with(".sh") {
+        "shell".to_string()
+    } else {
+        "plaintext".to_string()
+    }
 }
 
 fn best_git_diff_for_path(project_root: &str, path: &str, status: &str) -> String {
@@ -9333,8 +9940,12 @@ fn run_silent_agent_turn_once(
 struct AutomationExecutionOutcome {
     owner_cli: String,
     raw_output: String,
+    final_content: String,
+    content_format: String,
     summary: String,
     exit_code: Option<i32>,
+    blocks: Vec<ChatMessageBlock>,
+    transport_session: Option<AgentTransportSession>,
     relevant_files: Vec<String>,
 }
 
@@ -9424,13 +10035,25 @@ fn build_automation_goal_prompt(
     } else {
         "If multiple approaches exist and the choice is material, stop and explain the decision point."
     };
+    let parameter_summary = if run.parameter_values.is_empty() {
+        "No run parameters were provided.".to_string()
+    } else {
+        run.parameter_values
+            .iter()
+            .map(|(key, value)| format!("- {}: {}", key, display_parameter_value(value)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
     format!(
         "You are executing an unattended automation goal inside Multi CLI Studio.\n\
          Project: {}\n\
+         Automation job: {}\n\
          Goal title: {}\n\n\
          Round: {} of {}\n\
          Current owner CLI: {}\n\n\
+         Permission profile: {}\n\n\
+         Run parameters:\n{}\n\n\
          Primary goal:\n{}\n\n\
          Expected outcome:\n{}\n\n\
          Prior progress summary:\n{}\n\n\
@@ -9444,10 +10067,13 @@ fn build_automation_goal_prompt(
          - If blocked by a real external dependency, missing credential, or risky operation, state that clearly.\n\
          - Finish with a concise summary of what changed, what was verified, and any residual risk.",
         run.project_name.trim(),
+        run.job_name.as_deref().unwrap_or(run.project_name.trim()),
         goal.title.trim(),
         round_index,
         profile.max_rounds_per_goal,
         owner_cli,
+        run.permission_profile.trim(),
+        parameter_summary,
         goal.goal.trim(),
         goal.expected_outcome.trim(),
         prior_progress.unwrap_or("No prior progress has been recorded yet."),
@@ -9536,6 +10162,23 @@ fn detect_automation_rule_pause_reason(
     }
 
     None
+}
+
+fn resolution_code_for_pause_reason(reason: &str) -> String {
+    let lowered = reason.to_ascii_lowercase();
+    if lowered.contains("credential") || lowered.contains("authentication") {
+        "credentials_required".to_string()
+    } else if lowered.contains("install") || lowered.contains("dependency") {
+        "external_install_required".to_string()
+    } else if lowered.contains("destructive") {
+        "destructive_command_blocked".to_string()
+    } else if lowered.contains("push") {
+        "git_push_blocked".to_string()
+    } else if lowered.contains("manual") {
+        "manual_pause_requested".to_string()
+    } else {
+        "judge_requested_pause".to_string()
+    }
 }
 
 fn build_automation_judge_prompt(
@@ -9786,8 +10429,15 @@ fn execute_auto_mode_goal(
             return AutomationExecutionOutcome {
                 owner_cli: "claude".to_string(),
                 raw_output: error.clone(),
+                final_content: error.clone(),
+                content_format: "log".to_string(),
                 summary: error,
                 exit_code: Some(1),
+                blocks: vec![ChatMessageBlock::Status {
+                    level: "error".to_string(),
+                    text: "Automation planner runtime unavailable.".to_string(),
+                }],
+                transport_session: None,
                 relevant_files: Vec::new(),
             };
         }
@@ -9881,19 +10531,10 @@ fn execute_auto_mode_goal(
 
         let mut worker_session = acp::AcpSession::default();
         worker_session.plan_mode = !step.write;
-        if step.owner == "claude" {
-            worker_session
-                .permission_mode
-                .insert("claude".to_string(), if step.write { "acceptEdits".to_string() } else { "plan".to_string() });
-        } else if step.owner == "gemini" {
-            worker_session
-                .permission_mode
-                .insert("gemini".to_string(), if step.write { "auto_edit".to_string() } else { "plan".to_string() });
-        } else {
-            worker_session
-                .permission_mode
-                .insert("codex".to_string(), if step.write { "workspace-write".to_string() } else { "read-only".to_string() });
-        }
+        worker_session.permission_mode.insert(
+            step.owner.clone(),
+            automation_permission_mode_for_cli(&run.permission_profile, &step.owner, step.write),
+        );
 
         let worker_prompt = compose_tab_context_prompt(
             state_snapshot,
@@ -10022,11 +10663,33 @@ fn execute_auto_mode_goal(
     };
 
     let final_content = synthesized.unwrap_or(fallback_summary);
+    let mut blocks = vec![ChatMessageBlock::OrchestrationPlan {
+        title: "Auto orchestration".to_string(),
+        goal: plan.goal.clone(),
+        summary: plan.summary.clone(),
+        status: Some(if encountered_failure {
+            "failed".to_string()
+        } else {
+            "completed".to_string()
+        }),
+    }];
+    blocks.extend(step_states.iter().map(|step| ChatMessageBlock::OrchestrationStep {
+        step_id: step.step.id.clone(),
+        owner: step.step.owner.clone(),
+        title: step.step.title.clone(),
+        summary: step.summary.clone(),
+        result: step.result.clone(),
+        status: Some(step.status.clone()),
+    }));
     AutomationExecutionOutcome {
         owner_cli: "claude".to_string(),
         raw_output: final_content.clone(),
+        final_content: final_content.clone(),
+        content_format: "log".to_string(),
         summary: display_summary(&final_content),
         exit_code: Some(if encountered_failure { 1 } else { 0 }),
+        blocks,
+        transport_session: None,
         relevant_files: collected_files.into_iter().collect(),
     }
 }
@@ -10247,6 +10910,173 @@ fn schedule_existing_automation_runs(
     }
 }
 
+fn create_automation_run_from_job_with_handles(
+    app: AppHandle,
+    state_arc: Arc<Mutex<AppStateDto>>,
+    context_arc: Arc<Mutex<ContextStore>>,
+    settings_arc: Arc<Mutex<AppSettings>>,
+    terminal_storage: TerminalStorage,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
+    automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
+    active_runs: Arc<Mutex<BTreeSet<String>>>,
+    mut request: CreateAutomationRunFromJobRequest,
+    trigger_source: &str,
+) -> Result<AutomationRunRecord, String> {
+    request.scheduled_start_at = normalize_scheduled_start_at(request.scheduled_start_at.clone());
+    if trigger_source == "manual" {
+        if let Some(start_at) = request.scheduled_start_at.as_ref() {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(start_at) {
+                if parsed.timestamp_millis() <= Local::now().timestamp_millis() + 1000 {
+                    return Err("Scheduled start time must be in the future.".to_string());
+                }
+            } else {
+                return Err("Scheduled start time is invalid.".to_string());
+            }
+        }
+    }
+
+    let job = automation_jobs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .find(|item| item.id == request.job_id && item.enabled)
+        .cloned()
+        .ok_or_else(|| "Automation job not found or disabled.".to_string())?;
+
+    let run = {
+        let mut runs = automation_runs.lock().map_err(|err| err.to_string())?;
+        let run_number = runs
+            .iter()
+            .filter(|item| item.job_id.as_deref() == Some(job.id.as_str()))
+            .filter_map(|item| item.run_number)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut run = build_run_from_job(&job, request, run_number);
+        run.trigger_source = Some(trigger_source.to_string());
+        if trigger_source == "cron" {
+            push_event(
+                &mut run,
+                None,
+                "info",
+                "Run triggered",
+                "The automation job was triggered by its cron schedule.",
+            );
+        }
+        runs.insert(0, run.clone());
+        persist_automation_runs_to_disk(&runs)?;
+        run
+    };
+
+    schedule_automation_run_with_handles(
+        app,
+        state_arc,
+        context_arc,
+        settings_arc,
+        terminal_storage,
+        claude_approval_rules,
+        claude_pending_approvals,
+        codex_pending_approvals,
+        automation_runs,
+        active_runs,
+        run.id.clone(),
+    );
+
+    Ok(automation_run_record(&run))
+}
+
+fn schedule_cron_automation_jobs(
+    app: AppHandle,
+    state_arc: Arc<Mutex<AppStateDto>>,
+    context_arc: Arc<Mutex<ContextStore>>,
+    settings_arc: Arc<Mutex<AppSettings>>,
+    terminal_storage: TerminalStorage,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
+    automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
+    active_runs: Arc<Mutex<BTreeSet<String>>>,
+) {
+    thread::spawn(move || loop {
+        let due_job_ids = {
+            let now = Local::now();
+            let mut due = Vec::new();
+            let mut changed = false;
+            let mut jobs = match automation_jobs.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+
+            for job in jobs.iter_mut() {
+                if !job.enabled {
+                    continue;
+                }
+                let Some(cron_expression) = job.cron_expression.as_deref() else {
+                    continue;
+                };
+                let Ok(schedule) = Schedule::from_str(cron_expression) else {
+                    continue;
+                };
+
+                let anchor = job
+                    .last_triggered_at
+                    .as_deref()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&Local))
+                    .or_else(|| {
+                        chrono::DateTime::parse_from_rfc3339(&job.created_at)
+                            .ok()
+                            .map(|value| value.with_timezone(&Local))
+                    })
+                    .unwrap_or_else(|| now - chrono::Duration::minutes(1));
+
+                if let Some(next_fire) = schedule.after(&anchor).next() {
+                    if next_fire <= now {
+                        job.last_triggered_at = Some(next_fire.to_rfc3339());
+                        job.updated_at = now.to_rfc3339();
+                        due.push(job.id.clone());
+                        changed = true;
+                    }
+                }
+            }
+
+            if changed {
+                let _ = persist_automation_jobs_to_disk(&jobs);
+            }
+            due
+        };
+
+        for job_id in due_job_ids {
+            let _ = create_automation_run_from_job_with_handles(
+                app.clone(),
+                state_arc.clone(),
+                context_arc.clone(),
+                settings_arc.clone(),
+                terminal_storage.clone(),
+                claude_approval_rules.clone(),
+                claude_pending_approvals.clone(),
+                codex_pending_approvals.clone(),
+                automation_jobs.clone(),
+                automation_runs.clone(),
+                active_runs.clone(),
+                CreateAutomationRunFromJobRequest {
+                    job_id,
+                    scheduled_start_at: Some(Local::now().to_rfc3339()),
+                    execution_mode: None,
+                    parameter_values: BTreeMap::new(),
+                },
+                "cron",
+            );
+        }
+
+        thread::sleep(Duration::from_secs(15));
+    });
+}
+
 fn execute_automation_goal(
     app: &AppHandle,
     state_arc: &Arc<Mutex<AppStateDto>>,
@@ -10284,8 +11114,15 @@ fn execute_automation_goal(
             return AutomationExecutionOutcome {
                 owner_cli: owner_cli.to_string(),
                 raw_output: error.clone(),
+                final_content: error.clone(),
+                content_format: "log".to_string(),
                 summary: error,
                 exit_code: Some(1),
+                blocks: vec![ChatMessageBlock::Status {
+                    level: "error".to_string(),
+                    text: "CLI runtime unavailable.".to_string(),
+                }],
+                transport_session: None,
                 relevant_files: Vec::new(),
             }
         }
@@ -10305,24 +11142,12 @@ fn execute_automation_goal(
 
     let mut session = acp::AcpSession::default();
     session.plan_mode = false;
-    match owner_cli {
-        "claude" => {
-            session
-                .permission_mode
-                .insert("claude".to_string(), "acceptEdits".to_string());
-        }
-        "gemini" => {
-            session
-                .permission_mode
-                .insert("gemini".to_string(), "auto_edit".to_string());
-        }
-        _ => {
-            session
-                .permission_mode
-                .insert("codex".to_string(), "workspace-write".to_string());
-        }
-    }
+    session.permission_mode.insert(
+        owner_cli.to_string(),
+        automation_permission_mode_for_cli(&run.permission_profile, owner_cli, true),
+    );
 
+    let message_id = create_id("auto-msg");
     let automation_prompt = build_automation_goal_prompt(
         run,
         goal,
@@ -10332,9 +11157,17 @@ fn execute_automation_goal(
         prior_progress,
         next_instruction,
     );
+    let _ = append_automation_turn_seed(
+        terminal_storage,
+        run,
+        goal,
+        owner_cli,
+        &automation_prompt,
+        &message_id,
+    );
 
     if goal.execution_mode == "auto" {
-        return execute_auto_mode_goal(
+        let outcome = execute_auto_mode_goal(
             app,
             &state_snapshot,
             settings_arc,
@@ -10347,6 +11180,8 @@ fn execute_automation_goal(
             &automation_prompt,
             timeout_ms,
         );
+        let _ = finalize_automation_turn_message(terminal_storage, goal, &message_id, &outcome);
+        return outcome;
     }
 
     let (prompt_for_context, selected_codex_skills, selected_claude_skill) = match owner_cli {
@@ -10387,7 +11222,6 @@ fn execute_automation_goal(
         .map(|panel| panel.recent_changes.into_iter().map(|change| change.path).collect::<BTreeSet<_>>())
         .unwrap_or_default();
 
-    let message_id = create_id("auto-msg");
     let execution = match owner_cli {
         "codex" => run_codex_app_server_turn(
             app,
@@ -10403,7 +11237,14 @@ fn execute_automation_goal(
             codex_pending_approvals.clone(),
             Vec::new(),
         )
-        .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks)),
+        .map(|outcome| (
+            outcome.raw_output,
+            outcome.final_content,
+            outcome.content_format,
+            outcome.exit_code,
+            outcome.blocks,
+            Some(outcome.transport_session),
+        )),
         "claude" => run_claude_headless_turn(
             app,
             &wrapper_path,
@@ -10418,7 +11259,14 @@ fn execute_automation_goal(
             claude_approval_rules.clone(),
             claude_pending_approvals.clone(),
         )
-        .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks)),
+        .map(|outcome| (
+            outcome.raw_output,
+            outcome.final_content,
+            outcome.content_format,
+            outcome.exit_code,
+            outcome.blocks,
+            Some(outcome.transport_session),
+        )),
         "gemini" => run_gemini_acp_turn(
             app,
             &wrapper_path,
@@ -10432,7 +11280,14 @@ fn execute_automation_goal(
             timeout_ms,
             Vec::new(),
         )
-        .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks)),
+        .map(|outcome| (
+            outcome.raw_output,
+            outcome.final_content,
+            outcome.content_format,
+            outcome.exit_code,
+            outcome.blocks,
+            Some(outcome.transport_session),
+        )),
         _ => run_silent_agent_turn_once(
             &run.project_root,
             &owner_cli,
@@ -10442,7 +11297,18 @@ fn execute_automation_goal(
             &session,
             timeout_ms,
         )
-        .map(|outcome| (outcome.raw_output, outcome.final_content, Some(0), Vec::new())),
+        .map(|outcome| (
+            outcome.raw_output.clone(),
+            if outcome.final_content.trim().is_empty() {
+                outcome.raw_output
+            } else {
+                outcome.final_content
+            },
+            "log".to_string(),
+            Some(0),
+            Vec::new(),
+            None,
+        )),
     };
 
     let after_files = get_git_panel(run.project_root.clone())
@@ -10454,17 +11320,25 @@ fn execute_automation_goal(
         .collect::<Vec<_>>();
 
     match execution {
-        Ok((raw_output, final_content, exit_code, blocks)) => {
+        Ok((raw_output, final_content, content_format, exit_code, blocks, transport_session)) => {
             let raw = if raw_output.trim().is_empty() {
                 final_content.clone()
             } else {
                 raw_output.clone()
             };
-            AutomationExecutionOutcome {
+            let outcome = AutomationExecutionOutcome {
                 owner_cli: owner_cli.to_string(),
                 raw_output: raw.clone(),
+                final_content: if final_content.trim().is_empty() {
+                    raw.clone()
+                } else {
+                    final_content.clone()
+                },
+                content_format,
                 summary: display_summary(&raw),
                 exit_code,
+                blocks: blocks.clone(),
+                transport_session,
                 relevant_files: if blocks.is_empty() {
                     relevant_files
                 } else {
@@ -10475,15 +11349,28 @@ fn execute_automation_goal(
                         .into_iter()
                         .collect()
                 },
-            }
+            };
+            let _ = finalize_automation_turn_message(terminal_storage, goal, &message_id, &outcome);
+            outcome
         }
-        Err(error) => AutomationExecutionOutcome {
-            owner_cli: owner_cli.to_string(),
-            raw_output: error.clone(),
-            summary: display_summary(&error),
-            exit_code: Some(1),
-            relevant_files,
-        },
+        Err(error) => {
+            let outcome = AutomationExecutionOutcome {
+                owner_cli: owner_cli.to_string(),
+                raw_output: error.clone(),
+                final_content: error.clone(),
+                content_format: "log".to_string(),
+                summary: display_summary(&error),
+                exit_code: Some(1),
+                blocks: vec![ChatMessageBlock::Status {
+                    level: "error".to_string(),
+                    text: error.clone(),
+                }],
+                transport_session: None,
+                relevant_files,
+            };
+            let _ = finalize_automation_turn_message(terminal_storage, goal, &message_id, &outcome);
+            outcome
+        }
     }
 }
 
@@ -10526,15 +11413,27 @@ fn execute_automation_run_loop(
             let queued_goal = run.goals.iter().find(|goal| goal.status == "queued").cloned();
             if let Some(goal) = queued_goal {
                 let now = now_stamp();
+                run.lifecycle_status = "running".to_string();
+                run.outcome_status = "unknown".to_string();
+                run.attention_status = "none".to_string();
+                run.resolution_code = "in_progress".to_string();
+                run.status_summary = Some("Run is actively executing.".to_string());
                 run.status = "running".to_string();
                 run.started_at = run.started_at.clone().or(Some(now.clone()));
                 run.updated_at = now.clone();
                 if let Some(goal_mut) = run.goals.iter_mut().find(|item| item.id == goal.id) {
+                    goal_mut.lifecycle_status = "running".to_string();
+                    goal_mut.outcome_status = "unknown".to_string();
+                    goal_mut.attention_status = "none".to_string();
+                    goal_mut.resolution_code = "in_progress".to_string();
+                    goal_mut.status_summary = Some("Goal is actively executing.".to_string());
                     goal_mut.status = "running".to_string();
                     goal_mut.started_at = goal_mut.started_at.clone().or(Some(now.clone()));
                     goal_mut.updated_at = now.clone();
                     goal_mut.last_owner_cli = Some(infer_automation_owner(goal_mut));
+                    sync_goal_status_fields(goal_mut);
                 }
+                sync_run_status_fields(run);
                 push_event(
                     run,
                     Some(&goal.id),
@@ -10548,14 +11447,37 @@ fn execute_automation_run_loop(
             } else {
                 let has_paused = run.goals.iter().any(|goal| goal.status == "paused");
                 let has_failed = run.goals.iter().any(|goal| goal.status == "failed");
+                let has_unknown = run
+                    .goals
+                    .iter()
+                    .any(|goal| goal.outcome_status == "unknown" || goal.outcome_status == "partial");
                 let now = now_stamp();
-                run.status = if has_paused {
-                    "paused".to_string()
+                if has_paused {
+                    run.lifecycle_status = "stopped".to_string();
+                    run.outcome_status = if has_failed { "failed".to_string() } else { "unknown".to_string() };
+                    run.attention_status = "waiting_human".to_string();
+                    run.resolution_code = "manual_pause_requested".to_string();
+                    run.status_summary = Some("Stopped and waiting for manual handling.".to_string());
                 } else if has_failed {
-                    "failed".to_string()
+                    run.lifecycle_status = "finished".to_string();
+                    run.outcome_status = "failed".to_string();
+                    run.attention_status = "none".to_string();
+                    run.resolution_code = "objective_checks_failed".to_string();
+                    run.status_summary = Some("Finished with failed outcomes.".to_string());
+                } else if has_unknown {
+                    run.lifecycle_status = "finished".to_string();
+                    run.outcome_status = "partial".to_string();
+                    run.attention_status = "none".to_string();
+                    run.resolution_code = "expected_outcome_not_met".to_string();
+                    run.status_summary = Some("Finished but objective completion was not fully verified.".to_string());
                 } else {
-                    "completed".to_string()
-                };
+                    run.lifecycle_status = "finished".to_string();
+                    run.outcome_status = "success".to_string();
+                    run.attention_status = "none".to_string();
+                    run.resolution_code = "objective_checks_passed".to_string();
+                    run.status_summary = Some("Finished successfully.".to_string());
+                }
+                sync_run_status_fields(run);
                 run.completed_at = Some(now.clone());
                 run.updated_at = now;
                 run.summary = Some(summarize_automation_run(run));
@@ -10822,6 +11744,65 @@ fn execute_automation_run_loop(
                     return;
                 };
                 if let Some(goal) = run.goals.iter_mut().find(|item| item.id == working_goal.id) {
+                    let resolution_code = match decision.as_str() {
+                        "complete" => "objective_checks_passed".to_string(),
+                        "fail" => {
+                            if new_failure_count >= working_goal.rule_config.max_consecutive_failures {
+                                "max_failures_exceeded".to_string()
+                            } else if new_no_progress > working_goal.rule_config.max_no_progress_rounds {
+                                "no_progress_exceeded".to_string()
+                            } else if round_index >= working_goal.rule_config.max_rounds_per_goal {
+                                "max_rounds_exceeded".to_string()
+                            } else {
+                                "objective_checks_failed".to_string()
+                            }
+                        }
+                        "pause" => resolution_code_for_pause_reason(&reason),
+                        _ => {
+                            if outcome.exit_code == Some(0) {
+                                "in_progress".to_string()
+                            } else {
+                                "runtime_error".to_string()
+                            }
+                        }
+                    };
+                    let attention_status = match decision.as_str() {
+                        "pause" => {
+                            if resolution_code == "manual_pause_requested"
+                                || resolution_code == "judge_requested_pause"
+                            {
+                                "waiting_human".to_string()
+                            } else {
+                                "blocked_by_policy".to_string()
+                            }
+                        }
+                        _ => "none".to_string(),
+                    };
+                    let lifecycle_status = match decision.as_str() {
+                        "continue" => "running".to_string(),
+                        "pause" => "stopped".to_string(),
+                        _ => "finished".to_string(),
+                    };
+                    let outcome_status = match decision.as_str() {
+                        "complete" => "success".to_string(),
+                        "fail" => "failed".to_string(),
+                        "pause" => {
+                            if judgement.expected_outcome_met && outcome.exit_code == Some(0) {
+                                "partial".to_string()
+                            } else {
+                                "unknown".to_string()
+                            }
+                        }
+                        _ => {
+                            if judgement.expected_outcome_met {
+                                "success".to_string()
+                            } else if judgement.made_progress {
+                                "partial".to_string()
+                            } else {
+                                "unknown".to_string()
+                            }
+                        }
+                    };
                     goal.round_count = round_index;
                     goal.last_owner_cli = Some(outcome.owner_cli.clone());
                     goal.result_summary = Some(outcome.summary.clone());
@@ -10829,6 +11810,33 @@ fn execute_automation_run_loop(
                     goal.next_instruction = judgement.next_instruction.clone();
                     goal.relevant_files = merged_files.clone();
                     goal.last_exit_code = outcome.exit_code;
+                    goal.lifecycle_status = lifecycle_status;
+                    goal.outcome_status = outcome_status;
+                    goal.attention_status = attention_status;
+                    goal.resolution_code = resolution_code;
+                    goal.status_summary = Some(format!(
+                        "{} {}",
+                        judgement.progress_summary.trim(),
+                        reason.trim()
+                    ).trim().to_string());
+                    goal.objective_signals = AutomationObjectiveSignals {
+                        exit_code: outcome.exit_code,
+                        checks_passed: outcome.exit_code == Some(0) && judgement.expected_outcome_met,
+                        checks_failed: outcome.exit_code.is_some() && outcome.exit_code != Some(0),
+                        artifacts_produced: !merged_files.is_empty(),
+                        files_changed: merged_files.len(),
+                        policy_blocks: if rule_pause_reason.is_some() {
+                            vec![reason.clone()]
+                        } else {
+                            Vec::new()
+                        },
+                    };
+                    goal.judge_assessment = AutomationJudgeAssessment {
+                        made_progress: judgement.made_progress,
+                        expected_outcome_met: judgement.expected_outcome_met,
+                        suggested_decision: Some(judgement.decision.clone()),
+                        reason: Some(judgement.reason.clone()),
+                    };
                     goal.consecutive_failure_count = new_failure_count;
                     goal.no_progress_rounds = new_no_progress;
                     goal.updated_at = now_stamp();
@@ -10849,10 +11857,14 @@ fn execute_automation_run_loop(
                         "complete" => "completed".to_string(),
                         _ => "running".to_string(),
                     };
+                    sync_goal_status_fields(goal);
                     working_goal = goal.clone();
                 }
 
                 run.updated_at = now_stamp();
+                run.objective_signals = working_goal.objective_signals.clone();
+                run.judge_assessment = working_goal.judge_assessment.clone();
+                run.status_summary = working_goal.status_summary.clone();
                 let event_level = if decision == "continue" {
                     "info"
                 } else if decision == "complete" {
@@ -12650,6 +13662,11 @@ pub fn run() {
         &data_dir().expect("failed to resolve local app data directory"),
     ))
     .expect("failed to initialize terminal sqlite storage");
+    let mut automation_jobs =
+        load_automation_jobs_from_disk().unwrap_or_else(|_| Vec::new());
+    automation::normalize_jobs_on_startup(&mut automation_jobs);
+    let _ = persist_automation_jobs_to_disk(&automation_jobs);
+    let automation_jobs = Arc::new(Mutex::new(automation_jobs));
     let mut automation_runs =
         load_automation_runs_from_disk().unwrap_or_else(|_| Vec::new());
     normalize_runs_on_startup(&mut automation_runs);
@@ -12671,6 +13688,7 @@ pub fn run() {
     let scheduler_context = startup_context.clone();
     let scheduler_settings = startup_settings.clone();
     let scheduler_storage = terminal_storage.clone();
+    let scheduler_jobs = automation_jobs.clone();
     let scheduler_runs = automation_runs.clone();
     let scheduler_active = automation_active_runs.clone();
     let claude_approval_rules = Arc::new(Mutex::new(
@@ -12688,6 +13706,7 @@ pub fn run() {
             context: startup_context,
             settings: startup_settings,
             terminal_storage,
+            automation_jobs,
             automation_runs,
             automation_active_runs,
             automation_rule_profile,
@@ -12706,6 +13725,19 @@ pub fn run() {
                 scheduler_claude_approval_rules.clone(),
                 scheduler_claude_pending_approvals.clone(),
                 scheduler_codex_pending_approvals.clone(),
+                scheduler_runs.clone(),
+                scheduler_active.clone(),
+            );
+            schedule_cron_automation_jobs(
+                app.handle().clone(),
+                scheduler_state.clone(),
+                scheduler_context.clone(),
+                scheduler_settings.clone(),
+                scheduler_storage.clone(),
+                scheduler_claude_approval_rules.clone(),
+                scheduler_claude_pending_approvals.clone(),
+                scheduler_codex_pending_approvals.clone(),
+                scheduler_jobs.clone(),
                 scheduler_runs.clone(),
                 scheduler_active.clone(),
             );
@@ -12729,11 +13761,19 @@ pub fn run() {
             delete_chat_message_record,
             delete_chat_session_by_tab,
             update_chat_message_blocks,
+            list_automation_jobs,
+            get_automation_job,
+            create_automation_job,
+            update_automation_job,
+            delete_automation_job,
             list_automation_runs,
+            list_automation_job_runs,
+            get_automation_run_detail,
             get_automation_rule_profile,
             update_automation_rule_profile,
             update_automation_goal_rule_config,
             create_automation_run,
+            create_automation_run_from_job,
             start_automation_run,
             pause_automation_run,
             resume_automation_run,

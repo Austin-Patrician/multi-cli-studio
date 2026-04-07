@@ -2,7 +2,11 @@ import { browserRuntime } from "./browserRuntime";
 import {
   AgentId,
   AgentPromptRequest,
+  AutomationJob,
+  AutomationJobDraft,
   AutomationGoalRuleConfig,
+  AutomationRunDetail,
+  AutomationRunRecord,
   AutomationRun,
   AutomationRuleProfile,
   AutoOrchestrationRequest,
@@ -18,6 +22,7 @@ import {
   CliHandoffRequest,
   ContextStore,
   ConversationTurn,
+  CreateAutomationRunFromJobRequest,
   CreateAutomationRunRequest,
   CliSkillItem,
   FileMentionCandidate,
@@ -61,11 +66,19 @@ export interface RuntimeBridge {
   deleteChatMessage: (request: ChatMessageDeleteRequest) => Promise<void>;
   deleteChatSessionByTab: (terminalTabId: string) => Promise<void>;
   updateChatMessageBlocks: (request: ChatMessageBlocksUpdateRequest) => Promise<void>;
+  listAutomationJobs: () => Promise<AutomationJob[]>;
+  getAutomationJob: (jobId: string) => Promise<AutomationJob>;
+  createAutomationJob: (job: AutomationJobDraft) => Promise<AutomationJob>;
+  updateAutomationJob: (jobId: string, job: AutomationJobDraft) => Promise<AutomationJob>;
+  deleteAutomationJob: (jobId: string) => Promise<void>;
+  listAutomationJobRuns: (jobId?: string | null) => Promise<AutomationRunRecord[]>;
+  getAutomationRunDetail: (runId: string) => Promise<AutomationRunDetail>;
   listAutomationRuns: () => Promise<AutomationRun[]>;
   getAutomationRuleProfile: () => Promise<AutomationRuleProfile>;
   updateAutomationRuleProfile: (profile: AutomationRuleProfile) => Promise<AutomationRuleProfile>;
   updateAutomationGoalRuleConfig: (goalId: string, ruleConfig: AutomationGoalRuleConfig) => Promise<AutomationRun>;
   createAutomationRun: (request: CreateAutomationRunRequest) => Promise<AutomationRun>;
+  createAutomationRunFromJob: (request: CreateAutomationRunFromJobRequest) => Promise<AutomationRunRecord>;
   startAutomationRun: (runId: string) => Promise<AutomationRun>;
   pauseAutomationRun: (runId: string) => Promise<AutomationRun>;
   resumeAutomationRun: (runId: string) => Promise<AutomationRun>;
@@ -198,6 +211,34 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("update_chat_message_blocks", { request });
   },
+  async listAutomationJobs() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationJob[]>("list_automation_jobs");
+  },
+  async getAutomationJob(jobId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationJob>("get_automation_job", { jobId });
+  },
+  async createAutomationJob(job) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationJob>("create_automation_job", { job });
+  },
+  async updateAutomationJob(jobId, job) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationJob>("update_automation_job", { jobId, job });
+  },
+  async deleteAutomationJob(jobId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("delete_automation_job", { jobId });
+  },
+  async listAutomationJobRuns(jobId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRunRecord[]>("list_automation_job_runs", { jobId });
+  },
+  async getAutomationRunDetail(runId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRunDetail>("get_automation_run_detail", { runId });
+  },
   async listAutomationRuns() {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AutomationRun[]>("list_automation_runs");
@@ -217,6 +258,10 @@ const tauriRuntime: RuntimeBridge = {
   async createAutomationRun(request) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AutomationRun>("create_automation_run", { request });
+  },
+  async createAutomationRunFromJob(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationRunRecord>("create_automation_run_from_job", { request });
   },
   async startAutomationRun(runId) {
     const { invoke } = await import("@tauri-apps/api/core");

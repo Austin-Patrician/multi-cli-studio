@@ -12,11 +12,13 @@
     "tauri:android": "node ./scripts/run-tauri.mjs android"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-notification": "^2.0.0",
     "echarts": "^6.0.0",
     "echarts-for-react": "^3.0.6",
+    "monaco-editor": "^0.55.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",

@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { bridge } from "../lib/bridge";
 import { AgentId, AgentResourceGroup, AgentResourceKind, AgentRuntimeResources, AppSettings } from "../lib/models";
+import refreshIcon from "../media/svg/refresh.svg";
 import { useStore } from "../lib/store";
 import { requestDesktopNotificationPermission } from "../lib/desktopNotifications";
 
@@ -80,17 +81,17 @@ const BellIcon = () => (
   </svg>
 );
 
+const ChevronRightIcon = ({ className = "w-4 h-4" }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
+    <path d="M9 6L15 12L9 18" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 const CpuIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-5 h-5">
     <rect x="5" y="5" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.5"/>
     <path d="M9 9H15V15H9V9Z" stroke="currentColor" strokeWidth="1.5"/>
     <path d="M9 2V5M15 2V5M9 19V22M15 19V22M2 9H5M2 15H5M19 9H22M19 15H22" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-  </svg>
-);
-
-const RefreshIcon = ({ className = "w-4 h-4" }: { className?: string }) => (
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={className}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
   </svg>
 );
 
@@ -307,7 +308,6 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [notificationBusy, setNotificationBusy] = useState(false);
 
   useEffect(() => {
@@ -431,7 +431,7 @@ export function SettingsPage() {
 
             <div className="flex items-center gap-2 bg-white/50 p-1.5 rounded-2xl ring-1 ring-slate-200/50 backdrop-blur-md shadow-sm">
               <IconButton 
-                icon={<RefreshIcon className={cx(refreshing && "animate-spin")} />} 
+                icon={<img src={refreshIcon} alt="" className={cx("h-4 w-4", refreshing && "animate-spin")} />} 
                 onClick={refreshRuntime} 
                 disabled={refreshing} 
                 title="Scan Runtime" 
@@ -465,6 +465,22 @@ export function SettingsPage() {
               </div>
             )}
           </div>
+
+          {dirty ? (
+            <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800 shadow-sm">
+              <div className="text-sm font-semibold">
+                Detected unsaved changes. Click save to apply updates.
+              </div>
+              <button
+                type="button"
+                onClick={handleSave}
+                disabled={saving}
+                className="inline-flex h-9 items-center justify-center rounded-xl bg-slate-900 px-4 text-xs font-semibold text-white transition hover:bg-slate-800 disabled:opacity-50"
+              >
+                Save now
+              </button>
+            </div>
+          ) : null}
         </header>
 
         <main className="space-y-10">
@@ -604,42 +620,56 @@ export function SettingsPage() {
 
           {/* Limits */}
           <div style={stageStyle(mounted, 200)}>
-            <Panel title="Execution Limits" description="Safety boundaries for automated agent operations." icon={<CpuIcon />} action={
-              <button onClick={() => setShowAdvanced((v) => !v)} className="rounded-xl bg-white px-4 py-2 text-[11px] font-bold uppercase tracking-widest text-slate-600 ring-1 ring-slate-200 shadow-sm hover:bg-slate-50 transition-all">
-                {showAdvanced ? "Lock Settings" : "Configure Limits"}
-              </button>
-            }>
-              {!showAdvanced ? (
-                <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-slate-100">
-                  <div className="p-8">
-                    <FieldLabel>Rounds / Agent</FieldLabel>
-                    <span className="text-[22px] font-bold text-slate-900 font-mono tracking-tighter">{formatLimit(local.maxTurnsPerAgent)}</span>
-                  </div>
-                  <div className="p-8">
-                    <FieldLabel>Output Limit</FieldLabel>
-                    <span className="text-[22px] font-bold text-slate-900 font-mono tracking-tighter">{formatLimit(local.maxOutputCharsPerTurn)}</span>
-                  </div>
-                  <div className="p-8">
-                    <FieldLabel>Process Timeout</FieldLabel>
-                    <span className="text-[22px] font-bold text-slate-900 font-mono tracking-tighter">{formatLimit(local.processTimeoutMs)}<span className="text-xs ml-1 text-slate-400 uppercase tracking-widest">ms</span></span>
-                  </div>
+            <Panel title="Execution Limits" description="Safety boundaries for automated agent operations." icon={<CpuIcon />}>
+              <div className="grid gap-6 p-8 sm:grid-cols-3">
+                <div className="rounded-2xl border border-slate-100 bg-slate-50/50 p-5">
+                  <FieldLabel>Rounds / Agent</FieldLabel>
+                  <input
+                    type="number"
+                    className={INPUT_CLASS}
+                    value={local.maxTurnsPerAgent}
+                    onChange={(e) =>
+                      setLocal({
+                        ...local,
+                        maxTurnsPerAgent: parseInt(e.target.value, 10) || 50,
+                      })
+                    }
+                  />
                 </div>
-              ) : (
-                <div className="grid gap-8 p-8 sm:grid-cols-3 bg-indigo-50/20">
-                  <div>
-                    <FieldLabel>Rounds / Agent</FieldLabel>
-                    <input type="number" className={INPUT_CLASS} value={local.maxTurnsPerAgent} onChange={(e) => setLocal({ ...local, maxTurnsPerAgent: parseInt(e.target.value, 10) || 50 })} />
-                  </div>
-                  <div>
-                    <FieldLabel>Output limit (chars)</FieldLabel>
-                    <input type="number" className={INPUT_CLASS} value={local.maxOutputCharsPerTurn} onChange={(e) => setLocal({ ...local, maxOutputCharsPerTurn: parseInt(e.target.value, 10) || 100000 })} />
-                  </div>
-                  <div>
-                    <FieldLabel>Timeout buffer (ms)</FieldLabel>
-                    <input type="number" className={INPUT_CLASS} value={local.processTimeoutMs} onChange={(e) => setLocal({ ...local, processTimeoutMs: parseInt(e.target.value, 10) || 300000 })} />
-                  </div>
+                <div className="rounded-2xl border border-slate-100 bg-slate-50/50 p-5">
+                  <FieldLabel>Output limit (chars)</FieldLabel>
+                  <input
+                    type="number"
+                    className={INPUT_CLASS}
+                    value={local.maxOutputCharsPerTurn}
+                    onChange={(e) =>
+                      setLocal({
+                        ...local,
+                        maxOutputCharsPerTurn: parseInt(e.target.value, 10) || 100000,
+                      })
+                    }
+                  />
                 </div>
-              )}
+                <div className="rounded-2xl border border-slate-100 bg-slate-50/50 p-5">
+                  <FieldLabel>Timeout buffer (ms)</FieldLabel>
+                  <input
+                    type="number"
+                    className={INPUT_CLASS}
+                    value={local.processTimeoutMs}
+                    onChange={(e) =>
+                      setLocal({
+                        ...local,
+                        processTimeoutMs: parseInt(e.target.value, 10) || 300000,
+                      })
+                    }
+                  />
+                </div>
+              </div>
+              <div className="px-8 pb-8 text-xs text-slate-500">
+                当前生效值: Rounds {formatLimit(local.maxTurnsPerAgent)} / Output{" "}
+                {formatLimit(local.maxOutputCharsPerTurn)} / Timeout{" "}
+                {formatLimit(local.processTimeoutMs)}ms
+              </div>
             </Panel>
           </div>
         </main>

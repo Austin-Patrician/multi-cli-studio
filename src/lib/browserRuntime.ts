@@ -1,10 +1,17 @@
 import {
   AppState,
   AgentId,
+  AutomationJob,
+  AutomationJobDraft,
   AutomationGoal,
   AutomationGoalDraft,
   AutomationGoalRuleConfig,
   AutomationGoalStatus,
+  AutomationParameterDefinition,
+  AutomationPermissionProfile,
+  AutomationParameterValue,
+  AutomationRunDetail,
+  AutomationRunRecord,
   AutomationRuleProfile,
   AutomationRun,
   AutomationRunStatus,
@@ -26,6 +33,7 @@ import {
   TerminalLine,
   ContextStore,
   ConversationTurn,
+  CreateAutomationRunFromJobRequest,
   CreateAutomationRunRequest,
   AppSettings,
   EnrichedHandoff,
@@ -57,6 +65,7 @@ const STORAGE_KEY = "multi-cli-studio::state";
 const CONTEXT_KEY = "multi-cli-studio::context";
 const SETTINGS_KEY = "multi-cli-studio::settings";
 const TERMINAL_STATE_KEY = "multi-cli-studio::terminal-state";
+const AUTOMATION_JOBS_KEY = "multi-cli-studio::automation-jobs";
 const AUTOMATION_RUNS_KEY = "multi-cli-studio::automation-runs";
 const AUTOMATION_RULE_KEY = "multi-cli-studio::automation-rule";
 
@@ -64,6 +73,7 @@ let state: AppState = loadStoredState();
 let contextStore: ContextStore = loadStoredContext();
 let settings: AppSettings = loadStoredSettings();
 let acpSession: AcpSession = defaultAcpSession();
+let automationJobs: AutomationJob[] = loadStoredAutomationJobs();
 let automationRuns: AutomationRun[] = loadStoredAutomationRuns();
 let automationRuleProfile: AutomationRuleProfile = loadStoredAutomationRuleProfile();
 
@@ -295,6 +305,18 @@ function defaultSettings(): AppSettings {
     maxOutputCharsPerTurn: 100000,
     processTimeoutMs: 300000,
     notifyOnTerminalCompletion: false,
+    notificationConfig: {
+      notifyOnCompletion: false,
+      webhookUrl: "",
+      webhookEnabled: false,
+      smtpEnabled: false,
+      smtpHost: "",
+      smtpPort: 587,
+      smtpUsername: "",
+      smtpPassword: "",
+      smtpFrom: "",
+      emailRecipients: [],
+    },
   };
 }
 
@@ -319,6 +341,7 @@ function normalizeSettings(value: unknown): AppSettings {
     maxOutputCharsPerTurn: parsePositiveNumber(raw.maxOutputCharsPerTurn, defaults.maxOutputCharsPerTurn),
     processTimeoutMs: parsePositiveNumber(raw.processTimeoutMs, defaults.processTimeoutMs),
     notifyOnTerminalCompletion: raw.notifyOnTerminalCompletion === true,
+    notificationConfig: raw.notificationConfig ?? defaults.notificationConfig,
   };
 }
 
@@ -330,10 +353,35 @@ function loadStoredAutomationRuns(): AutomationRun[] {
     if (!Array.isArray(parsed)) return [];
     return parsed.map((run) => ({
       id: run.id ?? createId("auto-run"),
+      jobId: run.jobId ?? null,
+      jobName: run.jobName ?? null,
+      triggerSource: run.triggerSource ?? null,
+      runNumber: run.runNumber ?? null,
+      permissionProfile: normalizeAutomationPermissionProfile(run.permissionProfile),
+      parameterValues: normalizeAutomationParameterValues(run.parameterValues),
       workspaceId: run.workspaceId ?? "",
       projectRoot: run.projectRoot ?? "",
       projectName: run.projectName ?? "workspace",
       ruleProfileId: run.ruleProfileId ?? "safe-autonomy-v1",
+      lifecycleStatus: run.lifecycleStatus ?? "queued",
+      outcomeStatus: run.outcomeStatus ?? "unknown",
+      attentionStatus: run.attentionStatus ?? "none",
+      resolutionCode: run.resolutionCode ?? "not_evaluated",
+      statusSummary: run.statusSummary ?? null,
+      objectiveSignals: run.objectiveSignals ?? {
+        exitCode: null,
+        checksPassed: false,
+        checksFailed: false,
+        artifactsProduced: false,
+        filesChanged: 0,
+        policyBlocks: [],
+      },
+      judgeAssessment: run.judgeAssessment ?? {
+        madeProgress: false,
+        expectedOutcomeMet: false,
+        suggestedDecision: null,
+        reason: null,
+      },
       status: (run.status as AutomationRunStatus | undefined) ?? "draft",
       scheduledStartAt: run.scheduledStartAt ?? null,
       startedAt: run.startedAt ?? null,
@@ -348,6 +396,25 @@ function loadStoredAutomationRuns(): AutomationRun[] {
         goal: goal.goal ?? "",
         expectedOutcome: goal.expectedOutcome ?? "",
         executionMode: goal.executionMode ?? "auto",
+        lifecycleStatus: goal.lifecycleStatus ?? "queued",
+        outcomeStatus: goal.outcomeStatus ?? "unknown",
+        attentionStatus: goal.attentionStatus ?? "none",
+        resolutionCode: goal.resolutionCode ?? "not_evaluated",
+        statusSummary: goal.statusSummary ?? null,
+        objectiveSignals: goal.objectiveSignals ?? {
+          exitCode: null,
+          checksPassed: false,
+          checksFailed: false,
+          artifactsProduced: false,
+          filesChanged: 0,
+          policyBlocks: [],
+        },
+        judgeAssessment: goal.judgeAssessment ?? {
+          madeProgress: false,
+          expectedOutcomeMet: false,
+          suggestedDecision: null,
+          reason: null,
+        },
         status: (goal.status as AutomationGoalStatus | undefined) ?? "queued",
         position: goal.position ?? index,
         roundCount: goal.roundCount ?? 0,
@@ -373,6 +440,63 @@ function loadStoredAutomationRuns(): AutomationRun[] {
   }
 }
 
+function normalizeAutomationParameterDefinitions(
+  values: AutomationParameterDefinition[] | undefined | null
+): AutomationParameterDefinition[] {
+  if (!values) return [];
+  return values.map((item, index) => ({
+    id: item.id ?? createId(`auto-param-${index}`),
+    key: item.key?.trim() || `param-${index + 1}`,
+    label: item.label?.trim() || item.key?.trim() || `参数 ${index + 1}`,
+    kind: item.kind === "boolean" || item.kind === "enum" ? item.kind : "string",
+    description: item.description ?? null,
+    required: item.required === true,
+    options: item.kind === "enum" ? item.options ?? [] : [],
+    defaultValue: item.defaultValue ?? null,
+  }));
+}
+
+function normalizeAutomationParameterValues(
+  values: Record<string, AutomationParameterValue> | undefined | null
+): Record<string, AutomationParameterValue> {
+  if (!values) return {};
+  const normalizedEntries = Object.entries(values)
+    .map(([key, value]) => [key.trim(), value ?? null] as const)
+    .filter(([key]) => key.length > 0);
+  return Object.fromEntries(normalizedEntries);
+}
+
+function loadStoredAutomationJobs(): AutomationJob[] {
+  const raw = window.localStorage.getItem(AUTOMATION_JOBS_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as Partial<AutomationJob>[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((job, index) => ({
+      id: job.id ?? createId("auto-job"),
+      workspaceId: job.workspaceId ?? "",
+      projectRoot: job.projectRoot ?? "",
+      projectName: job.projectName ?? "workspace",
+      name: job.name?.trim() || `CLI 任务 ${index + 1}`,
+      description: job.description ?? null,
+      goal: job.goal ?? "",
+      expectedOutcome: job.expectedOutcome ?? "",
+      defaultExecutionMode: job.defaultExecutionMode ?? "auto",
+      permissionProfile: normalizeAutomationPermissionProfile(job.permissionProfile),
+      ruleConfig: normalizeAutomationGoalRuleConfig(job.ruleConfig ?? defaultAutomationRuleProfile()),
+      parameterDefinitions: normalizeAutomationParameterDefinitions(job.parameterDefinitions),
+      defaultParameterValues: normalizeAutomationParameterValues(job.defaultParameterValues),
+      cronExpression: job.cronExpression ?? null,
+      lastTriggeredAt: job.lastTriggeredAt ?? null,
+      enabled: job.enabled !== false,
+      createdAt: job.createdAt ?? nowISO(),
+      updatedAt: job.updatedAt ?? nowISO(),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 function defaultAutomationRuleProfile(): AutomationRuleProfile {
   return {
     id: "safe-autonomy-v1",
@@ -388,6 +512,10 @@ function defaultAutomationRuleProfile(): AutomationRuleProfile {
     maxConsecutiveFailures: 2,
     maxNoProgressRounds: 1,
   };
+}
+
+function normalizeAutomationPermissionProfile(value?: string | null): AutomationPermissionProfile {
+  return value === "full-access" || value === "read-only" ? value : "standard";
 }
 
 function normalizeAutomationRuleProfile(profile: AutomationRuleProfile): AutomationRuleProfile {
@@ -430,6 +558,10 @@ function persistSettings() {
 
 function persistTerminalState(state: PersistedTerminalState) {
   window.localStorage.setItem(TERMINAL_STATE_KEY, JSON.stringify(state));
+}
+
+function persistAutomationJobs() {
+  window.localStorage.setItem(AUTOMATION_JOBS_KEY, JSON.stringify(automationJobs));
 }
 
 function persistAutomationRuns() {
@@ -495,6 +627,13 @@ function createAutomationGoal(runId: string, draft: AutomationGoalDraft, positio
     goal: draft.goal,
     expectedOutcome: draft.expectedOutcome,
     executionMode: draft.executionMode ?? "auto",
+    lifecycleStatus: "queued",
+    outcomeStatus: "unknown",
+    attentionStatus: "none",
+    resolutionCode: "queued",
+    statusSummary: "Waiting to start.",
+    objectiveSignals: { exitCode: null, checksPassed: false, checksFailed: false, artifactsProduced: false, filesChanged: 0, policyBlocks: [] },
+    judgeAssessment: { madeProgress: false, expectedOutcomeMet: false, suggestedDecision: null, reason: null },
     status: "queued",
     position,
     roundCount: 0,
@@ -543,6 +682,122 @@ function inferBrowserGoalStatus(goal: AutomationGoal): AutomationGoalStatus {
   if (/approval|confirm|credential|login|manual/.test(text)) return "paused";
   if (/fail|broken|error/.test(text)) return "failed";
   return "completed";
+}
+
+function getPrimaryGoal(run: AutomationRun): AutomationGoal | null {
+  return [...run.goals].sort((left, right) => left.position - right.position)[0] ?? null;
+}
+
+function toAutomationRunRecord(run: AutomationRun): AutomationRunRecord {
+  const goal = getPrimaryGoal(run);
+  return {
+    id: run.id,
+    jobId: run.jobId ?? null,
+    jobName: run.jobName ?? goal?.title ?? run.projectName,
+    projectName: run.projectName,
+    projectRoot: run.projectRoot,
+    workspaceId: run.workspaceId,
+    executionMode: goal?.executionMode ?? "auto",
+    permissionProfile: normalizeAutomationPermissionProfile(run.permissionProfile),
+    triggerSource: run.triggerSource ?? "manual",
+    runNumber: run.runNumber ?? null,
+    status: run.status,
+    displayStatus:
+      run.attentionStatus === "waiting_human"
+        ? "waiting_human"
+        : run.attentionStatus === "blocked_by_policy"
+          ? "blocked_by_policy"
+          : run.attentionStatus === "blocked_by_environment"
+            ? "blocked_by_environment"
+            : run.outcomeStatus === "success"
+              ? "success"
+              : run.outcomeStatus === "failed"
+                ? "failed"
+                : run.outcomeStatus === "partial"
+                  ? "partial"
+                  : run.lifecycleStatus ?? "unknown",
+    lifecycleStatus: run.lifecycleStatus ?? "queued",
+    outcomeStatus: run.outcomeStatus ?? "unknown",
+    attentionStatus: run.attentionStatus ?? "none",
+    resolutionCode: run.resolutionCode ?? "not_evaluated",
+    statusSummary: run.statusSummary ?? null,
+    summary: run.summary ?? null,
+    requiresAttentionReason: goal?.requiresAttentionReason ?? null,
+    objectiveSignals: run.objectiveSignals ?? {
+      exitCode: null,
+      checksPassed: false,
+      checksFailed: false,
+      artifactsProduced: false,
+      filesChanged: 0,
+      policyBlocks: [],
+    },
+    judgeAssessment: run.judgeAssessment ?? {
+      madeProgress: false,
+      expectedOutcomeMet: false,
+      suggestedDecision: null,
+      reason: null,
+    },
+    relevantFiles: goal?.relevantFiles ?? [],
+    lastExitCode: goal?.lastExitCode ?? null,
+    terminalTabId: goal?.syntheticTerminalTabId ?? null,
+    parameterValues: normalizeAutomationParameterValues(run.parameterValues),
+    scheduledStartAt: run.scheduledStartAt ?? null,
+    startedAt: run.startedAt ?? null,
+    completedAt: run.completedAt ?? null,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+  };
+}
+
+function toAutomationRunDetail(run: AutomationRun): AutomationRunDetail {
+  const goal = getPrimaryGoal(run);
+  const runRecord = toAutomationRunRecord(run);
+  const job = run.jobId ? automationJobs.find((item) => item.id === run.jobId) ?? null : null;
+  const messageContent = [
+    runRecord.summary ? `Summary: ${runRecord.summary}` : null,
+    goal?.latestProgressSummary ? `Progress: ${goal.latestProgressSummary}` : null,
+    goal?.requiresAttentionReason ? `Attention: ${goal.requiresAttentionReason}` : null,
+  ].filter(Boolean).join("\n");
+
+  return {
+    run: runRecord,
+    job,
+    ruleConfig: goal?.ruleConfig ?? defaultAutomationRuleProfile(),
+    goal: goal?.goal ?? "",
+    expectedOutcome: goal?.expectedOutcome ?? "",
+    events: structuredClone(run.events),
+    conversationSession: goal
+      ? {
+          id: `session-${goal.syntheticTerminalTabId}`,
+          terminalTabId: goal.syntheticTerminalTabId,
+          workspaceId: run.workspaceId,
+          projectRoot: run.projectRoot,
+          projectName: run.projectName,
+          messages: [
+            {
+              id: createId("msg"),
+              role: "assistant",
+              cliId: goal.lastOwnerCli ?? "codex",
+              timestamp: run.updatedAt,
+              content: messageContent || "Browser fallback did not capture detailed logs for this run.",
+              rawContent: null,
+              contentFormat: "plain",
+              transportKind: "browser-fallback",
+              blocks: null,
+              isStreaming: false,
+              durationMs: null,
+              exitCode: goal.lastExitCode ?? null,
+            },
+          ],
+          compactedSummaries: [],
+          lastCompactedAt: null,
+          estimatedTokens: 0,
+          createdAt: run.createdAt,
+          updatedAt: run.updatedAt,
+        }
+      : null,
+    taskContext: null,
+  };
 }
 
 function scheduleBrowserAutomationRun(runId: string) {
@@ -947,6 +1202,73 @@ export const browserRuntime = {
   async updateChatMessageBlocks(_request: ChatMessageBlocksUpdateRequest) {
     return;
   },
+  async listAutomationJobs() {
+    return structuredClone(automationJobs);
+  },
+  async getAutomationJob(jobId: string) {
+    const job = automationJobs.find((item) => item.id === jobId);
+    if (!job) throw new Error("Automation job not found.");
+    return structuredClone(job);
+  },
+  async createAutomationJob(job: AutomationJobDraft) {
+    const created: AutomationJob = {
+      ...job,
+      id: createId("auto-job"),
+      name: job.name.trim() || `CLI 任务 ${automationJobs.length + 1}`,
+      description: job.description?.trim() || null,
+      defaultExecutionMode: job.defaultExecutionMode ?? "auto",
+      permissionProfile: normalizeAutomationPermissionProfile(job.permissionProfile),
+      ruleConfig: normalizeAutomationGoalRuleConfig(job.ruleConfig),
+      parameterDefinitions: normalizeAutomationParameterDefinitions(job.parameterDefinitions),
+      defaultParameterValues: normalizeAutomationParameterValues(job.defaultParameterValues),
+      cronExpression: job.cronExpression?.trim() || null,
+      lastTriggeredAt: null,
+      enabled: job.enabled !== false,
+      createdAt: nowISO(),
+      updatedAt: nowISO(),
+    };
+    automationJobs = [created, ...automationJobs];
+    persistAutomationJobs();
+    return structuredClone(created);
+  },
+  async updateAutomationJob(jobId: string, job: AutomationJobDraft) {
+    const index = automationJobs.findIndex((item) => item.id === jobId);
+    if (index < 0) throw new Error("Automation job not found.");
+    const updated: AutomationJob = {
+      ...automationJobs[index],
+      ...job,
+      name: job.name.trim() || automationJobs[index].name,
+      description: job.description?.trim() || null,
+      defaultExecutionMode: job.defaultExecutionMode ?? "auto",
+      permissionProfile: normalizeAutomationPermissionProfile(job.permissionProfile),
+      ruleConfig: normalizeAutomationGoalRuleConfig(job.ruleConfig),
+      parameterDefinitions: normalizeAutomationParameterDefinitions(job.parameterDefinitions),
+      defaultParameterValues: normalizeAutomationParameterValues(job.defaultParameterValues),
+      cronExpression: job.cronExpression?.trim() || null,
+      enabled: job.enabled !== false,
+      updatedAt: nowISO(),
+    };
+    automationJobs[index] = updated;
+    persistAutomationJobs();
+    return structuredClone(updated);
+  },
+  async deleteAutomationJob(jobId: string) {
+    automationJobs = automationJobs.filter((item) => item.id !== jobId);
+    persistAutomationJobs();
+  },
+  async listAutomationJobRuns(jobId?: string | null) {
+    return structuredClone(
+      automationRuns
+        .filter((run) => (jobId ? run.jobId === jobId : true))
+        .map((run) => toAutomationRunRecord(run))
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    );
+  },
+  async getAutomationRunDetail(runId: string) {
+    const run = automationRuns.find((item) => item.id === runId);
+    if (!run) throw new Error("Automation run not found.");
+    return structuredClone(toAutomationRunDetail(run));
+  },
   async getAutomationRuleProfile() {
     return structuredClone(automationRuleProfile);
   },
@@ -973,10 +1295,18 @@ export const browserRuntime = {
     const status: AutomationRunStatus = request.scheduledStartAt ? "scheduled" : "draft";
     const run: AutomationRun = {
       id: runId,
+      permissionProfile: "standard",
       workspaceId: request.workspaceId,
       projectRoot: request.projectRoot,
       projectName: request.projectName,
       ruleProfileId: request.ruleProfileId ?? "safe-autonomy-v1",
+      lifecycleStatus: status === "scheduled" ? "queued" : "stopped",
+      outcomeStatus: "unknown",
+      attentionStatus: "none",
+      resolutionCode: status === "scheduled" ? "scheduled" : "draft",
+      statusSummary: status === "scheduled" ? "Scheduled and waiting to start." : "Saved as draft.",
+      objectiveSignals: { exitCode: null, checksPassed: false, checksFailed: false, artifactsProduced: false, filesChanged: 0, policyBlocks: [] },
+      judgeAssessment: { madeProgress: false, expectedOutcomeMet: false, suggestedDecision: null, reason: null },
       status,
       scheduledStartAt: request.scheduledStartAt ?? null,
       startedAt: null,
@@ -1001,6 +1331,79 @@ export const browserRuntime = {
       scheduleBrowserAutomationRun(run.id);
     }
     return structuredClone(run);
+  },
+  async createAutomationRunFromJob(request: CreateAutomationRunFromJobRequest) {
+    const job = automationJobs.find((item) => item.id === request.jobId);
+    if (!job) throw new Error("Automation job not found.");
+    if (request.scheduledStartAt) {
+      const scheduledMs = Date.parse(request.scheduledStartAt);
+      if (!Number.isFinite(scheduledMs)) {
+        throw new Error("Scheduled start time is invalid.");
+      }
+      if (scheduledMs <= Date.now() + 1000) {
+        throw new Error("Scheduled start time must be in the future.");
+      }
+    }
+    const runId = createId("auto-run");
+    const nextRunNumber =
+      automationRuns
+        .filter((item) => item.jobId === job.id)
+        .reduce((max, item) => Math.max(max, item.runNumber ?? 0), 0) + 1;
+    const run: AutomationRun = {
+      id: runId,
+      jobId: job.id,
+      jobName: job.name,
+      triggerSource: request.scheduledStartAt ? "schedule" : "manual",
+      runNumber: nextRunNumber,
+      permissionProfile: normalizeAutomationPermissionProfile(job.permissionProfile),
+      parameterValues: {
+        ...normalizeAutomationParameterValues(job.defaultParameterValues),
+        ...normalizeAutomationParameterValues(request.parameterValues ?? {}),
+      },
+      workspaceId: job.workspaceId,
+      projectRoot: job.projectRoot,
+      projectName: job.projectName,
+      ruleProfileId: "safe-autonomy-v1",
+      lifecycleStatus: "queued",
+      outcomeStatus: "unknown",
+      attentionStatus: "none",
+      resolutionCode: request.scheduledStartAt ? "scheduled" : "queued",
+      statusSummary: request.scheduledStartAt ? "Scheduled and waiting to start." : "Queued to start immediately.",
+      objectiveSignals: { exitCode: null, checksPassed: false, checksFailed: false, artifactsProduced: false, filesChanged: 0, policyBlocks: [] },
+      judgeAssessment: { madeProgress: false, expectedOutcomeMet: false, suggestedDecision: null, reason: null },
+      status: "scheduled",
+      scheduledStartAt: request.scheduledStartAt ?? nowISO(),
+      startedAt: null,
+      completedAt: null,
+      summary: null,
+      createdAt: nowISO(),
+      updatedAt: nowISO(),
+      goals: [
+        {
+          ...createAutomationGoal(runId, {
+            title: job.name,
+            goal: job.goal,
+            expectedOutcome: job.expectedOutcome,
+            executionMode: request.executionMode ?? job.defaultExecutionMode,
+            ruleConfig: job.ruleConfig,
+          }, 0),
+          title: job.name,
+        },
+      ],
+      events: [],
+    };
+    pushAutomationEvent(
+      run,
+      "info",
+      "Run created",
+      request.scheduledStartAt
+        ? "Browser fallback queued the CLI run for a scheduled start."
+        : "Browser fallback queued the CLI run to start immediately."
+    );
+    automationRuns = [run, ...automationRuns];
+    persistAutomationRuns();
+    scheduleBrowserAutomationRun(run.id);
+    return structuredClone(toAutomationRunRecord(run));
   },
   async startAutomationRun(runId: string) {
     const run = automationRuns.find((item) => item.id === runId);
@@ -1301,7 +1704,29 @@ index 531f4a0..62cb617 100644
 +    <div className="flex min-h-0 flex-1">
        <div className="flex-1 flex flex-col min-w-0">
          <ChatConversation />
-         <ChatPromptBar />`,
+        <ChatPromptBar />`,
+        originalContent: `export function TerminalPage() {
+  return (
+    <div className="flex-1 flex min-h-0">
+      <div className="flex-1 flex flex-col min-w-0">
+        <ChatConversation />
+        <ChatPromptBar />
+      </div>
+    </div>
+  );
+}`,
+        modifiedContent: `export function TerminalPage() {
+  return (
+    <div className="flex min-h-0 flex-1">
+      <div className="flex-1 flex flex-col min-w-0">
+        <ChatConversation />
+        <ChatPromptBar />
+      </div>
+    </div>
+  );
+}`,
+        language: "typescript",
+        isBinary: false,
       },
       "src/components/chat/ChatConversation.tsx": {
         path: "src/components/chat/ChatConversation.tsx",
@@ -1316,6 +1741,14 @@ new file mode 100644
 +export function ChatConversation() {
 +  return <div className="flex-1">Conversation</div>;
 +}`,
+        originalContent: "",
+        modifiedContent: `import { useStore } from "../../lib/store";
+
+export function ChatConversation() {
+  return <div className="flex-1">Conversation</div>;
+}`,
+        language: "typescript",
+        isBinary: false,
       },
       "src/lib/store.ts": {
         path: "src/lib/store.ts",
@@ -1330,7 +1763,19 @@ index bce9811..14f1e8c 100644
        const gitPanel = await bridge.getGitPanel(projectRoot);
 +      // keep the workspace inspector in sync after each streamed response
 +      // without requiring manual refresh
-       set((state) => {`,
+      set((state) => {`,
+        originalContent: `loadGitPanel: async (workspaceId, projectRoot) => {
+  try {
+    const gitPanel = await bridge.getGitPanel(projectRoot);
+    set((state) => {`,
+        modifiedContent: `loadGitPanel: async (workspaceId, projectRoot) => {
+  try {
+    const gitPanel = await bridge.getGitPanel(projectRoot);
+    // keep the workspace inspector in sync after each streamed response
+    // without requiring manual refresh
+    set((state) => {`,
+        language: "typescript",
+        isBinary: false,
       },
       "src/components/chat/GitPanel.tsx": {
         path: "src/components/chat/GitPanel.tsx",
@@ -1340,6 +1785,14 @@ index bce9811..14f1e8c 100644
 similarity index 86%
 rename from src/components/GitPanel.tsx
 rename to src/components/chat/GitPanel.tsx`,
+        originalContent: `export function GitPanel() {
+  return <div>Old panel</div>;
+}`,
+        modifiedContent: `export function GitPanel() {
+  return <div>New panel</div>;
+}`,
+        language: "typescript",
+        isBinary: false,
       },
     };
 
@@ -1353,6 +1806,22 @@ rename to src/components/chat/GitPanel.tsx`,
 @@ -1 +1 @@
 -previous content
 +updated content`,
+        originalContent: "previous content\n",
+        modifiedContent: "updated content\n",
+        language: path.endsWith(".rs")
+          ? "rust"
+          : path.endsWith(".json")
+            ? "json"
+            : path.endsWith(".md")
+              ? "markdown"
+              : path.endsWith(".css")
+                ? "css"
+                : path.endsWith(".js")
+                  ? "javascript"
+                  : path.endsWith(".ts") || path.endsWith(".tsx")
+                    ? "typescript"
+                    : "plaintext",
+        isBinary: false,
       }
     );
   },

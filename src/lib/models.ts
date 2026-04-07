@@ -256,6 +256,10 @@ export type AutomationGoalStatus =
 
 export type AutomationEventLevel = "info" | "success" | "warning" | "error";
 export type AutomationExecutionMode = TerminalCliId;
+export type AutomationPermissionProfile = "standard" | "full-access" | "read-only";
+export type AutomationLifecycleStatus = "queued" | "running" | "stopped" | "finished";
+export type AutomationOutcomeStatus = "unknown" | "success" | "failed" | "partial";
+export type AutomationAttentionStatus = "none" | "waiting_human" | "blocked_by_policy" | "blocked_by_environment";
 
 export interface AutomationGoalDraft {
   title?: string | null;
@@ -282,6 +286,13 @@ export interface AutomationGoal {
   goal: string;
   expectedOutcome: string;
   executionMode: AutomationExecutionMode;
+  lifecycleStatus?: AutomationLifecycleStatus;
+  outcomeStatus?: AutomationOutcomeStatus;
+  attentionStatus?: AutomationAttentionStatus;
+  resolutionCode?: string | null;
+  statusSummary?: string | null;
+  objectiveSignals?: AutomationObjectiveSignals | null;
+  judgeAssessment?: AutomationJudgeAssessment | null;
   status: AutomationGoalStatus;
   position: number;
   roundCount: number;
@@ -303,10 +314,23 @@ export interface AutomationGoal {
 
 export interface AutomationRun {
   id: string;
+  jobId?: string | null;
+  jobName?: string | null;
+  triggerSource?: string | null;
+  runNumber?: number | null;
+  permissionProfile?: AutomationPermissionProfile;
+  parameterValues?: Record<string, AutomationParameterValue>;
   workspaceId: string;
   projectRoot: string;
   projectName: string;
   ruleProfileId: string;
+  lifecycleStatus?: AutomationLifecycleStatus;
+  outcomeStatus?: AutomationOutcomeStatus;
+  attentionStatus?: AutomationAttentionStatus;
+  resolutionCode?: string | null;
+  statusSummary?: string | null;
+  objectiveSignals?: AutomationObjectiveSignals | null;
+  judgeAssessment?: AutomationJudgeAssessment | null;
   status: AutomationRunStatus;
   scheduledStartAt?: string | null;
   startedAt?: string | null;
@@ -344,6 +368,163 @@ export interface CreateAutomationRunRequest {
   scheduledStartAt?: string | null;
   ruleProfileId?: string | null;
   goals: AutomationGoalDraft[];
+}
+
+export type AutomationParameterValue = string | number | boolean | null;
+export type AutomationParameterKind = "string" | "boolean" | "enum";
+
+export interface AutomationParameterDefinition {
+  id: string;
+  key: string;
+  label: string;
+  kind: AutomationParameterKind;
+  description?: string | null;
+  required: boolean;
+  options: string[];
+  defaultValue?: AutomationParameterValue;
+}
+
+export interface AutomationJobDraft {
+  workspaceId: string;
+  projectRoot: string;
+  projectName: string;
+  name: string;
+  description?: string | null;
+  goal: string;
+  expectedOutcome: string;
+  defaultExecutionMode: AutomationExecutionMode;
+  permissionProfile: AutomationPermissionProfile;
+  ruleConfig: AutomationGoalRuleConfig;
+  parameterDefinitions: AutomationParameterDefinition[];
+  defaultParameterValues: Record<string, AutomationParameterValue>;
+  cronExpression?: string | null;
+  enabled: boolean;
+}
+
+export interface AutomationJob extends AutomationJobDraft {
+  id: string;
+  lastTriggeredAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateAutomationRunFromJobRequest {
+  jobId: string;
+  scheduledStartAt?: string | null;
+  executionMode?: AutomationExecutionMode | null;
+  parameterValues?: Record<string, AutomationParameterValue> | null;
+}
+
+export interface AutomationRunRecord {
+  id: string;
+  jobId?: string | null;
+  jobName: string;
+  projectName: string;
+  projectRoot: string;
+  workspaceId: string;
+  executionMode: AutomationExecutionMode;
+  permissionProfile: AutomationPermissionProfile;
+  triggerSource: string;
+  runNumber?: number | null;
+  status: AutomationRunStatus;
+  displayStatus: string;
+  lifecycleStatus: AutomationLifecycleStatus;
+  outcomeStatus: AutomationOutcomeStatus;
+  attentionStatus: AutomationAttentionStatus;
+  resolutionCode: string;
+  statusSummary?: string | null;
+  summary?: string | null;
+  requiresAttentionReason?: string | null;
+  objectiveSignals: AutomationObjectiveSignals;
+  judgeAssessment: AutomationJudgeAssessment;
+  relevantFiles: string[];
+  lastExitCode?: number | null;
+  terminalTabId?: string | null;
+  parameterValues: Record<string, AutomationParameterValue>;
+  scheduledStartAt?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomationRunDetail {
+  run: AutomationRunRecord;
+  job?: AutomationJob | null;
+  ruleConfig: AutomationGoalRuleConfig;
+  goal: string;
+  expectedOutcome: string;
+  events: AutomationEvent[];
+  conversationSession?: {
+    id: string;
+    terminalTabId: string;
+    workspaceId: string;
+    projectRoot: string;
+    projectName: string;
+    messages: ChatMessage[];
+    compactedSummaries: CompactedSummary[];
+    lastCompactedAt?: string | null;
+    estimatedTokens?: number;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
+  taskContext?: {
+    taskPacket: {
+      id: string;
+      terminalTabId: string;
+      workspaceId: string;
+      projectRoot: string;
+      projectName: string;
+      title: string;
+      goal: string;
+      status: string;
+      currentOwnerCli: string;
+      latestConclusion?: string | null;
+      openQuestions: string[];
+      risks: string[];
+      nextStep?: string | null;
+      relevantFiles: string[];
+      relevantCommands: string[];
+      linkedSessionIds: string[];
+      latestSnapshotId?: string | null;
+      updatedAt: string;
+      createdAt: string;
+    };
+    latestHandoff?: unknown;
+    latestSnapshot?: {
+      id: string;
+      taskId: string;
+      triggerReason: string;
+      summary: string;
+      factsConfirmed: string[];
+      workCompleted: string[];
+      filesTouched: string[];
+      commandsRun: string[];
+      failures: string[];
+      openQuestions: string[];
+      nextStep?: string | null;
+      sourceUserPrompt?: string | null;
+      sourceAssistantSummary?: string | null;
+      createdAt: string;
+    } | null;
+    latestBoundary?: unknown;
+  } | null;
+}
+
+export interface AutomationObjectiveSignals {
+  exitCode?: number | null;
+  checksPassed: boolean;
+  checksFailed: boolean;
+  artifactsProduced: boolean;
+  filesChanged: number;
+  policyBlocks: string[];
+}
+
+export interface AutomationJudgeAssessment {
+  madeProgress: boolean;
+  expectedOutcomeMet: boolean;
+  suggestedDecision?: string | null;
+  reason?: string | null;
 }
 
 // ── New chat types ──────────────────────────────────────────────────────
@@ -577,6 +758,10 @@ export interface GitFileDiff {
   status: GitFileChange["status"];
   previousPath?: string | null;
   diff: string;
+  originalContent?: string | null;
+  modifiedContent?: string | null;
+  language?: string | null;
+  isBinary?: boolean;
 }
 
 export interface GitPanelData {

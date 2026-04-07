@@ -3,8 +3,8 @@ import { useEffect } from "react";
 import { AppLayout } from "./layouts/AppLayout";
 import { DashboardPage } from "./pages/DashboardPage";
 import { TerminalPage } from "./pages/TerminalPage";
-import { AutomationPage } from "./pages/AutomationPage";
-import { AutomationComposerPage } from "./pages/AutomationComposerPage";
+import { AutomationJobsPage } from "./pages/AutomationJobsPage";
+import { AutomationJobEditorPage } from "./pages/AutomationJobEditorPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { useStore } from "./lib/store";
 import { bridge } from "./lib/bridge";
@@ -116,8 +116,10 @@ function App() {
       <Route element={<AppLayout />}>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/terminal" element={<TerminalPage />} />
-        <Route path="/automation" element={<AutomationPage />} />
-        <Route path="/automation/new" element={<AutomationComposerPage />} />
+        <Route path="/automation" element={<AutomationJobsPage />} />
+        <Route path="/automation/new" element={<AutomationJobEditorPage />} />
+        <Route path="/automation/jobs/new" element={<AutomationJobEditorPage />} />
+        <Route path="/automation/jobs/:jobId" element={<AutomationJobEditorPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
     </Routes>
