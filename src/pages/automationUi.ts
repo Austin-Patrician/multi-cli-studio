@@ -41,8 +41,12 @@ export function statusText(status: AutomationRunStatus | string) {
       return "待执行";
     case "running":
       return "运行中";
+    case "validating":
+      return "验收中";
     case "paused":
       return "已暂停";
+    case "blocked":
+      return "已阻塞";
     case "completed":
       return "已完成";
     case "failed":
@@ -72,9 +76,13 @@ export function statusTone(status: AutomationRunStatus | string) {
       return "bg-emerald-50 text-emerald-700 ring-emerald-600/20";
     case "running":
       return "bg-sky-50 text-sky-700 ring-sky-600/20";
+    case "validating":
+      return "bg-indigo-50 text-indigo-700 ring-indigo-600/20";
     case "scheduled":
       return "bg-indigo-50 text-indigo-700 ring-indigo-600/20";
     case "paused":
+      return "bg-amber-50 text-amber-700 ring-amber-600/20";
+    case "blocked":
       return "bg-amber-50 text-amber-700 ring-amber-600/20";
     case "failed":
     case "cancelled":
@@ -116,5 +124,5 @@ export function parameterValueText(value: AutomationParameterValue | undefined) 
 }
 
 export function isActiveRunStatus(status: AutomationRunStatus | string) {
-  return status === "running" || status === "scheduled" || status === "paused";
+  return status === "running" || status === "validating" || status === "scheduled" || status === "paused";
 }

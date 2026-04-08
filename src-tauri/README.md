@@ -1,10 +1,12 @@
-# Multi CLI Studio - Tauri Backend
+# Multi CLI Studio
 
 Native desktop host for Multi CLI Studio - a desktop orchestration shell for managing multiple AI CLI agents (Codex, Claude, Gemini) in a unified interface.
 
-## Project Overview
+> 本项目是 Multi CLI Studio 的 Tauri 后端，负责原生桌面能力、自动化任务调度和数据持久化。
 
-**Multi CLI Studio** is a desktop application that provides a unified terminal interface for orchestrating multiple AI CLI agents. It enables users to:
+## 项目简介
+
+**Multi CLI Studio** 是一款桌面应用程序，为协调多个 AI CLI 代理提供统一的终端界面。主要功能包括：
 
 - Manage multiple workspaces with concurrent AI agent sessions
 - Orchestrate Codex, Claude, and Gemini CLI agents

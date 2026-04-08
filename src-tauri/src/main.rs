@@ -34,7 +34,7 @@ use automation::{
     persist_runs as persist_automation_runs_to_disk, push_event, sync_goal_status_fields,
     sync_run_status_fields, update_job_from_draft, AutomationGoal, AutomationGoalRuleConfig,
     AutomationJob, AutomationJobDraft, AutomationJudgeAssessment, AutomationObjectiveSignals,
-    AutomationRuleProfile, AutomationRun, display_status_from_dimensions,
+    AutomationRuleProfile, AutomationRun, AutomationValidationResult, display_status_from_dimensions,
     CreateAutomationRunFromJobRequest, CreateAutomationRunRequest,
 };
 use storage::{
@@ -327,6 +327,52 @@ impl Default for NotificationConfig {
 
 fn default_smtp_port() -> u16 {
     587
+}
+
+fn is_likely_email(value: &str) -> bool {
+    let trimmed = value.trim();
+    let parts = trimmed.split('@').collect::<Vec<_>>();
+    parts.len() == 2 && !parts[0].is_empty() && parts[1].contains('.')
+}
+
+fn validate_notification_config(config: &NotificationConfig) -> Result<(), String> {
+    if !config.smtp_enabled {
+        return Ok(());
+    }
+    if config.smtp_host.trim().is_empty() {
+        return Err("SMTP host is required when email notifications are enabled.".to_string());
+    }
+    if config.smtp_port == 0 {
+        return Err("SMTP port must be greater than zero.".to_string());
+    }
+    if config.smtp_username.trim().is_empty() {
+        return Err("SMTP username is required when email notifications are enabled.".to_string());
+    }
+    if config.smtp_password.trim().is_empty() {
+        return Err("SMTP password is required when email notifications are enabled.".to_string());
+    }
+    if !is_likely_email(&config.smtp_from) {
+        return Err("SMTP from address is invalid.".to_string());
+    }
+    if config.email_recipients.is_empty() {
+        return Err("At least one email recipient is required when email notifications are enabled.".to_string());
+    }
+    if config
+        .email_recipients
+        .iter()
+        .any(|recipient| !is_likely_email(recipient))
+    {
+        return Err("One or more email recipients are invalid.".to_string());
+    }
+    if config.smtp_host.trim().eq_ignore_ascii_case("smtp.useplunk.com") {
+        if config.smtp_username.trim() != "plunk" {
+            return Err("Plunk SMTP username must be set to `plunk`.".to_string());
+        }
+        if config.smtp_port != 2465 && config.smtp_port != 2587 {
+            return Err("Plunk SMTP supports port 465 (SSL) or 587 (STARTTLS).".to_string());
+        }
+    }
+    Ok(())
 }
 
 // ── Chat types ─────────────────────────────────────────────────────────
@@ -5507,6 +5553,7 @@ fn update_settings(
     store: State<'_, AppStore>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
+    validate_notification_config(&settings.notification_config)?;
     {
         let mut s = store.settings.lock().map_err(|err| err.to_string())?;
         *s = settings.clone();
@@ -5519,6 +5566,27 @@ fn update_settings(
     }
     persist_settings(&settings)?;
     Ok(settings)
+}
+
+#[tauri::command]
+fn send_test_email_notification(config: NotificationConfig) -> Result<String, String> {
+    validate_notification_config(&config)?;
+    let recipients = config.email_recipients.clone();
+    let subject = "Multi CLI Studio 邮件测试".to_string();
+    let body = test_mail_text_body(&config, &recipients);
+    let html_body = test_mail_html_body(&config, &recipients);
+    send_email_notification(
+        &config.smtp_host,
+        config.smtp_port,
+        &config.smtp_username,
+        &config.smtp_password,
+        &config.smtp_from,
+        &recipients,
+        &subject,
+        &body,
+        &html_body,
+    )?;
+    Ok(format!("测试邮件已发送至 {}", recipients.join(", ")))
 }
 
 #[tauri::command]
@@ -5608,6 +5676,7 @@ struct AutomationRunRecord {
     requires_attention_reason: Option<String>,
     objective_signals: AutomationObjectiveSignals,
     judge_assessment: AutomationJudgeAssessment,
+    validation_result: AutomationValidationResult,
     relevant_files: Vec<String>,
     last_exit_code: Option<i32>,
     terminal_tab_id: Option<String>,
@@ -5676,6 +5745,7 @@ fn automation_run_record(run: &AutomationRun) -> AutomationRunRecord {
         requires_attention_reason: goal.and_then(|item| item.requires_attention_reason.clone()),
         objective_signals: run.objective_signals.clone(),
         judge_assessment: run.judge_assessment.clone(),
+        validation_result: run.validation_result.clone(),
         relevant_files: goal.map(|item| item.relevant_files.clone()).unwrap_or_default(),
         last_exit_code: goal.and_then(|item| item.last_exit_code),
         terminal_tab_id: goal.map(|item| item.synthetic_terminal_tab_id.clone()),
@@ -6106,6 +6176,7 @@ fn start_automation_run(
         run.status_summary = Some("Queued to start.".to_string());
         run.objective_signals = AutomationObjectiveSignals::default();
         run.judge_assessment = AutomationJudgeAssessment::default();
+        run.validation_result = AutomationValidationResult::default();
         run.status = "scheduled".to_string();
         run.lifecycle_status = "queued".to_string();
         run.outcome_status = "unknown".to_string();
@@ -6114,6 +6185,7 @@ fn start_automation_run(
         run.status_summary = Some("Reset and queued again.".to_string());
         run.objective_signals = AutomationObjectiveSignals::default();
         run.judge_assessment = AutomationJudgeAssessment::default();
+        run.validation_result = AutomationValidationResult::default();
         run.scheduled_start_at = Some(now.clone());
         run.updated_at = now.clone();
         // Reset goal states when starting a paused run
@@ -6126,6 +6198,7 @@ fn start_automation_run(
                 goal.status_summary = Some("Queued to start.".to_string());
                 goal.objective_signals = AutomationObjectiveSignals::default();
                 goal.judge_assessment = AutomationJudgeAssessment::default();
+                goal.validation_result = AutomationValidationResult::default();
                 goal.status = "queued".to_string();
                 goal.round_count = 0;
                 goal.consecutive_failure_count = 0;
@@ -6278,10 +6351,18 @@ fn restart_automation_run(
         }
 
         run.status = "scheduled".to_string();
+        run.lifecycle_status = "queued".to_string();
+        run.outcome_status = "unknown".to_string();
+        run.attention_status = "none".to_string();
+        run.resolution_code = "scheduled".to_string();
+        run.status_summary = Some("Reset and queued again.".to_string());
         run.scheduled_start_at = Some(now.clone());
         run.started_at = None;
         run.completed_at = None;
         run.summary = None;
+        run.objective_signals = AutomationObjectiveSignals::default();
+        run.judge_assessment = AutomationJudgeAssessment::default();
+        run.validation_result = AutomationValidationResult::default();
         run.updated_at = now.clone();
         for goal in &mut run.goals {
             goal.lifecycle_status = "queued".to_string();
@@ -6291,6 +6372,7 @@ fn restart_automation_run(
             goal.status_summary = Some("Reset and queued again.".to_string());
             goal.objective_signals = AutomationObjectiveSignals::default();
             goal.judge_assessment = AutomationJudgeAssessment::default();
+            goal.validation_result = AutomationValidationResult::default();
             goal.status = "queued".to_string();
             goal.round_count = 0;
             goal.consecutive_failure_count = 0;
@@ -6521,6 +6603,63 @@ fn delete_automation_run(
     }
 
     Ok(())
+}
+
+fn sanitize_download_filename(file_name: &str) -> String {
+    let sanitized = file_name
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if sanitized.is_empty() {
+        "automation-log.txt".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn unique_download_path(base_dir: &Path, file_name: &str) -> PathBuf {
+    let candidate = base_dir.join(file_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("automation-log");
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{}", value))
+        .unwrap_or_default();
+
+    for index in 2..=9999 {
+        let next = base_dir.join(format!("{}-{}{}", stem, index, extension));
+        if !next.exists() {
+            return next;
+        }
+    }
+
+    base_dir.join(format!("{}-{}{}", stem, create_id("log"), extension))
+}
+
+#[tauri::command]
+fn save_text_to_downloads(file_name: String, content: String) -> Result<String, String> {
+    let base_dir = dirs::download_dir()
+        .or_else(dirs::document_dir)
+        .or_else(dirs::desktop_dir)
+        .or_else(data_local_dir)
+        .ok_or_else(|| "Unable to resolve a writable download directory.".to_string())?;
+    fs::create_dir_all(&base_dir).map_err(|err| err.to_string())?;
+    let path = unique_download_path(&base_dir, &sanitize_download_filename(&file_name));
+    fs::write(&path, content).map_err(|err| err.to_string())?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -9992,14 +10131,24 @@ struct AutomationExecutionOutcome {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AutomationJudgeResponse {
+struct AutomationValidationResponse {
     decision: String,
     reason: String,
-    progress_summary: String,
-    next_instruction: Option<String>,
-    next_owner_cli: Option<String>,
+    feedback: Option<String>,
+    evidence_summary: String,
+    #[serde(default)]
+    missing_checks: Vec<String>,
+    #[serde(default)]
+    verification_steps: Vec<String>,
     made_progress: bool,
     expected_outcome_met: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AutomationRoundValidationOutcome {
+    response: AutomationValidationResponse,
+    raw_output: String,
+    used_fallback: bool,
 }
 
 fn infer_automation_owner(goal: &AutomationGoal) -> String {
@@ -10127,9 +10276,22 @@ fn build_automation_goal_prompt(
 
 fn detect_automation_rule_pause_reason(
     text: &str,
+    blocks: &[ChatMessageBlock],
     profile: &AutomationGoalRuleConfig,
 ) -> Option<String> {
     let normalized = text.to_ascii_lowercase();
+    let command_texts = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ChatMessageBlock::Command { command, .. } => Some(command.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let has_command_match = |needles: &[&str]| {
+        command_texts.iter().any(|command| {
+            needles.iter().any(|needle| command.contains(needle))
+        })
+    };
     if profile.pause_on_credentials
         && [
             "requires credentials",
@@ -10147,7 +10309,7 @@ fn detect_automation_rule_pause_reason(
     }
 
     if profile.pause_on_external_installs
-        && [
+        && (has_command_match(&[
             "npm install",
             "pnpm install",
             "yarn install",
@@ -10155,33 +10317,34 @@ fn detect_automation_rule_pause_reason(
             "pip install",
             "brew install",
             "apt install",
+        ]) || [
             "dependency is missing",
+            "dependencies are missing",
+            "need to install dependencies",
+            "requires installing dependencies",
+            "missing package dependency",
         ]
         .iter()
-        .any(|needle| normalized.contains(needle))
+        .any(|needle| normalized.contains(needle)))
     {
         return Some("Paused because the run appears to need installing or changing external dependencies.".to_string());
     }
 
     if profile.pause_on_destructive_commands
-        && [
+        && has_command_match(&[
             "git reset --hard",
             "rm -rf",
             "remove-item -recurse -force",
             "del /f",
             "drop database",
             "truncate table",
-        ]
-        .iter()
-        .any(|needle| normalized.contains(needle))
+        ])
     {
         return Some("Paused because a destructive command pattern was detected.".to_string());
     }
 
     if profile.pause_on_git_push
-        && ["git push", "force push", "push --force"]
-            .iter()
-            .any(|needle| normalized.contains(needle))
+        && has_command_match(&["git push", "force push", "push --force"])
     {
         return Some("Paused because the run appears ready to push changes to a remote.".to_string());
     }
@@ -10222,7 +10385,7 @@ fn resolution_code_for_pause_reason(reason: &str) -> String {
     }
 }
 
-fn build_automation_judge_prompt(
+fn build_automation_validation_prompt(
     run: &AutomationRun,
     goal: &AutomationGoal,
     profile: &AutomationGoalRuleConfig,
@@ -10233,53 +10396,45 @@ fn build_automation_judge_prompt(
 ) -> String {
     let clipped_output = truncate_automation_text(raw_output, 4000);
     format!(
-        "You are the unattended automation adjudicator for Multi CLI Studio.\n\
+        "You are validating whether an unattended CLI automation round delivered the expected outcome inside Multi CLI Studio.\n\
          Return JSON only with this exact shape:\n\
-         {{\"decision\":\"complete|continue|pause|fail\",\"reason\":\"string\",\"progressSummary\":\"string\",\"nextInstruction\":\"string|null\",\"nextOwnerCli\":\"codex|claude|gemini|null\",\"madeProgress\":true,\"expectedOutcomeMet\":false}}\n\n\
+         {{\"decision\":\"pass|fail_with_feedback|blocked\",\"reason\":\"string\",\"feedback\":\"string|null\",\"evidenceSummary\":\"string\",\"missingChecks\":[\"string\"],\"verificationSteps\":[\"string\"],\"madeProgress\":true,\"expectedOutcomeMet\":false}}\n\n\
          Project: {}\n\
          Goal title: {}\n\
          Goal:\n{}\n\n\
          Expected outcome:\n{}\n\n\
+         Validation contract:\n\
+         - Use the same CLI family that executed this round: {}\n\
+         - You may inspect the workspace and run safe read-only verification commands.\n\
+         - Do not modify files.\n\
+         - If the expected outcome is met, return pass.\n\
+         - If the expected outcome is not met but unattended iteration can continue, return fail_with_feedback.\n\
+         - If human attention or a policy boundary should stop execution, return blocked.\n\
+         - reason must explain the acceptance decision in one sentence.\n\
+         - feedback must summarize the next corrective move in one sentence.\n\
+         - evidenceSummary must summarize the concrete evidence you used.\n\
+         - missingChecks must list the unmet expected-outcome items. Return [] when none are missing.\n\
+         - verificationSteps must list the exact checks or follow-up actions required next. Return [] when not needed.\n\n\
          Rule profile:\n\
-         - auto strategy: {}\n\
-         - workspace edits: {}\n\
          - safe checks: {}\n\
-         - pause on credentials: {}\n\
-         - pause on installs: {}\n\
-         - pause on destructive commands: {}\n\
-         - pause on git push: {}\n\
          - max rounds per goal: {}\n\
          - max consecutive failures: {}\n\
          - max no-progress rounds: {}\n\n\
          Current round: {}\n\
-         Current owner CLI: {}\n\
          Exit code: {}\n\n\
          Latest CLI output:\n{}\n\n\
-         Decision rules:\n\
-         - choose complete only if the expected outcome is substantially met.\n\
-         - choose continue only if unattended progress should continue in another round.\n\
-         - choose pause if human attention is required or a rule boundary should stop execution.\n\
-         - choose fail if the goal is not realistically progressing and should stop for this batch.\n\
-         - keep progressSummary concise and factual.\n\
-         - nextInstruction should tell the next round exactly what to do next.\n\
-         - nextOwnerCli may switch between codex, claude, and gemini when appropriate.\n\
-         - madeProgress should be false if the latest round mostly repeated prior work or ended without material advancement.",
+         Apply a strict delivery check against the expected outcome instead of judging style or effort.\n\
+         madeProgress should be false only if this round did not materially advance the goal.",
         run.project_name,
         goal.title,
         goal.goal,
         goal.expected_outcome,
-        profile.allow_auto_select_strategy,
-        profile.allow_safe_workspace_edits,
+        owner_cli,
         profile.allow_safe_checks,
-        profile.pause_on_credentials,
-        profile.pause_on_external_installs,
-        profile.pause_on_destructive_commands,
-        profile.pause_on_git_push,
         profile.max_rounds_per_goal,
         profile.max_consecutive_failures,
         profile.max_no_progress_rounds,
         round_index,
-        owner_cli,
         exit_code
             .map(|value| value.to_string())
             .unwrap_or_else(|| "null".to_string()),
@@ -10290,102 +10445,413 @@ fn build_automation_judge_prompt(
 fn truncate_automation_text(text: &str, max_chars: usize) -> String {
     let normalized = text.replace('\n', " ");
     let trimmed = normalized.trim();
-    if trimmed.len() <= max_chars {
+    if trimmed.chars().count() <= max_chars {
         trimmed.to_string()
     } else {
-        let mut value = trimmed[..max_chars].to_string();
+        let mut value = safe_truncate_chars(trimmed, max_chars);
         value.push('…');
         value
     }
 }
 
-fn fallback_automation_judge_response(
+fn sanitize_validation_list(items: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    items
+        .into_iter()
+        .map(|item| item.replace('\n', " "))
+        .map(|item| item.trim().trim_matches('·').trim_matches('-').trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| seen.insert(item.to_ascii_lowercase()))
+        .take(8)
+        .collect()
+}
+
+fn split_feedback_steps(value: &str) -> Vec<String> {
+    let normalized = value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace("；", "\n")
+        .replace(';', "\n");
+    let items = normalized
+        .lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | '•' | '·'))
+                .trim()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    sanitize_validation_list(items)
+}
+
+fn is_match_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '，'
+            | '。'
+            | '；'
+            | '：'
+            | '、'
+            | '（'
+            | '）'
+            | '【'
+            | '】'
+            | '《'
+            | '》'
+            | '「'
+            | '」'
+            | '『'
+            | '』'
+            | '？'
+            | '！'
+            | '…'
+            | '—'
+            | '·'
+            | ','
+            | '.'
+            | ';'
+            | ':'
+            | '!'
+            | '?'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '"'
+            | '\''
+            | '`'
+            | '/'
+            | '\\'
+            | '|'
+            | '_'
+            | '='
+            | '+'
+            | '*'
+            | '#'
+            | '@'
+            | '~'
+            | '^'
+            | '&'
+    )
+}
+
+fn normalize_text_for_match(value: &str) -> String {
+    value
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !is_match_punctuation(*ch))
+        .collect()
+}
+
+fn strip_goal_filler_text(value: &str) -> String {
+    let prefixes = [
+        "请",
+        "需要",
+        "帮我",
+        "输出",
+        "给出",
+        "得到",
+        "拿到",
+        "获取",
+        "整理",
+        "总结",
+        "说明",
+        "描述",
+        "确认",
+        "列出",
+        "展示",
+        "分析",
+        "最终",
+        "然后就是",
+        "然后",
+        "以及",
+        "并且",
+        "并",
+        "同时",
+        "如果是",
+        "如果",
+        "那就",
+        "都要",
+        "都",
+        "该项目的",
+        "这个项目的",
+        "项目的",
+        "该项目",
+        "这个项目",
+    ];
+    let mut current = value.trim().to_string();
+    loop {
+        let trimmed = current
+            .trim_start_matches(|ch: char| {
+                matches!(ch, '-' | '*' | '•' | '·' | ':' | '：' | '、' | '.' | ')' | '(')
+                    || ch.is_ascii_digit()
+            })
+            .trim()
+            .to_string();
+        current = trimmed;
+        let mut stripped = false;
+        for prefix in prefixes {
+            if current.starts_with(prefix) && current.chars().count() > prefix.chars().count() {
+                current = current[prefix.len()..]
+                    .trim_start_matches(|ch: char| matches!(ch, ':' | '：' | ',' | '，' | ' '))
+                    .trim()
+                    .to_string();
+                stripped = true;
+                break;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    for suffix in ["是什么", "是什么？", "是什么?", "即可", "就行", "就可以了"] {
+        if current.ends_with(suffix) && current.chars().count() > suffix.chars().count() {
+            current = current[..current.len() - suffix.len()].trim().to_string();
+            break;
+        }
+    }
+    current
+}
+
+fn split_expected_outcome_items(text: &str) -> Vec<String> {
+    let normalized = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace("然后就是", "\n")
+        .replace("然后", "\n")
+        .replace("以及", "\n")
+        .replace("并且", "\n")
+        .replace("同时", "\n")
+        .replace("；", "\n")
+        .replace(';', "\n")
+        .replace("。", "\n")
+        .replace("，", "\n");
+    let mut items = normalized
+        .lines()
+        .map(strip_goal_filler_text)
+        .filter(|item| item.chars().count() >= 2)
+        .filter(|item| {
+            !matches!(
+                item.as_str(),
+                "给出" | "都要给出" | "都要" | "结果" | "信息" | "内容" | "说明" | "分析"
+            )
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        let fallback = strip_goal_filler_text(text);
+        if fallback.chars().count() >= 2 {
+            items.push(fallback);
+        }
+    }
+    sanitize_validation_list(items)
+}
+
+fn keyword_candidates_for_outcome_item(item: &str) -> Vec<String> {
+    let normalized = normalize_text_for_match(item);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = vec![normalized.clone()];
+    for phrase in [
+        "层级结构",
+        "项目结构",
+        "目录结构",
+        "结构",
+        "前后端分离",
+        "前后端",
+        "前端",
+        "后端",
+        "功能",
+        "主要功能",
+        "完整功能",
+        "技术栈",
+        "接口",
+        "api",
+        "数据流",
+        "启动方式",
+        "依赖",
+        "模块",
+        "页面",
+        "组件",
+        "服务",
+        "配置",
+        "仓库",
+        "目录",
+    ] {
+        if normalized.contains(phrase) {
+            candidates.push(phrase.to_string());
+        }
+    }
+    for word in item
+        .to_ascii_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 4)
+    {
+        candidates.push(word.to_string());
+    }
+    let chars = normalized.chars().collect::<Vec<_>>();
+    if chars.len() > 4 {
+        for len in [2usize, 3, 4] {
+            if chars.len() >= len {
+                candidates.push(chars[chars.len() - len..].iter().collect::<String>());
+            }
+        }
+    }
+    sanitize_validation_list(candidates)
+}
+
+fn outcome_item_is_matched(item: &str, normalized_output: &str) -> bool {
+    keyword_candidates_for_outcome_item(item)
+        .iter()
+        .any(|candidate| candidate.chars().count() >= 2 && normalized_output.contains(candidate))
+}
+
+fn derive_validation_checklist(goal: &AutomationGoal, raw_output: &str) -> (Vec<String>, Vec<String>) {
+    let items = split_expected_outcome_items(&goal.expected_outcome);
+    let normalized_output = normalize_text_for_match(raw_output);
+    let mut matched = Vec::new();
+    let mut missing = Vec::new();
+    for item in items {
+        if outcome_item_is_matched(&item, &normalized_output) {
+            matched.push(item);
+        } else {
+            missing.push(item);
+        }
+    }
+    (sanitize_validation_list(matched), sanitize_validation_list(missing))
+}
+
+fn verification_steps_for_missing_items(items: &[String]) -> Vec<String> {
+    sanitize_validation_list(
+        items.iter()
+            .map(|item| format!("直接验证并补齐：{}", item))
+            .collect(),
+    )
+}
+
+fn build_fallback_evidence_summary(
+    matched_items: &[String],
+    missing_items: &[String],
+    raw_output: &str,
+) -> String {
+    let mut parts = Vec::new();
+    if !matched_items.is_empty() {
+        parts.push(format!("已确认：{}", matched_items.join("；")));
+    }
+    if !missing_items.is_empty() {
+        parts.push(format!("证据不足：{}", missing_items.join("；")));
+    }
+    parts.push(format!("输出摘要：{}", display_summary(raw_output)));
+    parts.join("。")
+}
+
+fn fallback_automation_validation_response(
     goal: &AutomationGoal,
-    owner_cli: &str,
     raw_output: &str,
     exit_code: Option<i32>,
-) -> AutomationJudgeResponse {
+) -> AutomationValidationResponse {
     let normalized = raw_output.to_ascii_lowercase();
-    let expected = goal.expected_outcome.to_ascii_lowercase();
-    let expected_tokens = expected
-        .split_whitespace()
-        .filter(|token| token.len() > 3)
-        .collect::<Vec<_>>();
-    let matched_tokens = expected_tokens
-        .iter()
-        .filter(|token| normalized.contains(**token))
-        .count();
-    let likely_complete = !expected_tokens.is_empty()
-        && matched_tokens >= usize::max(1, expected_tokens.len() / 2)
-        && exit_code == Some(0);
+    let (matched_items, missing_items) = derive_validation_checklist(goal, raw_output);
+    let verification_steps = verification_steps_for_missing_items(&missing_items);
+    let likely_complete = exit_code == Some(0) && !matched_items.is_empty() && missing_items.is_empty();
 
     if likely_complete {
-        return AutomationJudgeResponse {
-            decision: "continue".to_string(),
-            reason: "Fallback heuristic found evidence but not enough confidence to mark complete, continuing.".to_string(),
-            progress_summary: display_summary(raw_output),
-            next_instruction: None,
-            next_owner_cli: Some(owner_cli.to_string()),
+        return AutomationValidationResponse {
+            decision: "pass".to_string(),
+            reason: "回退验收已找到足够证据，可判定期望结果已经交付。".to_string(),
+            feedback: None,
+            evidence_summary: build_fallback_evidence_summary(&matched_items, &missing_items, raw_output),
+            missing_checks: Vec::new(),
+            verification_steps: Vec::new(),
             made_progress: true,
+            expected_outcome_met: true,
+        };
+    }
+
+    if exit_code == Some(0) || normalized.contains("blocked") || normalized.contains("missing") {
+        return AutomationValidationResponse {
+            decision: "fail_with_feedback".to_string(),
+            reason: if missing_items.is_empty() {
+                "回退验收暂时无法确认期望结果已经完整交付。".to_string()
+            } else {
+                format!("回退验收发现仍有 {} 项期望结果未满足，或缺少直接证据。", missing_items.len())
+            },
+            feedback: if verification_steps.is_empty() {
+                Some("请基于最新结果继续执行，逐项核对期望结果，并补齐剩余缺口。".to_string())
+            } else {
+                Some(verification_steps.join("\n"))
+            },
+            evidence_summary: build_fallback_evidence_summary(&matched_items, &missing_items, raw_output),
+            missing_checks: missing_items,
+            verification_steps,
+            made_progress: exit_code == Some(0) || !matched_items.is_empty(),
             expected_outcome_met: false,
         };
     }
 
-    if exit_code == Some(0) {
-        return AutomationJudgeResponse {
-            decision: "continue".to_string(),
-            reason: "Fallback heuristic saw successful output but not enough evidence of completion.".to_string(),
-            progress_summary: display_summary(raw_output),
-            next_instruction: Some("Continue the goal, verify the expected outcome directly, and close remaining gaps.".to_string()),
-            next_owner_cli: Some(owner_cli.to_string()),
-            made_progress: true,
-            expected_outcome_met: false,
-        };
-    }
-
-    AutomationJudgeResponse {
-        decision: "fail".to_string(),
-        reason: "Fallback heuristic judged the latest round as failed.".to_string(),
-        progress_summary: display_summary(raw_output),
-        next_instruction: None,
-        next_owner_cli: Some(owner_cli.to_string()),
+    AutomationValidationResponse {
+        decision: "fail_with_feedback".to_string(),
+        reason: "回退验收判定本轮未通过，因为最新一轮执行本身已经失败。".to_string(),
+        feedback: Some("请先修复本轮执行错误，再重新验收期望结果。".to_string()),
+        evidence_summary: build_fallback_evidence_summary(&matched_items, &missing_items, raw_output),
+        missing_checks: missing_items,
+        verification_steps: vec!["先修复本轮执行错误，再重新执行验收。".to_string()],
         made_progress: false,
         expected_outcome_met: false,
     }
 }
 
-fn normalize_automation_judge_response(
-    response: AutomationJudgeResponse,
-    owner_cli: &str,
-) -> AutomationJudgeResponse {
+fn normalize_automation_validation_response(
+    response: AutomationValidationResponse,
+) -> AutomationValidationResponse {
+    let feedback = response
+        .feedback
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let missing_checks = sanitize_validation_list(response.missing_checks);
+    let verification_steps = {
+        let steps = sanitize_validation_list(response.verification_steps);
+        if steps.is_empty() {
+            feedback
+                .as_deref()
+                .map(split_feedback_steps)
+                .unwrap_or_default()
+        } else {
+            steps
+        }
+    };
     let decision = match response.decision.trim().to_ascii_lowercase().as_str() {
-        "complete" => "complete",
-        "pause" => "pause",
-        "fail" => "fail",
-        _ => "continue",
+        "pass" => "pass",
+        "blocked" => "blocked",
+        _ => "fail_with_feedback",
     }
     .to_string();
 
-    AutomationJudgeResponse {
+    AutomationValidationResponse {
         decision,
         reason: if response.reason.trim().is_empty() {
-            "No decision rationale provided.".to_string()
+            "未提供验收判定理由。".to_string()
         } else {
             response.reason.trim().to_string()
         },
-        progress_summary: if response.progress_summary.trim().is_empty() {
-            "No progress summary provided.".to_string()
+        feedback: feedback.or_else(|| {
+            if verification_steps.is_empty() {
+                None
+            } else {
+                Some(verification_steps.join("\n"))
+            }
+        }),
+        evidence_summary: if response.evidence_summary.trim().is_empty() {
+            "未提供验收依据摘要。".to_string()
         } else {
-            response.progress_summary.trim().to_string()
+            response.evidence_summary.trim().to_string()
         },
-        next_instruction: response
-            .next_instruction
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        next_owner_cli: Some(normalize_automation_owner(
-            response.next_owner_cli.as_deref(),
-            owner_cli,
-        )),
+        missing_checks,
+        verification_steps,
         made_progress: response.made_progress,
         expected_outcome_met: response.expected_outcome_met,
     }
@@ -10394,6 +10860,7 @@ fn normalize_automation_judge_response(
 fn evaluate_automation_round(
     state_snapshot: &AppStateDto,
     settings_arc: &Arc<Mutex<AppSettings>>,
+    terminal_storage: &TerminalStorage,
     run: &AutomationRun,
     goal: &AutomationGoal,
     profile: &AutomationGoalRuleConfig,
@@ -10401,11 +10868,15 @@ fn evaluate_automation_round(
     round_index: usize,
     raw_output: &str,
     exit_code: Option<i32>,
-) -> AutomationJudgeResponse {
-    let wrapper_path = match resolve_runtime_command(state_snapshot, "claude") {
+) -> AutomationRoundValidationOutcome {
+    let wrapper_path = match resolve_runtime_command(state_snapshot, owner_cli) {
         Ok(path) => path,
         Err(_) => {
-            return fallback_automation_judge_response(goal, owner_cli, raw_output, exit_code);
+            return AutomationRoundValidationOutcome {
+                response: fallback_automation_validation_response(goal, raw_output, exit_code),
+                raw_output: "Validation runtime unavailable. Fallback heuristic inspected the latest execution output.".to_string(),
+                used_fallback: true,
+            };
         }
     };
     let timeout_ms = settings_arc
@@ -10413,10 +10884,30 @@ fn evaluate_automation_round(
         .map(|settings| settings.process_timeout_ms)
         .unwrap_or(DEFAULT_TIMEOUT_MS);
 
-    let mut judge_session = acp::AcpSession::default();
-    judge_session.plan_mode = true;
+    let recent_turns = terminal_storage
+        .load_prompt_turns_for_terminal_tab(
+        &goal.synthetic_terminal_tab_id,
+        owner_cli,
+        4,
+    )
+        .unwrap_or_default()
+        .into_iter()
+        .map(|turn| ChatContextTurn {
+            cli_id: turn.cli_id,
+            user_prompt: turn.user_prompt,
+            assistant_reply: turn.assistant_reply,
+            timestamp: turn.timestamp,
+        })
+        .collect::<Vec<_>>();
 
-    let prompt = build_automation_judge_prompt(
+    let mut validation_session = acp::AcpSession::default();
+    validation_session.plan_mode = true;
+    validation_session.permission_mode.insert(
+        owner_cli.to_string(),
+        automation_permission_mode_for_cli(&run.permission_profile, owner_cli, false),
+    );
+
+    let prompt = build_automation_validation_prompt(
         run,
         goal,
         profile,
@@ -10425,13 +10916,27 @@ fn evaluate_automation_round(
         raw_output,
         exit_code,
     );
+    let composed_prompt = compose_tab_context_prompt(
+        state_snapshot,
+        terminal_storage,
+        owner_cli,
+        &goal.synthetic_terminal_tab_id,
+        &run.workspace_id,
+        &run.project_root,
+        &run.project_name,
+        &prompt,
+        &recent_turns,
+        false,
+        None,
+        None,
+    );
     let result = run_silent_agent_turn_once(
         &run.project_root,
-        "claude",
+        owner_cli,
         &wrapper_path,
-        &prompt,
+        &composed_prompt,
         false,
-        &judge_session,
+        &validation_session,
         timeout_ms,
     );
 
@@ -10442,13 +10947,248 @@ fn evaluate_automation_round(
             } else {
                 outcome.final_content
             };
-            extract_json_object(&source)
-                .and_then(|payload| serde_json::from_str::<AutomationJudgeResponse>(&payload).ok())
-                .map(|value| normalize_automation_judge_response(value, owner_cli))
-                .unwrap_or_else(|| fallback_automation_judge_response(goal, owner_cli, &source, exit_code))
+            let response = extract_json_object(&source)
+                .and_then(|payload| serde_json::from_str::<AutomationValidationResponse>(&payload).ok())
+                .map(normalize_automation_validation_response)
+                .unwrap_or_else(|| fallback_automation_validation_response(goal, &source, exit_code));
+            let used_fallback = extract_json_object(&source)
+                .and_then(|payload| serde_json::from_str::<AutomationValidationResponse>(&payload).ok())
+                .is_none();
+            AutomationRoundValidationOutcome {
+                response,
+                raw_output: source,
+                used_fallback,
+            }
         }
-        Err(_) => fallback_automation_judge_response(goal, owner_cli, raw_output, exit_code),
+        Err(error) => AutomationRoundValidationOutcome {
+            response: fallback_automation_validation_response(goal, raw_output, exit_code),
+            raw_output: error,
+            used_fallback: true,
+        },
     }
+}
+
+fn validation_result_from_response(
+    response: &AutomationValidationResponse,
+) -> AutomationValidationResult {
+    AutomationValidationResult {
+        decision: Some(response.decision.clone()),
+        reason: Some(response.reason.clone()),
+        feedback: response.feedback.clone(),
+        evidence_summary: Some(response.evidence_summary.clone()),
+        missing_checks: response.missing_checks.clone(),
+        verification_steps: response.verification_steps.clone(),
+        made_progress: response.made_progress,
+        expected_outcome_met: response.expected_outcome_met,
+    }
+}
+
+fn validation_detail_text(result: &AutomationValidationResult) -> String {
+    let decision = match result.decision.as_deref() {
+        Some("pass") => "验收通过",
+        Some("blocked") => "验收阻塞",
+        Some("fail_with_feedback") => "验收未通过",
+        _ => "验收待确认",
+    };
+    let mut parts = vec![decision.to_string()];
+    if let Some(reason) = result.reason.as_ref().filter(|value| !value.trim().is_empty()) {
+        parts.push(format!("原因：{}", reason.trim()));
+    }
+    if !result.missing_checks.is_empty() {
+        parts.push(format!("未满足项：{}", result.missing_checks.join("；")));
+    }
+    if !result.verification_steps.is_empty() {
+        parts.push(format!("下一步：{}", result.verification_steps.join("；")));
+    }
+    if let Some(feedback) = result
+        .feedback
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if result.verification_steps.is_empty() {
+            parts.push(format!("待修复：{}", feedback.trim()));
+        }
+    }
+    parts.join("\n")
+}
+
+fn validation_message_text(
+    result: &AutomationValidationResult,
+    validation_raw_output: &str,
+    used_fallback: bool,
+) -> String {
+    let decision = match result.decision.as_deref() {
+        Some("pass") => "验收通过",
+        Some("blocked") => "验收阻塞",
+        Some("fail_with_feedback") => "验收未通过",
+        _ => "验收待确认",
+    };
+    let mut sections = vec![format!("验收结论：{}", decision)];
+    if let Some(reason) = result.reason.as_ref().filter(|value| !value.trim().is_empty()) {
+        sections.push(format!("原因：{}", reason.trim()));
+    }
+    if !result.missing_checks.is_empty() {
+        sections.push(format!(
+            "未满足项：\n{}",
+            result
+                .missing_checks
+                .iter()
+                .map(|item| format!("- {}", item))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if !result.verification_steps.is_empty() {
+        sections.push(format!(
+            "下一轮建议：\n{}",
+            result
+                .verification_steps
+                .iter()
+                .map(|item| format!("- {}", item))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    } else if let Some(feedback) = result
+        .feedback
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        sections.push(format!("下一轮建议：{}", feedback.trim()));
+    }
+    if let Some(evidence) = result
+        .evidence_summary
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        sections.push(format!("判定依据：\n{}", evidence.trim()));
+    }
+    if !validation_raw_output.trim().is_empty() {
+        sections.push(format!(
+            "{}：\n{}",
+            if used_fallback {
+                "验收原始输出（回退模式）"
+            } else {
+                "验收原始输出"
+            },
+            validation_raw_output.trim()
+        ));
+    }
+    sections.join("\n\n")
+}
+
+fn next_instruction_from_validation(
+    previous: Option<&str>,
+    result: &AutomationValidationResult,
+    round_index: usize,
+) -> Option<String> {
+    if result.decision.as_deref() != Some("fail_with_feedback") {
+        return None;
+    }
+    let mut sections = Vec::new();
+    if let Some(existing) = previous
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(existing.to_string());
+    }
+    let mut latest = format!(
+        "Round {} validation failed.\nReason: {}",
+        round_index,
+        result
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("The expected outcome is not fully met yet.")
+    );
+    if !result.missing_checks.is_empty() {
+        latest.push_str("\nRemaining gaps:\n");
+        latest.push_str(
+            &result
+                .missing_checks
+                .iter()
+                .map(|item| format!("- {}", item))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    if !result.verification_steps.is_empty() {
+        latest.push_str("\nVerify next:\n");
+        latest.push_str(
+            &result
+                .verification_steps
+                .iter()
+                .map(|item| format!("- {}", item))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    } else if let Some(feedback) = result
+        .feedback
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        latest.push_str("\nFix next:\n");
+        latest.push_str(feedback);
+    }
+    if !sections.iter().any(|entry| entry == &latest) {
+        sections.push(latest);
+    }
+    Some(sections.join("\n\n"))
+}
+
+fn append_automation_validation_message(
+    terminal_storage: &TerminalStorage,
+    run: &AutomationRun,
+    goal: &AutomationGoal,
+    owner_cli: &str,
+    result: &AutomationValidationResult,
+    validation_raw_output: &str,
+    used_fallback: bool,
+) -> Result<(), String> {
+    let now = now_stamp();
+    let session = ensure_automation_conversation_session(terminal_storage, run, goal)?;
+    let decision = result.decision.as_deref().unwrap_or("fail_with_feedback");
+    let level = match decision {
+        "pass" => "success",
+        "blocked" => "warning",
+        _ => "error",
+    };
+    let content = validation_message_text(result, validation_raw_output, used_fallback);
+    let request = MessageEventsAppendRequest {
+        seeds: vec![MessageSessionSeed {
+            terminal_tab_id: goal.synthetic_terminal_tab_id.clone(),
+            session,
+            messages: vec![PersistedChatMessage {
+                id: create_id("auto-validation"),
+                role: "assistant".to_string(),
+                cli_id: Some(owner_cli.to_string()),
+                timestamp: now,
+                content: content.clone(),
+                raw_content: Some(content.clone()),
+                content_format: Some("plain".to_string()),
+                transport_kind: Some(transport_kind_for_cli(owner_cli)),
+                blocks: Some(vec![
+                    ChatMessageBlock::Status {
+                        level: level.to_string(),
+                        text: match decision {
+                            "pass" => "验收通过".to_string(),
+                            "blocked" => "验收阻塞".to_string(),
+                            _ => "验收未通过".to_string(),
+                        },
+                    },
+                    ChatMessageBlock::Text {
+                        text: content,
+                        format: "plain".to_string(),
+                    },
+                ]),
+                is_streaming: false,
+                duration_ms: None,
+                exit_code: None,
+            }],
+        }],
+    };
+    terminal_storage.append_chat_messages(&request)
 }
 
 fn execute_auto_mode_goal(
@@ -10747,11 +11487,11 @@ fn notify_automation_event(app: &AppHandle, title: &str, body: &str) {
 fn summarize_automation_run(run: &AutomationRun) -> String {
     let completed = run.goals.iter().filter(|goal| goal.status == "completed").count();
     let failed = run.goals.iter().filter(|goal| goal.status == "failed").count();
-    let paused = run.goals.iter().filter(|goal| goal.status == "paused").count();
+    let blocked = run.goals.iter().filter(|goal| goal.status == "paused").count();
     let total = run.goals.len();
     format!(
-        "{} of {} completed • {} failed • {} paused",
-        completed, total, failed, paused
+        "{} of {} completed • {} failed • {} blocked",
+        completed, total, failed, blocked
     )
 }
 
@@ -10792,6 +11532,323 @@ fn send_webhook_notification(url: &str, payload: &WebhookPayload) {
     let _ = client.post(url).json(payload).send();
 }
 
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn multiline_html(value: &str) -> String {
+    escape_html(value)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "<br/>")
+}
+
+fn email_status_meta(status: &str) -> (&'static str, &'static str, &'static str) {
+    match status {
+        "completed" => ("已完成", "#dcfce7", "#166534"),
+        "failed" => ("失败", "#fee2e2", "#b91c1c"),
+        "blocked" => ("已阻塞", "#fef3c7", "#b45309"),
+        "cancelled" => ("已取消", "#e2e8f0", "#475569"),
+        "running" => ("运行中", "#dbeafe", "#1d4ed8"),
+        "validating" => ("验收中", "#e0e7ff", "#4338ca"),
+        _ => ("待确认", "#e2e8f0", "#475569"),
+    }
+}
+
+fn validation_status_meta(decision: Option<&str>) -> (&'static str, &'static str, &'static str) {
+    match decision {
+        Some("pass") => ("验收通过", "#dcfce7", "#166534"),
+        Some("blocked") => ("验收阻塞", "#fef3c7", "#b45309"),
+        Some("fail_with_feedback") => ("验收未通过", "#fee2e2", "#b91c1c"),
+        _ => ("验收待确认", "#e2e8f0", "#475569"),
+    }
+}
+
+fn html_list(items: &[String], empty_text: &str) -> String {
+    if items.is_empty() {
+        return format!(
+            "<div style=\"font-size:13px;line-height:1.7;color:#64748b;\">{}</div>",
+            escape_html(empty_text)
+        );
+    }
+    format!(
+        "<ul style=\"margin:0;padding-left:18px;color:#0f172a;font-size:13px;line-height:1.8;\">{}</ul>",
+        items
+            .iter()
+            .map(|item| format!("<li style=\"margin:0 0 6px;\">{}</li>", escape_html(item)))
+            .collect::<Vec<_>>()
+            .join("")
+    )
+}
+
+fn html_metric_card(label: &str, value: &str) -> String {
+    format!(
+        "<td style=\"width:50%;padding:0 6px 12px;vertical-align:top;\">
+            <div style=\"border:1px solid #e2e8f0;border-radius:16px;background:#f8fafc;padding:14px 16px;\">
+              <div style=\"font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#64748b;font-weight:700;\">{}</div>
+              <div style=\"margin-top:8px;font-size:14px;line-height:1.6;color:#0f172a;font-weight:600;word-break:break-word;\">{}</div>
+            </div>
+         </td>",
+        escape_html(label),
+        escape_html(value)
+    )
+}
+
+fn html_section(title: &str, body: &str) -> String {
+    format!(
+        "<div style=\"margin-top:18px;border:1px solid #e2e8f0;border-radius:18px;background:#ffffff;padding:18px 20px;\">
+            <div style=\"font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#64748b;font-weight:700;margin-bottom:10px;\">{}</div>
+            {}
+         </div>",
+        escape_html(title),
+        body
+    )
+}
+
+fn email_shell_html(title: &str, subtitle: &str, badge_label: &str, badge_bg: &str, badge_fg: &str, body: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#eef2f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#0f172a;">
+    <div style="padding:32px 16px;">
+      <div style="max-width:760px;margin:0 auto;">
+        <div style="border-radius:28px;overflow:hidden;background:linear-gradient(135deg,#0f172a 0%,#1e293b 48%,#334155 100%);box-shadow:0 24px 70px rgba(15,23,42,.18);">
+          <div style="padding:28px 30px 24px;color:#f8fafc;">
+            <div style="display:inline-block;padding:7px 12px;border-radius:999px;background:{};color:{};font-size:12px;font-weight:700;letter-spacing:.04em;">{}</div>
+            <div style="margin-top:18px;font-size:28px;line-height:1.25;font-weight:800;">{}</div>
+            <div style="margin-top:10px;font-size:14px;line-height:1.8;color:#cbd5e1;">{}</div>
+          </div>
+          <div style="background:#ffffff;padding:24px 22px 26px;">
+            {}
+            <div style="margin-top:20px;padding-top:16px;border-top:1px solid #e2e8f0;font-size:12px;line-height:1.8;color:#64748b;">
+              此邮件由 Multi CLI Studio 自动发送。建议使用支持 HTML 的邮件客户端查看完整布局。
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>"#,
+        escape_html(title),
+        badge_bg,
+        badge_fg,
+        escape_html(badge_label),
+        escape_html(title),
+        escape_html(subtitle),
+        body
+    )
+}
+
+fn test_mail_text_body(config: &NotificationConfig, recipients: &[String]) -> String {
+    format!(
+        "Multi CLI Studio 邮件测试\n\nSMTP 配置校验成功，当前将使用以下参数发信：\n- SMTP 主机：{}\n- SMTP 端口：{}\n- 发件人：{}\n- 收件人：{}\n\n如果你收到这封邮件，说明当前 SMTP 配置已经可用。",
+        config.smtp_host,
+        config.smtp_port,
+        config.smtp_from,
+        recipients.join(", ")
+    )
+}
+
+fn test_mail_html_body(config: &NotificationConfig, recipients: &[String]) -> String {
+    let body = format!(
+        "<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">
+           <tr>
+             {}
+             {}
+           </tr>
+           <tr>
+             {}
+             {}
+           </tr>
+         </table>
+         {}
+         {}",
+        html_metric_card("SMTP 主机", &config.smtp_host),
+        html_metric_card("SMTP 端口", &config.smtp_port.to_string()),
+        html_metric_card("发件人", &config.smtp_from),
+        html_metric_card("收件人数", &recipients.len().to_string()),
+        html_section(
+            "收件人列表",
+            &html_list(recipients, "当前没有配置收件人。")
+        ),
+        html_section(
+            "说明",
+            "<div style=\"font-size:13px;line-height:1.8;color:#334155;\">这是一封由 <strong>Multi CLI Studio</strong> 发送的测试邮件。如果你收到了这封邮件，说明当前 SMTP 配置已经能够正常发信。</div>"
+        )
+    );
+    email_shell_html(
+        "SMTP 配置测试成功",
+        "这封邮件用于确认 Multi CLI Studio 当前 SMTP 配置可以正常发送 HTML 邮件。",
+        "测试邮件",
+        "#dbeafe",
+        "#1d4ed8",
+        &body,
+    )
+}
+
+fn automation_mail_status_label(status: &str) -> &'static str {
+    email_status_meta(status).0
+}
+
+fn automation_mail_subject(run: &AutomationRun, status: &str) -> String {
+    format!(
+        "[{}] 自动化{}：{}",
+        run.project_name,
+        automation_mail_status_label(status),
+        run.job_name
+            .as_deref()
+            .unwrap_or(run.project_name.as_str())
+    )
+}
+
+fn automation_mail_text_body(run: &AutomationRun, status: &str) -> String {
+    let goal = primary_goal(run);
+    let validation = run.validation_result.clone();
+    let validation_label = validation_status_meta(validation.decision.as_deref()).0;
+    let missing = if validation.missing_checks.is_empty() {
+        "无".to_string()
+    } else {
+        validation.missing_checks.join("；")
+    };
+    let next_steps = if validation.verification_steps.is_empty() {
+        validation.feedback.clone().unwrap_or_else(|| "无".to_string())
+    } else {
+        validation.verification_steps.join("；")
+    };
+    format!(
+        "Multi CLI Studio 自动化通知\n\n项目：{}\n任务：{}\n状态：{}\n运行 ID：{}\n开始时间：{}\n完成时间：{}\n摘要：{}\n\n任务目标：\n{}\n\n期望结果：\n{}\n\n最近验收：{}\n验收原因：{}\n未满足项：{}\n下一步建议：{}\n\n此邮件由 Multi CLI Studio 自动发送。",
+        run.project_name,
+        run.job_name.as_deref().unwrap_or(run.project_name.as_str()),
+        automation_mail_status_label(status),
+        run.id,
+        run.started_at.as_deref().unwrap_or("-"),
+        run.completed_at.as_deref().unwrap_or("-"),
+        run.status_summary.clone().or_else(|| run.summary.clone()).unwrap_or_default(),
+        goal.map(|item| item.goal.as_str()).unwrap_or("-"),
+        goal.map(|item| item.expected_outcome.as_str()).unwrap_or("-"),
+        validation_label,
+        validation.reason.unwrap_or_else(|| "-".to_string()),
+        missing,
+        next_steps,
+    )
+}
+
+fn automation_mail_html_body(run: &AutomationRun, status: &str) -> String {
+    let goal = primary_goal(run);
+    let validation = run.validation_result.clone();
+    let (status_label, status_bg, status_fg) = email_status_meta(status);
+    let (validation_label, validation_bg, validation_fg) =
+        validation_status_meta(validation.decision.as_deref());
+    let summary = run
+        .status_summary
+        .clone()
+        .or_else(|| run.summary.clone())
+        .unwrap_or_else(|| "本次运行已结束。".to_string());
+    let next_steps = if validation.verification_steps.is_empty() {
+        validation
+            .feedback
+            .clone()
+            .map(|value| vec![value])
+            .unwrap_or_default()
+    } else {
+        validation.verification_steps.clone()
+    };
+    let overview = format!(
+        "<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">
+           <tr>
+             {}
+             {}
+           </tr>
+           <tr>
+             {}
+             {}
+           </tr>
+         </table>",
+        html_metric_card("项目", &run.project_name),
+        html_metric_card("任务", run.job_name.as_deref().unwrap_or(run.project_name.as_str())),
+        html_metric_card("开始时间", run.started_at.as_deref().unwrap_or("-")),
+        html_metric_card("完成时间", run.completed_at.as_deref().unwrap_or("-")),
+    );
+    let status_section = html_section(
+        "运行概览",
+        &format!(
+            "<div style=\"display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;\">
+               <span style=\"display:inline-block;padding:7px 12px;border-radius:999px;background:{};color:{};font-size:12px;font-weight:700;\">{}</span>
+               <span style=\"display:inline-block;padding:7px 12px;border-radius:999px;background:{};color:{};font-size:12px;font-weight:700;\">{}</span>
+             </div>
+             <div style=\"font-size:14px;line-height:1.8;color:#334155;\">{}</div>
+             <div style=\"margin-top:10px;font-size:12px;line-height:1.7;color:#64748b;\">运行 ID：{}</div>",
+            status_bg,
+            status_fg,
+            escape_html(status_label),
+            validation_bg,
+            validation_fg,
+            escape_html(validation_label),
+            multiline_html(&summary),
+            escape_html(&run.id)
+        ),
+    );
+    let goal_section = html_section(
+        "任务目标",
+        &format!(
+            "<div style=\"font-size:13px;line-height:1.85;color:#0f172a;\">{}</div>",
+            multiline_html(goal.map(|item| item.goal.as_str()).unwrap_or("-"))
+        ),
+    );
+    let expected_section = html_section(
+        "期望结果",
+        &format!(
+            "<div style=\"font-size:13px;line-height:1.85;color:#0f172a;\">{}</div>",
+            multiline_html(goal.map(|item| item.expected_outcome.as_str()).unwrap_or("-"))
+        ),
+    );
+    let validation_section = html_section(
+        "最近验收",
+        &format!(
+            "<div style=\"font-size:13px;line-height:1.8;color:#334155;margin-bottom:12px;\">{}</div>
+             <div style=\"margin-top:12px;\">
+               <div style=\"font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#64748b;font-weight:700;margin-bottom:8px;\">未满足项</div>
+               {}
+             </div>
+             <div style=\"margin-top:14px;\">
+               <div style=\"font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#64748b;font-weight:700;margin-bottom:8px;\">下一步建议</div>
+               {}
+             </div>
+             <div style=\"margin-top:14px;\">
+               <div style=\"font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#64748b;font-weight:700;margin-bottom:8px;\">判定依据</div>
+               <div style=\"font-size:13px;line-height:1.8;color:#0f172a;\">{}</div>
+             </div>",
+            multiline_html(validation.reason.as_deref().unwrap_or("当前没有额外验收说明。")),
+            html_list(&validation.missing_checks, "当前没有记录到明确缺口。"),
+            html_list(&next_steps, "当前没有额外建议。"),
+            multiline_html(validation.evidence_summary.as_deref().unwrap_or("当前没有额外验收依据。"))
+        ),
+    );
+    let body = format!("{}{}{}{}{}", overview, status_section, goal_section, expected_section, validation_section);
+    email_shell_html(
+        &format!(
+            "{} · {}",
+            run.job_name.as_deref().unwrap_or(run.project_name.as_str()),
+            status_label
+        ),
+        "自动化任务已结束，以下是本次运行的结构化结果摘要。",
+        status_label,
+        status_bg,
+        status_fg,
+        &body,
+    )
+}
+
 fn send_email_notification(
     host: &str,
     port: u16,
@@ -10800,35 +11857,72 @@ fn send_email_notification(
     from: &str,
     recipients: &[String],
     subject: &str,
-    body: &str,
+    text_body: &str,
+    html_body: &str,
 ) -> Result<(), String> {
     use lettre::transport::smtp::authentication::Credentials;
+    use lettre::message::{header::ContentType, MultiPart, SinglePart};
     use lettre::{Message, SmtpTransport, Transport};
 
-    let credentials = Credentials::new(username.to_string(), password.to_string());
-
-    // Use relay() which handles STARTTLS automatically on port 587
-    let mailer = SmtpTransport::relay(host)
-        .map_err(|e| e.to_string())?
-        .port(port)
+    let credentials = Credentials::new(username.trim().to_string(), password.to_string());
+    let builder = if port == 2465 {
+        SmtpTransport::relay(host)
+            .map_err(|e| format!("SMTP TLS configuration failed: {}", e))?
+            .port(port)
+    } else if port == 2587 {
+        SmtpTransport::starttls_relay(host)
+            .map_err(|e| format!("SMTP STARTTLS configuration failed: {}", e))?
+            .port(port)
+    } else {
+        SmtpTransport::builder_dangerous(host)
+            .port(port)
+    };
+    let mailer = builder
         .credentials(credentials)
+        .timeout(Some(Duration::from_secs(15)))
         .build();
 
     let to_addrs = recipients
         .iter()
-        .map(|r| r.as_str())
+        .map(|r| r.trim())
         .collect::<Vec<_>>()
         .join(", ");
 
     let email = Message::builder()
-        .from(from.parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
+        .from(from.trim().parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
         .to(to_addrs.parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
         .subject(subject)
-        .body(String::from(body))
+        .multipart(
+            MultiPart::alternative()
+                .singlepart(SinglePart::plain(String::from(text_body)))
+                .singlepart(
+                    SinglePart::builder()
+                        .header(ContentType::TEXT_HTML)
+                        .body(String::from(html_body)),
+                ),
+        )
         .map_err(|e| e.to_string())?;
 
     mailer.send(&email).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn smtp_notification_ready(config: &NotificationConfig) -> bool {
+    config.smtp_enabled
+        && !config.smtp_host.trim().is_empty()
+        && config.smtp_port > 0
+        && !config.smtp_username.trim().is_empty()
+        && !config.smtp_password.trim().is_empty()
+        && !config.smtp_from.trim().is_empty()
+        && !config.email_recipients.is_empty()
+}
+
+fn automation_run_mail_status(run: &AutomationRun) -> String {
+    display_status_from_dimensions(
+        &run.lifecycle_status,
+        &run.outcome_status,
+        &run.attention_status,
+    )
 }
 
 fn schedule_automation_run(app: AppHandle, store: &State<'_, AppStore>, run_id: String) {
@@ -10841,6 +11935,7 @@ fn schedule_automation_run(app: AppHandle, store: &State<'_, AppStore>, run_id: 
         store.claude_approval_rules.clone(),
         store.claude_pending_approvals.clone(),
         store.codex_pending_approvals.clone(),
+        store.automation_jobs.clone(),
         store.automation_runs.clone(),
         store.automation_active_runs.clone(),
         run_id,
@@ -10856,6 +11951,7 @@ fn schedule_automation_run_with_handles(
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
     active_runs: Arc<Mutex<BTreeSet<String>>>,
     run_id: String,
@@ -10903,6 +11999,7 @@ fn schedule_automation_run_with_handles(
             &claude_approval_rules,
             &claude_pending_approvals,
             &codex_pending_approvals,
+            &automation_jobs,
             &automation_runs,
             &run_id,
         );
@@ -10922,6 +12019,7 @@ fn schedule_existing_automation_runs(
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
     active_runs: Arc<Mutex<BTreeSet<String>>>,
 ) {
@@ -10944,6 +12042,7 @@ fn schedule_existing_automation_runs(
             claude_approval_rules.clone(),
             claude_pending_approvals.clone(),
             codex_pending_approvals.clone(),
+            automation_jobs.clone(),
             automation_runs.clone(),
             active_runs.clone(),
             run_id,
@@ -11021,6 +12120,7 @@ fn create_automation_run_from_job_with_handles(
         claude_approval_rules,
         claude_pending_approvals,
         codex_pending_approvals,
+        automation_jobs,
         automation_runs,
         active_runs,
         run.id.clone(),
@@ -11424,6 +12524,7 @@ fn execute_automation_run_loop(
     claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
     codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: &Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: &Arc<Mutex<Vec<AutomationRun>>>,
     run_id: &str,
 ) {
@@ -11492,31 +12593,61 @@ fn execute_automation_run_loop(
                     .goals
                     .iter()
                     .any(|goal| goal.outcome_status == "unknown" || goal.outcome_status == "partial");
+                let latest_goal = run
+                    .goals
+                    .iter()
+                    .min_by_key(|goal| goal.position)
+                    .or_else(|| run.goals.first())
+                    .cloned();
                 let now = now_stamp();
                 if has_paused {
                     run.lifecycle_status = "stopped".to_string();
                     run.outcome_status = if has_failed { "failed".to_string() } else { "unknown".to_string() };
-                    run.attention_status = "waiting_human".to_string();
-                    run.resolution_code = "manual_pause_requested".to_string();
-                    run.status_summary = Some("Stopped and waiting for manual handling.".to_string());
+                    run.attention_status = latest_goal
+                        .as_ref()
+                        .map(|goal| goal.attention_status.clone())
+                        .filter(|value| value != "none")
+                        .unwrap_or_else(|| "waiting_human".to_string());
+                    run.resolution_code = latest_goal
+                        .as_ref()
+                        .map(|goal| goal.resolution_code.clone())
+                        .unwrap_or_else(|| "manual_pause_requested".to_string());
+                    run.status_summary = latest_goal
+                        .as_ref()
+                        .and_then(|goal| goal.status_summary.clone())
+                        .or_else(|| Some("Stopped and waiting for manual handling.".to_string()));
                 } else if has_failed {
                     run.lifecycle_status = "finished".to_string();
                     run.outcome_status = "failed".to_string();
                     run.attention_status = "none".to_string();
                     run.resolution_code = "objective_checks_failed".to_string();
-                    run.status_summary = Some("Finished with failed outcomes.".to_string());
+                    run.status_summary = latest_goal
+                        .as_ref()
+                        .and_then(|goal| goal.status_summary.clone())
+                        .or_else(|| Some("Finished with failed outcomes.".to_string()));
                 } else if has_unknown {
                     run.lifecycle_status = "finished".to_string();
                     run.outcome_status = "partial".to_string();
                     run.attention_status = "none".to_string();
                     run.resolution_code = "expected_outcome_not_met".to_string();
-                    run.status_summary = Some("Finished but objective completion was not fully verified.".to_string());
+                    run.status_summary = latest_goal
+                        .as_ref()
+                        .and_then(|goal| goal.status_summary.clone())
+                        .or_else(|| Some("Finished but objective completion was not fully verified.".to_string()));
                 } else {
                     run.lifecycle_status = "finished".to_string();
                     run.outcome_status = "success".to_string();
                     run.attention_status = "none".to_string();
                     run.resolution_code = "objective_checks_passed".to_string();
-                    run.status_summary = Some("Finished successfully.".to_string());
+                    run.status_summary = latest_goal
+                        .as_ref()
+                        .and_then(|goal| goal.status_summary.clone())
+                        .or_else(|| Some("Finished successfully.".to_string()));
+                }
+                if let Some(goal) = latest_goal.as_ref() {
+                    run.objective_signals = goal.objective_signals.clone();
+                    run.judge_assessment = goal.judge_assessment.clone();
+                    run.validation_result = goal.validation_result.clone();
                 }
                 sync_run_status_fields(run);
                 run.completed_at = Some(now.clone());
@@ -11591,38 +12722,54 @@ fn execute_automation_run_loop(
                                 send_webhook_notification(&url, &payload);
                             });
                         }
+                    }
 
-                        // Email notification
-                        if cfg.smtp_enabled
-                            && !cfg.email_recipients.is_empty()
-                            && !cfg.smtp_host.is_empty()
-                            && !cfg.smtp_username.is_empty()
-                        {
-                            let host = cfg.smtp_host.clone();
-                            let port = cfg.smtp_port;
-                            let username = cfg.smtp_username.clone();
-                            let password = cfg.smtp_password.clone();
-                            let from = cfg.smtp_from.clone();
-                            let recipients = cfg.email_recipients.clone();
-                            let subject = format!(
-                                "[{}] Automation {} - {}",
-                                project_name,
-                                status,
-                                &run_id[..8.min(run_id.len())]
+                    let should_email = if snapshot.status == "cancelled"
+                        || snapshot.resolution_code == "manual_pause_requested"
+                    {
+                        false
+                    } else if !smtp_notification_ready(&cfg) {
+                        false
+                    } else {
+                        let job_id = snapshot.job_id.clone();
+                        job_id
+                            .and_then(|value| {
+                                automation_jobs
+                                    .lock()
+                                    .ok()
+                                    .and_then(|jobs| {
+                                        jobs.iter()
+                                            .find(|job| job.id == value)
+                                            .map(|job| job.email_notification_enabled)
+                                    })
+                            })
+                            .unwrap_or(false)
+                    };
+
+                    if should_email {
+                        let host = cfg.smtp_host.clone();
+                        let port = cfg.smtp_port;
+                        let username = cfg.smtp_username.clone();
+                        let password = cfg.smtp_password.clone();
+                        let from = cfg.smtp_from.clone();
+                        let recipients = cfg.email_recipients.clone();
+                        let mail_status = automation_run_mail_status(&snapshot);
+                        let subject = automation_mail_subject(&snapshot, &mail_status);
+                        let body = automation_mail_text_body(&snapshot, &mail_status);
+                        let html_body = automation_mail_html_body(&snapshot, &mail_status);
+                        std::thread::spawn(move || {
+                            let _ = send_email_notification(
+                                &host,
+                                port,
+                                &username,
+                                &password,
+                                &from,
+                                &recipients,
+                                &subject,
+                                &body,
+                                &html_body,
                             );
-                            let body = format!(
-                                "Project: {}\nStatus: {}\nSummary: {}\nRun ID: {}\n\nThis notification was sent by Multi CLI Studio.",
-                                project_name,
-                                status,
-                                summary.unwrap_or_default(),
-                                run_id
-                            );
-                            std::thread::spawn(move || {
-                                let _ = send_email_notification(
-                                    &host, port, &username, &password, &from, &recipients, &subject, &body,
-                                );
-                            });
-                        }
+                        });
                     }
                 }
 
@@ -11643,7 +12790,11 @@ fn execute_automation_run_loop(
             },
             &automation_goal_target_cli(&working_goal),
         );
-        let mut prior_progress = working_goal.latest_progress_summary.clone();
+        let mut prior_progress = working_goal
+            .validation_result
+            .evidence_summary
+            .clone()
+            .or_else(|| working_goal.latest_progress_summary.clone());
         let mut next_instruction = working_goal.next_instruction.clone();
         let final_title: String;
         let final_level: String;
@@ -11690,18 +12841,59 @@ fn execute_automation_run_loop(
             });
 
             let rule_pause_reason =
-                detect_automation_rule_pause_reason(&outcome.raw_output, &working_goal.rule_config);
-            let judgement = if let Some(reason) = rule_pause_reason.clone() {
-                AutomationJudgeResponse {
-                    decision: "pause".to_string(),
-                    reason: reason.clone(),
-                    progress_summary: outcome.summary.clone(),
-                    next_instruction: None,
-                    next_owner_cli: Some(current_owner.clone()),
-                    made_progress: outcome.exit_code == Some(0),
-                    expected_outcome_met: false,
+                detect_automation_rule_pause_reason(&outcome.raw_output, &outcome.blocks, &working_goal.rule_config);
+            let validation_outcome = if let Some(reason) = rule_pause_reason.clone() {
+                AutomationRoundValidationOutcome {
+                    response: AutomationValidationResponse {
+                        decision: "blocked".to_string(),
+                        reason,
+                        feedback: None,
+                        evidence_summary: outcome.summary.clone(),
+                        missing_checks: Vec::new(),
+                        verification_steps: Vec::new(),
+                        made_progress: outcome.exit_code == Some(0),
+                        expected_outcome_met: false,
+                    },
+                    raw_output: String::new(),
+                    used_fallback: false,
                 }
             } else {
+                {
+                    let mut runs = match automation_runs.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return,
+                    };
+                    let Some(run) = runs.iter_mut().find(|item| item.id == run_id) else {
+                        return;
+                    };
+                    let now = now_stamp();
+                    run.lifecycle_status = "validating".to_string();
+                    run.outcome_status = "unknown".to_string();
+                    run.attention_status = "none".to_string();
+                    run.resolution_code = "validating".to_string();
+                    run.status_summary = Some("Comparing the delivered result against the expected outcome.".to_string());
+                    run.updated_at = now.clone();
+                    if let Some(goal) = run.goals.iter_mut().find(|item| item.id == working_goal.id) {
+                        goal.lifecycle_status = "validating".to_string();
+                        goal.outcome_status = "unknown".to_string();
+                        goal.attention_status = "none".to_string();
+                        goal.resolution_code = "validating".to_string();
+                        goal.status_summary =
+                            Some("Comparing the delivered result against the expected outcome.".to_string());
+                        goal.updated_at = now;
+                        sync_goal_status_fields(goal);
+                    }
+                    sync_run_status_fields(run);
+                    push_event(
+                        run,
+                        Some(&working_goal.id),
+                        "info",
+                        "Validation started",
+                        "The latest execution result is being checked against the expected outcome.",
+                    );
+                    let _ = persist_automation_runs_to_disk(&runs);
+                }
+
                 let mut state_snapshot = state_arc
                     .lock()
                     .map(|guard| guard.clone())
@@ -11714,6 +12906,7 @@ fn execute_automation_run_loop(
                 evaluate_automation_round(
                     &state_snapshot,
                     settings_arc,
+                    terminal_storage,
                     &run_snapshot,
                     &working_goal,
                     &working_goal.rule_config,
@@ -11723,16 +12916,31 @@ fn execute_automation_run_loop(
                     outcome.exit_code,
                 )
             };
+            let validation = validation_outcome.response.clone();
+            let validation_result = validation_result_from_response(&validation);
+            let _ = append_automation_validation_message(
+                terminal_storage,
+                &run_snapshot,
+                &working_goal,
+                &current_owner,
+                &validation_result,
+                &validation_outcome.raw_output,
+                validation_outcome.used_fallback,
+            );
 
-            let new_failure_count = if outcome.exit_code == Some(0) {
+            let new_failure_count = if validation.decision == "pass" {
                 0
-            } else {
+            } else if validation.decision == "fail_with_feedback" {
                 working_goal.consecutive_failure_count + 1
-            };
-            let new_no_progress = if judgement.made_progress || judgement.expected_outcome_met {
-                0
             } else {
+                working_goal.consecutive_failure_count
+            };
+            let new_no_progress = if validation.made_progress || validation.expected_outcome_met {
+                0
+            } else if validation.decision == "fail_with_feedback" {
                 working_goal.no_progress_rounds + 1
+            } else {
+                working_goal.no_progress_rounds
             };
             let merged_files = {
                 let mut files = working_goal.relevant_files.clone();
@@ -11744,23 +12952,19 @@ fn execute_automation_run_loop(
                 files
             };
 
-            let mut decision = judgement.decision.clone();
-            let mut reason = judgement.reason.clone();
-            // If judge says complete but expected outcome not met, force continue to keep iterating
-            if decision == "complete" && !judgement.expected_outcome_met {
-                decision = "continue".to_string();
-                reason = format!(
-                    "Expected outcome not yet met (judge marked complete=false), continuing iteration. Reason: {}",
-                    judgement.reason
-                );
-            }
+            let mut decision = match validation.decision.as_str() {
+                "pass" => "pass".to_string(),
+                "blocked" => "blocked".to_string(),
+                _ => "continue".to_string(),
+            };
+            let mut reason = validation.reason.clone();
             let pause_requested = automation_runs
                 .lock()
                 .ok()
                 .and_then(|runs| runs.iter().find(|item| item.id == run_id).map(|run| run.status == "paused"))
                 .unwrap_or(false);
             if decision == "continue" && pause_requested {
-                decision = "pause".to_string();
+                decision = "blocked".to_string();
                 reason = "批次已手动暂停，当前轮次结束后停止继续。".to_string();
             }
             if decision == "continue" && round_index >= working_goal.rule_config.max_rounds_per_goal {
@@ -11786,7 +12990,7 @@ fn execute_automation_run_loop(
                 };
                 if let Some(goal) = run.goals.iter_mut().find(|item| item.id == working_goal.id) {
                     let resolution_code = match decision.as_str() {
-                        "complete" => "objective_checks_passed".to_string(),
+                        "pass" => "objective_checks_passed".to_string(),
                         "fail" => {
                             if new_failure_count >= working_goal.rule_config.max_consecutive_failures {
                                 "max_failures_exceeded".to_string()
@@ -11798,19 +13002,16 @@ fn execute_automation_run_loop(
                                 "objective_checks_failed".to_string()
                             }
                         }
-                        "pause" => resolution_code_for_pause_reason(&reason),
+                        "blocked" => resolution_code_for_pause_reason(&reason),
                         _ => {
-                            if outcome.exit_code == Some(0) {
-                                "in_progress".to_string()
-                            } else {
-                                "runtime_error".to_string()
-                            }
+                            "validation_failed".to_string()
                         }
                     };
                     let attention_status = match decision.as_str() {
-                        "pause" => {
+                        "blocked" => {
                             if resolution_code == "manual_pause_requested"
-                                || resolution_code == "judge_requested_pause"
+                                || reason.to_ascii_lowercase().contains("human")
+                                || reason.to_ascii_lowercase().contains("manual")
                             {
                                 "waiting_human".to_string()
                             } else {
@@ -11821,23 +13022,24 @@ fn execute_automation_run_loop(
                     };
                     let lifecycle_status = match decision.as_str() {
                         "continue" => "running".to_string(),
-                        "pause" => "stopped".to_string(),
+                        "blocked" => "stopped".to_string(),
+                        "pass" => "finished".to_string(),
                         _ => "finished".to_string(),
                     };
                     let outcome_status = match decision.as_str() {
-                        "complete" => "success".to_string(),
+                        "pass" => "success".to_string(),
                         "fail" => "failed".to_string(),
-                        "pause" => {
-                            if judgement.expected_outcome_met && outcome.exit_code == Some(0) {
+                        "blocked" => {
+                            if validation.expected_outcome_met && outcome.exit_code == Some(0) {
                                 "partial".to_string()
                             } else {
                                 "unknown".to_string()
                             }
                         }
                         _ => {
-                            if judgement.expected_outcome_met {
+                            if validation.expected_outcome_met {
                                 "success".to_string()
-                            } else if judgement.made_progress {
+                            } else if validation.made_progress {
                                 "partial".to_string()
                             } else {
                                 "unknown".to_string()
@@ -11847,37 +13049,50 @@ fn execute_automation_run_loop(
                     goal.round_count = round_index;
                     goal.last_owner_cli = Some(outcome.owner_cli.clone());
                     goal.result_summary = Some(outcome.summary.clone());
-                    goal.latest_progress_summary = Some(judgement.progress_summary.clone());
-                    goal.next_instruction = judgement.next_instruction.clone();
+                    goal.latest_progress_summary = Some(validation.evidence_summary.clone());
+                    goal.next_instruction = if decision == "continue" {
+                        next_instruction_from_validation(
+                            goal.next_instruction.as_deref(),
+                            &validation_result,
+                            round_index,
+                        )
+                    } else {
+                        None
+                    };
                     goal.relevant_files = merged_files.clone();
                     goal.last_exit_code = outcome.exit_code;
                     goal.lifecycle_status = lifecycle_status;
                     goal.outcome_status = outcome_status;
                     goal.attention_status = attention_status;
                     goal.resolution_code = resolution_code;
-                    goal.status_summary = Some(format!(
-                        "{} {}",
-                        judgement.progress_summary.trim(),
-                        reason.trim()
-                    ).trim().to_string());
+                    let validation_detail = validation_detail_text(&validation_result);
+                    goal.status_summary = Some(if decision == "fail"
+                        && validation_result.reason.as_deref() != Some(reason.as_str())
+                    {
+                        format!("{}\n{}", validation_detail, reason)
+                    } else {
+                        validation_detail
+                    });
                     goal.objective_signals = AutomationObjectiveSignals {
                         exit_code: outcome.exit_code,
-                        checks_passed: outcome.exit_code == Some(0) && judgement.expected_outcome_met,
-                        checks_failed: outcome.exit_code.is_some() && outcome.exit_code != Some(0),
+                        checks_passed: validation.decision == "pass",
+                        checks_failed: validation.decision == "fail_with_feedback"
+                            || (outcome.exit_code.is_some() && outcome.exit_code != Some(0)),
                         artifacts_produced: !merged_files.is_empty(),
                         files_changed: merged_files.len(),
-                        policy_blocks: if rule_pause_reason.is_some() {
+                        policy_blocks: if decision == "blocked" {
                             vec![reason.clone()]
                         } else {
                             Vec::new()
                         },
                     };
                     goal.judge_assessment = AutomationJudgeAssessment {
-                        made_progress: judgement.made_progress,
-                        expected_outcome_met: judgement.expected_outcome_met,
-                        suggested_decision: Some(judgement.decision.clone()),
-                        reason: Some(judgement.reason.clone()),
+                        made_progress: validation.made_progress,
+                        expected_outcome_met: validation.expected_outcome_met,
+                        suggested_decision: Some(validation.decision.clone()),
+                        reason: Some(validation.reason.clone()),
                     };
+                    goal.validation_result = validation_result.clone();
                     goal.consecutive_failure_count = new_failure_count;
                     goal.no_progress_rounds = new_no_progress;
                     goal.updated_at = now_stamp();
@@ -11887,15 +13102,15 @@ fn execute_automation_run_loop(
                     } else {
                         Some(goal.updated_at.clone())
                     };
-                    goal.requires_attention_reason = if decision == "pause" {
+                    goal.requires_attention_reason = if decision == "blocked" {
                         Some(reason.clone())
                     } else {
                         None
                     };
                     goal.status = match decision.as_str() {
-                        "pause" => "paused".to_string(),
+                        "blocked" => "paused".to_string(),
                         "fail" => "failed".to_string(),
-                        "complete" => "completed".to_string(),
+                        "pass" => "completed".to_string(),
                         _ => "running".to_string(),
                     };
                     sync_goal_status_fields(goal);
@@ -11905,22 +13120,24 @@ fn execute_automation_run_loop(
                 run.updated_at = now_stamp();
                 run.objective_signals = working_goal.objective_signals.clone();
                 run.judge_assessment = working_goal.judge_assessment.clone();
+                run.validation_result = working_goal.validation_result.clone();
                 run.status_summary = working_goal.status_summary.clone();
+                run.summary = working_goal.status_summary.clone();
                 let event_level = if decision == "continue" {
                     "info"
-                } else if decision == "complete" {
+                } else if decision == "pass" {
                     "success"
-                } else if decision == "pause" {
+                } else if decision == "blocked" {
                     "warning"
                 } else {
                     "error"
                 };
                 let event_title = if decision == "continue" {
-                    format!("Round {} complete", round_index)
-                } else if decision == "complete" {
-                    "Goal completed".to_string()
-                } else if decision == "pause" {
-                    "Goal paused".to_string()
+                    format!("Round {} validation failed", round_index)
+                } else if decision == "pass" {
+                    "Goal accepted".to_string()
+                } else if decision == "blocked" {
+                    "Goal blocked".to_string()
                 } else {
                     "Goal failed".to_string()
                 };
@@ -11929,20 +13146,20 @@ fn execute_automation_run_loop(
                     Some(&working_goal.id),
                     event_level,
                     &event_title,
-                    &format!("{}\n{}", judgement.progress_summary, reason),
+                    &working_goal
+                        .status_summary
+                        .clone()
+                        .unwrap_or_else(|| reason.clone()),
                 );
                 let _ = persist_automation_runs_to_disk(&runs);
             }
 
 
             if decision == "continue" {
-                prior_progress = Some(judgement.progress_summary.clone());
-                next_instruction = judgement.next_instruction.clone();
+                prior_progress = Some(validation.evidence_summary.clone());
+                next_instruction = working_goal.next_instruction.clone();
                 current_owner = if working_goal.execution_mode == "auto" {
-                    normalize_automation_owner(
-                        judgement.next_owner_cli.as_deref(),
-                        &current_owner,
-                    )
+                    normalize_automation_owner(Some(outcome.owner_cli.as_str()), &current_owner)
                 } else {
                     working_goal.execution_mode.clone()
                 };
@@ -11950,21 +13167,24 @@ fn execute_automation_run_loop(
                 continue;
             }
 
-            final_title = if decision == "complete" {
-                "Goal completed".to_string()
-            } else if decision == "pause" {
-                "Goal paused".to_string()
+            final_title = if decision == "pass" {
+                "Goal accepted".to_string()
+            } else if decision == "blocked" {
+                "Goal blocked".to_string()
             } else {
                 "Goal failed".to_string()
             };
-            final_level = if decision == "complete" {
+            final_level = if decision == "pass" {
                 "success".to_string()
-            } else if decision == "pause" {
+            } else if decision == "blocked" {
                 "warning".to_string()
             } else {
                 "error".to_string()
             };
-            final_detail = format!("{}\n{}", judgement.progress_summary, reason);
+            final_detail = working_goal
+                .status_summary
+                .clone()
+                .unwrap_or_else(|| validation_detail_text(&validation_result));
             break;
         }
 
@@ -13766,6 +14986,7 @@ pub fn run() {
                 scheduler_claude_approval_rules.clone(),
                 scheduler_claude_pending_approvals.clone(),
                 scheduler_codex_pending_approvals.clone(),
+                scheduler_jobs.clone(),
                 scheduler_runs.clone(),
                 scheduler_active.clone(),
             );
@@ -13827,6 +15048,7 @@ pub fn run() {
             resume_automation_goal,
             cancel_automation_run,
             delete_automation_run,
+            save_text_to_downloads,
             switch_cli_for_task,
             send_chat_message,
             run_auto_orchestration,
@@ -13839,6 +15061,7 @@ pub fn run() {
             search_workspace_files,
             get_settings,
             update_settings,
+            send_test_email_notification,
             execute_acp_command,
             get_acp_commands,
             get_acp_session,

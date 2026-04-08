@@ -36,6 +36,7 @@ import {
   CreateAutomationRunFromJobRequest,
   CreateAutomationRunRequest,
   AppSettings,
+  NotificationConfig,
   EnrichedHandoff,
   ChatPromptRequest,
   FileMentionCandidate,
@@ -320,6 +321,32 @@ function defaultSettings(): AppSettings {
   };
 }
 
+function normalizeNotificationConfig(value: unknown, fallback = defaultSettings().notificationConfig) {
+  if (!value || typeof value !== "object") return fallback;
+  const raw = value as Partial<AppSettings["notificationConfig"]>;
+  const smtpPort =
+    typeof raw.smtpPort === "number" && Number.isFinite(raw.smtpPort) && raw.smtpPort > 0
+      ? Math.round(raw.smtpPort)
+      : fallback.smtpPort;
+  const emailRecipients = Array.isArray(raw.emailRecipients)
+    ? raw.emailRecipients
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter(Boolean)
+    : fallback.emailRecipients;
+  return {
+    notifyOnCompletion: raw.notifyOnCompletion === true,
+    webhookUrl: typeof raw.webhookUrl === "string" ? raw.webhookUrl : fallback.webhookUrl,
+    webhookEnabled: raw.webhookEnabled === true,
+    smtpEnabled: raw.smtpEnabled === true,
+    smtpHost: typeof raw.smtpHost === "string" ? raw.smtpHost : fallback.smtpHost,
+    smtpPort,
+    smtpUsername: typeof raw.smtpUsername === "string" ? raw.smtpUsername : fallback.smtpUsername,
+    smtpPassword: typeof raw.smtpPassword === "string" ? raw.smtpPassword : fallback.smtpPassword,
+    smtpFrom: typeof raw.smtpFrom === "string" ? raw.smtpFrom : fallback.smtpFrom,
+    emailRecipients,
+  };
+}
+
 function normalizeSettings(value: unknown): AppSettings {
   const defaults = defaultSettings();
   if (!value || typeof value !== "object") return defaults;
@@ -341,7 +368,7 @@ function normalizeSettings(value: unknown): AppSettings {
     maxOutputCharsPerTurn: parsePositiveNumber(raw.maxOutputCharsPerTurn, defaults.maxOutputCharsPerTurn),
     processTimeoutMs: parsePositiveNumber(raw.processTimeoutMs, defaults.processTimeoutMs),
     notifyOnTerminalCompletion: raw.notifyOnTerminalCompletion === true,
-    notificationConfig: raw.notificationConfig ?? defaults.notificationConfig,
+    notificationConfig: normalizeNotificationConfig(raw.notificationConfig, defaults.notificationConfig),
   };
 }
 
@@ -382,6 +409,16 @@ function loadStoredAutomationRuns(): AutomationRun[] {
         suggestedDecision: null,
         reason: null,
       },
+      validationResult: run.validationResult ?? {
+        decision: null,
+        reason: null,
+        feedback: null,
+        evidenceSummary: null,
+        missingChecks: [],
+        verificationSteps: [],
+        madeProgress: false,
+        expectedOutcomeMet: false,
+      },
       status: (run.status as AutomationRunStatus | undefined) ?? "draft",
       scheduledStartAt: run.scheduledStartAt ?? null,
       startedAt: run.startedAt ?? null,
@@ -414,6 +451,16 @@ function loadStoredAutomationRuns(): AutomationRun[] {
           expectedOutcomeMet: false,
           suggestedDecision: null,
           reason: null,
+        },
+        validationResult: goal.validationResult ?? {
+          decision: null,
+          reason: null,
+          feedback: null,
+          evidenceSummary: null,
+          missingChecks: [],
+          verificationSteps: [],
+          madeProgress: false,
+          expectedOutcomeMet: false,
         },
         status: (goal.status as AutomationGoalStatus | undefined) ?? "queued",
         position: goal.position ?? index,
@@ -487,6 +534,7 @@ function loadStoredAutomationJobs(): AutomationJob[] {
       parameterDefinitions: normalizeAutomationParameterDefinitions(job.parameterDefinitions),
       defaultParameterValues: normalizeAutomationParameterValues(job.defaultParameterValues),
       cronExpression: job.cronExpression ?? null,
+      emailNotificationEnabled: job.emailNotificationEnabled === true,
       lastTriggeredAt: job.lastTriggeredAt ?? null,
       enabled: job.enabled !== false,
       createdAt: job.createdAt ?? nowISO(),
@@ -634,6 +682,16 @@ function createAutomationGoal(runId: string, draft: AutomationGoalDraft, positio
     statusSummary: "Waiting to start.",
     objectiveSignals: { exitCode: null, checksPassed: false, checksFailed: false, artifactsProduced: false, filesChanged: 0, policyBlocks: [] },
     judgeAssessment: { madeProgress: false, expectedOutcomeMet: false, suggestedDecision: null, reason: null },
+    validationResult: {
+      decision: null,
+      reason: null,
+      feedback: null,
+      evidenceSummary: null,
+      missingChecks: [],
+      verificationSteps: [],
+      madeProgress: false,
+      expectedOutcomeMet: false,
+    },
     status: "queued",
     position,
     roundCount: 0,
@@ -673,8 +731,8 @@ function normalizeAutomationGoalRuleConfig(config: AutomationGoalRuleConfig): Au
 function summarizeBrowserRun(run: AutomationRun) {
   const completed = run.goals.filter((goal) => goal.status === "completed").length;
   const failed = run.goals.filter((goal) => goal.status === "failed").length;
-  const paused = run.goals.filter((goal) => goal.status === "paused").length;
-  return `${completed}/${run.goals.length} completed • ${failed} failed • ${paused} paused`;
+  const blocked = run.goals.filter((goal) => goal.status === "paused").length;
+  return `${completed}/${run.goals.length} completed • ${failed} failed • ${blocked} blocked`;
 }
 
 function inferBrowserGoalStatus(goal: AutomationGoal): AutomationGoalStatus {
@@ -690,6 +748,22 @@ function getPrimaryGoal(run: AutomationRun): AutomationGoal | null {
 
 function toAutomationRunRecord(run: AutomationRun): AutomationRunRecord {
   const goal = getPrimaryGoal(run);
+  const displayStatus =
+    run.lifecycleStatus === "validating"
+      ? "validating"
+      : run.attentionStatus && run.attentionStatus !== "none"
+        ? "blocked"
+        : run.lifecycleStatus === "queued"
+          ? "scheduled"
+          : run.lifecycleStatus === "finished" && run.outcomeStatus === "success"
+            ? "completed"
+            : run.lifecycleStatus === "finished" && run.outcomeStatus === "failed"
+              ? "failed"
+              : run.lifecycleStatus === "stopped" && run.attentionStatus === "none"
+                ? "cancelled"
+                : run.lifecycleStatus === "running"
+                  ? "running"
+                  : "unknown";
   return {
     id: run.id,
     jobId: run.jobId ?? null,
@@ -702,20 +776,7 @@ function toAutomationRunRecord(run: AutomationRun): AutomationRunRecord {
     triggerSource: run.triggerSource ?? "manual",
     runNumber: run.runNumber ?? null,
     status: run.status,
-    displayStatus:
-      run.attentionStatus === "waiting_human"
-        ? "waiting_human"
-        : run.attentionStatus === "blocked_by_policy"
-          ? "blocked_by_policy"
-          : run.attentionStatus === "blocked_by_environment"
-            ? "blocked_by_environment"
-            : run.outcomeStatus === "success"
-              ? "success"
-              : run.outcomeStatus === "failed"
-                ? "failed"
-                : run.outcomeStatus === "partial"
-                  ? "partial"
-                  : run.lifecycleStatus ?? "unknown",
+    displayStatus,
     lifecycleStatus: run.lifecycleStatus ?? "queued",
     outcomeStatus: run.outcomeStatus ?? "unknown",
     attentionStatus: run.attentionStatus ?? "none",
@@ -737,6 +798,16 @@ function toAutomationRunRecord(run: AutomationRun): AutomationRunRecord {
       suggestedDecision: null,
       reason: null,
     },
+    validationResult: run.validationResult ?? {
+      decision: null,
+      reason: null,
+      feedback: null,
+      evidenceSummary: null,
+      missingChecks: [],
+      verificationSteps: [],
+      madeProgress: false,
+      expectedOutcomeMet: false,
+    },
     relevantFiles: goal?.relevantFiles ?? [],
     lastExitCode: goal?.lastExitCode ?? null,
     terminalTabId: goal?.syntheticTerminalTabId ?? null,
@@ -755,7 +826,8 @@ function toAutomationRunDetail(run: AutomationRun): AutomationRunDetail {
   const job = run.jobId ? automationJobs.find((item) => item.id === run.jobId) ?? null : null;
   const messageContent = [
     runRecord.summary ? `Summary: ${runRecord.summary}` : null,
-    goal?.latestProgressSummary ? `Progress: ${goal.latestProgressSummary}` : null,
+    runRecord.validationResult?.reason ? `Validation: ${runRecord.validationResult.reason}` : null,
+    runRecord.validationResult?.feedback ? `Feedback: ${runRecord.validationResult.feedback}` : null,
     goal?.requiresAttentionReason ? `Attention: ${goal.requiresAttentionReason}` : null,
   ].filter(Boolean).join("\n");
 
@@ -1174,6 +1246,29 @@ export const browserRuntime = {
     return structuredClone(settings);
   },
 
+  async sendTestEmailNotification(config: NotificationConfig) {
+    const normalized = normalizeNotificationConfig(config);
+    if (!normalized.smtpEnabled) {
+      throw new Error("SMTP is disabled.");
+    }
+    if (!normalized.smtpHost.trim()) {
+      throw new Error("SMTP host is required.");
+    }
+    if (!normalized.smtpUsername.trim()) {
+      throw new Error("SMTP username is required.");
+    }
+    if (!normalized.smtpPassword.trim()) {
+      throw new Error("SMTP password is required.");
+    }
+    if (!normalized.smtpFrom.trim()) {
+      throw new Error("Sender email is required.");
+    }
+    if (normalized.emailRecipients.length === 0) {
+      throw new Error("At least one recipient is required.");
+    }
+    return `Browser fallback simulated a test email to ${normalized.emailRecipients.join(", ")}.`;
+  },
+
   async loadTerminalState() {
     return structuredClone(loadStoredTerminalState());
   },
@@ -1222,6 +1317,7 @@ export const browserRuntime = {
       parameterDefinitions: normalizeAutomationParameterDefinitions(job.parameterDefinitions),
       defaultParameterValues: normalizeAutomationParameterValues(job.defaultParameterValues),
       cronExpression: job.cronExpression?.trim() || null,
+      emailNotificationEnabled: job.emailNotificationEnabled === true,
       lastTriggeredAt: null,
       enabled: job.enabled !== false,
       createdAt: nowISO(),
@@ -1245,6 +1341,7 @@ export const browserRuntime = {
       parameterDefinitions: normalizeAutomationParameterDefinitions(job.parameterDefinitions),
       defaultParameterValues: normalizeAutomationParameterValues(job.defaultParameterValues),
       cronExpression: job.cronExpression?.trim() || null,
+      emailNotificationEnabled: job.emailNotificationEnabled === true,
       enabled: job.enabled !== false,
       updatedAt: nowISO(),
     };
@@ -1307,6 +1404,16 @@ export const browserRuntime = {
       statusSummary: status === "scheduled" ? "Scheduled and waiting to start." : "Saved as draft.",
       objectiveSignals: { exitCode: null, checksPassed: false, checksFailed: false, artifactsProduced: false, filesChanged: 0, policyBlocks: [] },
       judgeAssessment: { madeProgress: false, expectedOutcomeMet: false, suggestedDecision: null, reason: null },
+      validationResult: {
+        decision: null,
+        reason: null,
+        feedback: null,
+        evidenceSummary: null,
+        missingChecks: [],
+        verificationSteps: [],
+        madeProgress: false,
+        expectedOutcomeMet: false,
+      },
       status,
       scheduledStartAt: request.scheduledStartAt ?? null,
       startedAt: null,
@@ -1371,6 +1478,16 @@ export const browserRuntime = {
       statusSummary: request.scheduledStartAt ? "Scheduled and waiting to start." : "Queued to start immediately.",
       objectiveSignals: { exitCode: null, checksPassed: false, checksFailed: false, artifactsProduced: false, filesChanged: 0, policyBlocks: [] },
       judgeAssessment: { madeProgress: false, expectedOutcomeMet: false, suggestedDecision: null, reason: null },
+      validationResult: {
+        decision: null,
+        reason: null,
+        feedback: null,
+        evidenceSummary: null,
+        missingChecks: [],
+        verificationSteps: [],
+        madeProgress: false,
+        expectedOutcomeMet: false,
+      },
       status: "scheduled",
       scheduledStartAt: request.scheduledStartAt ?? nowISO(),
       startedAt: null,
@@ -1445,6 +1562,11 @@ export const browserRuntime = {
     const run = automationRuns.find((item) => item.id === runId);
     if (!run) throw new Error("Automation run not found.");
     run.status = "scheduled";
+    run.lifecycleStatus = "queued";
+    run.outcomeStatus = "unknown";
+    run.attentionStatus = "none";
+    run.resolutionCode = "scheduled";
+    run.statusSummary = "Reset and queued again.";
     run.scheduledStartAt = nowISO();
     run.startedAt = null;
     run.completedAt = null;
@@ -1452,6 +1574,11 @@ export const browserRuntime = {
     run.updatedAt = nowISO();
     run.goals = run.goals.map((goal) => ({
       ...goal,
+      lifecycleStatus: "queued",
+      outcomeStatus: "unknown",
+      attentionStatus: "none",
+      resolutionCode: "scheduled",
+      statusSummary: "Reset and queued again.",
       status: "queued",
       roundCount: 0,
       consecutiveFailureCount: 0,
@@ -1524,6 +1651,18 @@ export const browserRuntime = {
     }
     automationRuns = automationRuns.filter((item) => item.id !== runId);
     persistAutomationRuns();
+  },
+  async saveTextToDownloads(fileName: string, content: string) {
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+    return `browser-download:${fileName}`;
   },
 
   async sendChatMessage(request: ChatPromptRequest) {

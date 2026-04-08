@@ -30,6 +30,13 @@ const TEXTAREA_CLASS = `${INPUT_CLASS} min-h-[140px] resize-none py-3 leading-re
 
 type WorkspaceOption = { id: string; name: string; rootPath: string };
 
+function deriveWorkspaceName(rootPath: string) {
+  const trimmed = rootPath.trim().replace(/[\\/]+$/, "");
+  if (!trimmed) return "Workspace";
+  const parts = trimmed.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? trimmed;
+}
+
 function defaultRuleConfig(defaults?: AutomationRuleProfile | null): AutomationGoalRuleConfig {
   return {
     allowAutoSelectStrategy: defaults?.allowAutoSelectStrategy ?? true,
@@ -60,6 +67,7 @@ function buildEmptyDraft(defaults?: AutomationRuleProfile | null, workspace?: Wo
     parameterDefinitions: [],
     defaultParameterValues: {},
     cronExpression: "",
+    emailNotificationEnabled: false,
     enabled: true,
   };
 }
@@ -211,6 +219,7 @@ export function AutomationJobEditorPage() {
   const navigate = useNavigate();
   const workspaces = useStore((state) => state.workspaces);
   const appState = useStore((state) => state.appState);
+  const appSettings = useStore((state) => state.settings);
 
   const workspaceOptions = useMemo<WorkspaceOption[]>(() => {
     if (workspaces.length > 0) return workspaces;
@@ -223,6 +232,23 @@ export function AutomationJobEditorPage() {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [launchScheduledAt, setLaunchScheduledAt] = useState("");
+
+  const availableWorkspaceOptions = useMemo<WorkspaceOption[]>(() => {
+    const items = [...workspaceOptions];
+    const hasCurrentSelection = items.some(
+      (workspace) =>
+        workspace.id === draft.workspaceId ||
+        workspace.rootPath === draft.projectRoot
+    );
+    if (!hasCurrentSelection && draft.projectRoot.trim()) {
+      items.push({
+        id: draft.workspaceId || draft.projectRoot,
+        name: draft.projectName || deriveWorkspaceName(draft.projectRoot),
+        rootPath: draft.projectRoot,
+      });
+    }
+    return items;
+  }, [draft.projectName, draft.projectRoot, draft.workspaceId, workspaceOptions]);
 
   useEffect(() => {
     if (!draft.workspaceId && workspaceOptions[0]) {
@@ -269,6 +295,7 @@ export function AutomationJobEditorPage() {
           parameterDefinitions: [],
           defaultParameterValues: {},
           cronExpression: job.cronExpression ?? "",
+          emailNotificationEnabled: job.emailNotificationEnabled,
           enabled: job.enabled,
         });
       } catch (nextError) {
@@ -299,12 +326,25 @@ export function AutomationJobEditorPage() {
   }
 
   function updateWorkspace(workspaceId: string) {
-    const workspace = workspaceOptions.find((item) => item.id === workspaceId);
+    const workspace = availableWorkspaceOptions.find((item) => item.id === workspaceId);
     setDraft((current) => ({
       ...current,
       workspaceId,
       projectRoot: workspace?.rootPath ?? current.projectRoot,
       projectName: workspace?.name ?? current.projectName,
+    }));
+  }
+
+  async function handlePickWorkspaceFolder() {
+    const picked = await bridge.pickWorkspaceFolder();
+    if (!picked) return;
+    const rootPath = picked.rootPath.trim();
+    if (!rootPath) return;
+    setDraft((current) => ({
+      ...current,
+      workspaceId: rootPath,
+      projectRoot: rootPath,
+      projectName: picked.name?.trim() || deriveWorkspaceName(rootPath),
     }));
   }
 
@@ -318,13 +358,14 @@ export function AutomationJobEditorPage() {
       parameterDefinitions: [],
       defaultParameterValues: {},
       cronExpression: draft.cronExpression?.trim() ?? "",
+      emailNotificationEnabled: draft.emailNotificationEnabled,
     };
   }
 
   async function ensureSavedJob(): Promise<string> {
     const payload = buildPayload();
-    if (!payload.workspaceId || !payload.goal || !payload.expectedOutcome) {
-      throw new Error("请先填写工作区、任务目标和期望结果。");
+    if (!payload.workspaceId || !payload.projectRoot || !payload.goal || !payload.expectedOutcome) {
+      throw new Error("请先选择目标目录，并填写任务目标和期望结果。");
     }
 
     if (jobId) {
@@ -370,6 +411,7 @@ export function AutomationJobEditorPage() {
   }
 
   const cronEnabled = Boolean(draft.cronExpression?.trim());
+  const smtpEnabled = appSettings?.notificationConfig.smtpEnabled === true;
 
   return (
     <div className="min-h-full bg-slate-50/50 px-4 py-8 text-slate-900 sm:px-6 lg:px-8">
@@ -472,23 +514,47 @@ export function AutomationJobEditorPage() {
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-bold tracking-tight text-slate-700">目标工作区 <span className="text-rose-500">*</span></label>
-                    <div className="relative">
-                      <select 
-                        value={draft.workspaceId} 
-                        onChange={(event) => updateWorkspace(event.target.value)} 
-                        className={cn(INPUT_CLASS, "appearance-none pr-10")}
-                      >
-                        {workspaceOptions.map((workspace) => (
-                          <option key={workspace.id} value={workspace.id}>
-                            {workspace.name}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 text-slate-400">
-                        <svg viewBox="0 0 20 20" fill="none" className="h-5 w-5 stroke-current stroke-[1.5]">
-                          <path d="M5 7.5L10 12.5L15 7.5" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
+                    <div className="space-y-3">
+                      <div className="flex flex-col gap-3 sm:flex-row">
+                        <div className="relative flex-1">
+                          <select
+                            value={draft.workspaceId}
+                            onChange={(event) => updateWorkspace(event.target.value)}
+                            className={cn(INPUT_CLASS, "appearance-none pr-10")}
+                          >
+                            {availableWorkspaceOptions.map((workspace) => {
+                              const isAttachedWorkspace = workspaceOptions.some((item) => item.id === workspace.id);
+                              return (
+                                <option key={workspace.id} value={workspace.id}>
+                                  {isAttachedWorkspace ? workspace.name : `自定义目录 · ${workspace.name}`}
+                                </option>
+                              );
+                            })}
+                          </select>
+                          <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 text-slate-400">
+                            <svg viewBox="0 0 20 20" fill="none" className="h-5 w-5 stroke-current stroke-[1.5]">
+                              <path d="M5 7.5L10 12.5L15 7.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void withBusy("pick-workspace", handlePickWorkspaceFolder)}
+                          disabled={busyKey === "pick-workspace"}
+                          className="inline-flex h-[42px] shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50 active:scale-95"
+                        >
+                          选择文件夹
+                        </button>
                       </div>
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">当前目录</div>
+                        <div className="mt-1 break-all font-mono text-xs text-slate-700">
+                          {draft.projectRoot || "尚未选择目录"}
+                        </div>
+                      </div>
+                      <p className="text-xs leading-relaxed text-slate-500">
+                        可以直接复用当前已打开的工作区，也可以点击“选择文件夹”为自动化任务指定任意本地目录。
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -626,6 +692,37 @@ export function AutomationJobEditorPage() {
                       onChange={(next) => setDraft((current) => ({ ...current, ruleConfig: { ...current.ruleConfig, maxNoProgressRounds: next } }))}
                     />
                   </div>
+                </div>
+              </div>
+            </SectionCard>
+
+            <SectionCard title="通知" hint="控制任务结束后是否发送邮件通知。SMTP 与收件人来自 Settings 全局配置。">
+              <div className="space-y-6">
+                <ToggleField
+                  checked={draft.emailNotificationEnabled}
+                  label="完成后发送邮件通知"
+                  hint={
+                    smtpEnabled
+                      ? "任务结束后会发送一封邮件，包含最终状态、摘要和最近一次验收结果。"
+                      : "当前全局 SMTP 未启用。你仍可先开启这个开关，邮件会在 Settings 配置完成后才会实际发送。"
+                  }
+                  onChange={(checked) =>
+                    setDraft((current) => ({
+                      ...current,
+                      emailNotificationEnabled: checked,
+                    }))
+                  }
+                />
+
+                <div className={cn(
+                  "rounded-2xl border px-4 py-3 text-sm",
+                  smtpEnabled
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    : "border-amber-200 bg-amber-50 text-amber-800"
+                )}>
+                  {smtpEnabled
+                    ? "全局 SMTP 已启用，任务开启后会使用 Settings 中配置的默认收件人发送邮件。"
+                    : "全局 SMTP 尚未启用。请先到 Settings 完成 SMTP 和默认收件人配置。"}
                 </div>
               </div>
             </SectionCard>

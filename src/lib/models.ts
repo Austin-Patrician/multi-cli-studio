@@ -257,7 +257,7 @@ export type AutomationGoalStatus =
 export type AutomationEventLevel = "info" | "success" | "warning" | "error";
 export type AutomationExecutionMode = TerminalCliId;
 export type AutomationPermissionProfile = "standard" | "full-access" | "read-only";
-export type AutomationLifecycleStatus = "queued" | "running" | "stopped" | "finished";
+export type AutomationLifecycleStatus = "queued" | "running" | "validating" | "stopped" | "finished";
 export type AutomationOutcomeStatus = "unknown" | "success" | "failed" | "partial";
 export type AutomationAttentionStatus = "none" | "waiting_human" | "blocked_by_policy" | "blocked_by_environment";
 
@@ -293,6 +293,7 @@ export interface AutomationGoal {
   statusSummary?: string | null;
   objectiveSignals?: AutomationObjectiveSignals | null;
   judgeAssessment?: AutomationJudgeAssessment | null;
+  validationResult?: AutomationValidationResult | null;
   status: AutomationGoalStatus;
   position: number;
   roundCount: number;
@@ -331,6 +332,7 @@ export interface AutomationRun {
   statusSummary?: string | null;
   objectiveSignals?: AutomationObjectiveSignals | null;
   judgeAssessment?: AutomationJudgeAssessment | null;
+  validationResult?: AutomationValidationResult | null;
   status: AutomationRunStatus;
   scheduledStartAt?: string | null;
   startedAt?: string | null;
@@ -398,6 +400,7 @@ export interface AutomationJobDraft {
   parameterDefinitions: AutomationParameterDefinition[];
   defaultParameterValues: Record<string, AutomationParameterValue>;
   cronExpression?: string | null;
+  emailNotificationEnabled: boolean;
   enabled: boolean;
 }
 
@@ -437,6 +440,7 @@ export interface AutomationRunRecord {
   requiresAttentionReason?: string | null;
   objectiveSignals: AutomationObjectiveSignals;
   judgeAssessment: AutomationJudgeAssessment;
+  validationResult: AutomationValidationResult;
   relevantFiles: string[];
   lastExitCode?: number | null;
   terminalTabId?: string | null;
@@ -525,6 +529,17 @@ export interface AutomationJudgeAssessment {
   expectedOutcomeMet: boolean;
   suggestedDecision?: string | null;
   reason?: string | null;
+}
+
+export interface AutomationValidationResult {
+  decision?: "pass" | "fail_with_feedback" | "blocked" | null;
+  reason?: string | null;
+  feedback?: string | null;
+  evidenceSummary?: string | null;
+  missingChecks?: string[];
+  verificationSteps?: string[];
+  madeProgress: boolean;
+  expectedOutcomeMet: boolean;
 }
 
 // ── New chat types ──────────────────────────────────────────────────────

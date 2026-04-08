@@ -79,6 +79,8 @@ pub struct AutomationJobDraft {
     pub default_parameter_values: BTreeMap<String, Value>,
     #[serde(default)]
     pub cron_expression: Option<String>,
+    #[serde(default)]
+    pub email_notification_enabled: bool,
     #[serde(default = "default_job_enabled")]
     pub enabled: bool,
 }
@@ -109,6 +111,8 @@ pub struct AutomationJob {
     pub cron_expression: Option<String>,
     #[serde(default)]
     pub last_triggered_at: Option<String>,
+    #[serde(default)]
+    pub email_notification_enabled: bool,
     #[serde(default = "default_job_enabled")]
     pub enabled: bool,
     pub created_at: String,
@@ -161,6 +165,8 @@ pub struct AutomationRun {
     pub objective_signals: AutomationObjectiveSignals,
     #[serde(default)]
     pub judge_assessment: AutomationJudgeAssessment,
+    #[serde(default)]
+    pub validation_result: AutomationValidationResult,
     pub status: String,
     pub scheduled_start_at: Option<String>,
     pub started_at: Option<String>,
@@ -198,6 +204,8 @@ pub struct AutomationGoal {
     pub objective_signals: AutomationObjectiveSignals,
     #[serde(default)]
     pub judge_assessment: AutomationJudgeAssessment,
+    #[serde(default)]
+    pub validation_result: AutomationValidationResult,
     pub status: String,
     pub position: usize,
     #[serde(default)]
@@ -294,6 +302,27 @@ pub struct AutomationJudgeAssessment {
     pub suggested_decision: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationValidationResult {
+    #[serde(default)]
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub feedback: Option<String>,
+    #[serde(default)]
+    pub evidence_summary: Option<String>,
+    #[serde(default)]
+    pub missing_checks: Vec<String>,
+    #[serde(default)]
+    pub verification_steps: Vec<String>,
+    #[serde(default)]
+    pub made_progress: bool,
+    #[serde(default)]
+    pub expected_outcome_met: bool,
 }
 
 pub fn load_jobs() -> Result<Vec<AutomationJob>, String> {
@@ -483,9 +512,18 @@ pub fn sync_run_status_fields(run: &mut AutomationRun) {
 pub fn normalize_runs_on_startup(runs: &mut [AutomationRun]) {
     let now = now_rfc3339();
     for run in runs {
-        if run.status == "running" {
+        if run.status == "running"
+            || matches!(normalize_lifecycle_status(&run.lifecycle_status).as_str(), "running" | "validating")
+        {
             run.status = "scheduled".to_string();
+            run.lifecycle_status = "queued".to_string();
+            run.outcome_status = "unknown".to_string();
+            run.attention_status = "none".to_string();
+            run.resolution_code = "scheduled".to_string();
+            run.status_summary = Some("Re-queued after app restart.".to_string());
             if run.scheduled_start_at.is_none() {
+                run.scheduled_start_at = Some(now.clone());
+            } else {
                 run.scheduled_start_at = Some(now.clone());
             }
             run.updated_at = now.clone();
@@ -500,8 +538,16 @@ pub fn normalize_runs_on_startup(runs: &mut [AutomationRun]) {
 
         for goal in &mut run.goals {
             goal.execution_mode = normalize_execution_mode(&goal.execution_mode);
-            if goal.status == "running" {
+            if goal.status == "running"
+                || matches!(normalize_lifecycle_status(&goal.lifecycle_status).as_str(), "running" | "validating")
+            {
                 goal.status = "queued".to_string();
+                goal.lifecycle_status = "queued".to_string();
+                goal.outcome_status = "unknown".to_string();
+                goal.attention_status = "none".to_string();
+                goal.resolution_code = "scheduled".to_string();
+                goal.status_summary = Some("Re-queued after app restart.".to_string());
+                goal.requires_attention_reason = None;
                 goal.updated_at = now.clone();
             }
             if goal.lifecycle_status == DEFAULT_LIFECYCLE_STATUS
@@ -587,6 +633,7 @@ pub fn build_job_from_draft(draft: AutomationJobDraft) -> Result<AutomationJob, 
             .collect(),
         default_parameter_values: normalize_parameter_values(draft.default_parameter_values),
         cron_expression: normalize_cron_expression(draft.cron_expression)?,
+        email_notification_enabled: draft.email_notification_enabled,
         last_triggered_at: None,
         enabled: draft.enabled,
         created_at: now.clone(),
@@ -616,6 +663,7 @@ pub fn update_job_from_draft(existing: &AutomationJob, draft: AutomationJobDraft
             .collect(),
         default_parameter_values: normalize_parameter_values(draft.default_parameter_values),
         cron_expression: normalized_cron,
+        email_notification_enabled: draft.email_notification_enabled,
         last_triggered_at: if reset_last_trigger {
             None
         } else {
@@ -666,6 +714,7 @@ pub fn build_run_from_job(
         status_summary: Some("Waiting to start.".to_string()),
         objective_signals: AutomationObjectiveSignals::default(),
         judge_assessment: AutomationJudgeAssessment::default(),
+        validation_result: AutomationValidationResult::default(),
         status: "queued".to_string(),
         position: 0,
         round_count: 0,
@@ -716,6 +765,7 @@ pub fn build_run_from_job(
         }),
         objective_signals: AutomationObjectiveSignals::default(),
         judge_assessment: AutomationJudgeAssessment::default(),
+        validation_result: AutomationValidationResult::default(),
         status: "scheduled".to_string(),
         scheduled_start_at,
         started_at: None,
@@ -776,6 +826,7 @@ pub fn build_run_from_request(request: CreateAutomationRunRequest) -> Automation
             status_summary: Some("Waiting to start.".to_string()),
             objective_signals: AutomationObjectiveSignals::default(),
             judge_assessment: AutomationJudgeAssessment::default(),
+            validation_result: AutomationValidationResult::default(),
             status: "queued".to_string(),
             position: index,
             round_count: 0,
@@ -832,6 +883,7 @@ pub fn build_run_from_request(request: CreateAutomationRunRequest) -> Automation
         }),
         objective_signals: AutomationObjectiveSignals::default(),
         judge_assessment: AutomationJudgeAssessment::default(),
+        validation_result: AutomationValidationResult::default(),
         status: status.to_string(),
         scheduled_start_at,
         started_at: None,
@@ -904,6 +956,7 @@ pub fn normalize_permission_profile(value: &str) -> String {
 pub fn normalize_lifecycle_status(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "running" => "running".to_string(),
+        "validating" => "validating".to_string(),
         "stopped" => "stopped".to_string(),
         "finished" => "finished".to_string(),
         _ => "queued".to_string(),
@@ -942,6 +995,7 @@ pub fn derive_legacy_goal_status(
 ) -> String {
     match normalize_lifecycle_status(lifecycle_status).as_str() {
         "queued" => "queued".to_string(),
+        "validating" => "running".to_string(),
         "running" => "running".to_string(),
         "finished" => match normalize_outcome_status(outcome_status).as_str() {
             "success" => "completed".to_string(),
@@ -971,6 +1025,7 @@ pub fn derive_legacy_run_status(
 ) -> String {
     match normalize_lifecycle_status(lifecycle_status).as_str() {
         "queued" => "scheduled".to_string(),
+        "validating" => "running".to_string(),
         "running" => "running".to_string(),
         "finished" => match normalize_outcome_status(outcome_status).as_str() {
             "success" => "completed".to_string(),
@@ -1002,14 +1057,16 @@ pub fn display_status_from_dimensions(
     let outcome = normalize_outcome_status(outcome_status);
     let attention = normalize_attention_status(attention_status);
     match (lifecycle.as_str(), outcome.as_str(), attention.as_str()) {
+        ("validating", _, _) => "validating".to_string(),
         ("running", _, _) => "running".to_string(),
         ("queued", _, _) => "scheduled".to_string(),
-        ("finished", "success", _) => "success".to_string(),
+        ("finished", "success", _) => "completed".to_string(),
         ("finished", "failed", _) => "failed".to_string(),
-        (_, _, "waiting_human") => "waiting_human".to_string(),
-        (_, _, "blocked_by_policy") => "blocked_by_policy".to_string(),
-        (_, _, "blocked_by_environment") => "blocked_by_environment".to_string(),
-        ("finished", "partial", _) => "partial".to_string(),
+        (_, _, "waiting_human") => "blocked".to_string(),
+        (_, _, "blocked_by_policy") => "blocked".to_string(),
+        (_, _, "blocked_by_environment") => "blocked".to_string(),
+        ("stopped", _, "none") => "cancelled".to_string(),
+        ("finished", "partial", _) => "failed".to_string(),
         _ => "unknown".to_string(),
     }
 }

@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { AutomationRunDetail, ChatMessage } from "../lib/models";
 import { cn, formatStamp, parameterValueText, statusText, statusTone } from "./automationUi";
 
@@ -24,22 +25,45 @@ function messageText(message: ChatMessage) {
   return (message.rawContent ?? message.content ?? "").trim();
 }
 
-export function AutomationRunConversationSection({
-  messages,
-  title = "执行日志",
-  emptyText = "当前没有可展示的日志输出。",
-}: {
-  messages: ChatMessage[];
-  title?: string;
-  emptyText?: string;
-}) {
-  const lines = messages
+function orderedMessages(messages: ChatMessage[]) {
+  return messages
+    .map((message, index) => ({ message, index }))
+    .sort((left, right) => {
+      const leftTs = Date.parse(left.message.timestamp);
+      const rightTs = Date.parse(right.message.timestamp);
+      if (Number.isFinite(leftTs) && Number.isFinite(rightTs) && leftTs !== rightTs) {
+        return leftTs - rightTs;
+      }
+      return left.index - right.index;
+    })
+    .map(({ message }) => message);
+}
+
+export function buildAutomationConversationLog(messages: ChatMessage[]) {
+  return orderedMessages(messages)
     .map((message) => {
       const text = messageText(message);
       if (!text) return null;
       return [`[${formatStamp(message.timestamp)}] ${roleLabel(message)}`, text].join("\n");
     })
-    .filter((value): value is string => Boolean(value));
+    .filter((value): value is string => Boolean(value))
+    .join("\n\n");
+}
+
+export function AutomationRunConversationSection({
+  messages,
+  title = "执行日志",
+  emptyText = "当前没有可展示的日志输出。",
+  actions,
+}: {
+  messages: ChatMessage[];
+  title?: string;
+  emptyText?: string;
+  actions?: ReactNode;
+}) {
+  const ordered = orderedMessages(messages);
+  const logText = buildAutomationConversationLog(ordered);
+  const entryCount = ordered.filter((message) => messageText(message)).length;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[20px] border border-slate-900 bg-[#050c16] shadow-[0_24px_70px_rgba(2,8,23,0.32)]">
@@ -52,14 +76,17 @@ export function AutomationRunConversationSection({
           </div>
           <h2 className="text-sm font-semibold uppercase tracking-[0.22em] text-slate-100">{title}</h2>
         </div>
-        <span className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">{lines.length} entries</span>
+        <div className="flex items-center gap-3">
+          {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
+          <span className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">{entryCount} entries</span>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-        {lines.length === 0 ? (
+        {!logText ? (
           <div className="text-sm text-slate-400">{emptyText}</div>
         ) : (
-          <pre className="whitespace-pre-wrap break-words font-mono text-[13px] leading-7 text-slate-100">{lines.join("\n\n")}</pre>
+          <pre className="whitespace-pre-wrap break-words font-mono text-[13px] leading-7 text-slate-100">{logText}</pre>
         )}
       </div>
     </div>

@@ -28,6 +28,7 @@ import {
   FileMentionCandidate,
   GitFileDiff,
   GitPanelData,
+  NotificationConfig,
   PersistedTerminalState,
   StreamEvent,
   TerminalEvent,
@@ -57,6 +58,7 @@ export interface RuntimeBridge {
   getConversationHistory: (agentId: AgentId) => Promise<ConversationTurn[]>;
   getSettings: () => Promise<AppSettings>;
   updateSettings: (settings: AppSettings) => Promise<AppSettings>;
+  sendTestEmailNotification: (config: NotificationConfig) => Promise<string>;
   loadTerminalState: () => Promise<PersistedTerminalState | null>;
   saveTerminalState: (state: PersistedTerminalState) => Promise<void>;
   switchCliForTask: (request: CliHandoffRequest) => Promise<void>;
@@ -87,6 +89,7 @@ export interface RuntimeBridge {
   resumeAutomationGoal: (goalId: string) => Promise<AutomationRun>;
   cancelAutomationRun: (runId: string) => Promise<AutomationRun>;
   deleteAutomationRun: (runId: string) => Promise<void>;
+  saveTextToDownloads: (fileName: string, content: string) => Promise<string>;
   // Chat methods
   sendChatMessage: (request: ChatPromptRequest) => Promise<string>;
   runAutoOrchestration: (request: AutoOrchestrationRequest) => Promise<string>;
@@ -174,6 +177,10 @@ const tauriRuntime: RuntimeBridge = {
   async updateSettings(settings) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AppSettings>("update_settings", { settings });
+  },
+  async sendTestEmailNotification(config) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<string>("send_test_email_notification", { config });
   },
   async loadTerminalState() {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -294,6 +301,10 @@ const tauriRuntime: RuntimeBridge = {
   async deleteAutomationRun(runId) {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("delete_automation_run", { runId });
+  },
+  async saveTextToDownloads(fileName, content) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<string>("save_text_to_downloads", { fileName, content });
   },
   async sendChatMessage(request) {
     const { invoke } = await import("@tauri-apps/api/core");

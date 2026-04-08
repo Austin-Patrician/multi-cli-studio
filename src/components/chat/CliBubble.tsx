@@ -614,13 +614,57 @@ function RuntimeTextBlock({
   );
 }
 
+function RuntimeStreamingMarker({
+  blocks,
+}: {
+  blocks: ChatMessageBlock[];
+}) {
+  const lastBlock = blocks[blocks.length - 1];
+  let label = "Responding";
+
+  if (lastBlock) {
+    switch (lastBlock.kind) {
+      case "command":
+      case "tool":
+      case "approvalRequest":
+        label = "Running tools";
+        break;
+      case "fileChange":
+        label = "Updating files";
+        break;
+      case "reasoning":
+      case "plan":
+      case "orchestrationPlan":
+      case "orchestrationStep":
+      case "autoRoute":
+        label = "Planning";
+        break;
+      case "status":
+        label = "Responding";
+        break;
+      case "text":
+        label = "Responding";
+        break;
+      default:
+        label = "Responding";
+    }
+  }
+
+  return (
+    <div className="rounded-[14px] border border-dashed border-slate-200 bg-slate-50/70 px-3 py-2.5 text-[12px] font-medium text-slate-500">
+      {label}...
+      <span className="ml-1 inline-block h-3.5 w-1.5 rounded-full bg-accent align-[-2px] animate-pulse" />
+    </div>
+  );
+}
+
 function RuntimeReasoningBlock({
   block,
 }: {
   block: Extract<ChatMessageBlock, { kind: "reasoning" }>;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const preview = useMemo(() => summarizeMultiline(block.text, 4, 360), [block.text]);
+  const preview = useMemo(() => summarizeMultiline(block.text, 2, 220), [block.text]);
   const showToggle = preview.truncated;
 
   return (
@@ -781,27 +825,42 @@ function RuntimeToolBlock({
 }: {
   block: Extract<ChatMessageBlock, { kind: "tool" }>;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const combinedText = [block.source, block.summary].filter(Boolean).join("\n\n");
+  const preview = useMemo(() => summarizeMultiline(combinedText, 2, 260), [combinedText]);
+  const showToggle = preview.truncated;
+
   return (
     <div className="rounded-[20px] border border-[#dbe4ef] bg-[#f8fbff] px-4 py-3">
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
-          Tool
-        </span>
-        <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-700">
-          {block.tool}
-        </span>
-        {block.status && (
-          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-600">
-            {block.status}
-          </span>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+              Tool
+            </span>
+            <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-700">
+              {block.tool}
+            </span>
+            {block.status && (
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-600">
+                {block.status}
+              </span>
+            )}
+          </div>
+          {combinedText && (
+            <div className="mt-2 whitespace-pre-wrap break-words text-[12px] leading-6 text-slate-600">
+              {showToggle && !expanded ? preview.preview : combinedText}
+            </div>
+          )}
+        </div>
+        {showToggle && (
+          <ToggleButton
+            expanded={expanded}
+            label=""
+            onClick={() => setExpanded((value) => !value)}
+          />
         )}
       </div>
-      {(block.source || block.summary) && (
-        <div className="mt-2 space-y-1 text-[12px] leading-6 text-slate-600">
-          {block.source && <div>{block.source}</div>}
-          {block.summary && <div className="whitespace-pre-wrap break-words">{block.summary}</div>}
-        </div>
-      )}
     </div>
   );
 }
@@ -1095,11 +1154,13 @@ function StructuredAssistantBlocks({
 
 function RuntimeStructuredBlocks({
   blocks,
+  isStreaming = false,
   workspaceRoot,
   onApprovalDecision,
   onAutoRouteAction,
 }: {
   blocks: ChatMessageBlock[];
+  isStreaming?: boolean;
   workspaceRoot?: string | null;
   onApprovalDecision?: ((requestId: string, decision: AssistantApprovalDecision) => void) | null;
   onAutoRouteAction?: ((action: AutoRouteAction) => void) | null;
@@ -1147,6 +1208,7 @@ function RuntimeStructuredBlocks({
             return null;
         }
       })}
+      {isStreaming && <RuntimeStreamingMarker blocks={blocks} />}
     </div>
   );
 }
@@ -1184,6 +1246,8 @@ export function CliBubble({
   const contentFormat = message.contentFormat ?? detectAssistantContentFormat(rawText);
   const parsed = useMemo(() => parseAssistantDisplayBlocks(rawText), [rawText]);
   const runtimeBlocks = message.blocks ?? null;
+  const hasTextRuntimeBlocks =
+    runtimeBlocks?.some((block) => block.kind === "text") ?? false;
   const hasOrchestrationBlocks =
     runtimeBlocks?.some(
       (block) => block.kind === "orchestrationPlan" || block.kind === "orchestrationStep"
@@ -1278,11 +1342,15 @@ export function CliBubble({
             <div className="space-y-3">
               <RuntimeStructuredBlocks
                 blocks={runtimeBlocks}
+                isStreaming={message.isStreaming}
                 workspaceRoot={workspaceRoot}
                 onApprovalDecision={onApprovalDecision}
                 onAutoRouteAction={onAutoRouteAction}
               />
-              {message.isStreaming && !hasOrchestrationBlocks && message.content.trim() && (
+              {message.isStreaming &&
+                !hasOrchestrationBlocks &&
+                !hasTextRuntimeBlocks &&
+                message.content.trim() && (
                 <AssistantMessageContent
                   content={message.content}
                   rawContent={message.rawContent}
@@ -1291,7 +1359,10 @@ export function CliBubble({
                   renderMode="rich"
                 />
               )}
-              {!message.isStreaming && hasOrchestrationBlocks && message.content.trim() && (
+              {!message.isStreaming &&
+                hasOrchestrationBlocks &&
+                !hasTextRuntimeBlocks &&
+                message.content.trim() && (
                 <AssistantMessageContent
                   content={message.content}
                   rawContent={message.rawContent}
