@@ -41,8 +41,8 @@ use storage::{
     default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest,
     MessageBlocksUpdateRequest, MessageDeleteRequest, MessageEventsAppendRequest,
     MessageFinalizeRequest, MessageSessionSeed, MessageStreamUpdateRequest, PersistedChatMessage,
-    PersistedConversationSession, PersistedTerminalState, TaskContextBundle, TaskRecentTurn,
-    TerminalStorage,
+    PersistedConversationSession, PersistedTerminalState, TaskContextBundle, TaskKernel,
+    TaskRecentTurn, TerminalStorage,
 };
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
@@ -5447,6 +5447,43 @@ fn get_context_store(store: State<'_, AppStore>) -> Result<ContextStore, String>
 }
 
 #[tauri::command]
+fn get_task_kernel(
+    store: State<'_, AppStore>,
+    terminal_tab_id: String,
+) -> Result<Option<TaskKernel>, String> {
+    store
+        .terminal_storage
+        .load_task_kernel_by_terminal_tab(&terminal_tab_id)
+}
+
+#[tauri::command]
+fn mark_kernel_fact_status(
+    store: State<'_, AppStore>,
+    fact_id: String,
+    status: String,
+) -> Result<Option<TaskKernel>, String> {
+    store.terminal_storage.mark_kernel_fact_status(&fact_id, &status)
+}
+
+#[tauri::command]
+fn pin_kernel_memory(
+    store: State<'_, AppStore>,
+    fact_id: String,
+) -> Result<Option<TaskKernel>, String> {
+    store.terminal_storage.pin_kernel_memory(&fact_id)
+}
+
+#[tauri::command]
+fn create_manual_kernel_checkpoint(
+    store: State<'_, AppStore>,
+    terminal_tab_id: String,
+) -> Result<Option<TaskKernel>, String> {
+    store
+        .terminal_storage
+        .create_manual_kernel_checkpoint(&terminal_tab_id)
+}
+
+#[tauri::command]
 fn get_conversation_history(
     store: State<'_, AppStore>,
     agent_id: String,
@@ -6495,9 +6532,8 @@ fn switch_cli_for_task(
     let to_cli = request.to_cli.clone();
     let project_name = request.project_name.clone();
     let latest_user_prompt = request.latest_user_prompt.clone();
-    let latest_assistant_summary = request.latest_assistant_summary.clone();
     let relevant_files = request.relevant_files.clone();
-    let _ = store
+    let bundle = store
         .terminal_storage
         .switch_cli_for_task(&CliHandoffStorageRequest {
             terminal_tab_id: request.terminal_tab_id,
@@ -6508,32 +6544,39 @@ fn switch_cli_for_task(
             to_cli: to_cli.clone(),
             reason: request.reason,
             latest_user_prompt: latest_user_prompt.clone(),
-            latest_assistant_summary: latest_assistant_summary.clone(),
+            latest_assistant_summary: request.latest_assistant_summary.clone(),
             relevant_files: relevant_files.clone(),
         })?;
 
-    if latest_assistant_summary.is_some() {
-        if let Ok(mut ctx) = store.context.lock() {
-            ctx.handoffs.insert(
-                0,
-                EnrichedHandoff {
-                    id: create_id("handoff"),
-                    from: from_cli,
-                    to: to_cli,
-                    timestamp: now_stamp(),
-                    git_diff: String::new(),
-                    changed_files: relevant_files,
-                    previous_turns: Vec::new(),
-                    user_goal: latest_user_prompt
-                        .unwrap_or_else(|| format!("Continue work in {}", project_name)),
-                    status: "ready".to_string(),
+    if let Ok(mut ctx) = store.context.lock() {
+        ctx.handoffs.insert(
+            0,
+            EnrichedHandoff {
+                id: create_id("handoff"),
+                from: from_cli,
+                to: to_cli,
+                timestamp: now_stamp(),
+                git_diff: String::new(),
+                changed_files: if bundle.task_packet.relevant_files.is_empty() {
+                    relevant_files
+                } else {
+                    bundle.task_packet.relevant_files.clone()
                 },
-            );
-            if ctx.handoffs.len() > 20 {
-                ctx.handoffs.truncate(20);
-            }
-            let _ = persist_context(&ctx);
+                previous_turns: Vec::new(),
+                user_goal: latest_user_prompt
+                    .or_else(|| Some(bundle.task_packet.goal.clone()))
+                    .unwrap_or_else(|| format!("Continue work in {}", project_name)),
+                status: bundle
+                    .task_packet
+                    .next_step
+                    .clone()
+                    .unwrap_or_else(|| "ready".to_string()),
+            },
+        );
+        if ctx.handoffs.len() > 20 {
+            ctx.handoffs.truncate(20);
         }
+        let _ = persist_context(&ctx);
     }
 
     Ok(())
@@ -9241,12 +9284,10 @@ fn compose_tab_context_prompt(
     };
 
     let workspace_tail = format!(
-        "{}{}{}\n\n--- Current workspace ---\n\
+        "{}\n\n--- Current workspace ---\n\
          Dirty files: {}\n\
          Failing checks: {}",
         rules,
-        compacted_section,
-        cross_tab_section,
         state.workspace.dirty_files, state.workspace.failing_checks,
     );
 
@@ -9279,8 +9320,8 @@ fn compose_tab_context_prompt(
         .map(|assembled| assembled.prompt)
         .unwrap_or_else(|_| {
             format!(
-                "{}\n\n{}\n\n--- User request ---\n{}",
-                workspace_preamble, workspace_tail, prompt
+                "{}\n\n{}{}{}\n\n--- User request ---\n{}",
+                workspace_preamble, workspace_tail, compacted_section, cross_tab_section, prompt
             )
         })
 }
@@ -13752,6 +13793,10 @@ pub fn run() {
             submit_prompt,
             request_review,
             get_context_store,
+            get_task_kernel,
+            mark_kernel_fact_status,
+            pin_kernel_memory,
+            create_manual_kernel_checkpoint,
             get_conversation_history,
             load_terminal_state,
             save_terminal_state,

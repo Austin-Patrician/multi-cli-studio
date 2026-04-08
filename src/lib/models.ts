@@ -582,6 +582,137 @@ export interface SharedContextEntry {
   updatedAt: string;
 }
 
+export interface KernelSessionRef {
+  id: string;
+  taskId: string;
+  terminalTabId: string;
+  cliId: AgentId;
+  transportKind?: AgentTransportKind | null;
+  nativeSessionId?: string | null;
+  nativeTurnId?: string | null;
+  model?: string | null;
+  permissionMode?: string | null;
+  resumeCapable: boolean;
+  state: "active" | "stale" | "broken" | "archived";
+  lastSyncAt: string;
+}
+
+export interface KernelFact {
+  id: string;
+  taskId: string;
+  kind:
+    | "requirement"
+    | "environment"
+    | "codebase"
+    | "runtime"
+    | "decision"
+    | "risk"
+    | "output";
+  statement: string;
+  status: "verified" | "inferred" | "pending" | "invalidated";
+  sourceEvidenceIds: string[];
+  ownerCli: AgentId;
+  confidence: "high" | "medium" | "low";
+  updatedAt: string;
+}
+
+export interface KernelEvidence {
+  id: string;
+  taskId: string;
+  messageId: string;
+  terminalTabId: string;
+  cliId: AgentId;
+  evidenceType: "command" | "fileChange" | "toolCall" | "assistantMessage" | "status";
+  summary: string;
+  payloadRef?: string | null;
+  timestamp: string;
+}
+
+export interface TaskKernel {
+  taskPacket: {
+    id: string;
+    terminalTabId: string;
+    workspaceId: string;
+    projectRoot: string;
+    projectName: string;
+    title: string;
+    goal: string;
+    status: string;
+    currentOwnerCli: string;
+    latestConclusion?: string | null;
+    openQuestions: string[];
+    risks: string[];
+    nextStep?: string | null;
+    relevantFiles: string[];
+    relevantCommands: string[];
+    linkedSessionIds: string[];
+    latestSnapshotId?: string | null;
+    updatedAt: string;
+    createdAt: string;
+  };
+  latestHandoff?: unknown;
+  latestCheckpoint?: {
+    id: string;
+    taskId: string;
+    triggerReason: string;
+    summary: string;
+    factsConfirmed: string[];
+    workCompleted: string[];
+    filesTouched: string[];
+    commandsRun: string[];
+    failures: string[];
+    openQuestions: string[];
+    nextStep?: string | null;
+    sourceUserPrompt?: string | null;
+    sourceAssistantSummary?: string | null;
+    createdAt: string;
+  } | null;
+  activePlan?: {
+    id: string;
+    taskId: string;
+    title: string;
+    goal: string;
+    summary?: string | null;
+    status: string;
+    updatedAt: string;
+  } | null;
+  workItems: Array<{
+    id: string;
+    taskId: string;
+    stepId?: string | null;
+    ownerCli: AgentId;
+    title: string;
+    summary?: string | null;
+    result?: string | null;
+    status: string;
+    updatedAt: string;
+  }>;
+  currentWorkItem?: {
+    id: string;
+    taskId: string;
+    stepId?: string | null;
+    ownerCli: AgentId;
+    title: string;
+    summary?: string | null;
+    result?: string | null;
+    status: string;
+    updatedAt: string;
+  } | null;
+  memoryEntries: Array<{
+    id: string;
+    scope: "task" | "workspace" | "global";
+    scopeRef: string;
+    kind: string;
+    content: string;
+    sourceFactId?: string | null;
+    sourceEvidenceIds: string[];
+    updatedAt: string;
+  }>;
+  sessionRefs: KernelSessionRef[];
+  facts: KernelFact[];
+  evidence: KernelEvidence[];
+}
+
 /** Project-scoped conversation session */
 export interface ConversationSession {
   id: string;

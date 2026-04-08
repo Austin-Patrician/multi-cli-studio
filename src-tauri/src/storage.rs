@@ -198,6 +198,115 @@ pub struct TaskContextBundle {
     pub latest_boundary: Option<CompactBoundary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct KernelSessionRef {
+    pub id: String,
+    pub task_id: String,
+    pub terminal_tab_id: String,
+    pub cli_id: String,
+    pub transport_kind: Option<String>,
+    pub native_session_id: Option<String>,
+    pub native_turn_id: Option<String>,
+    pub model: Option<String>,
+    pub permission_mode: Option<String>,
+    pub resume_capable: bool,
+    pub state: String,
+    pub last_sync_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct KernelFact {
+    pub id: String,
+    pub task_id: String,
+    pub kind: String,
+    pub subject: String,
+    pub polarity: String,
+    pub origin: String,
+    pub statement: String,
+    pub status: String,
+    pub source_evidence_ids: Vec<String>,
+    pub supersedes_fact_ids: Vec<String>,
+    pub owner_cli: String,
+    pub confidence: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct KernelEvidence {
+    pub id: String,
+    pub task_id: String,
+    pub message_id: String,
+    pub terminal_tab_id: String,
+    pub cli_id: String,
+    pub evidence_type: String,
+    pub summary: String,
+    pub payload_ref: Option<String>,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskKernel {
+    pub task_packet: TaskPacket,
+    pub latest_handoff: Option<HandoffEvent>,
+    pub latest_checkpoint: Option<ContextSnapshot>,
+    pub active_plan: Option<KernelPlan>,
+    pub work_items: Vec<KernelWorkItem>,
+    pub current_work_item: Option<KernelWorkItem>,
+    pub memory_entries: Vec<KernelMemoryEntry>,
+    pub session_refs: Vec<KernelSessionRef>,
+    pub facts: Vec<KernelFact>,
+    pub evidence: Vec<KernelEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct KernelPlan {
+    pub id: String,
+    pub task_id: String,
+    pub title: String,
+    pub goal: String,
+    pub summary: Option<String>,
+    pub status: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct KernelWorkItem {
+    pub id: String,
+    pub task_id: String,
+    pub step_id: Option<String>,
+    pub owner_cli: String,
+    pub title: String,
+    pub summary: Option<String>,
+    pub result: Option<String>,
+    pub status: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct KernelMemoryEntry {
+    pub id: String,
+    pub scope: String,
+    pub scope_ref: String,
+    pub kind: String,
+    pub priority: String,
+    pub pin_state: String,
+    pub content: String,
+    pub source_fact_id: Option<String>,
+    pub source_evidence_ids: Vec<String>,
+    pub last_used_at: Option<String>,
+    pub use_count: usize,
+    pub tags: Vec<String>,
+    pub decay_eligible: bool,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EnsureTaskPacketRequest {
     pub terminal_tab_id: String,
@@ -486,7 +595,455 @@ impl TerminalStorage {
             &request,
             Some(&request.updated_at),
         )?;
+        tx.commit().map_err(|err| err.to_string())?;
+        self.sync_task_kernel_from_finalized_message(request)
+    }
+
+    fn sync_task_kernel_from_finalized_message(
+        &self,
+        request: &MessageFinalizeRequest,
+    ) -> Result<(), String> {
+        let conn = self.open_connection()?;
+        let Some(session) = self.load_chat_session_by_terminal_tab(&conn, &request.terminal_tab_id)? else {
+            return Ok(());
+        };
+        let Some(message_index) = session
+            .messages
+            .iter()
+            .position(|message| message.id == request.message_id)
+        else {
+            return Ok(());
+        };
+        let message = session.messages[message_index].clone();
+        if message.role != "assistant" || message.is_streaming {
+            return Ok(());
+        }
+
+        let cli_id = request
+            .transport_session
+            .as_ref()
+            .map(|session| session.cli_id.clone())
+            .or_else(|| message.cli_id.clone())
+            .unwrap_or_else(|| "codex".to_string());
+        let latest_user_prompt = session.messages[..message_index]
+            .iter()
+            .rev()
+            .find(|candidate| candidate.role == "user")
+            .map(|candidate| candidate.content.clone())
+            .unwrap_or_else(|| format!("Continue work in {}", session.project_name));
+        let assistant_summary = truncate_text(
+            message.raw_content.as_deref().unwrap_or(message.content.as_str()),
+            600,
+        );
+        let relevant_files = collect_relevant_files_from_blocks_option(message.blocks.as_ref());
+        let recent_turns = extract_completed_turns_from_messages(&session.messages, &cli_id)
+            .into_iter()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|turn| TaskRecentTurn {
+                cli_id: turn.cli_id,
+                user_prompt: turn.user_prompt,
+                assistant_reply: truncate_text(&turn.assistant_reply, 320),
+                timestamp: turn.timestamp,
+            })
+            .collect::<Vec<_>>();
+
+        let bundle = self.record_turn_progress(&TaskTurnUpdate {
+            terminal_tab_id: request.terminal_tab_id.clone(),
+            workspace_id: session.workspace_id.clone(),
+            project_root: session.project_root.clone(),
+            project_name: session.project_name.clone(),
+            cli_id: cli_id.clone(),
+            user_prompt: latest_user_prompt,
+            assistant_summary: assistant_summary.clone(),
+            relevant_files: relevant_files.clone(),
+            recent_turns,
+            exit_code: request.exit_code,
+        })?;
+
+        let mut conn = self.open_connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|err| err.to_string())?;
+
+        self.upsert_kernel_session_ref_in_tx(
+            &tx,
+            &bundle.task_packet.id,
+            &request.terminal_tab_id,
+            &cli_id,
+            request.transport_kind.clone().or(message.transport_kind.clone()),
+            request.transport_session.as_ref(),
+            &request.updated_at,
+            request.exit_code,
+        )?;
+
+        let linked_session_ids =
+            merge_string_lists(&bundle.task_packet.linked_session_ids, &[session.id.clone()]);
+        tx.execute(
+            "UPDATE task_packets
+             SET linked_session_ids_json = ?1,
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![
+                to_json(&linked_session_ids)?,
+                request.updated_at,
+                bundle.task_packet.id,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+
+        let evidence = build_kernel_evidence_records(
+            &bundle.task_packet.id,
+            &request.message_id,
+            &request.terminal_tab_id,
+            &cli_id,
+            &assistant_summary,
+            message.blocks.as_ref(),
+            &message.timestamp,
+        );
+        for entry in &evidence {
+            self.insert_kernel_evidence_in_tx(&tx, entry)?;
+        }
+
+        let facts = build_kernel_fact_records(
+            &bundle.task_packet.id,
+            &cli_id,
+            &assistant_summary,
+            request.exit_code,
+            &evidence,
+            &request.updated_at,
+        );
+        for fact in &facts {
+            self.insert_kernel_fact_in_tx(&tx, fact)?;
+        }
+
+        if let Some(plan) = build_kernel_plan_record(
+            &bundle.task_packet.id,
+            message.blocks.as_ref(),
+            &request.updated_at,
+        ) {
+            self.upsert_kernel_plan_in_tx(&tx, &plan)?;
+        }
+
+        let work_items = build_kernel_work_item_records(
+            &bundle.task_packet.id,
+            &cli_id,
+            message.blocks.as_ref(),
+            &request.updated_at,
+        );
+        for item in &work_items {
+            self.upsert_kernel_work_item_in_tx(&tx, item)?;
+        }
+
         tx.commit().map_err(|err| err.to_string())
+    }
+
+    fn upsert_kernel_session_ref_in_tx(
+        &self,
+        tx: &Connection,
+        task_id: &str,
+        terminal_tab_id: &str,
+        cli_id: &str,
+        transport_kind: Option<String>,
+        transport_session: Option<&AgentTransportSession>,
+        updated_at: &str,
+        exit_code: Option<i32>,
+    ) -> Result<(), String> {
+        tx.execute(
+            "INSERT INTO kernel_session_refs (
+                id, task_id, terminal_tab_id, cli_id, transport_kind, native_session_id,
+                native_turn_id, model, permission_mode, resume_capable, state, last_sync_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            ON CONFLICT(task_id, terminal_tab_id, cli_id) DO UPDATE SET
+                transport_kind = excluded.transport_kind,
+                native_session_id = excluded.native_session_id,
+                native_turn_id = excluded.native_turn_id,
+                model = excluded.model,
+                permission_mode = excluded.permission_mode,
+                resume_capable = excluded.resume_capable,
+                state = excluded.state,
+                last_sync_at = excluded.last_sync_at",
+            params![
+                new_id("ksr"),
+                task_id,
+                terminal_tab_id,
+                cli_id,
+                transport_kind,
+                transport_session.and_then(|session| session.thread_id.clone()),
+                transport_session.and_then(|session| session.turn_id.clone()),
+                transport_session.and_then(|session| session.model.clone()),
+                transport_session.and_then(|session| session.permission_mode.clone()),
+                transport_session
+                    .and_then(|session| session.thread_id.as_ref())
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false),
+                if exit_code == Some(0) { "active" } else { "stale" },
+                updated_at,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    fn insert_kernel_evidence_in_tx(
+        &self,
+        tx: &Connection,
+        entry: &KernelEvidence,
+    ) -> Result<(), String> {
+        tx.execute(
+            "INSERT INTO kernel_evidence (
+                id, task_id, message_id, terminal_tab_id, cli_id, evidence_type, summary, payload_ref, timestamp
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                entry.id,
+                entry.task_id,
+                entry.message_id,
+                entry.terminal_tab_id,
+                entry.cli_id,
+                entry.evidence_type,
+                entry.summary,
+                entry.payload_ref,
+                entry.timestamp,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    fn insert_kernel_fact_in_tx(&self, tx: &Connection, fact: &KernelFact) -> Result<(), String> {
+        let mut supersedes_ids = Vec::new();
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, statement, status, polarity, confidence, source_evidence_ids_json
+                 FROM kernel_facts
+                 WHERE task_id = ?1 AND kind = ?2 AND subject = ?3",
+            )
+            .map_err(|err| err.to_string())?;
+        let existing = stmt
+            .query_map(params![fact.task_id, fact.kind, fact.subject], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    parse_json_default::<Vec<String>>(row.get::<_, String>(5)?),
+                ))
+            })
+            .map_err(|err| err.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?;
+
+        for (existing_id, existing_statement, existing_status, existing_polarity, existing_confidence, existing_evidence_ids) in existing {
+            if existing_statement == fact.statement {
+                let merged_evidence = merge_string_lists(&existing_evidence_ids, &fact.source_evidence_ids);
+                tx.execute(
+                    "UPDATE kernel_facts
+                     SET status = ?1,
+                         confidence = ?2,
+                         source_evidence_ids_json = ?3,
+                         updated_at = ?4,
+                         polarity = ?5,
+                         origin = ?6
+                     WHERE id = ?7",
+                    params![
+                        merge_fact_status(&existing_status, &fact.status),
+                        merge_fact_confidence(&existing_confidence, &fact.confidence),
+                        to_json(&merged_evidence)?,
+                        fact.updated_at,
+                        fact.polarity,
+                        fact.origin,
+                        existing_id,
+                    ],
+                )
+                .map_err(|err| err.to_string())?;
+                return Ok(());
+            }
+
+            if fact.kind == "risk" {
+                continue;
+            }
+
+            if fact.subject == "general" || fact.polarity == "neutral" || existing_polarity == "neutral" {
+                continue;
+            }
+
+            let opposite_polarity = fact.polarity != existing_polarity;
+            let can_supersede = fact.status == "verified" && fact.confidence == "high";
+            let should_downgrade = fact.status == "inferred";
+
+            if opposite_polarity && can_supersede {
+                tx.execute(
+                    "UPDATE kernel_facts
+                     SET status = 'invalidated', updated_at = ?1
+                     WHERE id = ?2 AND status != 'invalidated'",
+                    params![fact.updated_at, existing_id],
+                )
+                .map_err(|err| err.to_string())?;
+                supersedes_ids.push(existing_id);
+            } else if opposite_polarity && should_downgrade {
+                tx.execute(
+                    "UPDATE kernel_facts
+                     SET status = CASE
+                         WHEN status = 'verified' THEN 'verified'
+                         ELSE 'pending'
+                     END,
+                     updated_at = ?1
+                     WHERE id = ?2 AND status != 'invalidated'",
+                    params![fact.updated_at, existing_id],
+                )
+                .map_err(|err| err.to_string())?;
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO kernel_facts (
+                id, task_id, kind, subject, polarity, origin, statement, status,
+                source_evidence_ids_json, supersedes_fact_ids_json, owner_cli, confidence, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                fact.id,
+                fact.task_id,
+                fact.kind,
+                fact.subject,
+                fact.polarity,
+                fact.origin,
+                fact.statement,
+                fact.status,
+                to_json(&fact.source_evidence_ids)?,
+                to_json(&supersedes_ids)?,
+                fact.owner_cli,
+                fact.confidence,
+                fact.updated_at,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+
+        if fact.status == "verified" && fact.confidence == "high" {
+            let entry = KernelMemoryEntry {
+                id: stable_memory_id("task", &fact.task_id, &fact.kind, &fact.statement),
+                scope: "task".to_string(),
+                scope_ref: fact.task_id.clone(),
+                kind: fact.kind.clone(),
+                priority: default_memory_priority_for_kind(&fact.kind).to_string(),
+                pin_state: "auto".to_string(),
+                content: fact.statement.clone(),
+                source_fact_id: Some(fact.id.clone()),
+                source_evidence_ids: fact.source_evidence_ids.clone(),
+                last_used_at: None,
+                use_count: 0,
+                tags: default_memory_tags_for_fact(fact),
+                decay_eligible: true,
+                updated_at: fact.updated_at.clone(),
+            };
+            self.upsert_kernel_memory_in_tx(tx, &entry)?;
+        }
+
+        Ok(())
+    }
+
+    fn upsert_kernel_plan_in_tx(
+        &self,
+        tx: &Connection,
+        plan: &KernelPlan,
+    ) -> Result<(), String> {
+        tx.execute(
+            "INSERT INTO kernel_plans (
+                id, task_id, title, goal, summary, status, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                goal = excluded.goal,
+                summary = excluded.summary,
+                status = excluded.status,
+                updated_at = excluded.updated_at",
+            params![
+                plan.id,
+                plan.task_id,
+                plan.title,
+                plan.goal,
+                plan.summary,
+                plan.status,
+                plan.updated_at,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    fn upsert_kernel_work_item_in_tx(
+        &self,
+        tx: &Connection,
+        item: &KernelWorkItem,
+    ) -> Result<(), String> {
+        tx.execute(
+            "INSERT INTO kernel_work_items (
+                id, task_id, step_id, owner_cli, title, summary, result, status, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(id) DO UPDATE SET
+                summary = excluded.summary,
+                result = excluded.result,
+                status = excluded.status,
+                updated_at = excluded.updated_at",
+            params![
+                item.id,
+                item.task_id,
+                item.step_id,
+                item.owner_cli,
+                item.title,
+                item.summary,
+                item.result,
+                item.status,
+                item.updated_at,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    fn upsert_kernel_memory_in_tx(
+        &self,
+        tx: &Connection,
+        entry: &KernelMemoryEntry,
+    ) -> Result<(), String> {
+        tx.execute(
+            "INSERT INTO kernel_memory_entries (
+                id, scope, scope_ref, kind, priority, pin_state, content, source_fact_id,
+                source_evidence_ids_json, last_used_at, use_count, tags_json, decay_eligible, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            ON CONFLICT(id) DO UPDATE SET
+                priority = excluded.priority,
+                pin_state = excluded.pin_state,
+                content = excluded.content,
+                source_fact_id = excluded.source_fact_id,
+                source_evidence_ids_json = excluded.source_evidence_ids_json,
+                last_used_at = excluded.last_used_at,
+                use_count = excluded.use_count,
+                tags_json = excluded.tags_json,
+                decay_eligible = excluded.decay_eligible,
+                updated_at = excluded.updated_at",
+            params![
+                entry.id,
+                entry.scope,
+                entry.scope_ref,
+                entry.kind,
+                entry.priority,
+                entry.pin_state,
+                entry.content,
+                entry.source_fact_id,
+                to_json(&entry.source_evidence_ids)?,
+                entry.last_used_at,
+                entry.use_count as i64,
+                to_json(&entry.tags)?,
+                if entry.decay_eligible { 1 } else { 0 },
+                entry.updated_at,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(())
     }
 
     pub fn delete_chat_message(&self, request: &MessageDeleteRequest) -> Result<(), String> {
@@ -860,6 +1417,91 @@ impl TerminalStorage {
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS kernel_session_refs (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                terminal_tab_id TEXT NOT NULL,
+                cli_id TEXT NOT NULL,
+                transport_kind TEXT,
+                native_session_id TEXT,
+                native_turn_id TEXT,
+                model TEXT,
+                permission_mode TEXT,
+                resume_capable INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL,
+                last_sync_at TEXT NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_kernel_session_refs_task_tab_cli
+                ON kernel_session_refs(task_id, terminal_tab_id, cli_id);
+
+            CREATE TABLE IF NOT EXISTS kernel_facts (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                subject TEXT NOT NULL DEFAULT 'general',
+                polarity TEXT NOT NULL DEFAULT 'neutral',
+                origin TEXT NOT NULL DEFAULT 'assistant',
+                statement TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_evidence_ids_json TEXT NOT NULL,
+                supersedes_fact_ids_json TEXT NOT NULL DEFAULT '[]',
+                owner_cli TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS kernel_evidence (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                terminal_tab_id TEXT NOT NULL,
+                cli_id TEXT NOT NULL,
+                evidence_type TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                payload_ref TEXT,
+                timestamp TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS kernel_plans (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                goal TEXT NOT NULL,
+                summary TEXT,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS kernel_work_items (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                step_id TEXT,
+                owner_cli TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT,
+                result TEXT,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS kernel_memory_entries (
+                id TEXT PRIMARY KEY,
+                scope TEXT NOT NULL,
+                scope_ref TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                priority TEXT NOT NULL DEFAULT 'medium',
+                pin_state TEXT NOT NULL DEFAULT 'auto',
+                content TEXT NOT NULL,
+                source_fact_id TEXT,
+                source_evidence_ids_json TEXT NOT NULL,
+                last_used_at TEXT,
+                use_count INTEGER NOT NULL DEFAULT 0,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                decay_eligible INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_terminal_tabs_workspace ON terminal_tabs(workspace_id);
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session_order
                 ON chat_messages(session_id, message_order);
@@ -882,9 +1524,90 @@ impl TerminalStorage {
                 ON compact_boundaries(task_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_compacted_summaries_tab
                 ON compacted_summaries(terminal_tab_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_kernel_facts_task_updated
+                ON kernel_facts(task_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_kernel_evidence_task_timestamp
+                ON kernel_evidence(task_id, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_kernel_plans_task_updated
+                ON kernel_plans(task_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_kernel_work_items_task_updated
+                ON kernel_work_items(task_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_kernel_memory_scope_updated
+                ON kernel_memory_entries(scope, scope_ref, updated_at DESC);
             ",
         )
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+
+        ensure_column_exists(
+            conn,
+            "kernel_facts",
+            "subject",
+            "TEXT NOT NULL DEFAULT 'general'",
+        )?;
+        ensure_column_exists(
+            conn,
+            "kernel_facts",
+            "polarity",
+            "TEXT NOT NULL DEFAULT 'neutral'",
+        )?;
+        ensure_column_exists(
+            conn,
+            "kernel_facts",
+            "origin",
+            "TEXT NOT NULL DEFAULT 'assistant'",
+        )?;
+        ensure_column_exists(
+            conn,
+            "kernel_facts",
+            "supersedes_fact_ids_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+
+        ensure_column_exists(
+            conn,
+            "kernel_memory_entries",
+            "priority",
+            "TEXT NOT NULL DEFAULT 'medium'",
+        )?;
+        ensure_column_exists(
+            conn,
+            "kernel_memory_entries",
+            "pin_state",
+            "TEXT NOT NULL DEFAULT 'auto'",
+        )?;
+        ensure_column_exists(
+            conn,
+            "kernel_memory_entries",
+            "last_used_at",
+            "TEXT",
+        )?;
+        ensure_column_exists(
+            conn,
+            "kernel_memory_entries",
+            "use_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column_exists(
+            conn,
+            "kernel_memory_entries",
+            "tags_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column_exists(
+            conn,
+            "kernel_memory_entries",
+            "decay_eligible",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_kernel_facts_task_kind_subject
+             ON kernel_facts(task_id, kind, subject, updated_at DESC)",
+            [],
+        )
+        .map_err(|err| err.to_string())?;
+
+        Ok(())
     }
 
     fn load_workspaces(&self, conn: &Connection) -> Result<Vec<PersistedWorkspaceRef>, String> {
@@ -1143,12 +1866,23 @@ impl TerminalStorage {
 
         if request.from_cli != request.to_cli {
             let now = now_rfc3339();
+            let active_plan = self.load_kernel_plan_for_task(&tx, &task.id)?;
+            let work_items = self.load_kernel_work_items_for_task(&tx, &task.id, 8)?;
+            let current_work_item = select_current_work_item(&work_items);
             let latest_conclusion = request
                 .latest_assistant_summary
                 .clone()
+                .or_else(|| current_work_item.as_ref().and_then(|item| item.summary.clone()))
+                .or_else(|| active_plan.as_ref().and_then(|plan| plan.summary.clone()))
                 .or_else(|| task.latest_conclusion.clone());
             let merged_files = merge_string_lists(&task.relevant_files, &request.relevant_files);
-            let next_step = Some(format!("Continue the active task in {}.", request.to_cli));
+            let next_step = Some(
+                current_work_item
+                    .as_ref()
+                    .map(|item| format!("Continue work item '{}' in {}.", item.title, request.to_cli))
+                    .or_else(|| task.next_step.clone())
+                    .unwrap_or_else(|| format!("Continue the active task in {}.", request.to_cli))
+            );
 
             tx.execute(
                 "INSERT INTO handoff_events (
@@ -1361,6 +2095,206 @@ impl TerminalStorage {
             latest_snapshot,
             latest_boundary,
         }))
+    }
+
+    pub fn load_task_kernel_by_terminal_tab(
+        &self,
+        terminal_tab_id: &str,
+    ) -> Result<Option<TaskKernel>, String> {
+        let conn = self.open_connection()?;
+        let Some(task) = self.load_task_packet_by_terminal_tab(&conn, terminal_tab_id)? else {
+            return Ok(None);
+        };
+        let latest_handoff = self.load_latest_handoff_for_task(&conn, &task.id)?;
+        let latest_checkpoint = self.load_latest_snapshot_for_task(&conn, &task.id)?;
+        let active_plan = self.load_kernel_plan_for_task(&conn, &task.id)?;
+        let work_items = self.load_kernel_work_items_for_task(&conn, &task.id, 24)?;
+        let current_work_item = select_current_work_item(&work_items);
+        let mut memory_entries = self.load_kernel_memory_for_scope(&conn, "task", &task.id, 12)?;
+        let workspace_memory =
+            self.load_kernel_memory_for_scope(&conn, "workspace", &task.workspace_id, 8)?;
+        memory_entries.extend(workspace_memory);
+        let global_memory = self.load_kernel_memory_for_scope(&conn, "global", "global", 8)?;
+        memory_entries.extend(global_memory);
+        let session_refs = self.load_kernel_session_refs_for_task(&conn, &task.id)?;
+        let facts = self.load_kernel_facts_for_task(&conn, &task.id, 24)?;
+        let evidence = self.load_kernel_evidence_for_task(&conn, &task.id, 36)?;
+
+        Ok(Some(TaskKernel {
+            task_packet: task,
+            latest_handoff,
+            latest_checkpoint,
+            active_plan,
+            work_items,
+            current_work_item,
+            memory_entries,
+            session_refs,
+            facts,
+            evidence,
+        }))
+    }
+
+    pub fn mark_kernel_fact_status(
+        &self,
+        fact_id: &str,
+        status: &str,
+    ) -> Result<Option<TaskKernel>, String> {
+        let mut conn = self.open_connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|err| err.to_string())?;
+        let task_row = tx
+            .query_row(
+                "SELECT task_id FROM kernel_facts WHERE id = ?1",
+                [fact_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|err| err.to_string())?;
+        let Some(task_id) = task_row else {
+            tx.commit().map_err(|err| err.to_string())?;
+            return Ok(None);
+        };
+        tx.execute(
+            "UPDATE kernel_facts SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, now_rfc3339(), fact_id],
+        )
+        .map_err(|err| err.to_string())?;
+        let terminal_tab_id = self
+            .load_terminal_tab_id_for_task(&tx, &task_id)?
+            .ok_or_else(|| "Task kernel not found.".to_string())?;
+        tx.commit().map_err(|err| err.to_string())?;
+        self.load_task_kernel_by_terminal_tab(&terminal_tab_id)
+    }
+
+    pub fn pin_kernel_memory(
+        &self,
+        fact_id: &str,
+    ) -> Result<Option<TaskKernel>, String> {
+        let mut conn = self.open_connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|err| err.to_string())?;
+        let fact = tx
+            .query_row(
+                "SELECT id, task_id, kind, statement, source_evidence_ids_json FROM kernel_facts WHERE id = ?1",
+                [fact_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        parse_json_default::<Vec<String>>(row.get::<_, String>(4)?),
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|err| err.to_string())?;
+        let Some((fact_id_value, task_id, kind, statement, source_evidence_ids)) = fact else {
+            tx.commit().map_err(|err| err.to_string())?;
+            return Ok(None);
+        };
+        let terminal_tab_id = self
+            .load_terminal_tab_id_for_task(&tx, &task_id)?
+            .ok_or_else(|| "Task kernel not found.".to_string())?;
+        let task = self
+            .load_task_packet_by_terminal_tab(&tx, &terminal_tab_id)?
+            .ok_or_else(|| "Task packet not found.".to_string())?;
+        let task_entry = KernelMemoryEntry {
+            id: stable_memory_id("task", &task_id, &kind, &statement),
+            scope: "task".to_string(),
+            scope_ref: task_id.clone(),
+            kind: kind.clone(),
+            priority: "high".to_string(),
+            pin_state: "manual".to_string(),
+            content: statement.clone(),
+            source_fact_id: Some(fact_id_value.clone()),
+            source_evidence_ids: source_evidence_ids.clone(),
+            last_used_at: None,
+            use_count: 0,
+            tags: default_memory_tags_from_kind(&kind),
+            decay_eligible: false,
+            updated_at: now_rfc3339(),
+        };
+        self.upsert_kernel_memory_in_tx(&tx, &task_entry)?;
+        let workspace_entry = KernelMemoryEntry {
+            id: stable_memory_id("workspace", &task.workspace_id, &kind, &statement),
+            scope: "workspace".to_string(),
+            scope_ref: task.workspace_id.clone(),
+            kind,
+            priority: "high".to_string(),
+            pin_state: "manual".to_string(),
+            content: statement,
+            source_fact_id: Some(fact_id_value),
+            source_evidence_ids,
+            last_used_at: None,
+            use_count: 0,
+            tags: default_memory_tags_from_kind(&task_entry.kind),
+            decay_eligible: false,
+            updated_at: now_rfc3339(),
+        };
+        self.upsert_kernel_memory_in_tx(&tx, &workspace_entry)?;
+        if matches!(workspace_entry.kind.as_str(), "decision" | "requirement" | "risk") {
+            let global_entry = KernelMemoryEntry {
+                id: stable_memory_id("global", "global", &workspace_entry.kind, &workspace_entry.content),
+                scope: "global".to_string(),
+                scope_ref: "global".to_string(),
+                kind: workspace_entry.kind.clone(),
+                priority: "medium".to_string(),
+                pin_state: "manual".to_string(),
+                content: workspace_entry.content.clone(),
+                source_fact_id: workspace_entry.source_fact_id.clone(),
+                source_evidence_ids: workspace_entry.source_evidence_ids.clone(),
+                last_used_at: None,
+                use_count: 0,
+                tags: workspace_entry.tags.clone(),
+                decay_eligible: false,
+                updated_at: now_rfc3339(),
+            };
+            self.upsert_kernel_memory_in_tx(&tx, &global_entry)?;
+        }
+        tx.commit().map_err(|err| err.to_string())?;
+        self.load_task_kernel_by_terminal_tab(&terminal_tab_id)
+    }
+
+    pub fn create_manual_kernel_checkpoint(
+        &self,
+        terminal_tab_id: &str,
+    ) -> Result<Option<TaskKernel>, String> {
+        let conn = self.open_connection()?;
+        let Some(task) = self.load_task_packet_by_terminal_tab(&conn, terminal_tab_id)? else {
+            return Ok(None);
+        };
+        let facts = self.load_kernel_facts_for_task(&conn, &task.id, 8)?;
+        let evidence = self.load_kernel_evidence_for_task(&conn, &task.id, 8)?;
+        let recent_turns = evidence
+            .iter()
+            .filter(|entry| entry.evidence_type == "assistantMessage")
+            .take(4)
+            .map(|entry| TaskRecentTurn {
+                cli_id: task.current_owner_cli.clone(),
+                user_prompt: task.goal.clone(),
+                assistant_reply: entry.summary.clone(),
+                timestamp: entry.timestamp.clone(),
+            })
+            .collect::<Vec<_>>();
+        let bundle = self.record_turn_progress(&TaskTurnUpdate {
+            terminal_tab_id: terminal_tab_id.to_string(),
+            workspace_id: task.workspace_id.clone(),
+            project_root: task.project_root.clone(),
+            project_name: task.project_name.clone(),
+            cli_id: task.current_owner_cli.clone(),
+            user_prompt: task.goal.clone(),
+            assistant_summary: facts
+                .first()
+                .map(|fact| fact.statement.clone())
+                .unwrap_or_else(|| task.latest_conclusion.clone().unwrap_or_default()),
+            relevant_files: task.relevant_files.clone(),
+            recent_turns,
+            exit_code: Some(0),
+        })?;
+        self.load_task_kernel_by_terminal_tab(&bundle.task_packet.terminal_tab_id)
     }
 
     pub fn load_conversation_session_by_terminal_tab(
@@ -1646,6 +2580,158 @@ impl TerminalStorage {
             );
         }
 
+        let kernel_facts = self.load_kernel_facts_for_task(&conn, &bundle.task_packet.id, 8)?;
+        let kernel_evidence = self.load_kernel_evidence_for_task(&conn, &bundle.task_packet.id, 8)?;
+        let active_plan = self.load_kernel_plan_for_task(&conn, &bundle.task_packet.id)?;
+        let work_items = self.load_kernel_work_items_for_task(&conn, &bundle.task_packet.id, 8)?;
+        let current_work_item = select_current_work_item(&work_items);
+        let mut memory_entries =
+            self.load_kernel_memory_for_scope(&conn, "task", &bundle.task_packet.id, 6)?;
+        memory_entries.extend(self.load_kernel_memory_for_scope(
+            &conn,
+            "workspace",
+            &bundle.task_packet.workspace_id,
+            4,
+        )?);
+        memory_entries.extend(self.load_kernel_memory_for_scope(
+            &conn,
+            "global",
+            "global",
+            4,
+        )?);
+        let selected_work_items = select_work_items_for_cli(&work_items, target_cli);
+        let selected_facts = select_kernel_facts_for_cli(&kernel_facts, target_cli);
+        let selected_evidence = select_kernel_evidence_for_cli(&kernel_evidence, target_cli);
+        let selected_memory = select_memory_for_cli_with_budget(
+            &memory_entries,
+            target_cli,
+            current_work_item.as_ref(),
+            &bundle.task_packet.relevant_files,
+        );
+
+        if let Some(plan) = active_plan.as_ref() {
+            push_layer(
+                &mut lines,
+                &mut included_layers,
+                "active_plan",
+                &format!(
+                    "--- Active plan ---\nTitle: {}\nGoal: {}\nStatus: {}\nSummary: {}",
+                    plan.title,
+                    plan.goal,
+                    plan.status,
+                    plan.summary.as_deref().unwrap_or("none")
+                ),
+            );
+        }
+
+        if let Some(item) = current_work_item.as_ref() {
+            push_layer(
+                &mut lines,
+                &mut included_layers,
+                "current_work_item",
+                &format!(
+                    "--- Current work item ---\nOwner: {}\nStatus: {}\nTitle: {}\nSummary: {}",
+                    item.owner_cli,
+                    item.status,
+                    item.title,
+                    item.summary.as_deref().unwrap_or("none")
+                ),
+            );
+        }
+
+        if !selected_work_items.is_empty() {
+            let work_item_lines = selected_work_items
+                .iter()
+                .map(|item| {
+                    format!(
+                        "- [{} / {}] {}{}{}",
+                        item.owner_cli,
+                        item.status,
+                        item.title,
+                        item.summary
+                            .as_ref()
+                            .map(|summary| format!(" | {}", truncate_text(summary, 180)))
+                            .unwrap_or_default(),
+                        item.result
+                            .as_ref()
+                            .map(|result| format!(" | result: {}", truncate_text(result, 140)))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !work_item_lines.is_empty() {
+                push_layer(
+                    &mut lines,
+                    &mut included_layers,
+                    "work_items",
+                    &format!("--- Current work items ---\n{}", work_item_lines),
+                );
+            }
+        }
+
+        if !selected_facts.is_empty() {
+            let fact_lines = selected_facts
+                .iter()
+                .map(|fact| {
+                    format!(
+                        "- [{} / {}] {}",
+                        fact.status,
+                        fact.kind,
+                        truncate_text(&fact.statement, 220)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            push_layer(
+                &mut lines,
+                &mut included_layers,
+                "kernel_facts",
+                &format!("--- Verified and inferred task facts ---\n{}", fact_lines),
+            );
+        }
+
+        if !selected_evidence.is_empty() {
+            let evidence_lines = selected_evidence
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "- [{}] {}",
+                        entry.evidence_type,
+                        truncate_text(&entry.summary, 220)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            push_layer(
+                &mut lines,
+                &mut included_layers,
+                "kernel_evidence",
+                &format!("--- Recent evidence ledger ---\n{}", evidence_lines),
+            );
+        }
+
+        if !selected_memory.is_empty() {
+            let memory_lines = selected_memory
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "- [{} / {}] {}",
+                        entry.scope,
+                        entry.kind,
+                        truncate_text(&entry.content, 220)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            push_layer(
+                &mut lines,
+                &mut included_layers,
+                "kernel_memory",
+                &format!("--- Durable memory ---\n{}", memory_lines),
+            );
+        }
+
         if !hot_turns.is_empty() {
             let hot_text = format_turns_block("--- Active hot turns after compaction ---", &hot_turns);
             push_layer(&mut lines, &mut included_layers, "hot_turns", &hot_text);
@@ -1713,6 +2799,14 @@ impl TerminalStorage {
             &included_layers,
             &included_pack_ids,
             approx_chars,
+        )?;
+
+        self.touch_memory_usage(
+            &conn,
+            &selected_memory
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>(),
         )?;
 
         Ok(ContextAssemblyResult {
@@ -2125,6 +3219,263 @@ impl TerminalStorage {
         .map_err(|err| err.to_string())
     }
 
+    fn load_kernel_session_refs_for_task(
+        &self,
+        conn: &Connection,
+        task_id: &str,
+    ) -> Result<Vec<KernelSessionRef>, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, terminal_tab_id, cli_id, transport_kind, native_session_id,
+                        native_turn_id, model, permission_mode, resume_capable, state, last_sync_at
+                 FROM kernel_session_refs
+                 WHERE task_id = ?1
+                 ORDER BY last_sync_at DESC",
+            )
+            .map_err(|err| err.to_string())?;
+        let rows = stmt
+            .query_map([task_id], |row| {
+                Ok(KernelSessionRef {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    terminal_tab_id: row.get(2)?,
+                    cli_id: row.get(3)?,
+                    transport_kind: row.get(4)?,
+                    native_session_id: row.get(5)?,
+                    native_turn_id: row.get(6)?,
+                    model: row.get(7)?,
+                    permission_mode: row.get(8)?,
+                    resume_capable: row.get::<_, i64>(9)? != 0,
+                    state: row.get(10)?,
+                    last_sync_at: row.get(11)?,
+                })
+            })
+            .map_err(|err| err.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())
+    }
+
+    fn load_kernel_facts_for_task(
+        &self,
+        conn: &Connection,
+        task_id: &str,
+        limit: usize,
+    ) -> Result<Vec<KernelFact>, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, kind, statement, status, source_evidence_ids_json,
+                        subject, polarity, origin, owner_cli, confidence, updated_at, supersedes_fact_ids_json
+                 FROM kernel_facts
+                 WHERE task_id = ?1
+                 ORDER BY updated_at DESC
+                 LIMIT ?2",
+            )
+            .map_err(|err| err.to_string())?;
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], |row| {
+                Ok(KernelFact {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    statement: row.get(3)?,
+                    status: row.get(4)?,
+                    source_evidence_ids: parse_json_default(row.get::<_, String>(5)?),
+                    subject: row.get(6)?,
+                    polarity: row.get(7)?,
+                    origin: row.get(8)?,
+                    owner_cli: row.get(9)?,
+                    confidence: row.get(10)?,
+                    updated_at: row.get(11)?,
+                    supersedes_fact_ids: parse_json_default(row.get::<_, String>(12)?),
+                })
+            })
+            .map_err(|err| err.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())
+    }
+
+    fn load_kernel_evidence_for_task(
+        &self,
+        conn: &Connection,
+        task_id: &str,
+        limit: usize,
+    ) -> Result<Vec<KernelEvidence>, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, message_id, terminal_tab_id, cli_id, evidence_type,
+                        summary, payload_ref, timestamp
+                 FROM kernel_evidence
+                 WHERE task_id = ?1
+                 ORDER BY timestamp DESC
+                 LIMIT ?2",
+            )
+            .map_err(|err| err.to_string())?;
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], |row| {
+                Ok(KernelEvidence {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    message_id: row.get(2)?,
+                    terminal_tab_id: row.get(3)?,
+                    cli_id: row.get(4)?,
+                    evidence_type: row.get(5)?,
+                    summary: row.get(6)?,
+                    payload_ref: row.get(7)?,
+                    timestamp: row.get(8)?,
+                })
+            })
+            .map_err(|err| err.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())
+    }
+
+    fn load_kernel_plan_for_task(
+        &self,
+        conn: &Connection,
+        task_id: &str,
+    ) -> Result<Option<KernelPlan>, String> {
+        conn.query_row(
+            "SELECT id, task_id, title, goal, summary, status, updated_at
+             FROM kernel_plans
+             WHERE task_id = ?1
+             ORDER BY updated_at DESC
+             LIMIT 1",
+            [task_id],
+            |row| {
+                Ok(KernelPlan {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    title: row.get(2)?,
+                    goal: row.get(3)?,
+                    summary: row.get(4)?,
+                    status: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|err| err.to_string())
+    }
+
+    fn load_kernel_work_items_for_task(
+        &self,
+        conn: &Connection,
+        task_id: &str,
+        limit: usize,
+    ) -> Result<Vec<KernelWorkItem>, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, task_id, step_id, owner_cli, title, summary, result, status, updated_at
+                 FROM kernel_work_items
+                 WHERE task_id = ?1
+                 ORDER BY updated_at DESC
+                 LIMIT ?2",
+            )
+            .map_err(|err| err.to_string())?;
+        let rows = stmt
+            .query_map(params![task_id, limit as i64], |row| {
+                Ok(KernelWorkItem {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    step_id: row.get(2)?,
+                    owner_cli: row.get(3)?,
+                    title: row.get(4)?,
+                    summary: row.get(5)?,
+                    result: row.get(6)?,
+                    status: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })
+            .map_err(|err| err.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())
+    }
+
+    fn load_kernel_memory_for_scope(
+        &self,
+        conn: &Connection,
+        scope: &str,
+        scope_ref: &str,
+        limit: usize,
+    ) -> Result<Vec<KernelMemoryEntry>, String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, scope, scope_ref, kind, content, source_fact_id, source_evidence_ids_json, updated_at
+                        , priority, pin_state, last_used_at, use_count, tags_json, decay_eligible
+                 FROM kernel_memory_entries
+                 WHERE scope = ?1 AND scope_ref = ?2
+                   AND (
+                        source_fact_id IS NULL
+                        OR source_fact_id IN (
+                            SELECT id FROM kernel_facts WHERE status != 'invalidated'
+                        )
+                   )
+                 ORDER BY updated_at DESC
+                 LIMIT ?3",
+            )
+            .map_err(|err| err.to_string())?;
+        let rows = stmt
+            .query_map(params![scope, scope_ref, limit as i64], |row| {
+                Ok(KernelMemoryEntry {
+                    id: row.get(0)?,
+                    scope: row.get(1)?,
+                    scope_ref: row.get(2)?,
+                    kind: row.get(3)?,
+                    content: row.get(4)?,
+                    source_fact_id: row.get(5)?,
+                    source_evidence_ids: parse_json_default(row.get::<_, String>(6)?),
+                    updated_at: row.get(7)?,
+                    priority: row.get(8)?,
+                    pin_state: row.get(9)?,
+                    last_used_at: row.get(10)?,
+                    use_count: row.get::<_, i64>(11)? as usize,
+                    tags: parse_json_default(row.get::<_, String>(12)?),
+                    decay_eligible: row.get::<_, i64>(13)? != 0,
+                })
+            })
+            .map_err(|err| err.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())
+    }
+
+    fn touch_memory_usage(
+        &self,
+        conn: &Connection,
+        ids: &[String],
+    ) -> Result<(), String> {
+        let now = now_rfc3339();
+        for id in ids {
+            conn.execute(
+                "UPDATE kernel_memory_entries
+                 SET last_used_at = ?1,
+                     use_count = use_count + 1
+                 WHERE id = ?2",
+                params![now, id],
+            )
+            .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn load_terminal_tab_id_for_task(
+        &self,
+        conn: &Connection,
+        task_id: &str,
+    ) -> Result<Option<String>, String> {
+        conn.query_row(
+            "SELECT terminal_tab_id FROM task_packets WHERE id = ?1",
+            [task_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|err| err.to_string())
+    }
+
     fn load_context_packs_for_task(
         &self,
         conn: &Connection,
@@ -2221,6 +3572,38 @@ fn option_to_json<T: Serialize>(value: &Option<T>) -> Result<Option<String>, Str
         .as_ref()
         .map(|inner| serde_json::to_string(inner).map_err(|err| err.to_string()))
         .transpose()
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let pragma = format!("PRAGMA table_info({})", table);
+    let mut stmt = conn.prepare(&pragma).map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| err.to_string())?;
+    for item in rows {
+        let name = item.map_err(|err| err.to_string())?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition_sql: &str,
+) -> Result<(), String> {
+    if table_has_column(conn, table, column)? {
+        return Ok(());
+    }
+    let sql = format!(
+        "ALTER TABLE {} ADD COLUMN {} {}",
+        table, column, definition_sql
+    );
+    conn.execute(&sql, []).map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 fn parse_json_default<T: DeserializeOwned + Default>(raw: String) -> T {
@@ -2426,3 +3809,634 @@ fn format_turns_block(title: &str, turns: &[TaskRecentTurn]) -> String {
     }
     lines.join("\n")
 }
+
+fn normalized_identity_key(value: &str) -> String {
+    value
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .take(18)
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+fn stable_fact_id(task_id: &str, kind: &str, subject: &str, statement: &str) -> String {
+    format!(
+        "fact::{}::{}::{}::{}",
+        task_id,
+        normalized_identity_key(kind),
+        normalized_identity_key(subject),
+        normalized_identity_key(statement)
+    )
+}
+
+fn stable_memory_id(scope: &str, scope_ref: &str, kind: &str, content: &str) -> String {
+    format!(
+        "memory::{}::{}::{}::{}",
+        normalized_identity_key(scope),
+        scope_ref,
+        normalized_identity_key(kind),
+        normalized_identity_key(content)
+    )
+}
+
+fn select_current_work_item(items: &[KernelWorkItem]) -> Option<KernelWorkItem> {
+    let priority = |status: &str| match status {
+        "running" => 0,
+        "blocked" => 1,
+        "planned" => 2,
+        "pending" => 3,
+        "failed" => 4,
+        "completed" => 5,
+        _ => 6,
+    };
+
+    items
+        .iter()
+        .min_by_key(|item| (priority(&item.status), std::cmp::Reverse(item.updated_at.clone())))
+        .cloned()
+}
+
+fn select_work_items_for_cli<'a>(
+    items: &'a [KernelWorkItem],
+    target_cli: &str,
+) -> Vec<&'a KernelWorkItem> {
+    items
+        .iter()
+        .filter(|item| {
+            target_cli == "claude"
+                || item.owner_cli == target_cli
+                || matches!(item.status.as_str(), "running" | "blocked")
+        })
+        .take(6)
+        .collect()
+}
+
+fn select_kernel_facts_for_cli<'a>(
+    facts: &'a [KernelFact],
+    target_cli: &str,
+) -> Vec<&'a KernelFact> {
+    let limit = if target_cli == "claude" { 8 } else { 6 };
+    facts
+        .iter()
+        .filter(|fact| {
+            if target_cli == "claude" {
+                true
+            } else if target_cli == "gemini" {
+                matches!(fact.kind.as_str(), "decision" | "codebase" | "output")
+            } else {
+                matches!(fact.kind.as_str(), "runtime" | "codebase" | "output" | "decision")
+            }
+        })
+        .take(limit)
+        .collect()
+}
+
+fn select_kernel_evidence_for_cli<'a>(
+    evidence: &'a [KernelEvidence],
+    target_cli: &str,
+) -> Vec<&'a KernelEvidence> {
+    evidence
+        .iter()
+        .filter(|entry| {
+            if target_cli == "claude" {
+                true
+            } else if target_cli == "gemini" {
+                matches!(entry.evidence_type.as_str(), "fileChange" | "assistantMessage" | "toolCall")
+            } else {
+                matches!(entry.evidence_type.as_str(), "command" | "fileChange" | "assistantMessage")
+            }
+        })
+        .take(if target_cli == "claude" { 8 } else { 5 })
+        .collect()
+}
+
+fn select_memory_for_cli_with_budget<'a>(
+    memory_entries: &'a [KernelMemoryEntry],
+    target_cli: &str,
+    current_work_item: Option<&KernelWorkItem>,
+    relevant_files: &[String],
+) -> Vec<&'a KernelMemoryEntry> {
+    let mut scored = memory_entries
+        .iter()
+        .filter_map(|entry| {
+            let score = score_memory_for_cli(entry, target_cli, current_work_item, relevant_files);
+            if score > 0 {
+                Some((score, entry))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| right.0.cmp(&left.0));
+    let budget = if target_cli == "claude" { 8 } else { 4 };
+    scored.into_iter().take(budget).map(|(_, entry)| entry).collect()
+}
+
+fn extract_fact_subject(
+    kind: &str,
+    entry: &KernelEvidence,
+    assistant_summary: &str,
+) -> String {
+    if let Some(payload) = entry.payload_ref.as_ref().filter(|value| !value.trim().is_empty()) {
+        return normalized_identity_key(payload);
+    }
+    if entry.evidence_type == "assistantMessage" {
+        if let Some(backtick) = assistant_summary
+            .split('`')
+            .nth(1)
+            .filter(|value| !value.trim().is_empty())
+        {
+            return normalized_identity_key(backtick);
+        }
+    }
+    if kind == "output" {
+        return "current_turn".to_string();
+    }
+    "general".to_string()
+}
+
+fn detect_fact_polarity(
+    kind: &str,
+    summary: &str,
+    status: &str,
+) -> String {
+    let lowered = summary.to_ascii_lowercase();
+    if kind == "risk" {
+        return "negative".to_string();
+    }
+    if lowered.contains("failed")
+        || lowered.contains("error")
+        || lowered.contains("unable")
+        || lowered.contains("denied")
+    {
+        return "negative".to_string();
+    }
+    if status == "verified"
+        || lowered.contains("succeeded")
+        || lowered.contains("completed")
+        || lowered.contains("fixed")
+    {
+        return "positive".to_string();
+    }
+    "neutral".to_string()
+}
+
+fn default_memory_priority_for_kind(kind: &str) -> &'static str {
+    match kind {
+        "decision" | "requirement" => "high",
+        "codebase" | "runtime" => "medium",
+        _ => "low",
+    }
+}
+
+fn default_memory_tags_from_kind(kind: &str) -> Vec<String> {
+    match kind {
+        "decision" => vec!["decision".to_string(), "workflow".to_string()],
+        "requirement" => vec!["requirement".to_string()],
+        "codebase" => vec!["codebase".to_string()],
+        "runtime" => vec!["runtime".to_string()],
+        "risk" => vec!["risk".to_string()],
+        _ => vec!["output".to_string()],
+    }
+}
+
+fn default_memory_tags_for_fact(fact: &KernelFact) -> Vec<String> {
+    let mut tags = default_memory_tags_from_kind(&fact.kind);
+    if fact.subject != "general" {
+        tags.push(fact.subject.clone());
+    }
+    tags
+}
+
+fn parse_rfc3339_millis(value: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|item| item.timestamp_millis())
+        .unwrap_or(0)
+}
+
+fn score_memory_for_cli(
+    entry: &KernelMemoryEntry,
+    target_cli: &str,
+    current_work_item: Option<&KernelWorkItem>,
+    relevant_files: &[String],
+) -> i64 {
+    let scope_score = match entry.scope.as_str() {
+        "task" => 40,
+        "workspace" => 24,
+        "global" => 12,
+        _ => 0,
+    };
+    let pin_score = match entry.pin_state.as_str() {
+        "manual" => 100,
+        "auto" => 20,
+        _ => 0,
+    };
+    let priority_score = match entry.priority.as_str() {
+        "high" => 30,
+        "medium" => 15,
+        _ => 5,
+    };
+    let affinity_score = if target_cli == "claude" {
+        if matches!(entry.kind.as_str(), "decision" | "requirement" | "risk") {
+            24
+        } else {
+            10
+        }
+    } else if target_cli == "gemini" {
+        if matches!(entry.kind.as_str(), "decision" | "requirement" | "codebase") {
+            20
+        } else {
+            6
+        }
+    } else if matches!(entry.kind.as_str(), "codebase" | "runtime" | "output") {
+        20
+    } else {
+        8
+    };
+    let freshness_score = {
+        let age_ms = Local::now().timestamp_millis() - parse_rfc3339_millis(&entry.updated_at);
+        if age_ms <= 86_400_000 {
+            20
+        } else if age_ms <= 604_800_000 {
+            10
+        } else if age_ms <= 2_592_000_000 {
+            4
+        } else {
+            0
+        }
+    };
+    let usage_score = (entry.use_count.min(5) as i64) * 2;
+    let relevance_score = current_work_item
+        .map(|item| {
+            let title = item.title.to_ascii_lowercase();
+            let summary = item.summary.clone().unwrap_or_default().to_ascii_lowercase();
+            let content = entry.content.to_ascii_lowercase();
+            if content.contains(&title) || (!summary.is_empty() && content.contains(&summary)) {
+                20
+            } else {
+                0
+            }
+        })
+        .unwrap_or(0)
+        + if relevant_files.iter().any(|file| {
+            let key = std::path::Path::new(file)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(file)
+                .to_ascii_lowercase();
+            entry.content.to_ascii_lowercase().contains(&key)
+        }) {
+            16
+        } else {
+            0
+        };
+    let decay_penalty = if entry.decay_eligible && entry.pin_state != "manual" && freshness_score == 0 {
+        12
+    } else {
+        0
+    };
+
+    scope_score + pin_score + priority_score + affinity_score + freshness_score + usage_score + relevance_score - decay_penalty
+}
+
+fn merge_fact_status(existing: &str, incoming: &str) -> String {
+    match (existing, incoming) {
+        ("verified", _) | (_, "verified") => "verified".to_string(),
+        ("invalidated", "pending") => "pending".to_string(),
+        (_, "pending") => "pending".to_string(),
+        _ => incoming.to_string(),
+    }
+}
+
+fn merge_fact_confidence(existing: &str, incoming: &str) -> String {
+    let score = |value: &str| match value {
+        "high" => 3,
+        "medium" => 2,
+        _ => 1,
+    };
+    if score(existing) >= score(incoming) {
+        existing.to_string()
+    } else {
+        incoming.to_string()
+    }
+}
+
+fn collect_relevant_files_from_blocks_option(blocks: Option<&Vec<ChatMessageBlock>>) -> Vec<String> {
+    let mut files = Vec::new();
+    let Some(blocks) = blocks else {
+        return files;
+    };
+    for block in blocks {
+        if let ChatMessageBlock::FileChange { path, .. } = block {
+            if !path.trim().is_empty() && !files.iter().any(|existing| existing == path) {
+                files.push(path.clone());
+            }
+        }
+    }
+    files
+}
+
+fn build_kernel_evidence_records(
+    task_id: &str,
+    message_id: &str,
+    terminal_tab_id: &str,
+    cli_id: &str,
+    assistant_summary: &str,
+    blocks: Option<&Vec<ChatMessageBlock>>,
+    timestamp: &str,
+) -> Vec<KernelEvidence> {
+    let mut records = vec![KernelEvidence {
+        id: new_id("evidence"),
+        task_id: task_id.to_string(),
+        message_id: message_id.to_string(),
+        terminal_tab_id: terminal_tab_id.to_string(),
+        cli_id: cli_id.to_string(),
+        evidence_type: "assistantMessage".to_string(),
+        summary: truncate_text(assistant_summary, 320),
+        payload_ref: Some(message_id.to_string()),
+        timestamp: timestamp.to_string(),
+    }];
+
+    let Some(blocks) = blocks else {
+        return records;
+    };
+
+    for block in blocks {
+        let entry = match block {
+            ChatMessageBlock::Command {
+                label,
+                command,
+                exit_code,
+                ..
+            } => Some(KernelEvidence {
+                id: new_id("evidence"),
+                task_id: task_id.to_string(),
+                message_id: message_id.to_string(),
+                terminal_tab_id: terminal_tab_id.to_string(),
+                cli_id: cli_id.to_string(),
+                evidence_type: "command".to_string(),
+                summary: format!(
+                    "Command {}: {}",
+                    if exit_code.unwrap_or(0) == 0 {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    },
+                    truncate_text(if label.trim().is_empty() { command } else { label }, 180)
+                ),
+                payload_ref: Some(truncate_text(command, 220)),
+                timestamp: timestamp.to_string(),
+            }),
+            ChatMessageBlock::FileChange {
+                path,
+                change_type,
+                ..
+            } => Some(KernelEvidence {
+                id: new_id("evidence"),
+                task_id: task_id.to_string(),
+                message_id: message_id.to_string(),
+                terminal_tab_id: terminal_tab_id.to_string(),
+                cli_id: cli_id.to_string(),
+                evidence_type: "fileChange".to_string(),
+                summary: format!("File {}: {}", change_type, path),
+                payload_ref: Some(path.clone()),
+                timestamp: timestamp.to_string(),
+            }),
+            ChatMessageBlock::Tool {
+                tool, summary, source, ..
+            } => Some(KernelEvidence {
+                id: new_id("evidence"),
+                task_id: task_id.to_string(),
+                message_id: message_id.to_string(),
+                terminal_tab_id: terminal_tab_id.to_string(),
+                cli_id: cli_id.to_string(),
+                evidence_type: "toolCall".to_string(),
+                summary: format!(
+                    "Tool {}{}",
+                    tool,
+                    summary
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| format!(": {}", truncate_text(value, 180)))
+                        .unwrap_or_default()
+                ),
+                payload_ref: source.clone(),
+                timestamp: timestamp.to_string(),
+            }),
+            ChatMessageBlock::Status { level, text } => Some(KernelEvidence {
+                id: new_id("evidence"),
+                task_id: task_id.to_string(),
+                message_id: message_id.to_string(),
+                terminal_tab_id: terminal_tab_id.to_string(),
+                cli_id: cli_id.to_string(),
+                evidence_type: "status".to_string(),
+                summary: format!("Status {}: {}", level, truncate_text(text, 180)),
+                payload_ref: None,
+                timestamp: timestamp.to_string(),
+            }),
+            _ => None,
+        };
+        if let Some(entry) = entry {
+            records.push(entry);
+        }
+    }
+
+    records
+}
+
+fn build_kernel_fact_records(
+    task_id: &str,
+    cli_id: &str,
+    assistant_summary: &str,
+    exit_code: Option<i32>,
+    evidence: &[KernelEvidence],
+    updated_at: &str,
+) -> Vec<KernelFact> {
+    let mut facts = Vec::new();
+    let assistant_evidence_ids = evidence
+        .iter()
+        .filter(|entry| entry.evidence_type == "assistantMessage")
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+
+    if !assistant_summary.trim().is_empty() {
+        let subject = if let Some(primary) = evidence
+            .iter()
+            .find(|entry| entry.evidence_type != "assistantMessage")
+        {
+            extract_fact_subject("output", primary, assistant_summary)
+        } else {
+            "current_turn".to_string()
+        };
+        let status = if exit_code == Some(0) {
+            "inferred".to_string()
+        } else {
+            "pending".to_string()
+        };
+        facts.push(KernelFact {
+            id: stable_fact_id(task_id, "output", &subject, assistant_summary),
+            task_id: task_id.to_string(),
+            kind: "output".to_string(),
+            subject,
+            polarity: detect_fact_polarity("output", assistant_summary, &status),
+            origin: "assistant".to_string(),
+            statement: truncate_text(assistant_summary, 320),
+            status,
+            source_evidence_ids: assistant_evidence_ids,
+            supersedes_fact_ids: Vec::new(),
+            owner_cli: cli_id.to_string(),
+            confidence: "medium".to_string(),
+            updated_at: updated_at.to_string(),
+        });
+    }
+
+    for entry in evidence {
+        if entry.evidence_type == "assistantMessage" {
+            continue;
+        }
+        let (kind, status, confidence) = match entry.evidence_type.as_str() {
+            "fileChange" => ("codebase", "verified", "high"),
+            "command" if entry.summary.contains("failed") => ("runtime", "pending", "high"),
+            "command" => ("runtime", "verified", "high"),
+            "status" if entry.summary.to_ascii_lowercase().contains("error") => ("risk", "pending", "medium"),
+            "toolCall" => ("decision", "inferred", "medium"),
+            _ => ("output", "inferred", "low"),
+        };
+        let subject = extract_fact_subject(kind, entry, assistant_summary);
+        facts.push(KernelFact {
+            id: stable_fact_id(task_id, kind, &subject, &entry.summary),
+            task_id: task_id.to_string(),
+            kind: kind.to_string(),
+            subject,
+            polarity: detect_fact_polarity(kind, &entry.summary, status),
+            origin: match entry.evidence_type.as_str() {
+                "command" => "command".to_string(),
+                "fileChange" => "file".to_string(),
+                "toolCall" => "tool".to_string(),
+                "status" => "assistant".to_string(),
+                _ => "assistant".to_string(),
+            },
+            statement: entry.summary.clone(),
+            status: status.to_string(),
+            source_evidence_ids: vec![entry.id.clone()],
+            supersedes_fact_ids: Vec::new(),
+            owner_cli: cli_id.to_string(),
+            confidence: confidence.to_string(),
+            updated_at: updated_at.to_string(),
+        });
+    }
+
+    facts
+}
+
+fn build_kernel_plan_record(
+    task_id: &str,
+    blocks: Option<&Vec<ChatMessageBlock>>,
+    updated_at: &str,
+) -> Option<KernelPlan> {
+    let blocks = blocks?;
+    for block in blocks {
+        match block {
+            ChatMessageBlock::OrchestrationPlan {
+                title,
+                goal,
+                summary,
+                status,
+            } => {
+                return Some(KernelPlan {
+                    id: format!("plan::{}", task_id),
+                    task_id: task_id.to_string(),
+                    title: title.clone(),
+                    goal: goal.clone(),
+                    summary: summary.clone(),
+                    status: status.clone().unwrap_or_else(|| "active".to_string()),
+                    updated_at: updated_at.to_string(),
+                });
+            }
+            ChatMessageBlock::Plan { text } => {
+                return Some(KernelPlan {
+                    id: format!("plan::{}", task_id),
+                    task_id: task_id.to_string(),
+                    title: "Active plan".to_string(),
+                    goal: truncate_text(text, 180),
+                    summary: Some(text.clone()),
+                    status: "active".to_string(),
+                    updated_at: updated_at.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn build_kernel_work_item_records(
+    task_id: &str,
+    fallback_cli: &str,
+    blocks: Option<&Vec<ChatMessageBlock>>,
+    updated_at: &str,
+) -> Vec<KernelWorkItem> {
+    let mut items = Vec::new();
+    let Some(blocks) = blocks else {
+        return items;
+    };
+
+    for block in blocks {
+        match block {
+            ChatMessageBlock::OrchestrationStep {
+                step_id,
+                owner,
+                title,
+                summary,
+                result,
+                status,
+            } => items.push(KernelWorkItem {
+                id: format!("workitem::{}::{}", task_id, step_id),
+                task_id: task_id.to_string(),
+                step_id: Some(step_id.clone()),
+                owner_cli: owner.clone(),
+                title: title.clone(),
+                summary: summary.clone(),
+                result: result.clone(),
+                status: status.clone().unwrap_or_else(|| "planned".to_string()),
+                updated_at: updated_at.to_string(),
+            }),
+            ChatMessageBlock::AutoRoute {
+                target_cli,
+                title,
+                reason,
+                state,
+                ..
+            } => items.push(KernelWorkItem {
+                id: format!("workitem::{}::autoroute::{}", task_id, title),
+                task_id: task_id.to_string(),
+                step_id: None,
+                owner_cli: target_cli.clone(),
+                title: title.clone(),
+                summary: Some(reason.clone()),
+                result: None,
+                status: state.clone().unwrap_or_else(|| "pending".to_string()),
+                updated_at: updated_at.to_string(),
+            }),
+            ChatMessageBlock::Plan { text } => items.push(KernelWorkItem {
+                id: format!("workitem::{}::plan-text", task_id),
+                task_id: task_id.to_string(),
+                step_id: None,
+                owner_cli: fallback_cli.to_string(),
+                title: "Planned next action".to_string(),
+                summary: Some(truncate_text(text, 220)),
+                result: None,
+                status: "planned".to_string(),
+                updated_at: updated_at.to_string(),
+            }),
+            _ => {}
+        }
+    }
+
+    items
+}
+
