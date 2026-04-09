@@ -319,6 +319,8 @@ export interface AutomationRun {
   jobName?: string | null;
   triggerSource?: string | null;
   runNumber?: number | null;
+  workflowRunId?: string | null;
+  workflowNodeId?: string | null;
   permissionProfile?: AutomationPermissionProfile;
   parameterValues?: Record<string, AutomationParameterValue>;
   workspaceId: string;
@@ -418,6 +420,128 @@ export interface CreateAutomationRunFromJobRequest {
   parameterValues?: Record<string, AutomationParameterValue> | null;
 }
 
+export type AutomationWorkflowContextStrategy =
+  | "resume-per-cli"
+  | "kernel-only"
+  | "session-pool";
+
+export type AutomationWorkflowBranchResult = "success" | "fail";
+
+export interface AutomationWorkflowNodeDraft {
+  id?: string | null;
+  label?: string | null;
+  goal: string;
+  expectedOutcome: string;
+  executionMode: AutomationExecutionMode | "inherit";
+  permissionProfile: AutomationPermissionProfile | "inherit";
+  reuseSession: boolean;
+}
+
+export interface AutomationWorkflowEdgeDraft {
+  fromNodeId: string;
+  on: AutomationWorkflowBranchResult;
+  toNodeId: string;
+}
+
+export interface AutomationWorkflowDraft {
+  workspaceId: string;
+  projectRoot: string;
+  projectName: string;
+  name: string;
+  description?: string | null;
+  cronExpression?: string | null;
+  emailNotificationEnabled: boolean;
+  enabled: boolean;
+  entryNodeId?: string | null;
+  defaultContextStrategy: AutomationWorkflowContextStrategy;
+  defaultExecutionMode: AutomationExecutionMode;
+  defaultPermissionProfile: AutomationPermissionProfile;
+  nodes: AutomationWorkflowNodeDraft[];
+  edges: AutomationWorkflowEdgeDraft[];
+}
+
+export interface AutomationWorkflowNode {
+  id: string;
+  label: string;
+  goal: string;
+  expectedOutcome: string;
+  executionMode: AutomationExecutionMode | "inherit";
+  permissionProfile: AutomationPermissionProfile | "inherit";
+  reuseSession: boolean;
+}
+
+export interface AutomationWorkflowEdge {
+  fromNodeId: string;
+  on: AutomationWorkflowBranchResult;
+  toNodeId: string;
+}
+
+export interface WorkflowCliSessionRef {
+  cliId: AgentId;
+  kind: AgentTransportKind;
+  threadId?: string | null;
+  turnId?: string | null;
+  model?: string | null;
+  permissionMode?: string | null;
+  lastSyncAt?: string | null;
+}
+
+export interface AutomationWorkflow extends AutomationWorkflowDraft {
+  id: string;
+  entryNodeId: string;
+  nodes: AutomationWorkflowNode[];
+  edges: AutomationWorkflowEdge[];
+  lastTriggeredAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateAutomationWorkflowRunRequest {
+  workflowId: string;
+  scheduledStartAt?: string | null;
+}
+
+export interface AutomationWorkflowNodeRun {
+  id: string;
+  workflowRunId: string;
+  nodeId: string;
+  label: string;
+  goal: string;
+  automationRunId?: string | null;
+  status: string;
+  branchResult?: AutomationWorkflowBranchResult | null;
+  usedCli?: AgentId | null;
+  transportSession?: WorkflowCliSessionRef | null;
+  statusSummary?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  updatedAt: string;
+}
+
+export interface AutomationWorkflowRun {
+  id: string;
+  workflowId: string;
+  workflowName: string;
+  triggerSource: string;
+  workspaceId: string;
+  projectRoot: string;
+  projectName: string;
+  status: string;
+  statusSummary?: string | null;
+  scheduledStartAt?: string | null;
+  sharedTerminalTabId: string;
+  entryNodeId: string;
+  currentNodeId?: string | null;
+  emailNotificationEnabled: boolean;
+  cliSessions: WorkflowCliSessionRef[];
+  nodeRuns: AutomationWorkflowNodeRun[];
+  events: AutomationEvent[];
+  startedAt?: string | null;
+  completedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AutomationRunRecord {
   id: string;
   jobId?: string | null;
@@ -515,6 +639,14 @@ export interface AutomationRunDetail {
   } | null;
 }
 
+export interface AutomationWorkflowRunDetail {
+  run: AutomationWorkflowRun;
+  workflow?: AutomationWorkflow | null;
+  childRuns: AutomationRunRecord[];
+  conversationSession?: AutomationRunDetail["conversationSession"] | null;
+  taskContext?: AutomationRunDetail["taskContext"] | null;
+}
+
 export interface AutomationObjectiveSignals {
   exitCode?: number | null;
   checksPassed: boolean;
@@ -549,6 +681,9 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   cliId: AgentId | null;
+  automationRunId?: string | null;
+  workflowRunId?: string | null;
+  workflowNodeId?: string | null;
   timestamp: string;
   content: string;
   rawContent?: string | null;

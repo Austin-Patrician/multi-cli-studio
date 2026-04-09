@@ -27,15 +27,22 @@ use serde_json::{json, Value};
 use tauri_plugin_notification::NotificationExt;
 use automation::{
     build_job_from_draft, build_run_from_job, build_run_from_request, default_rule_profile,
-    display_parameter_value, load_jobs as load_automation_jobs_from_disk, load_rule_profile,
-    load_runs as load_automation_runs_from_disk, normalize_goal_rule_config,
+    build_workflow_from_draft, build_workflow_run_from_workflow, display_parameter_value,
+    load_jobs as load_automation_jobs_from_disk, load_rule_profile,
+    load_runs as load_automation_runs_from_disk, load_workflow_runs as load_automation_workflow_runs_from_disk,
+    load_workflows as load_automation_workflows_from_disk, normalize_goal_rule_config,
     normalize_permission_profile, normalize_rule_profile, normalize_scheduled_start_at,
-    normalize_runs_on_startup, persist_jobs as persist_automation_jobs_to_disk, persist_rule_profile,
-    persist_runs as persist_automation_runs_to_disk, push_event, sync_goal_status_fields,
-    sync_run_status_fields, update_job_from_draft, AutomationGoal, AutomationGoalRuleConfig,
-    AutomationJob, AutomationJobDraft, AutomationJudgeAssessment, AutomationObjectiveSignals,
-    AutomationRuleProfile, AutomationRun, AutomationValidationResult, display_status_from_dimensions,
-    CreateAutomationRunFromJobRequest, CreateAutomationRunRequest,
+    normalize_runs_on_startup, normalize_workflow_runs_on_startup, normalize_workflows_on_startup,
+    persist_jobs as persist_automation_jobs_to_disk, persist_rule_profile,
+    persist_runs as persist_automation_runs_to_disk, persist_workflow_runs as persist_automation_workflow_runs_to_disk,
+    persist_workflows as persist_automation_workflows_to_disk, push_event, push_workflow_event,
+    sync_goal_status_fields, sync_run_status_fields, update_job_from_draft,
+    update_workflow_from_draft, AutomationGoal, AutomationGoalRuleConfig, AutomationJob,
+    AutomationJobDraft, AutomationJudgeAssessment, AutomationObjectiveSignals,
+    AutomationRuleProfile, AutomationRun, AutomationValidationResult, AutomationWorkflow,
+    AutomationWorkflowDraft, AutomationWorkflowRun, CreateAutomationRunFromJobRequest,
+    CreateAutomationRunRequest, CreateAutomationWorkflowRunRequest, WorkflowCliSessionRef,
+    display_status_from_dimensions,
 };
 use storage::{
     default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest,
@@ -762,6 +769,9 @@ struct AppStore {
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
     automation_active_runs: Arc<Mutex<BTreeSet<String>>>,
+    automation_workflows: Arc<Mutex<Vec<AutomationWorkflow>>>,
+    automation_workflow_runs: Arc<Mutex<Vec<AutomationWorkflowRun>>>,
+    automation_active_workflow_runs: Arc<Mutex<BTreeSet<String>>>,
     automation_rule_profile: Arc<Mutex<AutomationRuleProfile>>,
     acp_session: Arc<Mutex<acp::AcpSession>>,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
@@ -5701,6 +5711,16 @@ struct AutomationRunDetailDto {
     task_context: Option<TaskContextBundle>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomationWorkflowRunDetailDto {
+    run: AutomationWorkflowRun,
+    workflow: Option<AutomationWorkflow>,
+    child_runs: Vec<AutomationRunRecord>,
+    conversation_session: Option<PersistedConversationSession>,
+    task_context: Option<TaskContextBundle>,
+}
+
 fn primary_goal(run: &AutomationRun) -> Option<&AutomationGoal> {
     run.goals
         .iter()
@@ -5767,6 +5787,61 @@ fn transport_kind_for_cli(cli_id: &str) -> String {
     }
 }
 
+fn workflow_cli_session_ref(session: &AgentTransportSession) -> WorkflowCliSessionRef {
+    WorkflowCliSessionRef {
+        cli_id: session.cli_id.clone(),
+        kind: session.kind.clone(),
+        thread_id: session.thread_id.clone(),
+        turn_id: session.turn_id.clone(),
+        model: session.model.clone(),
+        permission_mode: session.permission_mode.clone(),
+        last_sync_at: session.last_sync_at.clone(),
+    }
+}
+
+fn agent_transport_session_from_kernel_ref(
+    session: &storage::KernelSessionRef,
+) -> Option<AgentTransportSession> {
+    if !session.resume_capable {
+        return None;
+    }
+    let thread_id = session.native_session_id.clone();
+    if thread_id.as_deref().unwrap_or("").trim().is_empty() {
+        return None;
+    }
+    Some(AgentTransportSession {
+        cli_id: session.cli_id.clone(),
+        kind: session
+            .transport_kind
+            .clone()
+            .unwrap_or_else(|| transport_kind_for_cli(&session.cli_id)),
+        thread_id,
+        turn_id: session.native_turn_id.clone(),
+        model: session.model.clone(),
+        permission_mode: session.permission_mode.clone(),
+        last_sync_at: Some(session.last_sync_at.clone()),
+    })
+}
+
+fn latest_automation_transport_session(
+    terminal_storage: &TerminalStorage,
+    terminal_tab_id: &str,
+    cli_id: &str,
+) -> Option<AgentTransportSession> {
+    terminal_storage
+        .load_task_kernel_by_terminal_tab(terminal_tab_id)
+        .ok()
+        .flatten()
+        .and_then(|kernel| {
+            kernel
+                .session_refs
+                .into_iter()
+                .filter(|entry| entry.cli_id == cli_id)
+                .max_by(|left, right| left.last_sync_at.cmp(&right.last_sync_at))
+        })
+        .and_then(|entry| agent_transport_session_from_kernel_ref(&entry))
+}
+
 fn ensure_automation_conversation_session(
     terminal_storage: &TerminalStorage,
     run: &AutomationRun,
@@ -5793,6 +5868,66 @@ fn ensure_automation_conversation_session(
     })
 }
 
+fn ensure_workflow_conversation_session(
+    terminal_storage: &TerminalStorage,
+    run: &AutomationWorkflowRun,
+) -> Result<PersistedConversationSession, String> {
+    if let Some(existing) =
+        terminal_storage.load_conversation_session_by_terminal_tab(&run.shared_terminal_tab_id)?
+    {
+        return Ok(existing);
+    }
+
+    let now = now_stamp();
+    Ok(PersistedConversationSession {
+        id: create_id("session"),
+        terminal_tab_id: run.shared_terminal_tab_id.clone(),
+        workspace_id: run.workspace_id.clone(),
+        project_root: run.project_root.clone(),
+        project_name: run.project_name.clone(),
+        messages: Vec::new(),
+        compacted_summaries: Vec::new(),
+        last_compacted_at: None,
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+fn append_workflow_log_message(
+    terminal_storage: &TerminalStorage,
+    run: &AutomationWorkflowRun,
+    workflow_node_id: Option<&str>,
+    automation_run_id: Option<&str>,
+    text: &str,
+) -> Result<(), String> {
+    let session = ensure_workflow_conversation_session(terminal_storage, run)?;
+    let timestamp = now_stamp();
+    let request = MessageEventsAppendRequest {
+        seeds: vec![MessageSessionSeed {
+            terminal_tab_id: run.shared_terminal_tab_id.clone(),
+            session,
+            messages: vec![PersistedChatMessage {
+                id: create_id("wf-log"),
+                role: "system".to_string(),
+                cli_id: None,
+                automation_run_id: automation_run_id.map(|value| value.to_string()),
+                workflow_run_id: Some(run.id.clone()),
+                workflow_node_id: workflow_node_id.map(|value| value.to_string()),
+                timestamp: timestamp.clone(),
+                content: text.to_string(),
+                raw_content: Some(text.to_string()),
+                content_format: Some("log".to_string()),
+                transport_kind: None,
+                blocks: None,
+                is_streaming: false,
+                duration_ms: None,
+                exit_code: None,
+            }],
+        }],
+    };
+    terminal_storage.append_chat_messages(&request)
+}
+
 fn append_automation_turn_seed(
     terminal_storage: &TerminalStorage,
     run: &AutomationRun,
@@ -5812,6 +5947,9 @@ fn append_automation_turn_seed(
                     id: create_id("auto-user"),
                     role: "user".to_string(),
                     cli_id: None,
+                    automation_run_id: Some(run.id.clone()),
+                    workflow_run_id: run.workflow_run_id.clone(),
+                    workflow_node_id: run.workflow_node_id.clone(),
                     timestamp: now.clone(),
                     content: prompt.to_string(),
                     raw_content: Some(prompt.to_string()),
@@ -5826,6 +5964,9 @@ fn append_automation_turn_seed(
                     id: message_id.to_string(),
                     role: "assistant".to_string(),
                     cli_id: Some(owner_cli.to_string()),
+                    automation_run_id: Some(run.id.clone()),
+                    workflow_run_id: run.workflow_run_id.clone(),
+                    workflow_node_id: run.workflow_node_id.clone(),
                     timestamp: now.clone(),
                     content: String::new(),
                     raw_content: Some(String::new()),
@@ -5840,6 +5981,22 @@ fn append_automation_turn_seed(
         }],
     };
     terminal_storage.append_chat_messages(&request)
+}
+
+fn workflow_node_rule_config() -> AutomationGoalRuleConfig {
+    let defaults = default_rule_profile();
+    AutomationGoalRuleConfig {
+        allow_auto_select_strategy: defaults.allow_auto_select_strategy,
+        allow_safe_workspace_edits: defaults.allow_safe_workspace_edits,
+        allow_safe_checks: defaults.allow_safe_checks,
+        pause_on_credentials: defaults.pause_on_credentials,
+        pause_on_external_installs: defaults.pause_on_external_installs,
+        pause_on_destructive_commands: defaults.pause_on_destructive_commands,
+        pause_on_git_push: defaults.pause_on_git_push,
+        max_rounds_per_goal: 1,
+        max_consecutive_failures: 1,
+        max_no_progress_rounds: 0,
+    }
 }
 
 fn finalize_automation_turn_message(
@@ -6600,6 +6757,514 @@ fn delete_automation_run(
         let _ = store
             .terminal_storage
             .delete_chat_session_by_tab(&goal.synthetic_terminal_tab_id);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn list_automation_workflows(
+    store: State<'_, AppStore>,
+) -> Result<Vec<AutomationWorkflow>, String> {
+    let mut workflows = store
+        .automation_workflows
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone();
+    workflows.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    Ok(workflows)
+}
+
+#[tauri::command]
+fn get_automation_workflow(
+    store: State<'_, AppStore>,
+    workflow_id: String,
+) -> Result<AutomationWorkflow, String> {
+    store
+        .automation_workflows
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .find(|item| item.id == workflow_id)
+        .cloned()
+        .ok_or_else(|| "Automation workflow not found.".to_string())
+}
+
+#[tauri::command]
+fn create_automation_workflow(
+    store: State<'_, AppStore>,
+    workflow: AutomationWorkflowDraft,
+) -> Result<AutomationWorkflow, String> {
+    let created = build_workflow_from_draft(workflow)?;
+    let mut workflows = store
+        .automation_workflows
+        .lock()
+        .map_err(|err| err.to_string())?;
+    workflows.insert(0, created.clone());
+    persist_automation_workflows_to_disk(&workflows)?;
+    Ok(created)
+}
+
+#[tauri::command]
+fn update_automation_workflow(
+    store: State<'_, AppStore>,
+    workflow_id: String,
+    workflow: AutomationWorkflowDraft,
+) -> Result<AutomationWorkflow, String> {
+    let mut workflows = store
+        .automation_workflows
+        .lock()
+        .map_err(|err| err.to_string())?;
+    let index = workflows
+        .iter()
+        .position(|item| item.id == workflow_id)
+        .ok_or_else(|| "Automation workflow not found.".to_string())?;
+    let updated = update_workflow_from_draft(&workflows[index], workflow)?;
+    workflows[index] = updated.clone();
+    persist_automation_workflows_to_disk(&workflows)?;
+    Ok(updated)
+}
+
+#[tauri::command]
+fn delete_automation_workflow(
+    store: State<'_, AppStore>,
+    workflow_id: String,
+) -> Result<(), String> {
+    if store
+        .automation_workflow_runs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .any(|run| {
+            run.workflow_id == workflow_id && matches!(run.status.as_str(), "scheduled" | "running")
+        })
+    {
+        return Err("This workflow has active runs and cannot be deleted yet.".to_string());
+    }
+
+    let mut workflows = store
+        .automation_workflows
+        .lock()
+        .map_err(|err| err.to_string())?;
+    let index = workflows
+        .iter()
+        .position(|item| item.id == workflow_id)
+        .ok_or_else(|| "Automation workflow not found.".to_string())?;
+    workflows.remove(index);
+    persist_automation_workflows_to_disk(&workflows)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_automation_workflow_runs(
+    store: State<'_, AppStore>,
+    workflow_id: Option<String>,
+) -> Result<Vec<AutomationWorkflowRun>, String> {
+    let mut runs = store
+        .automation_workflow_runs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .clone()
+        .into_iter()
+        .filter(|run| match workflow_id.as_deref() {
+            Some(needle) => run.workflow_id == needle,
+            None => true,
+        })
+        .collect::<Vec<_>>();
+    runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(runs)
+}
+
+#[tauri::command]
+fn get_automation_workflow_run_detail(
+    store: State<'_, AppStore>,
+    workflow_run_id: String,
+) -> Result<AutomationWorkflowRunDetailDto, String> {
+    let run = store
+        .automation_workflow_runs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .find(|item| item.id == workflow_run_id)
+        .cloned()
+        .ok_or_else(|| "Workflow run not found.".to_string())?;
+    let workflow = store
+        .automation_workflows
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .find(|item| item.id == run.workflow_id)
+        .cloned();
+    let child_runs = store
+        .automation_runs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .filter(|item| item.workflow_run_id.as_deref() == Some(run.id.as_str()))
+        .cloned()
+        .map(|item| automation_run_record(&item))
+        .collect::<Vec<_>>();
+    let conversation_session = store
+        .terminal_storage
+        .load_conversation_session_by_terminal_tab(&run.shared_terminal_tab_id)?;
+    let task_context = store
+        .terminal_storage
+        .load_task_context_bundle(&run.shared_terminal_tab_id)?;
+    Ok(AutomationWorkflowRunDetailDto {
+        run,
+        workflow,
+        child_runs,
+        conversation_session,
+        task_context,
+    })
+}
+
+fn workflow_node_by_id<'a>(
+    workflow: &'a AutomationWorkflow,
+    node_id: &str,
+) -> Option<&'a automation::AutomationWorkflowNode> {
+    workflow.nodes.iter().find(|node| node.id == node_id)
+}
+
+fn workflow_next_node_id(
+    workflow: &AutomationWorkflow,
+    node_id: &str,
+    branch: &str,
+) -> Option<String> {
+    workflow
+        .edges
+        .iter()
+        .find(|edge| edge.from_node_id == node_id && edge.on_result == branch)
+        .map(|edge| edge.to_node_id.clone())
+}
+
+fn workflow_run_summary(run: &AutomationWorkflowRun) -> String {
+    let completed = run
+        .node_runs
+        .iter()
+        .filter(|node| node.status == "completed")
+        .count();
+    let failed = run
+        .node_runs
+        .iter()
+        .filter(|node| node.status == "failed")
+        .count();
+    let total = run.node_runs.len();
+    format!("{completed}/{total} completed • {failed} failed")
+}
+
+fn upsert_workflow_cli_session(
+    run: &mut AutomationWorkflowRun,
+    session: &AgentTransportSession,
+) {
+    let next = workflow_cli_session_ref(session);
+    if let Some(existing) = run
+        .cli_sessions
+        .iter_mut()
+        .find(|entry| entry.cli_id == next.cli_id)
+    {
+        *existing = next;
+    } else {
+        run.cli_sessions.push(next);
+    }
+}
+
+fn execute_workflow_node_as_automation_run(
+    app: &AppHandle,
+    state_arc: &Arc<Mutex<AppStateDto>>,
+    context_arc: &Arc<Mutex<ContextStore>>,
+    settings_arc: &Arc<Mutex<AppSettings>>,
+    terminal_storage: &TerminalStorage,
+    claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: &Arc<Mutex<Vec<AutomationJob>>>,
+    automation_runs: &Arc<Mutex<Vec<AutomationRun>>>,
+    active_runs: &Arc<Mutex<BTreeSet<String>>>,
+    workflow: &AutomationWorkflow,
+    workflow_run: &AutomationWorkflowRun,
+    node: &automation::AutomationWorkflowNode,
+) -> Result<(AutomationRun, Option<AgentTransportSession>), String> {
+    let effective_execution_mode = if node.execution_mode == "inherit" {
+        workflow.default_execution_mode.clone()
+    } else {
+        node.execution_mode.clone()
+    };
+    let effective_permission_profile = if node.permission_profile == "inherit" {
+        workflow.default_permission_profile.clone()
+    } else {
+        node.permission_profile.clone()
+    };
+
+    let child_run = {
+        let mut runs = automation_runs.lock().map_err(|err| err.to_string())?;
+        let mut child_run = build_run_from_request(CreateAutomationRunRequest {
+            workspace_id: workflow.workspace_id.clone(),
+            project_root: workflow.project_root.clone(),
+            project_name: workflow.project_name.clone(),
+            scheduled_start_at: Some(Local::now().to_rfc3339()),
+            rule_profile_id: Some(automation::DEFAULT_RULE_PROFILE_ID.to_string()),
+            goals: vec![automation::AutomationGoalDraft {
+                title: Some(node.label.clone()),
+                goal: node.goal.clone(),
+                expected_outcome: node.expected_outcome.clone(),
+                execution_mode: effective_execution_mode,
+                rule_config: Some(workflow_node_rule_config()),
+            }],
+        });
+        child_run.job_name = Some(node.label.clone());
+        child_run.trigger_source = Some("workflow".to_string());
+        child_run.workflow_run_id = Some(workflow_run.id.clone());
+        child_run.workflow_node_id = Some(node.id.clone());
+        child_run.permission_profile = effective_permission_profile;
+        child_run.scheduled_start_at = Some(Local::now().to_rfc3339());
+        child_run.status = "scheduled".to_string();
+        if let Some(goal) = child_run.goals.get_mut(0) {
+            goal.synthetic_terminal_tab_id = workflow_run.shared_terminal_tab_id.clone();
+        }
+        push_event(
+            &mut child_run,
+            None,
+            "info",
+            "Workflow node started",
+            &format!(
+                "Started from workflow `{}` node `{}`.",
+                workflow_run.workflow_name, node.label
+            ),
+        );
+        runs.insert(0, child_run.clone());
+        persist_automation_runs_to_disk(&runs)?;
+        child_run
+    };
+
+    if let Ok(mut active) = active_runs.lock() {
+        active.insert(child_run.id.clone());
+    }
+
+    execute_automation_run_loop(
+        app,
+        state_arc,
+        context_arc,
+        settings_arc,
+        terminal_storage,
+        claude_approval_rules,
+        claude_pending_approvals,
+        codex_pending_approvals,
+        automation_jobs,
+        automation_runs,
+        &child_run.id,
+    );
+
+    if let Ok(mut active) = active_runs.lock() {
+        active.remove(&child_run.id);
+    }
+
+    let completed_run = automation_runs
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .find(|item| item.id == child_run.id)
+        .cloned()
+        .ok_or_else(|| "Workflow child automation run not found after execution.".to_string())?;
+
+    let transport_session = primary_goal(&completed_run)
+        .and_then(|goal| {
+            goal.last_owner_cli
+                .as_deref()
+                .or_else(|| {
+                    if goal.execution_mode != "auto" {
+                        Some(goal.execution_mode.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .and_then(|cli_id| {
+                    latest_automation_transport_session(
+                        terminal_storage,
+                        &workflow_run.shared_terminal_tab_id,
+                        cli_id,
+                    )
+                })
+        });
+
+    Ok((completed_run, transport_session))
+}
+
+fn create_automation_workflow_run_with_handles(
+    app: AppHandle,
+    state_arc: Arc<Mutex<AppStateDto>>,
+    context_arc: Arc<Mutex<ContextStore>>,
+    settings_arc: Arc<Mutex<AppSettings>>,
+    terminal_storage: TerminalStorage,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
+    automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
+    active_runs: Arc<Mutex<BTreeSet<String>>>,
+    automation_workflows: Arc<Mutex<Vec<AutomationWorkflow>>>,
+    automation_workflow_runs: Arc<Mutex<Vec<AutomationWorkflowRun>>>,
+    active_workflow_runs: Arc<Mutex<BTreeSet<String>>>,
+    mut request: CreateAutomationWorkflowRunRequest,
+    trigger_source: &str,
+) -> Result<AutomationWorkflowRun, String> {
+    request.scheduled_start_at = normalize_scheduled_start_at(request.scheduled_start_at.clone());
+    if trigger_source == "manual" {
+        if let Some(start_at) = request.scheduled_start_at.as_ref() {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(start_at) {
+                if parsed.timestamp_millis() <= Local::now().timestamp_millis() + 1000 {
+                    return Err("Scheduled start time must be in the future.".to_string());
+                }
+            } else {
+                return Err("Scheduled start time is invalid.".to_string());
+            }
+        }
+    }
+
+    let workflow = automation_workflows
+        .lock()
+        .map_err(|err| err.to_string())?
+        .iter()
+        .find(|item| item.id == request.workflow_id && item.enabled)
+        .cloned()
+        .ok_or_else(|| "Automation workflow not found or disabled.".to_string())?;
+
+    let run = {
+        let mut runs = automation_workflow_runs.lock().map_err(|err| err.to_string())?;
+        let mut run = build_workflow_run_from_workflow(&workflow, request);
+        run.trigger_source = trigger_source.to_string();
+        if trigger_source == "cron" {
+            push_workflow_event(
+                &mut run,
+                None,
+                "info",
+                "Workflow triggered",
+                "The workflow was triggered by its cron schedule.",
+            );
+        }
+        runs.insert(0, run.clone());
+        persist_automation_workflow_runs_to_disk(&runs)?;
+        run
+    };
+
+    schedule_automation_workflow_run_with_handles(
+        app,
+        state_arc,
+        context_arc,
+        settings_arc,
+        terminal_storage,
+        claude_approval_rules,
+        claude_pending_approvals,
+        codex_pending_approvals,
+        automation_jobs,
+        automation_runs,
+        active_runs,
+        automation_workflows,
+        automation_workflow_runs,
+        active_workflow_runs,
+        run.id.clone(),
+    );
+
+    Ok(run)
+}
+
+#[tauri::command]
+fn create_automation_workflow_run(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    request: CreateAutomationWorkflowRunRequest,
+) -> Result<AutomationWorkflowRun, String> {
+    create_automation_workflow_run_with_handles(
+        app,
+        store.state.clone(),
+        store.context.clone(),
+        store.settings.clone(),
+        store.terminal_storage.clone(),
+        store.claude_approval_rules.clone(),
+        store.claude_pending_approvals.clone(),
+        store.codex_pending_approvals.clone(),
+        store.automation_jobs.clone(),
+        store.automation_runs.clone(),
+        store.automation_active_runs.clone(),
+        store.automation_workflows.clone(),
+        store.automation_workflow_runs.clone(),
+        store.automation_active_workflow_runs.clone(),
+        request,
+        "manual",
+    )
+}
+
+#[tauri::command]
+fn cancel_automation_workflow_run(
+    store: State<'_, AppStore>,
+    workflow_run_id: String,
+) -> Result<AutomationWorkflowRun, String> {
+    let updated = {
+        let mut runs = store
+            .automation_workflow_runs
+            .lock()
+            .map_err(|err| err.to_string())?;
+        let run = runs
+            .iter_mut()
+            .find(|item| item.id == workflow_run_id)
+            .ok_or_else(|| "Workflow run not found.".to_string())?;
+        let now = now_stamp();
+        run.status = "cancelled".to_string();
+        run.status_summary = Some("Cancelled manually.".to_string());
+        run.completed_at = Some(now.clone());
+        run.updated_at = now.clone();
+        let current_node_id = run.current_node_id.clone();
+        push_workflow_event(
+            run,
+            current_node_id.as_deref(),
+            "warning",
+            "Workflow cancelled",
+            "The workflow run was cancelled. No further nodes will be started.",
+        );
+        let snapshot = run.clone();
+        persist_automation_workflow_runs_to_disk(&runs)?;
+        snapshot
+    };
+    Ok(updated)
+}
+
+#[tauri::command]
+fn delete_automation_workflow_run(
+    store: State<'_, AppStore>,
+    workflow_run_id: String,
+) -> Result<(), String> {
+    let run = {
+        let mut runs = store
+            .automation_workflow_runs
+            .lock()
+            .map_err(|err| err.to_string())?;
+        let Some(index) = runs.iter().position(|item| item.id == workflow_run_id) else {
+            return Err("Workflow run not found.".to_string());
+        };
+        if runs[index].status == "running" {
+            return Err("Running workflow runs must be cancelled before deletion.".to_string());
+        }
+        let snapshot = runs.remove(index);
+        persist_automation_workflow_runs_to_disk(&runs)?;
+        snapshot
+    };
+
+    if let Ok(mut active) = store.automation_active_workflow_runs.lock() {
+        active.remove(&workflow_run_id);
+    }
+
+    let child_run_ids = run
+        .node_runs
+        .iter()
+        .filter_map(|entry| entry.automation_run_id.clone())
+        .collect::<BTreeSet<_>>();
+    if !child_run_ids.is_empty() {
+        let mut automation_runs = store
+            .automation_runs
+            .lock()
+            .map_err(|err| err.to_string())?;
+        automation_runs.retain(|item| !child_run_ids.contains(&item.id));
+        persist_automation_runs_to_disk(&automation_runs)?;
     }
 
     Ok(())
@@ -10234,13 +10899,18 @@ fn build_automation_goal_prompt(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let round_summary = if run.workflow_run_id.is_some() {
+        String::new()
+    } else {
+        format!("Round: {} of {}\n", round_index, profile.max_rounds_per_goal)
+    };
 
     format!(
         "You are executing an unattended automation goal inside Multi CLI Studio.\n\
          Project: {}\n\
          Automation job: {}\n\
          Goal title: {}\n\n\
-         Round: {} of {}\n\
+         {}\
          Current owner CLI: {}\n\n\
          Permission profile: {}\n\n\
          Run parameters:\n{}\n\n\
@@ -10259,8 +10929,7 @@ fn build_automation_goal_prompt(
         run.project_name.trim(),
         run.job_name.as_deref().unwrap_or(run.project_name.trim()),
         goal.title.trim(),
-        round_index,
-        profile.max_rounds_per_goal,
+        round_summary,
         owner_cli,
         run.permission_profile.trim(),
         parameter_summary,
@@ -10410,7 +11079,9 @@ fn build_automation_validation_prompt(
          - If the expected outcome is met, return pass.\n\
          - If the expected outcome is not met but unattended iteration can continue, return fail_with_feedback.\n\
          - If human attention or a policy boundary should stop execution, return blocked.\n\
-         - reason must explain the acceptance decision in one sentence.\n\
+         - reason must explain the acceptance decision in one concrete sentence.\n\
+         - reason must mention the specific expected-outcome item(s) that were satisfied or are still missing.\n\
+         - Avoid generic wording such as 'enough evidence was found' without naming what was verified.\n\
          - feedback must summarize the next corrective move in one sentence.\n\
          - evidenceSummary must summarize the concrete evidence you used.\n\
          - missingChecks must list the unmet expected-outcome items. Return [] when none are missing.\n\
@@ -10747,6 +11418,86 @@ fn build_fallback_evidence_summary(
     parts.join("。")
 }
 
+fn summarize_validation_items(items: &[String]) -> String {
+    match items.len() {
+        0 => "当前没有可直接引用的条目".to_string(),
+        1 => format!("“{}”", items[0]),
+        2 => format!("“{}”和“{}”", items[0], items[1]),
+        _ => {
+            let mut head = items.iter().take(3).cloned().collect::<Vec<_>>();
+            let remainder = items.len().saturating_sub(head.len());
+            let joined = head
+                .drain(..)
+                .map(|item| format!("“{}”", item))
+                .collect::<Vec<_>>()
+                .join("、");
+            if remainder > 0 {
+                format!("{} 等 {} 项", joined, items.len())
+            } else {
+                joined
+            }
+        }
+    }
+}
+
+fn build_fallback_pass_reason(
+    matched_items: &[String],
+    raw_output: &str,
+) -> String {
+    if matched_items.is_empty() {
+        format!(
+            "最新输出已经给出可直接验收的结果，且未发现期望结果缺口；输出摘要：{}。",
+            display_summary(raw_output)
+        )
+    } else {
+        format!(
+            "已确认 {} 已满足，最新输出给出了与这些交付结果对应的直接证据。",
+            summarize_validation_items(matched_items)
+        )
+    }
+}
+
+fn build_fallback_incomplete_reason(
+    matched_items: &[String],
+    missing_items: &[String],
+    raw_output: &str,
+) -> String {
+    if !matched_items.is_empty() && !missing_items.is_empty() {
+        format!(
+            "虽然已确认 {} 已满足，但 {} 仍缺少直接证据，因此暂时不能判定任务已经完整完成。",
+            summarize_validation_items(matched_items),
+            summarize_validation_items(missing_items)
+        )
+    } else if !missing_items.is_empty() {
+        format!(
+            "{} 仍缺少直接证据，当前输出还不足以证明这些预期结果已经交付。",
+            summarize_validation_items(missing_items)
+        )
+    } else {
+        format!(
+            "当前输出暂时无法形成足够直接的验收证据；输出摘要：{}。",
+            display_summary(raw_output)
+        )
+    }
+}
+
+fn build_fallback_runtime_failure_reason(
+    missing_items: &[String],
+    raw_output: &str,
+) -> String {
+    if missing_items.is_empty() {
+        format!(
+            "本轮执行本身已经失败，因此当前不能判定任务完成；输出摘要：{}。",
+            display_summary(raw_output)
+        )
+    } else {
+        format!(
+            "本轮执行本身已经失败，且 {} 仍未获得足够证据，因此本轮验收不通过。",
+            summarize_validation_items(missing_items)
+        )
+    }
+}
+
 fn fallback_automation_validation_response(
     goal: &AutomationGoal,
     raw_output: &str,
@@ -10760,7 +11511,7 @@ fn fallback_automation_validation_response(
     if likely_complete {
         return AutomationValidationResponse {
             decision: "pass".to_string(),
-            reason: "回退验收已找到足够证据，可判定期望结果已经交付。".to_string(),
+            reason: build_fallback_pass_reason(&matched_items, raw_output),
             feedback: None,
             evidence_summary: build_fallback_evidence_summary(&matched_items, &missing_items, raw_output),
             missing_checks: Vec::new(),
@@ -10773,11 +11524,7 @@ fn fallback_automation_validation_response(
     if exit_code == Some(0) || normalized.contains("blocked") || normalized.contains("missing") {
         return AutomationValidationResponse {
             decision: "fail_with_feedback".to_string(),
-            reason: if missing_items.is_empty() {
-                "回退验收暂时无法确认期望结果已经完整交付。".to_string()
-            } else {
-                format!("回退验收发现仍有 {} 项期望结果未满足，或缺少直接证据。", missing_items.len())
-            },
+            reason: build_fallback_incomplete_reason(&matched_items, &missing_items, raw_output),
             feedback: if verification_steps.is_empty() {
                 Some("请基于最新结果继续执行，逐项核对期望结果，并补齐剩余缺口。".to_string())
             } else {
@@ -10793,7 +11540,7 @@ fn fallback_automation_validation_response(
 
     AutomationValidationResponse {
         decision: "fail_with_feedback".to_string(),
-        reason: "回退验收判定本轮未通过，因为最新一轮执行本身已经失败。".to_string(),
+        reason: build_fallback_runtime_failure_reason(&missing_items, raw_output),
         feedback: Some("请先修复本轮执行错误，再重新验收期望结果。".to_string()),
         evidence_summary: build_fallback_evidence_summary(&matched_items, &missing_items, raw_output),
         missing_checks: missing_items,
@@ -11163,6 +11910,9 @@ fn append_automation_validation_message(
                 id: create_id("auto-validation"),
                 role: "assistant".to_string(),
                 cli_id: Some(owner_cli.to_string()),
+                automation_run_id: Some(run.id.clone()),
+                workflow_run_id: run.workflow_run_id.clone(),
+                workflow_node_id: run.workflow_node_id.clone(),
                 timestamp: now,
                 content: content.clone(),
                 raw_content: Some(content.clone()),
@@ -12306,6 +13056,8 @@ fn execute_automation_goal(
         &automation_prompt,
         &message_id,
     );
+    let previous_transport_session =
+        latest_automation_transport_session(terminal_storage, &goal.synthetic_terminal_tab_id, owner_cli);
 
     if goal.execution_mode == "auto" {
         let outcome = execute_auto_mode_goal(
@@ -12371,7 +13123,7 @@ fn execute_automation_goal(
             &composed_prompt,
             &selected_codex_skills,
             &session,
-            None,
+            previous_transport_session.clone(),
             &goal.synthetic_terminal_tab_id,
             &message_id,
             true,
@@ -12392,7 +13144,7 @@ fn execute_automation_goal(
             &run.project_root,
             &composed_prompt,
             &session,
-            None,
+            previous_transport_session.clone(),
             &goal.synthetic_terminal_tab_id,
             &message_id,
             true,
@@ -12414,7 +13166,7 @@ fn execute_automation_goal(
             &run.project_root,
             &composed_prompt,
             &session,
-            None,
+            previous_transport_session,
             &goal.synthetic_terminal_tab_id,
             &message_id,
             true,
@@ -14394,6 +15146,555 @@ fn pick_workspace_folder_impl() -> Result<Option<WorkspacePickResult>, String> {
     Err("Workspace picking is not implemented on this platform yet.".to_string())
 }
 
+fn schedule_automation_workflow_run_with_handles(
+    app: AppHandle,
+    state_arc: Arc<Mutex<AppStateDto>>,
+    context_arc: Arc<Mutex<ContextStore>>,
+    settings_arc: Arc<Mutex<AppSettings>>,
+    terminal_storage: TerminalStorage,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
+    automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
+    active_runs: Arc<Mutex<BTreeSet<String>>>,
+    automation_workflows: Arc<Mutex<Vec<AutomationWorkflow>>>,
+    automation_workflow_runs: Arc<Mutex<Vec<AutomationWorkflowRun>>>,
+    active_workflow_runs: Arc<Mutex<BTreeSet<String>>>,
+    workflow_run_id: String,
+) {
+    thread::spawn(move || {
+        let scheduled_start_at = {
+            let runs = match automation_workflow_runs.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            let Some(run) = runs.iter().find(|item| item.id == workflow_run_id) else {
+                return;
+            };
+            if run.status != "scheduled" {
+                return;
+            }
+            run.scheduled_start_at.clone()
+        };
+
+        if let Some(start_at) = scheduled_start_at {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&start_at) {
+                let wait_ms = (parsed.timestamp_millis() - Local::now().timestamp_millis()).max(0);
+                if wait_ms > 0 {
+                    thread::sleep(Duration::from_millis(wait_ms as u64));
+                }
+            }
+        }
+
+        {
+            let mut active = match active_workflow_runs.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            if !active.insert(workflow_run_id.clone()) {
+                return;
+            }
+        }
+
+        execute_workflow_run_loop(
+            &app,
+            &state_arc,
+            &context_arc,
+            &settings_arc,
+            &terminal_storage,
+            &claude_approval_rules,
+            &claude_pending_approvals,
+            &codex_pending_approvals,
+            &automation_jobs,
+            &automation_runs,
+            &active_runs,
+            &automation_workflows,
+            &automation_workflow_runs,
+            &workflow_run_id,
+        );
+
+        if let Ok(mut active) = active_workflow_runs.lock() {
+            active.remove(&workflow_run_id);
+        }
+    });
+}
+
+fn schedule_existing_automation_workflow_runs(
+    app: AppHandle,
+    state_arc: Arc<Mutex<AppStateDto>>,
+    context_arc: Arc<Mutex<ContextStore>>,
+    settings_arc: Arc<Mutex<AppSettings>>,
+    terminal_storage: TerminalStorage,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
+    automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
+    active_runs: Arc<Mutex<BTreeSet<String>>>,
+    automation_workflows: Arc<Mutex<Vec<AutomationWorkflow>>>,
+    automation_workflow_runs: Arc<Mutex<Vec<AutomationWorkflowRun>>>,
+    active_workflow_runs: Arc<Mutex<BTreeSet<String>>>,
+) {
+    let run_ids = match automation_workflow_runs.lock() {
+        Ok(guard) => guard
+            .iter()
+            .filter(|run| run.status == "scheduled")
+            .map(|run| run.id.clone())
+            .collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+
+    for run_id in run_ids {
+        schedule_automation_workflow_run_with_handles(
+            app.clone(),
+            state_arc.clone(),
+            context_arc.clone(),
+            settings_arc.clone(),
+            terminal_storage.clone(),
+            claude_approval_rules.clone(),
+            claude_pending_approvals.clone(),
+            codex_pending_approvals.clone(),
+            automation_jobs.clone(),
+            automation_runs.clone(),
+            active_runs.clone(),
+            automation_workflows.clone(),
+            automation_workflow_runs.clone(),
+            active_workflow_runs.clone(),
+            run_id,
+        );
+    }
+}
+
+fn schedule_cron_automation_workflows(
+    app: AppHandle,
+    state_arc: Arc<Mutex<AppStateDto>>,
+    context_arc: Arc<Mutex<ContextStore>>,
+    settings_arc: Arc<Mutex<AppSettings>>,
+    terminal_storage: TerminalStorage,
+    claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
+    automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
+    active_runs: Arc<Mutex<BTreeSet<String>>>,
+    automation_workflows: Arc<Mutex<Vec<AutomationWorkflow>>>,
+    automation_workflow_runs: Arc<Mutex<Vec<AutomationWorkflowRun>>>,
+    active_workflow_runs: Arc<Mutex<BTreeSet<String>>>,
+) {
+    thread::spawn(move || loop {
+        let due_workflow_ids = {
+            let now = Local::now();
+            let mut due = Vec::new();
+            let mut changed = false;
+            let mut workflows = match automation_workflows.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+
+            for workflow in workflows.iter_mut() {
+                if !workflow.enabled {
+                    continue;
+                }
+                let Some(cron_expression) = workflow.cron_expression.as_deref() else {
+                    continue;
+                };
+                let Ok(schedule) = Schedule::from_str(cron_expression) else {
+                    continue;
+                };
+
+                let anchor = workflow
+                    .last_triggered_at
+                    .as_deref()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&Local))
+                    .or_else(|| {
+                        chrono::DateTime::parse_from_rfc3339(&workflow.created_at)
+                            .ok()
+                            .map(|value| value.with_timezone(&Local))
+                    })
+                    .unwrap_or_else(|| now - chrono::Duration::minutes(1));
+
+                if let Some(next_fire) = schedule.after(&anchor).next() {
+                    if next_fire <= now {
+                        workflow.last_triggered_at = Some(next_fire.to_rfc3339());
+                        workflow.updated_at = now.to_rfc3339();
+                        due.push(workflow.id.clone());
+                        changed = true;
+                    }
+                }
+            }
+
+            if changed {
+                let _ = persist_automation_workflows_to_disk(&workflows);
+            }
+            due
+        };
+
+        for workflow_id in due_workflow_ids {
+            let _ = create_automation_workflow_run_with_handles(
+                app.clone(),
+                state_arc.clone(),
+                context_arc.clone(),
+                settings_arc.clone(),
+                terminal_storage.clone(),
+                claude_approval_rules.clone(),
+                claude_pending_approvals.clone(),
+                codex_pending_approvals.clone(),
+                automation_jobs.clone(),
+                automation_runs.clone(),
+                active_runs.clone(),
+                automation_workflows.clone(),
+                automation_workflow_runs.clone(),
+                active_workflow_runs.clone(),
+                CreateAutomationWorkflowRunRequest {
+                    workflow_id,
+                    scheduled_start_at: Some(Local::now().to_rfc3339()),
+                },
+                "cron",
+            );
+        }
+
+        thread::sleep(Duration::from_secs(15));
+    });
+}
+
+fn execute_workflow_run_loop(
+    app: &AppHandle,
+    state_arc: &Arc<Mutex<AppStateDto>>,
+    context_arc: &Arc<Mutex<ContextStore>>,
+    settings_arc: &Arc<Mutex<AppSettings>>,
+    terminal_storage: &TerminalStorage,
+    claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
+    claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    automation_jobs: &Arc<Mutex<Vec<AutomationJob>>>,
+    automation_runs: &Arc<Mutex<Vec<AutomationRun>>>,
+    active_runs: &Arc<Mutex<BTreeSet<String>>>,
+    automation_workflows: &Arc<Mutex<Vec<AutomationWorkflow>>>,
+    automation_workflow_runs: &Arc<Mutex<Vec<AutomationWorkflowRun>>>,
+    workflow_run_id: &str,
+) {
+    loop {
+        let (workflow_snapshot, run_snapshot, node_snapshot) = {
+            let workflows = match automation_workflows.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            let mut runs = match automation_workflow_runs.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            let Some(run_index) = runs.iter().position(|item| item.id == workflow_run_id) else {
+                return;
+            };
+            let run = &mut runs[run_index];
+            if run.status == "cancelled" || run.status == "completed" || run.status == "failed" {
+                let _ = persist_automation_workflow_runs_to_disk(&runs);
+                return;
+            }
+            let Some(workflow) = workflows
+                .iter()
+                .find(|item| item.id == run.workflow_id)
+                .cloned()
+            else {
+                run.status = "failed".to_string();
+                run.status_summary = Some("The workflow definition no longer exists.".to_string());
+                run.completed_at = Some(now_stamp());
+                run.updated_at = now_stamp();
+                let _ = persist_automation_workflow_runs_to_disk(&runs);
+                return;
+            };
+            let next_node_id = run
+                .current_node_id
+                .clone()
+                .unwrap_or_else(|| run.entry_node_id.clone());
+            let Some(node) = workflow_node_by_id(&workflow, &next_node_id).cloned() else {
+                run.status = "failed".to_string();
+                run.status_summary = Some("The next workflow node definition is missing.".to_string());
+                run.completed_at = Some(now_stamp());
+                run.updated_at = now_stamp();
+                let _ = persist_automation_workflow_runs_to_disk(&runs);
+                return;
+            };
+
+            let now = now_stamp();
+            run.status = "running".to_string();
+            run.started_at = run.started_at.clone().or(Some(now.clone()));
+            run.updated_at = now.clone();
+            run.status_summary = Some(format!("Running workflow node `{}`.", node.label));
+            if let Some(node_run) = run.node_runs.iter_mut().find(|item| item.node_id == node.id) {
+                node_run.status = "running".to_string();
+                node_run.status_summary = Some("Executing linked automation job.".to_string());
+                node_run.started_at = node_run.started_at.clone().or(Some(now.clone()));
+                node_run.updated_at = now;
+            }
+            push_workflow_event(
+                run,
+                Some(&node.id),
+                "info",
+                "Workflow node started",
+                &format!("Running node `{}`.", node.label),
+            );
+            let run_snapshot = run.clone();
+            let _ = persist_automation_workflow_runs_to_disk(&runs);
+            (workflow, run_snapshot, node)
+        };
+        let _ = append_workflow_log_message(
+            terminal_storage,
+            &run_snapshot,
+            Some(&node_snapshot.id),
+            None,
+            &format!(
+                "=== 节点开始 ===\n节点：{}\n任务目标：{}\n预期交付：{}",
+                node_snapshot.label,
+                node_snapshot.goal.trim(),
+                node_snapshot.expected_outcome.trim()
+            ),
+        );
+
+        let child_result = execute_workflow_node_as_automation_run(
+            app,
+            state_arc,
+            context_arc,
+            settings_arc,
+            terminal_storage,
+            claude_approval_rules,
+            claude_pending_approvals,
+            codex_pending_approvals,
+            automation_jobs,
+            automation_runs,
+            active_runs,
+            &workflow_snapshot,
+            &run_snapshot,
+            &node_snapshot,
+        );
+
+        let (child_run, transport_session, branch_result, node_summary) = match child_result {
+            Ok((completed_run, transport_session)) => {
+                let branch = if completed_run.status == "completed" {
+                    "success".to_string()
+                } else {
+                    "fail".to_string()
+                };
+                let summary = completed_run
+                    .status_summary
+                    .clone()
+                    .or_else(|| completed_run.summary.clone())
+                    .unwrap_or_else(|| "The node run finished.".to_string());
+                (completed_run, transport_session, branch, summary)
+            }
+            Err(error) => {
+                let mut runs = match automation_workflow_runs.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return,
+                };
+                let Some(run) = runs.iter_mut().find(|item| item.id == workflow_run_id) else {
+                    return;
+                };
+                let project_name = run.project_name.clone();
+                run.status = "failed".to_string();
+                run.status_summary = Some(error.clone());
+                run.completed_at = Some(now_stamp());
+                run.updated_at = now_stamp();
+                if let Some(node_run) = run
+                    .node_runs
+                    .iter_mut()
+                    .find(|item| item.node_id == node_snapshot.id)
+                {
+                    node_run.status = "failed".to_string();
+                    node_run.branch_result = Some("fail".to_string());
+                    node_run.status_summary = Some(error.clone());
+                    node_run.completed_at = Some(now_stamp());
+                    node_run.updated_at = now_stamp();
+                }
+                push_workflow_event(
+                    run,
+                    Some(&node_snapshot.id),
+                    "error",
+                    "Workflow node failed",
+                    &error,
+                );
+                let log_snapshot = run.clone();
+                let _ = persist_automation_workflow_runs_to_disk(&runs);
+                let _ = append_workflow_log_message(
+                    terminal_storage,
+                    &log_snapshot,
+                    Some(&node_snapshot.id),
+                    None,
+                    &format!(
+                        "=== 节点结束 ===\n节点：{}\n结果：失败\n原因：{}",
+                        node_snapshot.label, error
+                    ),
+                );
+                notify_automation_event(
+                    app,
+                    "Workflow failed",
+                    &format!("{} • {}", project_name, error),
+                );
+                return;
+            }
+        };
+
+        let next_node_id = workflow_next_node_id(&workflow_snapshot, &node_snapshot.id, &branch_result);
+        let mut finished = false;
+        let final_status: String;
+        let final_detail: String;
+        {
+            let mut runs = match automation_workflow_runs.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            let Some(run) = runs.iter_mut().find(|item| item.id == workflow_run_id) else {
+                return;
+            };
+            if let Some(node_run) = run
+                .node_runs
+                .iter_mut()
+                .find(|item| item.node_id == node_snapshot.id)
+            {
+                node_run.automation_run_id = Some(child_run.id.clone());
+                node_run.status = child_run.status.clone();
+                node_run.branch_result = Some(branch_result.clone());
+                node_run.used_cli = primary_goal(&child_run).and_then(|goal| goal.last_owner_cli.clone());
+                node_run.transport_session =
+                    transport_session.as_ref().map(workflow_cli_session_ref);
+                node_run.status_summary = Some(node_summary.clone());
+                node_run.completed_at = Some(now_stamp());
+                node_run.updated_at = now_stamp();
+            }
+            if let Some(session) = transport_session.as_ref() {
+                upsert_workflow_cli_session(run, session);
+            }
+
+            let next_label = next_node_id
+                .as_deref()
+                .and_then(|value| workflow_node_by_id(&workflow_snapshot, value))
+                .map(|node| node.label.clone());
+
+            if let Some(next_node_id_value) = next_node_id.clone() {
+                run.current_node_id = Some(next_node_id_value);
+                run.status = "running".to_string();
+                run.status_summary = Some(match (branch_result.as_str(), next_label) {
+                    ("success", Some(label)) => {
+                        format!("Node `{}` completed. Continuing to `{}`.", node_snapshot.label, label)
+                    }
+                    ("fail", Some(label)) => {
+                        format!("Node `{}` failed. Routing to `{}`.", node_snapshot.label, label)
+                    }
+                    _ => workflow_run_summary(run),
+                });
+                let event_detail = run
+                    .status_summary
+                    .clone()
+                    .unwrap_or_else(|| "Workflow node finished.".to_string());
+                push_workflow_event(
+                    run,
+                    Some(&node_snapshot.id),
+                    if branch_result == "success" { "success" } else { "warning" },
+                    if branch_result == "success" {
+                        "Workflow node completed"
+                    } else {
+                        "Workflow node failed"
+                    },
+                    &event_detail,
+                );
+                final_status = "running".to_string();
+                final_detail = run.status_summary.clone().unwrap_or_default();
+            } else {
+                finished = true;
+                run.current_node_id = None;
+                run.completed_at = Some(now_stamp());
+                run.updated_at = now_stamp();
+                if branch_result == "success" {
+                    run.status = "completed".to_string();
+                    run.status_summary =
+                        Some("Workflow completed successfully.".to_string());
+                    push_workflow_event(
+                        run,
+                        Some(&node_snapshot.id),
+                        "success",
+                        "Workflow completed",
+                        "The final workflow node completed successfully.",
+                    );
+                } else {
+                    run.status = "failed".to_string();
+                    run.status_summary =
+                        Some(format!("Workflow stopped after `{}` failed.", node_snapshot.label));
+                    let event_detail = run
+                        .status_summary
+                        .clone()
+                        .unwrap_or_else(|| "The final workflow node failed.".to_string());
+                    push_workflow_event(
+                        run,
+                        Some(&node_snapshot.id),
+                        "error",
+                        "Workflow failed",
+                        &event_detail,
+                    );
+                }
+                final_status = run.status.clone();
+                final_detail = run.status_summary.clone().unwrap_or_default();
+            }
+
+            run.updated_at = now_stamp();
+            let log_snapshot = run.clone();
+            let _ = persist_automation_workflow_runs_to_disk(&runs);
+            let mut log_sections = vec![
+                "=== 节点结束 ===".to_string(),
+                format!("节点：{}", node_snapshot.label),
+                format!("结果：{}", if branch_result == "success" { "通过" } else { "失败" }),
+                format!("说明：{}", node_summary),
+            ];
+            if let Some(next_label) = next_node_id
+                .as_deref()
+                .and_then(|value| workflow_node_by_id(&workflow_snapshot, value))
+                .map(|node| node.label.clone())
+            {
+                log_sections.push(format!("下一节点：{}", next_label));
+            } else {
+                log_sections.push(format!(
+                    "工作流状态：{}",
+                    if final_status == "completed" { "已完成" } else { "已结束" }
+                ));
+            }
+            let _ = append_workflow_log_message(
+                terminal_storage,
+                &log_snapshot,
+                Some(&node_snapshot.id),
+                Some(&child_run.id),
+                &log_sections.join("\n"),
+            );
+        }
+
+        if finished {
+            notify_automation_event(
+                app,
+                &format!("Workflow {}", final_status),
+                &format!("{} • {}", run_snapshot.project_name, final_detail),
+            );
+            let _ = mutate_store_arc(state_arc, |state| {
+                append_activity(
+                    state,
+                    if final_status == "completed" {
+                        "success"
+                    } else {
+                        "warning"
+                    },
+                    &format!("workflow {}", final_status),
+                    &format!("{} • {}", run_snapshot.project_name, final_detail),
+                );
+            });
+            let snapshot_state = state_arc.lock().ok().map(|state| state.clone());
+            if let Some(state) = snapshot_state.as_ref() {
+                let _ = persist_state(state);
+                emit_state(app, state);
+            }
+            return;
+        }
+    }
+}
+
 // ── State persistence ──────────────────────────────────────────────────
 
 fn data_dir() -> Result<PathBuf, String> {
@@ -14923,17 +16224,28 @@ pub fn run() {
         &data_dir().expect("failed to resolve local app data directory"),
     ))
     .expect("failed to initialize terminal sqlite storage");
-    let mut automation_jobs =
+    let mut automation_jobs_seed =
         load_automation_jobs_from_disk().unwrap_or_else(|_| Vec::new());
-    automation::normalize_jobs_on_startup(&mut automation_jobs);
-    let _ = persist_automation_jobs_to_disk(&automation_jobs);
-    let automation_jobs = Arc::new(Mutex::new(automation_jobs));
+    automation::normalize_jobs_on_startup(&mut automation_jobs_seed);
+    let _ = persist_automation_jobs_to_disk(&automation_jobs_seed);
+    let automation_jobs = Arc::new(Mutex::new(automation_jobs_seed.clone()));
     let mut automation_runs =
         load_automation_runs_from_disk().unwrap_or_else(|_| Vec::new());
     normalize_runs_on_startup(&mut automation_runs);
     let _ = persist_automation_runs_to_disk(&automation_runs);
     let automation_runs = Arc::new(Mutex::new(automation_runs));
     let automation_active_runs = Arc::new(Mutex::new(BTreeSet::new()));
+    let mut automation_workflows =
+        load_automation_workflows_from_disk().unwrap_or_else(|_| Vec::new());
+    normalize_workflows_on_startup(&mut automation_workflows, &automation_jobs_seed);
+    let _ = persist_automation_workflows_to_disk(&automation_workflows);
+    let automation_workflows = Arc::new(Mutex::new(automation_workflows));
+    let mut automation_workflow_runs =
+        load_automation_workflow_runs_from_disk().unwrap_or_else(|_| Vec::new());
+    normalize_workflow_runs_on_startup(&mut automation_workflow_runs);
+    let _ = persist_automation_workflow_runs_to_disk(&automation_workflow_runs);
+    let automation_workflow_runs = Arc::new(Mutex::new(automation_workflow_runs));
+    let automation_active_workflow_runs = Arc::new(Mutex::new(BTreeSet::new()));
     let automation_rule_profile =
         Arc::new(Mutex::new(load_rule_profile().unwrap_or_else(|_| default_rule_profile())));
     let mut initial_state = load_or_seed_state(&project_root).unwrap_or_else(|_| seed_state(&project_root));
@@ -14952,6 +16264,9 @@ pub fn run() {
     let scheduler_jobs = automation_jobs.clone();
     let scheduler_runs = automation_runs.clone();
     let scheduler_active = automation_active_runs.clone();
+    let scheduler_workflows = automation_workflows.clone();
+    let scheduler_workflow_runs = automation_workflow_runs.clone();
+    let scheduler_active_workflows = automation_active_workflow_runs.clone();
     let claude_approval_rules = Arc::new(Mutex::new(
         load_or_seed_claude_approval_rules().unwrap_or_default(),
     ));
@@ -14970,6 +16285,9 @@ pub fn run() {
             automation_jobs,
             automation_runs,
             automation_active_runs,
+            automation_workflows,
+            automation_workflow_runs,
+            automation_active_workflow_runs,
             automation_rule_profile,
             acp_session: Arc::new(Mutex::new(acp::AcpSession::default())),
             claude_approval_rules,
@@ -15003,6 +16321,38 @@ pub fn run() {
                 scheduler_runs.clone(),
                 scheduler_active.clone(),
             );
+            schedule_existing_automation_workflow_runs(
+                app.handle().clone(),
+                scheduler_state.clone(),
+                scheduler_context.clone(),
+                scheduler_settings.clone(),
+                scheduler_storage.clone(),
+                scheduler_claude_approval_rules.clone(),
+                scheduler_claude_pending_approvals.clone(),
+                scheduler_codex_pending_approvals.clone(),
+                scheduler_jobs.clone(),
+                scheduler_runs.clone(),
+                scheduler_active.clone(),
+                scheduler_workflows.clone(),
+                scheduler_workflow_runs.clone(),
+                scheduler_active_workflows.clone(),
+            );
+            schedule_cron_automation_workflows(
+                app.handle().clone(),
+                scheduler_state.clone(),
+                scheduler_context.clone(),
+                scheduler_settings.clone(),
+                scheduler_storage.clone(),
+                scheduler_claude_approval_rules.clone(),
+                scheduler_claude_pending_approvals.clone(),
+                scheduler_codex_pending_approvals.clone(),
+                scheduler_jobs.clone(),
+                scheduler_runs.clone(),
+                scheduler_active.clone(),
+                scheduler_workflows.clone(),
+                scheduler_workflow_runs.clone(),
+                scheduler_active_workflows.clone(),
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -15032,14 +16382,22 @@ pub fn run() {
             create_automation_job,
             update_automation_job,
             delete_automation_job,
+            list_automation_workflows,
+            get_automation_workflow,
+            create_automation_workflow,
+            update_automation_workflow,
+            delete_automation_workflow,
             list_automation_runs,
             list_automation_job_runs,
             get_automation_run_detail,
+            list_automation_workflow_runs,
+            get_automation_workflow_run_detail,
             get_automation_rule_profile,
             update_automation_rule_profile,
             update_automation_goal_rule_config,
             create_automation_run,
             create_automation_run_from_job,
+            create_automation_workflow_run,
             start_automation_run,
             pause_automation_run,
             resume_automation_run,
@@ -15048,6 +16406,8 @@ pub fn run() {
             resume_automation_goal,
             cancel_automation_run,
             delete_automation_run,
+            cancel_automation_workflow_run,
+            delete_automation_workflow_run,
             save_text_to_downloads,
             switch_cli_for_task,
             send_chat_message,

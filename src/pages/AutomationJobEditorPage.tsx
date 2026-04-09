@@ -27,6 +27,32 @@ const PERMISSION_OPTIONS: Array<{ value: AutomationPermissionProfile; label: str
 const INPUT_CLASS =
   "w-full rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-2.5 text-sm text-slate-900 outline-none transition-all placeholder:text-slate-400 hover:border-slate-300 focus:border-sky-500 focus:bg-white focus:ring-4 focus:ring-sky-500/10";
 const TEXTAREA_CLASS = `${INPUT_CLASS} min-h-[140px] resize-none py-3 leading-relaxed`;
+const HEADER_ICON_BUTTON_CLASS =
+  "inline-flex h-[42px] w-[42px] items-center justify-center rounded-xl shadow-sm transition disabled:opacity-50 active:scale-95";
+
+const CancelIcon = ({ className = "h-4 w-4" }: { className?: string }) => (
+  <svg viewBox="0 0 20 20" fill="none" className={className}>
+    <path d="M14.5 5.5l-9 9m0-9l9 9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+  </svg>
+);
+
+const TrashIcon = ({ className = "h-4 w-4" }: { className?: string }) => (
+  <svg viewBox="0 0 20 20" fill="none" className={className}>
+    <path d="M7.5 7.5V6.25A1.25 1.25 0 018.75 5h2.5A1.25 1.25 0 0112.5 6.25V7.5m-7.5 0h10m-.8 0-.52 7.08A1.5 1.5 0 0112.18 16H7.82a1.5 1.5 0 01-1.49-1.42L5.8 7.5m2.7 2.5v3.5m3-3.5v3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const SaveIcon = ({ className = "h-4 w-4" }: { className?: string }) => (
+  <svg viewBox="0 0 20 20" fill="none" className={className}>
+    <path d="M4.5 10.5l3.25 3.25L15.5 6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const PlayIcon = ({ className = "h-4 w-4" }: { className?: string }) => (
+  <svg viewBox="0 0 20 20" fill="none" className={className}>
+    <path d="M6.5 5.5l8 4.5-8 4.5v-9z" fill="currentColor" />
+  </svg>
+);
 
 type WorkspaceOption = { id: string; name: string; rootPath: string };
 
@@ -420,17 +446,18 @@ export function AutomationJobEditorPage() {
         {/* Header Section */}
         <section className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-1.5">
-            <button 
-              type="button" 
-              onClick={() => navigate("/automation")} 
-              className="group inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 transition-colors hover:text-slate-900"
-            >
-              <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4 stroke-current stroke-[1.5] transition-transform group-hover:-translate-x-0.5">
-                <path d="M12.5 15L7.5 10l5-5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              返回任务中心
-            </button>
             <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => navigate("/automation")}
+                className={`${HEADER_ICON_BUTTON_CLASS} border border-slate-200 bg-white text-slate-600 hover:bg-slate-50`}
+                title="返回任务中心"
+                aria-label="返回任务中心"
+              >
+                <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4 stroke-current stroke-[1.7]">
+                  <path d="M12.5 15L7.5 10l5-5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
               <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
                 {jobId ? "编辑任务配置" : "新建自动化任务"}
               </h1>
@@ -445,38 +472,43 @@ export function AutomationJobEditorPage() {
             <button
               type="button"
               onClick={() => navigate("/automation")}
-              className="inline-flex h-[42px] items-center justify-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-600 shadow-sm transition hover:bg-slate-50 active:scale-95"
+              className={`${HEADER_ICON_BUTTON_CLASS} border border-slate-200 bg-white text-slate-600 hover:bg-slate-50`}
+              title="取消"
+              aria-label="取消"
             >
-              取消
+              <CancelIcon />
             </button>
             {jobId ? (
               <button
                 type="button"
                 onClick={() => void withBusy("delete", handleDelete)}
                 disabled={busyKey === "delete"}
-                className="inline-flex h-[42px] items-center justify-center rounded-xl border border-rose-200 bg-rose-50 px-4 text-sm font-medium text-rose-700 shadow-sm transition hover:bg-rose-100 disabled:opacity-50 active:scale-95"
+                className={`${HEADER_ICON_BUTTON_CLASS} border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100`}
+                title="删除"
+                aria-label="删除"
               >
-                删除
+                <TrashIcon />
               </button>
             ) : null}
             <button
               type="button"
               onClick={() => void withBusy("save", handleSave)}
               disabled={busyKey === "save"}
-              className="inline-flex h-[42px] items-center justify-center rounded-xl bg-slate-900 px-5 text-sm font-medium text-white shadow-sm transition hover:bg-slate-800 disabled:opacity-50 active:scale-95"
+              className={`${HEADER_ICON_BUTTON_CLASS} bg-slate-900 text-white hover:bg-slate-800`}
+              title="保存配置"
+              aria-label="保存配置"
             >
-              保存配置
+              <SaveIcon />
             </button>
             <button
               type="button"
               onClick={() => void withBusy("save-run", handleSaveAndRun)}
               disabled={busyKey === "save-run"}
-              className="inline-flex h-[42px] items-center justify-center gap-2 rounded-xl bg-sky-500 px-5 text-sm font-medium text-white shadow-sm transition hover:bg-sky-600 disabled:opacity-50 active:scale-95"
+              className={`${HEADER_ICON_BUTTON_CLASS} bg-sky-500 text-white hover:bg-sky-600`}
+              title="保存并运行"
+              aria-label="保存并运行"
             >
-              <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4">
-                <path d="M6.5 5.5l8 4.5-8 4.5v-9z" fill="currentColor" />
-              </svg>
-              保存并运行
+              <PlayIcon />
             </button>
           </div>
         </section>

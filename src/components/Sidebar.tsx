@@ -1,5 +1,5 @@
-import { NavLink } from "react-router-dom";
-import { useEffect, useId, useState } from "react";
+import { Link, matchPath, useLocation } from "react-router-dom";
+import { useEffect, useId, useState, type ComponentType } from "react";
 
 /**
  * MULTI-CLI STUDIO SIDEBAR
@@ -302,6 +302,15 @@ const IconAutomation = () => (
   </svg>
 );
 
+const IconWorkflow = () => (
+  <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5">
+    <circle cx="6" cy="6" r="2.25" stroke="currentColor" strokeWidth="1.5" />
+    <circle cx="18" cy="6" r="2.25" stroke="currentColor" strokeWidth="1.5" />
+    <circle cx="12" cy="18" r="2.25" stroke="currentColor" strokeWidth="1.5" />
+    <path d="M8 7.3l2.9 7.2M16 7.3l-2.9 7.2M8.25 6H15.75" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+  </svg>
+);
+
 const IconGear = () => (
   <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5">
     <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5"/>
@@ -315,55 +324,108 @@ const IconChevron = ({ collapsed }: { collapsed: boolean }) => (
   </svg>
 );
 
-const navItems = [
-  { to: "/", label: "控制面板", icon: IconDashboard },
-  { to: "/terminal", label: "终端交互", icon: IconTerminal },
-  { to: "/automation", label: "CLI 自动化", icon: IconAutomation },
-  { to: "/settings", label: "系统设置", icon: IconGear },
+type SidebarMatchPattern = {
+  path: string;
+  end?: boolean;
+};
+
+type SidebarNavItem = {
+  to: string;
+  label: string;
+  icon: ComponentType;
+  matchPatterns: SidebarMatchPattern[];
+};
+
+const navItems: SidebarNavItem[] = [
+  {
+    to: "/",
+    label: "控制面板",
+    icon: IconDashboard,
+    matchPatterns: [{ path: "/", end: true }],
+  },
+  {
+    to: "/terminal",
+    label: "终端交互",
+    icon: IconTerminal,
+    matchPatterns: [{ path: "/terminal", end: false }],
+  },
+  {
+    to: "/automation",
+    label: "CLI 自动化",
+    icon: IconAutomation,
+    matchPatterns: [
+      { path: "/automation", end: true },
+      { path: "/automation/new", end: true },
+      { path: "/automation/jobs", end: false },
+    ],
+  },
+  {
+    to: "/automation/workflows",
+    label: "CLI 工作流",
+    icon: IconWorkflow,
+    matchPatterns: [{ path: "/automation/workflows", end: false }],
+  },
+  {
+    to: "/settings",
+    label: "系统设置",
+    icon: IconGear,
+    matchPatterns: [{ path: "/settings", end: false }],
+  },
 ];
+
+function matchesSidebarItem(pathname: string, matchPatterns: SidebarMatchPattern[]) {
+  return matchPatterns.some((pattern) =>
+    matchPath(
+      {
+        path: pattern.path,
+        end: pattern.end ?? true,
+      },
+      pathname
+    )
+  );
+}
 
 function SidebarLink({
   to,
   label,
   icon: Icon,
   collapsed,
-  end = false
+  matchPatterns,
 }: {
   to: string;
   label: string;
-  icon: any;
+  icon: ComponentType;
   collapsed: boolean;
-  end?: boolean;
+  matchPatterns: SidebarMatchPattern[];
 }) {
+  const { pathname } = useLocation();
+  const isActive = matchesSidebarItem(pathname, matchPatterns);
+
   return (
-    <NavLink
+    <Link
       to={to}
-      end={end}
-      className={({ isActive }) =>
-        `group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-[13px] font-semibold tracking-tight transition-all duration-200 ${
-          isActive
-            ? "bg-emerald-50 text-emerald-700"
-            : "text-slate-500 hover:text-slate-800 hover:bg-slate-100"
-        }`
-      }
+      aria-current={isActive ? "page" : undefined}
+      className={`group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-[13px] font-semibold tracking-tight transition-all duration-200 ${
+        isActive
+          ? "bg-emerald-50 text-emerald-700"
+          : "text-slate-500 hover:text-slate-800 hover:bg-slate-100"
+      }`}
     >
-      {({ isActive }) => (
-        <>
-          {/* Active indicator bar */}
-          <div className={`absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-7 rounded-r-full bg-emerald-500 transition-all duration-200 ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-30'}`} />
+      <>
+        {/* Active indicator bar */}
+        <div className={`absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-7 rounded-r-full bg-emerald-500 transition-all duration-200 ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-30'}`} />
 
-          {/* Icon */}
-          <div className={`flex shrink-0 items-center justify-center w-8 h-8 rounded-lg transition-all duration-200 ${
-            isActive ? 'text-emerald-600' : 'text-slate-400 group-hover:text-slate-600'
-          }`}>
-            <Icon />
-          </div>
+        {/* Icon */}
+        <div className={`flex shrink-0 items-center justify-center w-8 h-8 rounded-lg transition-all duration-200 ${
+          isActive ? 'text-emerald-600' : 'text-slate-400 group-hover:text-slate-600'
+        }`}>
+          <Icon />
+        </div>
 
-          {/* Label */}
-          <span className={`truncate ${collapsed ? 'hidden' : ''}`}>{label}</span>
-        </>
-      )}
-    </NavLink>
+        {/* Label */}
+        <span className={`truncate ${collapsed ? 'hidden' : ''}`}>{label}</span>
+      </>
+    </Link>
   );
 }
 
@@ -408,7 +470,7 @@ export function Sidebar() {
       {/* Navigation */}
       <nav className="flex-1 flex flex-col gap-1 px-3 pt-5">
         {navItems.map((item) => (
-          <SidebarLink key={item.to} {...item} collapsed={collapsed} end={item.to === "/"} />
+          <SidebarLink key={item.to} {...item} collapsed={collapsed} />
         ))}
       </nav>
 

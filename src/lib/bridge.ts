@@ -5,6 +5,10 @@ import {
   AutomationJob,
   AutomationJobDraft,
   AutomationGoalRuleConfig,
+  AutomationWorkflow,
+  AutomationWorkflowDraft,
+  AutomationWorkflowRun,
+  AutomationWorkflowRunDetail,
   AutomationRunDetail,
   AutomationRunRecord,
   AutomationRun,
@@ -24,6 +28,7 @@ import {
   ConversationTurn,
   CreateAutomationRunFromJobRequest,
   CreateAutomationRunRequest,
+  CreateAutomationWorkflowRunRequest,
   CliSkillItem,
   FileMentionCandidate,
   GitFileDiff,
@@ -73,14 +78,22 @@ export interface RuntimeBridge {
   createAutomationJob: (job: AutomationJobDraft) => Promise<AutomationJob>;
   updateAutomationJob: (jobId: string, job: AutomationJobDraft) => Promise<AutomationJob>;
   deleteAutomationJob: (jobId: string) => Promise<void>;
+  listAutomationWorkflows: () => Promise<AutomationWorkflow[]>;
+  getAutomationWorkflow: (workflowId: string) => Promise<AutomationWorkflow>;
+  createAutomationWorkflow: (workflow: AutomationWorkflowDraft) => Promise<AutomationWorkflow>;
+  updateAutomationWorkflow: (workflowId: string, workflow: AutomationWorkflowDraft) => Promise<AutomationWorkflow>;
+  deleteAutomationWorkflow: (workflowId: string) => Promise<void>;
   listAutomationJobRuns: (jobId?: string | null) => Promise<AutomationRunRecord[]>;
   getAutomationRunDetail: (runId: string) => Promise<AutomationRunDetail>;
   listAutomationRuns: () => Promise<AutomationRun[]>;
+  listAutomationWorkflowRuns: (workflowId?: string | null) => Promise<AutomationWorkflowRun[]>;
+  getAutomationWorkflowRunDetail: (workflowRunId: string) => Promise<AutomationWorkflowRunDetail>;
   getAutomationRuleProfile: () => Promise<AutomationRuleProfile>;
   updateAutomationRuleProfile: (profile: AutomationRuleProfile) => Promise<AutomationRuleProfile>;
   updateAutomationGoalRuleConfig: (goalId: string, ruleConfig: AutomationGoalRuleConfig) => Promise<AutomationRun>;
   createAutomationRun: (request: CreateAutomationRunRequest) => Promise<AutomationRun>;
   createAutomationRunFromJob: (request: CreateAutomationRunFromJobRequest) => Promise<AutomationRunRecord>;
+  createAutomationWorkflowRun: (request: CreateAutomationWorkflowRunRequest) => Promise<AutomationWorkflowRun>;
   startAutomationRun: (runId: string) => Promise<AutomationRun>;
   pauseAutomationRun: (runId: string) => Promise<AutomationRun>;
   resumeAutomationRun: (runId: string) => Promise<AutomationRun>;
@@ -89,6 +102,8 @@ export interface RuntimeBridge {
   resumeAutomationGoal: (goalId: string) => Promise<AutomationRun>;
   cancelAutomationRun: (runId: string) => Promise<AutomationRun>;
   deleteAutomationRun: (runId: string) => Promise<void>;
+  cancelAutomationWorkflowRun: (workflowRunId: string) => Promise<AutomationWorkflowRun>;
+  deleteAutomationWorkflowRun: (workflowRunId: string) => Promise<void>;
   saveTextToDownloads: (fileName: string, content: string) => Promise<string>;
   // Chat methods
   sendChatMessage: (request: ChatPromptRequest) => Promise<string>;
@@ -238,6 +253,26 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("delete_automation_job", { jobId });
   },
+  async listAutomationWorkflows() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationWorkflow[]>("list_automation_workflows");
+  },
+  async getAutomationWorkflow(workflowId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationWorkflow>("get_automation_workflow", { workflowId });
+  },
+  async createAutomationWorkflow(workflow) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationWorkflow>("create_automation_workflow", { workflow });
+  },
+  async updateAutomationWorkflow(workflowId, workflow) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationWorkflow>("update_automation_workflow", { workflowId, workflow });
+  },
+  async deleteAutomationWorkflow(workflowId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("delete_automation_workflow", { workflowId });
+  },
   async listAutomationJobRuns(jobId) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AutomationRunRecord[]>("list_automation_job_runs", { jobId });
@@ -249,6 +284,16 @@ const tauriRuntime: RuntimeBridge = {
   async listAutomationRuns() {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AutomationRun[]>("list_automation_runs");
+  },
+  async listAutomationWorkflowRuns(workflowId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationWorkflowRun[]>("list_automation_workflow_runs", { workflowId });
+  },
+  async getAutomationWorkflowRunDetail(workflowRunId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationWorkflowRunDetail>("get_automation_workflow_run_detail", {
+      workflowRunId,
+    });
   },
   async getAutomationRuleProfile() {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -269,6 +314,10 @@ const tauriRuntime: RuntimeBridge = {
   async createAutomationRunFromJob(request) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AutomationRunRecord>("create_automation_run_from_job", { request });
+  },
+  async createAutomationWorkflowRun(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationWorkflowRun>("create_automation_workflow_run", { request });
   },
   async startAutomationRun(runId) {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -301,6 +350,14 @@ const tauriRuntime: RuntimeBridge = {
   async deleteAutomationRun(runId) {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("delete_automation_run", { runId });
+  },
+  async cancelAutomationWorkflowRun(workflowRunId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationWorkflowRun>("cancel_automation_workflow_run", { workflowRunId });
+  },
+  async deleteAutomationWorkflowRun(workflowRunId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("delete_automation_workflow_run", { workflowRunId });
   },
   async saveTextToDownloads(fileName, content) {
     const { invoke } = await import("@tauri-apps/api/core");

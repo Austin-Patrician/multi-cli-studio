@@ -80,6 +80,12 @@ pub struct PersistedChatMessage {
     pub id: String,
     pub role: String,
     pub cli_id: Option<String>,
+    #[serde(default)]
+    pub automation_run_id: Option<String>,
+    #[serde(default)]
+    pub workflow_run_id: Option<String>,
+    #[serde(default)]
+    pub workflow_node_id: Option<String>,
     pub timestamp: String,
     pub content: String,
     pub raw_content: Option<String>,
@@ -1288,6 +1294,9 @@ impl TerminalStorage {
                 message_order INTEGER NOT NULL,
                 role TEXT NOT NULL,
                 cli_id TEXT,
+                automation_run_id TEXT,
+                workflow_run_id TEXT,
+                workflow_node_id TEXT,
                 timestamp TEXT NOT NULL,
                 content TEXT NOT NULL,
                 raw_content TEXT,
@@ -1540,6 +1549,25 @@ impl TerminalStorage {
 
         ensure_column_exists(
             conn,
+            "chat_messages",
+            "automation_run_id",
+            "TEXT",
+        )?;
+        ensure_column_exists(
+            conn,
+            "chat_messages",
+            "workflow_run_id",
+            "TEXT",
+        )?;
+        ensure_column_exists(
+            conn,
+            "chat_messages",
+            "workflow_node_id",
+            "TEXT",
+        )?;
+
+        ensure_column_exists(
+            conn,
             "kernel_facts",
             "subject",
             "TEXT NOT NULL DEFAULT 'general'",
@@ -1717,7 +1745,8 @@ impl TerminalStorage {
     ) -> Result<Vec<PersistedChatMessage>, String> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, role, cli_id, timestamp, content, raw_content, content_format,
+                "SELECT id, role, cli_id, automation_run_id, workflow_run_id, workflow_node_id,
+                        timestamp, content, raw_content, content_format,
                         transport_kind, blocks_json, is_streaming, duration_ms, exit_code
                  FROM chat_messages
                  WHERE session_id = ?1
@@ -1726,22 +1755,25 @@ impl TerminalStorage {
             .map_err(|err| err.to_string())?;
         let rows = stmt
             .query_map([session_id], |row| {
-                let blocks_json = row.get::<_, Option<String>>(8)?;
+                let blocks_json = row.get::<_, Option<String>>(11)?;
                 Ok(PersistedChatMessage {
                     id: row.get(0)?,
                     role: row.get(1)?,
                     cli_id: row.get(2)?,
-                    timestamp: row.get(3)?,
-                    content: row.get(4)?,
-                    raw_content: row.get(5)?,
-                    content_format: row.get(6)?,
-                    transport_kind: row.get(7)?,
+                    automation_run_id: row.get(3)?,
+                    workflow_run_id: row.get(4)?,
+                    workflow_node_id: row.get(5)?,
+                    timestamp: row.get(6)?,
+                    content: row.get(7)?,
+                    raw_content: row.get(8)?,
+                    content_format: row.get(9)?,
+                    transport_kind: row.get(10)?,
                     blocks: blocks_json
                         .as_deref()
                         .and_then(|raw| serde_json::from_str::<Vec<ChatMessageBlock>>(raw).ok()),
-                    is_streaming: row.get(9)?,
-                    duration_ms: row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
-                    exit_code: row.get(11)?,
+                    is_streaming: row.get(12)?,
+                    duration_ms: row.get::<_, Option<i64>>(13)?.map(|value| value as u64),
+                    exit_code: row.get(14)?,
                 })
             })
             .map_err(|err| err.to_string())?;
@@ -2430,10 +2462,11 @@ impl TerminalStorage {
         for message in messages {
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO chat_messages (
-                    id, session_id, terminal_tab_id, message_order, role, cli_id, timestamp,
+                    id, session_id, terminal_tab_id, message_order, role, cli_id,
+                    automation_run_id, workflow_run_id, workflow_node_id, timestamp,
                     content, raw_content, content_format, transport_kind, blocks_json,
                     is_streaming, duration_ms, exit_code
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     message.id,
                     session_id,
@@ -2441,6 +2474,9 @@ impl TerminalStorage {
                     next_order,
                     message.role,
                     message.cli_id,
+                    message.automation_run_id,
+                    message.workflow_run_id,
+                    message.workflow_node_id,
                     message.timestamp,
                     message.content,
                     message.raw_content,

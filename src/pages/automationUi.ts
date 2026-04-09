@@ -1,4 +1,9 @@
-import type { AutomationExecutionMode, AutomationParameterValue, AutomationRunStatus } from "../lib/models";
+import type {
+  AutomationExecutionMode,
+  AutomationParameterValue,
+  AutomationRunStatus,
+  AutomationWorkflowContextStrategy,
+} from "../lib/models";
 
 export function cn(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
@@ -115,6 +120,25 @@ export function executionModeLabel(value?: AutomationExecutionMode | string | nu
     default:
       return "自动模式";
   }
+}
+
+export const workflowContextStrategyOptions: Array<{
+  value: AutomationWorkflowContextStrategy;
+  label: string;
+}> = [
+  { value: "resume-per-cli", label: "按执行方延续进度" },
+  { value: "kernel-only", label: "仅交接任务要点" },
+  { value: "session-pool", label: "全流程共享完整背景" },
+];
+
+export function workflowContextStrategyLabel(
+  value?: AutomationWorkflowContextStrategy | string | null
+) {
+  return (
+    workflowContextStrategyOptions.find((option) => option.value === value)?.label ??
+    value ??
+    "未设置"
+  );
 }
 
 export function parameterValueText(value: AutomationParameterValue | undefined) {

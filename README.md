@@ -1,133 +1,150 @@
 # Multi CLI Studio
 
-Desktop orchestration shell for Codex CLI, Claude Code, and Gemini CLI, designed around one dominant terminal surface with a secondary collaboration rail.
+Desktop orchestration shell for Codex CLI, Claude Code, and Gemini CLI, with one primary terminal surface and a secondary collaboration rail.
 
-## Project Overview
+## Table of Contents
 
-**Multi CLI Studio** is a desktop application that provides a unified terminal interface for orchestrating multiple AI CLI agents. It enables users to:
+- [Overview](#overview)
+- [Features](#features)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+- [Scripts](#scripts)
+- [Platform Notes](#platform-notes)
+- [Data Storage](#data-storage)
+- [Roadmap Ideas](#roadmap-ideas)
+- [Contributing](#contributing)
+- [License](#license)
+- [Star History](#star-history)
 
-- Manage multiple workspaces with concurrent AI agent sessions
-- Orchestrate Codex, Claude, and Gemini CLI agents
-- Stream CLI output in real-time through Tauri events
-- Schedule and run automation jobs with cron-based triggers
-- Persist conversation sessions and context across restarts
+## Overview
+
+**Multi CLI Studio** is a Tauri desktop app that unifies multiple AI coding CLIs into one workspace.  
+It focuses on:
+
+- Multi-agent orchestration (Codex / Claude / Gemini)
+- Persistent session state and context
+- Automation workflows and scheduled jobs
+- Real-time streaming output from backend to UI
+
+## Features
+
+- **Unified terminal experience** for multiple agent sessions
+- **Workspace-aware flow** with project and activity context
+- **Automation center** for jobs/workflows and execution tracking
+- **Persistent storage** through SQLite and JSON-backed runtime data
+- **Cross-platform launcher support** for local development
 
 ## Tech Stack
 
-### Frontend
-- **Framework**: React 19
-- **Build Tool**: Vite 7
-- **Language**: TypeScript
-- **Routing**: React Router DOM 7
-- **State Management**: Zustand 5
-- **Styling**: Tailwind CSS 4
-- **Charts**: ECharts
-- **Markdown**: react-markdown with GFM support
+### Frontend (`src`)
 
-### Backend (src-tauri)
-- **Language**: Rust
-- **Framework**: Tauri 2 (desktop app framework)
-- **Database**: SQLite (rusqlite with bundled SQLite)
-- **Key Dependencies**:
-  - `tauri` v2 - Desktop application framework
-  - `rusqlite` - SQLite database bindings
-  - `serde` / `serde_json` - Serialization
-  - `chrono` - Date/time handling
-  - `uuid` - UUID generation
-  - `reqwest` - HTTP client
-  - `lettre` - Email sending
-  - `cron` - Cron expression parsing for scheduling
+- React 19
+- TypeScript
+- Vite 7
+- React Router DOM 7
+- Zustand
+- Tailwind CSS 4
+- Monaco Editor
+- ECharts
+- react-markdown + remark-gfm
 
-## Core Modules
+### Backend (`src-tauri`)
 
-### Frontend Pages (`src/pages`)
-| Page | Description |
-|------|-------------|
-| `TerminalPage` | Main terminal interface with agent tabs and output |
-| `DashboardPage` | Overview with recent activity and quick actions |
-| `AutomationPage` | Automation job management and monitoring |
-| `AutomationJobsPage` | List of automation job definitions |
-| `AutomationJobEditorPage` | Create/edit automation job configurations |
-| `AutomationRunDetailSections` | Detailed view of automation run results |
-| `SettingsPage` | Application settings and preferences |
+- Rust (edition 2021, `rust-version = 1.88`)
+- Tauri 2
+- rusqlite (bundled SQLite)
+- serde / serde_json
+- chrono / uuid
+- reqwest / lettre
+- cron
 
-### Frontend Components (`src/components`)
-- **Chat**: `ChatConversation`, `ChatPromptBar`, `CliSelector`, `CliBubble`, `PromptOverlay`, `ProjectBar`, `GitPanel`, `ConversationHistory`
-- **Terminal**: `TerminalOutput`, `TerminalTabStrip`, `AgentTabs`
-- **Layout**: `Sidebar`, `AgentStatusCard`, `ProjectSummary`, `RecentActivity`, `QuickActions`
+## Project Structure
 
-### Backend Modules (`src-tauri/src`)
-| Module | Description |
-|--------|-------------|
-| `automation.rs` | Automation jobs, runs, goals, and cron scheduling |
-| `storage.rs` | SQLite-backed persistent storage for sessions and context |
-| `acp.rs` | Agent Communication Protocol for inter-agent handoffs |
-| `main.rs` | Tauri command handlers and application entry point |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Frontend (React)                         │
-│  ┌─────────────┐  ┌─────────────┐  ┌───────────────────────┐ │
-│  │  Sidebar    │  │  Terminal   │  │  Settings / Jobs UI   │ │
-│  └─────────────┘  └─────────────┘  └───────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
-                            │ Tauri IPC
-┌─────────────────────────────────────────────────────────────┐
-│                     Backend (Rust/Tauri)                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐   │
-│  │  Commands   │  │ Automation │  │  Storage (SQLite)   │   │
-│  │  Handlers   │  │   Engine    │  │                     │   │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+```text
+multi-cli-studio/
+├─ src/                        # React frontend
+│  ├─ components/              # Reusable UI modules
+│  │  ├─ chat/                 # Chat-specific components
+│  │  ├─ Sidebar.tsx
+│  │  ├─ TerminalOutput.tsx
+│  │  └─ ...
+│  ├─ pages/                   # Route-level pages
+│  │  ├─ TerminalPage.tsx
+│  │  ├─ DashboardPage.tsx
+│  │  ├─ Automation*.tsx
+│  │  └─ SettingsPage.tsx
+│  ├─ layouts/
+│  ├─ lib/
+│  └─ styles/
+├─ src-tauri/                  # Rust + Tauri backend
+│  ├─ src/
+│  │  ├─ main.rs
+│  │  ├─ automation.rs
+│  │  ├─ storage.rs
+│  │  └─ acp.rs
+│  ├─ tauri.conf.json
+│  └─ Cargo.toml
+├─ scripts/
+│  ├─ run-tauri.mjs
+│  └─ run-tauri.ps1
+├─ dist/                       # Frontend build output
+└─ package.json
 ```
 
-## Key Features
+## Getting Started
 
-1. **Multi-Agent Orchestration**: Seamlessly switch between Codex, Claude, and Gemini agents
-2. **Persistent Sessions**: Conversation history and context survive app restarts
-3. **Automation Jobs**: Create scheduled jobs with custom goals and parameters
-4. **Context Management**: Automatic context compaction for long conversations
-5. **CLI Detection**: Automatically detects installed CLI wrappers
-6. **Real-time Streaming**: CLI output streamed to frontend via Tauri events
-7. **Workspace Management**: Track git status, dirty files, and failing checks
+### Prerequisites
 
-## Commands
+- Node.js (LTS recommended)
+- Rust 1.88.0+
+- Tauri CLI v2
+- Windows users: Microsoft C++ Build Tools (MSVC toolchain)
+- macOS users: Xcode Command Line Tools
+
+### Install
 
 ```bash
-# Install dependencies
 npm install
+```
 
-# Frontend development (browser runtime)
+### Run (frontend only)
+
+```bash
 npm run dev
+```
 
-# Full Tauri development
+### Run (desktop app)
+
+```bash
 npm run tauri:dev
+```
 
-# Production build
+### Build
+
+```bash
 npm run build
 npm run tauri:build
 ```
 
-## macOS notes
+## Scripts
 
-- `npm run tauri:dev` now uses a cross-platform launcher. On macOS it runs the local Tauri CLI directly instead of the Windows PowerShell wrapper.
-- The desktop host uses the native macOS shell path and supports folder selection through `osascript`.
-- You still need the normal macOS native prerequisites for Tauri: Xcode Command Line Tools and a recent Rust toolchain.
+From `package.json`:
 
-## Build Requirements
+- `npm run dev` - Start Vite dev server
+- `npm run build` - Type-check + production frontend build
+- `npm run preview` - Preview built frontend
+- `npm run tauri:dev` - Start Tauri desktop development mode
+- `npm run tauri:build` - Build desktop bundle
+- `npm run tauri:android` - Android target flow via script wrapper
 
-- Rust 1.88+
-- Node.js (for frontend build)
-- Microsoft C++ Build Tools (for MSVC target on Windows)
-- Tauri CLI v2
+## Platform Notes
 
-## Rust toolchain requirement
+- This repo includes cross-platform Tauri launch scripts in `scripts/`.
+- On macOS, the launcher uses native shell behavior and supports `osascript`-based folder selection.
+- Rust toolchain is pinned via `rust-toolchain.toml` to ensure compatibility.
 
-The current Tauri dependency graph requires a newer Rust toolchain than the one that shipped on this machine. This repo now pins `rust-toolchain.toml` to Rust `1.88.0`.
-
-If your local toolchain is older, run:
+If needed:
 
 ```bash
 rustup toolchain install 1.88.0
@@ -136,23 +153,43 @@ rustup default 1.88.0
 
 ## Data Storage
 
-Application data is stored in the platform-specific app data directory:
-- **Windows**: `%LOCALAPPDATA%\multi-cli-studio`
-- **Linux**: `~/.local/share/multi-cli-studio`
-- **macOS**: `~/Library/Application Support/multi-cli-studio`
+Application data is stored in platform app-data directories:
 
-Key storage files:
-- `automation-jobs.json` - Job definitions
-- `automation-runs.json` - Run history
+- Windows: `%LOCALAPPDATA%\multi-cli-studio`
+- Linux: `~/.local/share/multi-cli-studio`
+- macOS: `~/Library/Application Support/multi-cli-studio`
+
+Common files:
+
+- `automation-jobs.json` - Automation job definitions
+- `automation-runs.json` - Automation run history
 - `automation-rules.json` - Rule profiles
-- `terminal-state.db` - SQLite database for sessions and context
+- `terminal-state.db` - SQLite persistence for sessions/context
 
-## Validation performed
+## Roadmap Ideas
 
-- `npm install`
-- `npm run build`
-- browser runtime interaction checks for:
-  - writer takeover
-  - review requests
-  - artifact creation
-  - activity updates
+- Plugin-like integration model for additional CLIs
+- Enhanced run analytics and dashboard visualizations
+- Better workflow templates and sharing
+- More granular context-control strategies
+
+## Contributing
+
+Contributions are welcome.  
+Recommended workflow:
+
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Open a Pull Request with clear change notes
+
+Please ensure your branch builds locally before submitting.
+
+## License
+
+This project is licensed under the **MIT License**.  
+See [`LICENSE`](./LICENSE) for full text.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Austin-Patrician/multi-cli-studio&type=Date)](https://star-history.com/#Austin-Patrician/multi-cli-studio&Date)

@@ -5,6 +5,8 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { TerminalPage } from "./pages/TerminalPage";
 import { AutomationJobsPage } from "./pages/AutomationJobsPage";
 import { AutomationJobEditorPage } from "./pages/AutomationJobEditorPage";
+import { AutomationWorkflowsPage } from "./pages/AutomationWorkflowsPage";
+import { AutomationWorkflowEditorPage } from "./pages/AutomationWorkflowEditorPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { useStore } from "./lib/store";
 import { bridge } from "./lib/bridge";
@@ -117,6 +119,9 @@ function App() {
         <Route path="/" element={<DashboardPage />} />
         <Route path="/terminal" element={<TerminalPage />} />
         <Route path="/automation" element={<AutomationJobsPage />} />
+        <Route path="/automation/workflows" element={<AutomationWorkflowsPage />} />
+        <Route path="/automation/workflows/new" element={<AutomationWorkflowEditorPage />} />
+        <Route path="/automation/workflows/:workflowId" element={<AutomationWorkflowEditorPage />} />
         <Route path="/automation/new" element={<AutomationJobEditorPage />} />
         <Route path="/automation/jobs/new" element={<AutomationJobEditorPage />} />
         <Route path="/automation/jobs/:jobId" element={<AutomationJobEditorPage />} />

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::PathBuf, str::FromStr};
+use std::{collections::{BTreeMap, BTreeSet}, fs, path::PathBuf, str::FromStr};
 
 use chrono::{DateTime, Local};
 use cron::Schedule;
@@ -133,6 +133,210 @@ pub struct CreateAutomationRunFromJobRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AutomationWorkflowNodeDraft {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default)]
+    pub expected_outcome: String,
+    #[serde(default = "default_workflow_node_execution_mode", alias = "executionModeOverride")]
+    pub execution_mode: String,
+    #[serde(default = "default_workflow_node_permission_profile", alias = "permissionProfileOverride")]
+    pub permission_profile: String,
+    #[serde(default = "default_reuse_session")]
+    pub reuse_session: bool,
+    #[serde(default)]
+    pub job_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationWorkflowEdgeDraft {
+    pub from_node_id: String,
+    #[serde(rename = "on")]
+    pub on_result: String,
+    pub to_node_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationWorkflowDraft {
+    pub workspace_id: String,
+    pub project_root: String,
+    pub project_name: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub cron_expression: Option<String>,
+    #[serde(default)]
+    pub email_notification_enabled: bool,
+    #[serde(default = "default_workflow_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub entry_node_id: Option<String>,
+    #[serde(default = "default_workflow_context_strategy")]
+    pub default_context_strategy: String,
+    #[serde(default = "default_execution_mode")]
+    pub default_execution_mode: String,
+    #[serde(default = "default_permission_profile")]
+    pub default_permission_profile: String,
+    pub nodes: Vec<AutomationWorkflowNodeDraft>,
+    #[serde(default)]
+    pub edges: Vec<AutomationWorkflowEdgeDraft>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationWorkflowNode {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub goal: String,
+    #[serde(default)]
+    pub expected_outcome: String,
+    #[serde(default = "default_workflow_node_execution_mode", alias = "executionModeOverride")]
+    pub execution_mode: String,
+    #[serde(default = "default_workflow_node_permission_profile", alias = "permissionProfileOverride")]
+    pub permission_profile: String,
+    #[serde(default = "default_reuse_session")]
+    pub reuse_session: bool,
+    #[serde(default)]
+    pub job_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationWorkflowEdge {
+    pub from_node_id: String,
+    #[serde(rename = "on")]
+    pub on_result: String,
+    pub to_node_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationWorkflow {
+    pub id: String,
+    pub workspace_id: String,
+    pub project_root: String,
+    pub project_name: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub cron_expression: Option<String>,
+    #[serde(default)]
+    pub last_triggered_at: Option<String>,
+    #[serde(default)]
+    pub email_notification_enabled: bool,
+    #[serde(default = "default_workflow_enabled")]
+    pub enabled: bool,
+    pub entry_node_id: String,
+    #[serde(default = "default_workflow_context_strategy")]
+    pub default_context_strategy: String,
+    #[serde(default = "default_execution_mode")]
+    pub default_execution_mode: String,
+    #[serde(default = "default_permission_profile")]
+    pub default_permission_profile: String,
+    pub nodes: Vec<AutomationWorkflowNode>,
+    #[serde(default)]
+    pub edges: Vec<AutomationWorkflowEdge>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowCliSessionRef {
+    pub cli_id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub last_sync_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAutomationWorkflowRunRequest {
+    pub workflow_id: String,
+    #[serde(default)]
+    pub scheduled_start_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationWorkflowNodeRun {
+    pub id: String,
+    pub workflow_run_id: String,
+    pub node_id: String,
+    pub label: String,
+    pub goal: String,
+    #[serde(default)]
+    pub automation_run_id: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub branch_result: Option<String>,
+    #[serde(default)]
+    pub used_cli: Option<String>,
+    #[serde(default)]
+    pub transport_session: Option<WorkflowCliSessionRef>,
+    #[serde(default)]
+    pub status_summary: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationWorkflowRun {
+    pub id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub trigger_source: String,
+    pub workspace_id: String,
+    pub project_root: String,
+    pub project_name: String,
+    pub status: String,
+    #[serde(default)]
+    pub status_summary: Option<String>,
+    #[serde(default)]
+    pub scheduled_start_at: Option<String>,
+    pub shared_terminal_tab_id: String,
+    pub entry_node_id: String,
+    #[serde(default)]
+    pub current_node_id: Option<String>,
+    #[serde(default)]
+    pub email_notification_enabled: bool,
+    #[serde(default)]
+    pub cli_sessions: Vec<WorkflowCliSessionRef>,
+    #[serde(default)]
+    pub node_runs: Vec<AutomationWorkflowNodeRun>,
+    #[serde(default)]
+    pub events: Vec<AutomationEvent>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AutomationRun {
     pub id: String,
     #[serde(default)]
@@ -143,6 +347,10 @@ pub struct AutomationRun {
     pub trigger_source: Option<String>,
     #[serde(default)]
     pub run_number: Option<usize>,
+    #[serde(default)]
+    pub workflow_run_id: Option<String>,
+    #[serde(default)]
+    pub workflow_node_id: Option<String>,
     #[serde(default = "default_permission_profile")]
     pub permission_profile: String,
     #[serde(default)]
@@ -367,6 +575,52 @@ pub fn persist_runs(runs: &[AutomationRun]) -> Result<(), String> {
     fs::write(path, raw).map_err(|err| err.to_string())
 }
 
+pub fn load_workflows() -> Result<Vec<AutomationWorkflow>, String> {
+    let path = automation_workflows_file()?;
+    if !path.exists() {
+        persist_workflows(&[])?;
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut workflows =
+        serde_json::from_str::<Vec<AutomationWorkflow>>(&raw).map_err(|err| err.to_string())?;
+    normalize_workflows_on_startup(&mut workflows, &[]);
+    Ok(workflows)
+}
+
+pub fn persist_workflows(workflows: &[AutomationWorkflow]) -> Result<(), String> {
+    let path = automation_workflows_file()?;
+    let raw = serde_json::to_string_pretty(workflows).map_err(|err| err.to_string())?;
+    fs::write(path, raw).map_err(|err| err.to_string())
+}
+
+pub fn load_workflow_runs() -> Result<Vec<AutomationWorkflowRun>, String> {
+    let path = automation_workflow_runs_file()?;
+    if !path.exists() {
+        persist_workflow_runs(&[])?;
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut runs =
+        serde_json::from_str::<Vec<AutomationWorkflowRun>>(&raw).map_err(|err| err.to_string())?;
+    normalize_workflow_runs_on_startup(&mut runs);
+    Ok(runs)
+}
+
+pub fn persist_workflow_runs(runs: &[AutomationWorkflowRun]) -> Result<(), String> {
+    let path = automation_workflow_runs_file()?;
+    let raw = serde_json::to_string_pretty(runs).map_err(|err| err.to_string())?;
+    fs::write(path, raw).map_err(|err| err.to_string())
+}
+
 pub fn default_rule_profile() -> AutomationRuleProfile {
     AutomationRuleProfile {
         id: DEFAULT_RULE_PROFILE_ID.to_string(),
@@ -482,6 +736,121 @@ pub fn normalize_jobs_on_startup(jobs: &mut [AutomationJob]) {
             .cloned()
             .map(normalize_parameter_definition)
             .collect();
+    }
+}
+
+pub fn normalize_workflows_on_startup(
+    workflows: &mut [AutomationWorkflow],
+    jobs: &[AutomationJob],
+) {
+    for workflow in workflows {
+        workflow.name = normalize_required_text(&workflow.name, "工作流");
+        workflow.project_name = normalize_required_text(&workflow.project_name, "Workspace");
+        workflow.cron_expression =
+            normalize_cron_expression(workflow.cron_expression.clone()).ok().flatten();
+        workflow.default_context_strategy =
+            normalize_workflow_context_strategy(&workflow.default_context_strategy);
+        workflow.default_execution_mode =
+            normalize_execution_mode(&workflow.default_execution_mode);
+        workflow.default_permission_profile =
+            normalize_permission_profile(&workflow.default_permission_profile);
+        for node in &mut workflow.nodes {
+            let legacy_job = node
+                .job_id
+                .as_deref()
+                .and_then(|job_id| jobs.iter().find(|job| job.id == job_id));
+            if node.goal.trim().is_empty() {
+                if let Some(job) = legacy_job {
+                    node.goal = job.goal.clone();
+                }
+            }
+            if node.expected_outcome.trim().is_empty() {
+                if let Some(job) = legacy_job {
+                    node.expected_outcome = job.expected_outcome.clone();
+                }
+            }
+            node.label = normalize_workflow_node_label(
+                Some(node.label.clone()),
+                &derive_goal_title(&node.goal),
+            );
+            node.goal = normalize_required_text(&node.goal, "");
+            node.expected_outcome = normalize_required_text(&node.expected_outcome, "");
+            let normalized_node_execution_mode =
+                normalize_workflow_node_execution_mode(&node.execution_mode);
+            let normalized_node_permission_profile =
+                normalize_workflow_node_permission_profile(&node.permission_profile);
+            if matches!(normalized_node_execution_mode.as_str(), "inherit")
+                && legacy_job.is_some()
+                && node.goal == legacy_job.map(|job| job.goal.clone()).unwrap_or_default()
+            {
+                node.execution_mode = legacy_job
+                    .map(|job| normalize_execution_mode(&job.default_execution_mode))
+                    .unwrap_or(normalized_node_execution_mode);
+            } else {
+                node.execution_mode = normalized_node_execution_mode;
+            }
+            if matches!(normalized_node_permission_profile.as_str(), "inherit")
+                && legacy_job.is_some()
+                && node.expected_outcome
+                    == legacy_job
+                        .map(|job| job.expected_outcome.clone())
+                        .unwrap_or_default()
+            {
+                node.permission_profile = legacy_job
+                    .map(|job| normalize_permission_profile(&job.permission_profile))
+                    .unwrap_or(normalized_node_permission_profile);
+            } else {
+                node.permission_profile = normalized_node_permission_profile;
+            }
+        }
+        if let Some(first_node) = workflow.nodes.first() {
+            if workflow
+                .nodes
+                .iter()
+                .all(|node| node.id != workflow.entry_node_id)
+            {
+                workflow.entry_node_id = first_node.id.clone();
+            }
+        }
+    }
+}
+
+pub fn normalize_workflow_runs_on_startup(runs: &mut [AutomationWorkflowRun]) {
+    let now = now_rfc3339();
+    for run in runs {
+        if run.status == "running" {
+            run.status = "failed".to_string();
+            run.status_summary =
+                Some("The app restarted while this workflow was active. Re-run it from the workflow page.".to_string());
+            run.completed_at = Some(now.clone());
+            run.updated_at = now.clone();
+            run.events.insert(
+                0,
+                AutomationEvent {
+                    id: new_id("wf-event"),
+                    run_id: run.id.clone(),
+                    goal_id: run.current_node_id.clone(),
+                    level: "warning".to_string(),
+                    title: "Host restarted".to_string(),
+                    detail: "The app restarted while this workflow was active. Re-run it from the workflow page."
+                        .to_string(),
+                    created_at: now.clone(),
+                },
+            );
+        }
+
+        for node_run in &mut run.node_runs {
+            if run.status == "failed" && matches!(node_run.status.as_str(), "queued" | "running") {
+                node_run.status = "failed".to_string();
+                node_run.branch_result = Some("fail".to_string());
+                node_run.status_summary = Some(
+                    "The host restarted before this node finished. Re-run the workflow to continue."
+                        .to_string(),
+                );
+                node_run.completed_at = Some(now.clone());
+                node_run.updated_at = now.clone();
+            }
+        }
     }
 }
 
@@ -675,6 +1044,147 @@ pub fn update_job_from_draft(existing: &AutomationJob, draft: AutomationJobDraft
     })
 }
 
+pub fn build_workflow_from_draft(
+    draft: AutomationWorkflowDraft,
+) -> Result<AutomationWorkflow, String> {
+    let now = now_rfc3339();
+    let normalized = normalize_workflow_draft(draft)?;
+    Ok(AutomationWorkflow {
+        id: new_id("wf"),
+        workspace_id: normalized.workspace_id,
+        project_root: normalized.project_root,
+        project_name: normalized.project_name,
+        name: normalized.name,
+        description: normalized.description,
+        cron_expression: normalized.cron_expression,
+        last_triggered_at: None,
+        email_notification_enabled: normalized.email_notification_enabled,
+        enabled: normalized.enabled,
+        entry_node_id: normalized.entry_node_id,
+        default_context_strategy: normalized.default_context_strategy,
+        default_execution_mode: normalized.default_execution_mode,
+        default_permission_profile: normalized.default_permission_profile,
+        nodes: normalized.nodes,
+        edges: normalized.edges,
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+pub fn update_workflow_from_draft(
+    existing: &AutomationWorkflow,
+    draft: AutomationWorkflowDraft,
+) -> Result<AutomationWorkflow, String> {
+    let normalized = normalize_workflow_draft(draft)?;
+    let reset_last_trigger = normalized.cron_expression != existing.cron_expression;
+    Ok(AutomationWorkflow {
+        id: existing.id.clone(),
+        workspace_id: normalized.workspace_id,
+        project_root: normalized.project_root,
+        project_name: normalized.project_name,
+        name: normalized.name,
+        description: normalized.description,
+        cron_expression: normalized.cron_expression,
+        last_triggered_at: if reset_last_trigger {
+            None
+        } else {
+            existing.last_triggered_at.clone()
+        },
+        email_notification_enabled: normalized.email_notification_enabled,
+        enabled: normalized.enabled,
+        entry_node_id: normalized.entry_node_id,
+        default_context_strategy: normalized.default_context_strategy,
+        default_execution_mode: normalized.default_execution_mode,
+        default_permission_profile: normalized.default_permission_profile,
+        nodes: normalized.nodes,
+        edges: normalized.edges,
+        created_at: existing.created_at.clone(),
+        updated_at: now_rfc3339(),
+    })
+}
+
+pub fn build_workflow_run_from_workflow(
+    workflow: &AutomationWorkflow,
+    mut request: CreateAutomationWorkflowRunRequest,
+) -> AutomationWorkflowRun {
+    let now = now_rfc3339();
+    request.scheduled_start_at = normalize_scheduled_start_at(request.scheduled_start_at);
+    let is_scheduled = request
+        .scheduled_start_at
+        .as_deref()
+        .and_then(parse_time)
+        .map(|value| value.timestamp_millis() > Local::now().timestamp_millis() + 1000)
+        .unwrap_or(false);
+    let mut run = AutomationWorkflowRun {
+        id: new_id("wf-run"),
+        workflow_id: workflow.id.clone(),
+        workflow_name: workflow.name.clone(),
+        trigger_source: if is_scheduled {
+            "schedule".to_string()
+        } else {
+            "manual".to_string()
+        },
+        workspace_id: workflow.workspace_id.clone(),
+        project_root: workflow.project_root.clone(),
+        project_name: workflow.project_name.clone(),
+        status: "scheduled".to_string(),
+        status_summary: Some(if is_scheduled {
+            "Scheduled and waiting to start.".to_string()
+        } else {
+            "Queued to start immediately.".to_string()
+        }),
+        scheduled_start_at: request.scheduled_start_at,
+        shared_terminal_tab_id: new_id("wf-tab"),
+        entry_node_id: workflow.entry_node_id.clone(),
+        current_node_id: Some(workflow.entry_node_id.clone()),
+        email_notification_enabled: workflow.email_notification_enabled,
+        cli_sessions: Vec::new(),
+        node_runs: workflow
+            .nodes
+            .iter()
+            .map(|node| AutomationWorkflowNodeRun {
+                id: new_id("wf-node-run"),
+                workflow_run_id: String::new(),
+                node_id: node.id.clone(),
+                label: node.label.clone(),
+                goal: node.goal.clone(),
+                automation_run_id: None,
+                status: "queued".to_string(),
+                branch_result: None,
+                used_cli: None,
+                transport_session: None,
+                status_summary: Some("Waiting for dependency resolution.".to_string()),
+                started_at: None,
+                completed_at: None,
+                updated_at: now.clone(),
+            })
+            .collect(),
+        events: Vec::new(),
+        started_at: None,
+        completed_at: None,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    for node_run in &mut run.node_runs {
+        node_run.workflow_run_id = run.id.clone();
+        if node_run.node_id == run.entry_node_id {
+            node_run.status_summary = Some("Ready to run as the entry node.".to_string());
+        }
+    }
+    push_workflow_event(
+        &mut run,
+        None,
+        "info",
+        "Workflow run created",
+        if is_scheduled {
+            "The workflow run is queued and will start at the scheduled time."
+        } else {
+            "The workflow run is queued and will start immediately."
+        },
+    );
+    run
+}
+
 pub fn build_run_from_job(
     job: &AutomationJob,
     request: CreateAutomationRunFromJobRequest,
@@ -744,6 +1254,8 @@ pub fn build_run_from_job(
             "manual".to_string()
         }),
         run_number: Some(run_number),
+        workflow_run_id: None,
+        workflow_node_id: None,
         permission_profile: normalize_permission_profile(&job.permission_profile),
         parameter_values: merged_parameters,
         workspace_id: job.workspace_id.clone(),
@@ -856,6 +1368,8 @@ pub fn build_run_from_request(request: CreateAutomationRunRequest) -> Automation
         job_name: None,
         trigger_source: None,
         run_number: None,
+        workflow_run_id: None,
+        workflow_node_id: None,
         permission_profile: default_permission_profile(),
         parameter_values: BTreeMap::new(),
         workspace_id: request.workspace_id,
@@ -1134,6 +1648,26 @@ fn default_job_enabled() -> bool {
     true
 }
 
+fn default_workflow_enabled() -> bool {
+    true
+}
+
+fn default_reuse_session() -> bool {
+    true
+}
+
+fn default_workflow_context_strategy() -> String {
+    "resume-per-cli".to_string()
+}
+
+fn default_workflow_node_execution_mode() -> String {
+    "inherit".to_string()
+}
+
+fn default_workflow_node_permission_profile() -> String {
+    "inherit".to_string()
+}
+
 fn normalize_parameter_definition(definition: AutomationParameterDefinition) -> AutomationParameterDefinition {
     let kind = match definition.kind.trim().to_ascii_lowercase().as_str() {
         "boolean" => "boolean",
@@ -1185,6 +1719,226 @@ fn normalize_job_name(value: &str, goal: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn normalize_workflow_name(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "工作流".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalize_workflow_context_strategy(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "kernel-only" => "kernel-only".to_string(),
+        "session-pool" => "session-pool".to_string(),
+        _ => default_workflow_context_strategy(),
+    }
+}
+
+fn normalize_workflow_node_execution_mode(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "codex" => "codex".to_string(),
+        "claude" => "claude".to_string(),
+        "gemini" => "gemini".to_string(),
+        _ => default_workflow_node_execution_mode(),
+    }
+}
+
+fn normalize_workflow_node_permission_profile(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "standard" => "standard".to_string(),
+        "full-access" => "full-access".to_string(),
+        "read-only" => "read-only".to_string(),
+        _ => default_workflow_node_permission_profile(),
+    }
+}
+
+fn normalize_workflow_node_label(value: Option<String>, fallback: &str) -> String {
+    value.map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn normalize_workflow_edge_on(value: &str) -> Result<String, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "success" => Ok("success".to_string()),
+        "fail" => Ok("fail".to_string()),
+        _ => Err("Workflow edges only support `success` or `fail`.".to_string()),
+    }
+}
+
+struct NormalizedWorkflowDraft {
+    workspace_id: String,
+    project_root: String,
+    project_name: String,
+    name: String,
+    description: Option<String>,
+    cron_expression: Option<String>,
+    email_notification_enabled: bool,
+    enabled: bool,
+    entry_node_id: String,
+    default_context_strategy: String,
+    default_execution_mode: String,
+    default_permission_profile: String,
+    nodes: Vec<AutomationWorkflowNode>,
+    edges: Vec<AutomationWorkflowEdge>,
+}
+
+fn normalize_workflow_draft(draft: AutomationWorkflowDraft) -> Result<NormalizedWorkflowDraft, String> {
+    if draft.nodes.is_empty() {
+        return Err("At least one workflow node is required.".to_string());
+    }
+
+    let mut node_ids = BTreeSet::new();
+    let nodes = draft
+        .nodes
+        .into_iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let node_id = node
+                .id
+                .clone()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| new_id("wf-node"));
+            if !node_ids.insert(node_id.clone()) {
+                return Err("Workflow node ids must be unique.".to_string());
+            }
+            let fallback_label = format!("节点 {}", index + 1);
+            Ok(AutomationWorkflowNode {
+                id: node_id,
+                job_id: node.job_id.and_then(|value| normalize_optional_text(Some(value))),
+                label: normalize_workflow_node_label(
+                    node.label,
+                    &if node.goal.trim().is_empty() {
+                        fallback_label.clone()
+                    } else {
+                        derive_goal_title(&node.goal)
+                    },
+                ),
+                goal: normalize_required_text(&node.goal, ""),
+                expected_outcome: normalize_required_text(&node.expected_outcome, ""),
+                execution_mode: normalize_workflow_node_execution_mode(&node.execution_mode),
+                permission_profile: normalize_workflow_node_permission_profile(&node.permission_profile),
+                reuse_session: node.reuse_session,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    if nodes.iter().any(|node| node.goal.trim().is_empty()) {
+        return Err("Each workflow node must define a task goal.".to_string());
+    }
+    if nodes
+        .iter()
+        .any(|node| node.expected_outcome.trim().is_empty())
+    {
+        return Err("Each workflow node must define an expected outcome.".to_string());
+    }
+
+    let entry_node_id = draft
+        .entry_node_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| nodes[0].id.clone());
+    if !nodes.iter().any(|node| node.id == entry_node_id) {
+        return Err("Workflow entry node is invalid.".to_string());
+    }
+
+    let mut edge_keys = BTreeSet::new();
+    let edges = draft
+        .edges
+        .into_iter()
+        .map(|edge| {
+            let from_node_id = edge.from_node_id.trim().to_string();
+            let to_node_id = edge.to_node_id.trim().to_string();
+            if from_node_id.is_empty() || to_node_id.is_empty() {
+                return Err("Workflow edges must reference both source and target nodes.".to_string());
+            }
+            if !nodes.iter().any(|node| node.id == from_node_id)
+                || !nodes.iter().any(|node| node.id == to_node_id)
+            {
+                return Err("Workflow edges must reference existing nodes.".to_string());
+            }
+            let on_result = normalize_workflow_edge_on(&edge.on_result)?;
+            if !edge_keys.insert((from_node_id.clone(), on_result.clone())) {
+                return Err("Each workflow node can only have one edge per result.".to_string());
+            }
+            Ok(AutomationWorkflowEdge {
+                from_node_id,
+                on_result,
+                to_node_id,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    validate_workflow_graph(&entry_node_id, &nodes, &edges)?;
+
+    Ok(NormalizedWorkflowDraft {
+        workspace_id: normalize_required_text(&draft.workspace_id, "workspace"),
+        project_root: normalize_required_text(&draft.project_root, ""),
+        project_name: normalize_required_text(&draft.project_name, "Workspace"),
+        name: normalize_workflow_name(&draft.name),
+        description: normalize_optional_text(draft.description),
+        cron_expression: normalize_cron_expression(draft.cron_expression)?,
+        email_notification_enabled: draft.email_notification_enabled,
+        enabled: draft.enabled,
+        entry_node_id,
+        default_context_strategy: normalize_workflow_context_strategy(&draft.default_context_strategy),
+        default_execution_mode: normalize_execution_mode(&draft.default_execution_mode),
+        default_permission_profile: normalize_permission_profile(&draft.default_permission_profile),
+        nodes,
+        edges,
+    })
+}
+
+fn validate_workflow_graph(
+    entry_node_id: &str,
+    nodes: &[AutomationWorkflowNode],
+    edges: &[AutomationWorkflowEdge],
+) -> Result<(), String> {
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    if !node_ids.contains(entry_node_id) {
+        return Err("Workflow entry node is invalid.".to_string());
+    }
+    let mut adjacency = BTreeMap::<String, Vec<String>>::new();
+    for edge in edges {
+        adjacency
+            .entry(edge.from_node_id.clone())
+            .or_default()
+            .push(edge.to_node_id.clone());
+    }
+
+    fn dfs(
+        node_id: &str,
+        adjacency: &BTreeMap<String, Vec<String>>,
+        visiting: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
+    ) -> Result<(), String> {
+        if !visiting.insert(node_id.to_string()) {
+            return Err("Workflow loops are not supported in this version.".to_string());
+        }
+        if let Some(targets) = adjacency.get(node_id) {
+            for target in targets {
+                if !visited.contains(target) {
+                    dfs(target, adjacency, visiting, visited)?;
+                }
+            }
+        }
+        visiting.remove(node_id);
+        visited.insert(node_id.to_string());
+        Ok(())
+    }
+
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    dfs(entry_node_id, &adjacency, &mut visiting, &mut visited)?;
+    Ok(())
 }
 
 fn normalize_required_text(value: &str, fallback: &str) -> String {
@@ -1256,6 +2010,16 @@ fn automation_runs_file() -> Result<PathBuf, String> {
     Ok(base.join("automation-runs.json"))
 }
 
+fn automation_workflows_file() -> Result<PathBuf, String> {
+    let base = automation_base_dir()?;
+    Ok(base.join("automation-workflows.json"))
+}
+
+fn automation_workflow_runs_file() -> Result<PathBuf, String> {
+    let base = automation_base_dir()?;
+    Ok(base.join("automation-workflow-runs.json"))
+}
+
 fn automation_rules_file() -> Result<PathBuf, String> {
     let base = automation_base_dir()?;
     Ok(base.join("automation-rules.json"))
@@ -1286,4 +2050,28 @@ fn new_id(prefix: &str) -> String {
 
 fn now_rfc3339() -> String {
     Local::now().to_rfc3339()
+}
+
+pub fn push_workflow_event(
+    run: &mut AutomationWorkflowRun,
+    node_id: Option<&str>,
+    level: &str,
+    title: &str,
+    detail: &str,
+) {
+    run.events.insert(
+        0,
+        AutomationEvent {
+            id: new_id("wf-event"),
+            run_id: run.id.clone(),
+            goal_id: node_id.map(|value| value.to_string()),
+            level: level.to_string(),
+            title: title.to_string(),
+            detail: detail.to_string(),
+            created_at: now_rfc3339(),
+        },
+    );
+    if run.events.len() > 200 {
+        run.events.truncate(200);
+    }
 }

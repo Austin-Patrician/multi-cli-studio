@@ -7,9 +7,18 @@ import {
   AutomationGoalDraft,
   AutomationGoalRuleConfig,
   AutomationGoalStatus,
+  AutomationExecutionMode,
   AutomationParameterDefinition,
   AutomationPermissionProfile,
   AutomationParameterValue,
+  AutomationWorkflow,
+  AutomationWorkflowContextStrategy,
+  AutomationWorkflowDraft,
+  AutomationWorkflowNode,
+  AutomationWorkflowNodeDraft,
+  AutomationWorkflowNodeRun,
+  AutomationWorkflowRun,
+  AutomationWorkflowRunDetail,
   AutomationRunDetail,
   AutomationRunRecord,
   AutomationRuleProfile,
@@ -35,6 +44,7 @@ import {
   ConversationTurn,
   CreateAutomationRunFromJobRequest,
   CreateAutomationRunRequest,
+  CreateAutomationWorkflowRunRequest,
   AppSettings,
   NotificationConfig,
   EnrichedHandoff,
@@ -68,6 +78,8 @@ const SETTINGS_KEY = "multi-cli-studio::settings";
 const TERMINAL_STATE_KEY = "multi-cli-studio::terminal-state";
 const AUTOMATION_JOBS_KEY = "multi-cli-studio::automation-jobs";
 const AUTOMATION_RUNS_KEY = "multi-cli-studio::automation-runs";
+const AUTOMATION_WORKFLOWS_KEY = "multi-cli-studio::automation-workflows";
+const AUTOMATION_WORKFLOW_RUNS_KEY = "multi-cli-studio::automation-workflow-runs";
 const AUTOMATION_RULE_KEY = "multi-cli-studio::automation-rule";
 
 let state: AppState = loadStoredState();
@@ -76,6 +88,8 @@ let settings: AppSettings = loadStoredSettings();
 let acpSession: AcpSession = defaultAcpSession();
 let automationJobs: AutomationJob[] = loadStoredAutomationJobs();
 let automationRuns: AutomationRun[] = loadStoredAutomationRuns();
+let automationWorkflows: AutomationWorkflow[] = loadStoredAutomationWorkflows();
+let automationWorkflowRuns: AutomationWorkflowRun[] = loadStoredAutomationWorkflowRuns();
 let automationRuleProfile: AutomationRuleProfile = loadStoredAutomationRuleProfile();
 
 automationRuns
@@ -83,6 +97,14 @@ automationRuns
   .forEach((run) => {
     if (typeof window !== "undefined") {
       window.setTimeout(() => scheduleBrowserAutomationRun(run.id), 0);
+    }
+  });
+
+automationWorkflowRuns
+  .filter((run) => run.status === "scheduled")
+  .forEach((run) => {
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => scheduleBrowserWorkflowRun(run.id), 0);
     }
   });
 
@@ -545,6 +567,168 @@ function loadStoredAutomationJobs(): AutomationJob[] {
   }
 }
 
+function defaultAutomationWorkflowContextStrategy(): AutomationWorkflowContextStrategy {
+  return "resume-per-cli";
+}
+
+function normalizeAutomationWorkflowContextStrategy(
+  value?: string | null
+): AutomationWorkflowContextStrategy {
+  return value === "kernel-only" || value === "session-pool" ? value : "resume-per-cli";
+}
+
+function normalizeWorkflowNodeExecutionMode(
+  value: unknown
+): AutomationExecutionMode | "inherit" {
+  return value === "codex" || value === "claude" || value === "gemini" ? value : "inherit";
+}
+
+function normalizeWorkflowNodePermissionProfile(
+  value: unknown
+): AutomationPermissionProfile | "inherit" {
+  return value === "standard" || value === "full-access" || value === "read-only"
+    ? value
+    : "inherit";
+}
+
+function normalizeAutomationWorkflowNode(
+  node: Partial<AutomationWorkflowNodeDraft>,
+  index: number
+): AutomationWorkflowNode {
+  const legacyJob =
+    typeof (node as { jobId?: string | null }).jobId === "string"
+      ? automationJobs.find((item) => item.id === (node as { jobId?: string | null }).jobId)
+      : null;
+  const goal = node.goal?.trim() || legacyJob?.goal || "";
+  const expectedOutcome =
+    node.expectedOutcome?.trim() || legacyJob?.expectedOutcome || "";
+  const label =
+    node.label?.trim() ||
+    legacyJob?.name ||
+    (goal ? deriveAutomationGoalTitle(goal) : `节点 ${index + 1}`);
+
+  return {
+    id: node.id?.trim() || createId("wf-node"),
+    label,
+    goal,
+    expectedOutcome,
+    executionMode: normalizeWorkflowNodeExecutionMode(
+      node.executionMode ?? (node as { executionModeOverride?: unknown }).executionModeOverride
+    ),
+    permissionProfile: normalizeWorkflowNodePermissionProfile(
+      node.permissionProfile ??
+        (node as { permissionProfileOverride?: unknown }).permissionProfileOverride
+    ),
+    reuseSession: node.reuseSession !== false,
+  };
+}
+
+function normalizeAutomationWorkflowEdge(
+  edge: Partial<AutomationWorkflowDraft["edges"][number]>
+) {
+  return {
+    fromNodeId: edge.fromNodeId?.trim() || "",
+    on: edge.on === "success" ? "success" : "fail",
+    toNodeId: edge.toNodeId?.trim() || "",
+  } as const;
+}
+
+function loadStoredAutomationWorkflows(): AutomationWorkflow[] {
+  const raw = window.localStorage.getItem(AUTOMATION_WORKFLOWS_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as Partial<AutomationWorkflow>[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((workflow, index) => {
+      const nodes = (workflow.nodes ?? []).map((node, nodeIndex) =>
+        normalizeAutomationWorkflowNode(node, nodeIndex)
+      );
+      const entryNodeId =
+        workflow.entryNodeId?.trim() || nodes[0]?.id || createId(`wf-entry-${index}`);
+      return {
+        id: workflow.id ?? createId("wf"),
+        workspaceId: workflow.workspaceId ?? "",
+        projectRoot: workflow.projectRoot ?? "",
+        projectName: workflow.projectName ?? "workspace",
+        name: workflow.name?.trim() || `工作流 ${index + 1}`,
+        description: workflow.description ?? null,
+        cronExpression: workflow.cronExpression ?? null,
+        emailNotificationEnabled: workflow.emailNotificationEnabled === true,
+        enabled: workflow.enabled !== false,
+        entryNodeId,
+        defaultContextStrategy: normalizeAutomationWorkflowContextStrategy(
+          workflow.defaultContextStrategy
+        ),
+        defaultExecutionMode:
+          workflow.defaultExecutionMode === "codex" ||
+          workflow.defaultExecutionMode === "claude" ||
+          workflow.defaultExecutionMode === "gemini"
+            ? workflow.defaultExecutionMode
+            : "auto",
+        defaultPermissionProfile: normalizeAutomationPermissionProfile(
+          workflow.defaultPermissionProfile
+        ),
+        nodes,
+        edges: (workflow.edges ?? []).map((edge) => normalizeAutomationWorkflowEdge(edge)),
+        lastTriggeredAt: workflow.lastTriggeredAt ?? null,
+        createdAt: workflow.createdAt ?? nowISO(),
+        updatedAt: workflow.updatedAt ?? nowISO(),
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+function loadStoredAutomationWorkflowRuns(): AutomationWorkflowRun[] {
+  const raw = window.localStorage.getItem(AUTOMATION_WORKFLOW_RUNS_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as Partial<AutomationWorkflowRun>[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((run) => ({
+      id: run.id ?? createId("wf-run"),
+      workflowId: run.workflowId ?? "",
+      workflowName: run.workflowName ?? "工作流",
+      triggerSource: run.triggerSource ?? "manual",
+      workspaceId: run.workspaceId ?? "",
+      projectRoot: run.projectRoot ?? "",
+      projectName: run.projectName ?? "workspace",
+      status: run.status ?? "scheduled",
+      statusSummary: run.statusSummary ?? null,
+      scheduledStartAt: run.scheduledStartAt ?? null,
+      sharedTerminalTabId: run.sharedTerminalTabId ?? createId("wf-tab"),
+      entryNodeId: run.entryNodeId ?? "",
+      currentNodeId: run.currentNodeId ?? null,
+      emailNotificationEnabled: run.emailNotificationEnabled === true,
+      cliSessions: run.cliSessions ?? [],
+      nodeRuns: (run.nodeRuns ?? []).map((nodeRun, index) => ({
+        id: nodeRun.id ?? createId("wf-node-run"),
+        workflowRunId: nodeRun.workflowRunId ?? run.id ?? createId("wf-run"),
+        nodeId: nodeRun.nodeId ?? "",
+        label: nodeRun.label ?? `节点 ${index + 1}`,
+        goal: nodeRun.goal ?? "",
+        automationRunId: nodeRun.automationRunId ?? null,
+        status: nodeRun.status ?? "queued",
+        branchResult: nodeRun.branchResult ?? null,
+        usedCli: nodeRun.usedCli ?? null,
+        transportSession: nodeRun.transportSession ?? null,
+        statusSummary: nodeRun.statusSummary ?? null,
+        startedAt: nodeRun.startedAt ?? null,
+        completedAt: nodeRun.completedAt ?? null,
+        updatedAt: nodeRun.updatedAt ?? nowISO(),
+      })),
+      events: run.events ?? [],
+      startedAt: run.startedAt ?? null,
+      completedAt: run.completedAt ?? null,
+      createdAt: run.createdAt ?? nowISO(),
+      updatedAt: run.updatedAt ?? nowISO(),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 function defaultAutomationRuleProfile(): AutomationRuleProfile {
   return {
     id: "safe-autonomy-v1",
@@ -616,6 +800,17 @@ function persistAutomationRuns() {
   window.localStorage.setItem(AUTOMATION_RUNS_KEY, JSON.stringify(automationRuns));
 }
 
+function persistAutomationWorkflows() {
+  window.localStorage.setItem(AUTOMATION_WORKFLOWS_KEY, JSON.stringify(automationWorkflows));
+}
+
+function persistAutomationWorkflowRuns() {
+  window.localStorage.setItem(
+    AUTOMATION_WORKFLOW_RUNS_KEY,
+    JSON.stringify(automationWorkflowRuns)
+  );
+}
+
 function persistAutomationRuleProfile() {
   window.localStorage.setItem(AUTOMATION_RULE_KEY, JSON.stringify(automationRuleProfile));
 }
@@ -653,6 +848,25 @@ function pushAutomationEvent(
     id: createId("auto-event"),
     runId: run.id,
     goalId: goalId ?? null,
+    level,
+    title,
+    detail,
+    createdAt: nowISO(),
+  });
+  run.events = run.events.slice(0, 200);
+}
+
+function pushWorkflowEvent(
+  run: AutomationWorkflowRun,
+  level: "info" | "success" | "warning" | "error",
+  title: string,
+  detail: string,
+  nodeId?: string | null
+) {
+  run.events.unshift({
+    id: createId("wf-event"),
+    runId: run.id,
+    goalId: nodeId ?? null,
     level,
     title,
     detail,
@@ -872,6 +1086,24 @@ function toAutomationRunDetail(run: AutomationRun): AutomationRunDetail {
   };
 }
 
+function toAutomationWorkflowRunDetail(
+  run: AutomationWorkflowRun
+): AutomationWorkflowRunDetail {
+  return {
+    run: structuredClone(run),
+    workflow:
+      structuredClone(
+        automationWorkflows.find((item) => item.id === run.workflowId) ?? null
+      ) ?? null,
+    childRuns: automationRuns
+      .filter((item) => item.workflowRunId === run.id)
+      .map((item) => toAutomationRunRecord(item))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
+    conversationSession: null,
+    taskContext: null,
+  };
+}
+
 function scheduleBrowserAutomationRun(runId: string) {
   const run = automationRuns.find((item) => item.id === runId);
   if (!run || run.status !== "scheduled") return;
@@ -945,6 +1177,301 @@ function scheduleBrowserAutomationRun(runId: string) {
         }, offset);
         offset += 600;
       });
+  }, waitMs);
+}
+
+function workflowNodeById(
+  workflow: AutomationWorkflow,
+  nodeId: string
+): AutomationWorkflowNode | null {
+  return workflow.nodes.find((node) => node.id === nodeId) ?? null;
+}
+
+function workflowNextNodeId(
+  workflow: AutomationWorkflow,
+  nodeId: string,
+  branchResult: "success" | "fail"
+) {
+  return (
+    workflow.edges.find(
+      (edge) => edge.fromNodeId === nodeId && edge.on === branchResult
+    )?.toNodeId ?? null
+  );
+}
+
+function workflowNodeEffectiveExecutionMode(
+  workflow: AutomationWorkflow,
+  node: AutomationWorkflowNode
+) {
+  return (node.executionMode === "inherit"
+    ? workflow.defaultExecutionMode
+    : node.executionMode) as "auto" | AgentId;
+}
+
+function workflowNodeEffectivePermissionProfile(
+  workflow: AutomationWorkflow,
+  node: AutomationWorkflowNode
+) {
+  return node.permissionProfile === "inherit"
+    ? workflow.defaultPermissionProfile
+    : node.permissionProfile;
+}
+
+function createBrowserWorkflowChildRun(
+  workflowRun: AutomationWorkflowRun,
+  workflow: AutomationWorkflow,
+  node: AutomationWorkflowNode
+) {
+  const runId = createId("auto-run");
+  const executionMode = workflowNodeEffectiveExecutionMode(workflow, node);
+  const goal = createAutomationGoal(
+    runId,
+    {
+      title: node.label,
+      goal: node.goal,
+      expectedOutcome: node.expectedOutcome,
+      executionMode,
+      ruleConfig: defaultAutomationRuleProfile(),
+    },
+    0
+  );
+  goal.syntheticTerminalTabId = workflowRun.sharedTerminalTabId;
+  const inferred = inferBrowserGoalStatus(goal);
+  const finalStatus = inferred === "completed" ? "completed" : inferred === "paused" ? "failed" : "failed";
+  goal.status = inferred;
+  goal.lifecycleStatus = "finished";
+  goal.outcomeStatus = inferred === "completed" ? "success" : "failed";
+  goal.attentionStatus = inferred === "paused" ? "waiting_human" : "none";
+  goal.resolutionCode = inferred === "completed" ? "objective_checks_passed" : "objective_checks_failed";
+  goal.statusSummary =
+    inferred === "completed"
+      ? "Browser fallback marked this workflow node as completed."
+      : inferred === "paused"
+        ? "Browser fallback marked this workflow node as needing manual attention."
+        : "Browser fallback marked this workflow node as failed.";
+  goal.roundCount = 1;
+  goal.lastOwnerCli = executionMode === "auto" ? "codex" : executionMode;
+  goal.resultSummary = goal.statusSummary;
+  goal.latestProgressSummary = goal.statusSummary;
+  goal.nextInstruction = inferred === "completed" ? null : "Review this workflow node in the desktop runtime.";
+  goal.requiresAttentionReason =
+    inferred === "paused" ? "Needs human review in browser fallback mode." : null;
+  goal.lastExitCode = inferred === "completed" ? 0 : 1;
+  goal.startedAt = nowISO();
+  goal.completedAt = nowISO();
+  goal.updatedAt = nowISO();
+
+  const run: AutomationRun = {
+    id: runId,
+    jobId: null,
+    jobName: node.label,
+    triggerSource: "workflow",
+    runNumber: null,
+    workflowRunId: workflowRun.id,
+    workflowNodeId: node.id,
+    permissionProfile: workflowNodeEffectivePermissionProfile(workflow, node),
+    parameterValues: {},
+    workspaceId: workflow.workspaceId,
+    projectRoot: workflow.projectRoot,
+    projectName: workflow.projectName,
+    ruleProfileId: "safe-autonomy-v1",
+    lifecycleStatus: "finished",
+    outcomeStatus: inferred === "completed" ? "success" : "failed",
+    attentionStatus: inferred === "paused" ? "waiting_human" : "none",
+    resolutionCode: inferred === "completed" ? "objective_checks_passed" : "objective_checks_failed",
+    statusSummary: goal.statusSummary,
+    objectiveSignals: {
+      exitCode: goal.lastExitCode,
+      checksPassed: inferred === "completed",
+      checksFailed: inferred !== "completed",
+      artifactsProduced: false,
+      filesChanged: 0,
+      policyBlocks: inferred === "paused" ? ["waiting_human"] : [],
+    },
+    judgeAssessment: {
+      madeProgress: inferred === "completed",
+      expectedOutcomeMet: inferred === "completed",
+      suggestedDecision: inferred === "completed" ? "pass" : "fail_with_feedback",
+      reason: goal.statusSummary,
+    },
+    validationResult: {
+      decision: inferred === "completed" ? "pass" : "fail_with_feedback",
+      reason: goal.statusSummary,
+      feedback: inferred === "completed" ? null : "Review this node in the desktop runtime.",
+      evidenceSummary: goal.statusSummary,
+      missingChecks: inferred === "completed" ? [] : [node.expectedOutcome],
+      verificationSteps:
+        inferred === "completed" ? [] : ["Open the desktop runtime to continue this workflow node."],
+      madeProgress: inferred === "completed",
+      expectedOutcomeMet: inferred === "completed",
+    },
+    status: finalStatus,
+    scheduledStartAt: workflowRun.scheduledStartAt ?? nowISO(),
+    startedAt: goal.startedAt,
+    completedAt: goal.completedAt,
+    summary: goal.statusSummary,
+    createdAt: nowISO(),
+    updatedAt: nowISO(),
+    goals: [goal],
+    events: [],
+  };
+
+  pushAutomationEvent(
+    run,
+    inferred === "completed" ? "success" : "warning",
+    inferred === "completed" ? "Workflow node completed" : "Workflow node failed",
+    goal.statusSummary ?? "Workflow node finished."
+  );
+
+  automationRuns = [run, ...automationRuns];
+  persistAutomationRuns();
+  return run;
+}
+
+function scheduleBrowserWorkflowRun(runId: string) {
+  const run = automationWorkflowRuns.find((item) => item.id === runId);
+  if (!run || run.status !== "scheduled") return;
+
+  const scheduledMs = run.scheduledStartAt ? Date.parse(run.scheduledStartAt) : Date.now();
+  const waitMs = Number.isFinite(scheduledMs) ? Math.max(0, scheduledMs - Date.now()) : 0;
+
+  window.setTimeout(() => {
+    const liveRun = automationWorkflowRuns.find((item) => item.id === runId);
+    if (!liveRun || liveRun.status !== "scheduled") return;
+    const workflow = automationWorkflows.find((item) => item.id === liveRun.workflowId);
+    if (!workflow) {
+      liveRun.status = "failed";
+      liveRun.statusSummary = "Workflow definition no longer exists.";
+      liveRun.completedAt = nowISO();
+      liveRun.updatedAt = nowISO();
+      pushWorkflowEvent(liveRun, "error", "Workflow failed", liveRun.statusSummary);
+      persistAutomationWorkflowRuns();
+      return;
+    }
+
+    liveRun.status = "running";
+    liveRun.startedAt = liveRun.startedAt ?? nowISO();
+    liveRun.updatedAt = nowISO();
+    pushWorkflowEvent(liveRun, "info", "Workflow started", "Browser fallback started the workflow run.");
+    persistAutomationWorkflowRuns();
+
+    const runNext = (nodeId: string | null) => {
+      const currentRun = automationWorkflowRuns.find((item) => item.id === runId);
+      const currentWorkflow = automationWorkflows.find((item) => item.id === liveRun.workflowId);
+      if (!currentRun || !currentWorkflow) return;
+      if (currentRun.status === "cancelled") return;
+      if (!nodeId) {
+        currentRun.status = "completed";
+        currentRun.currentNodeId = null;
+        currentRun.completedAt = nowISO();
+        currentRun.updatedAt = nowISO();
+        currentRun.statusSummary = "Workflow completed successfully.";
+        pushWorkflowEvent(currentRun, "success", "Workflow completed", currentRun.statusSummary);
+        persistAutomationWorkflowRuns();
+        return;
+      }
+
+      const node = workflowNodeById(currentWorkflow, nodeId);
+      if (!node) {
+        currentRun.status = "failed";
+        currentRun.currentNodeId = null;
+        currentRun.completedAt = nowISO();
+        currentRun.updatedAt = nowISO();
+        currentRun.statusSummary = "The next workflow node definition is missing.";
+        pushWorkflowEvent(currentRun, "error", "Workflow failed", currentRun.statusSummary);
+        persistAutomationWorkflowRuns();
+        return;
+      }
+      const nodeRun = currentRun.nodeRuns.find((item) => item.nodeId === node.id);
+      if (!nodeRun) {
+        currentRun.status = "failed";
+        currentRun.currentNodeId = null;
+        currentRun.completedAt = nowISO();
+        currentRun.updatedAt = nowISO();
+        currentRun.statusSummary = "The selected workflow node could not be resolved.";
+        pushWorkflowEvent(currentRun, "error", "Workflow failed", currentRun.statusSummary, node.id);
+        persistAutomationWorkflowRuns();
+        return;
+      }
+
+      currentRun.currentNodeId = node.id;
+      currentRun.status = "running";
+      currentRun.statusSummary = `Running workflow node \`${node.label}\`.`;
+      currentRun.updatedAt = nowISO();
+      nodeRun.status = "running";
+      nodeRun.statusSummary = "Executing linked automation job.";
+      nodeRun.startedAt = nodeRun.startedAt ?? nowISO();
+      nodeRun.updatedAt = nowISO();
+      pushWorkflowEvent(currentRun, "info", "Workflow node started", `Running node \`${node.label}\`.`, node.id);
+      persistAutomationWorkflowRuns();
+
+      window.setTimeout(() => {
+        const childRun = createBrowserWorkflowChildRun(currentRun, currentWorkflow, node);
+        const childGoal = childRun.goals[0];
+        const branchResult = childRun.status === "completed" ? "success" : "fail";
+        nodeRun.automationRunId = childRun.id;
+        nodeRun.status = childRun.status;
+        nodeRun.branchResult = branchResult;
+        nodeRun.usedCli = childGoal.lastOwnerCli;
+        nodeRun.statusSummary = childRun.statusSummary ?? childRun.summary ?? null;
+        nodeRun.completedAt = nowISO();
+        nodeRun.updatedAt = nowISO();
+        if (childGoal.lastOwnerCli) {
+          currentRun.cliSessions = [
+            ...currentRun.cliSessions.filter((entry) => entry.cliId !== childGoal.lastOwnerCli),
+            {
+              cliId: childGoal.lastOwnerCli,
+              kind: "browser-fallback",
+              threadId: `${currentRun.id}:${childGoal.lastOwnerCli}`,
+              turnId: childRun.id,
+              model: null,
+              permissionMode: null,
+              lastSyncAt: nowISO(),
+            },
+          ];
+        }
+
+        const nextNodeId = workflowNextNodeId(currentWorkflow, node.id, branchResult);
+        if (nextNodeId) {
+          currentRun.currentNodeId = nextNodeId;
+          currentRun.status = "running";
+          currentRun.updatedAt = nowISO();
+          currentRun.statusSummary =
+            branchResult === "success"
+              ? `Node \`${node.label}\` completed. Continuing to the next node.`
+              : `Node \`${node.label}\` failed. Routing to the fail branch.`;
+          pushWorkflowEvent(
+            currentRun,
+            branchResult === "success" ? "success" : "warning",
+            branchResult === "success" ? "Workflow node completed" : "Workflow node failed",
+            currentRun.statusSummary,
+            node.id
+          );
+          persistAutomationWorkflowRuns();
+          runNext(nextNodeId);
+          return;
+        }
+
+        currentRun.currentNodeId = null;
+        currentRun.status = branchResult === "success" ? "completed" : "failed";
+        currentRun.completedAt = nowISO();
+        currentRun.updatedAt = nowISO();
+        currentRun.statusSummary =
+          branchResult === "success"
+            ? "Workflow completed successfully."
+            : `Workflow stopped after \`${node.label}\` failed.`;
+        pushWorkflowEvent(
+          currentRun,
+          branchResult === "success" ? "success" : "error",
+          branchResult === "success" ? "Workflow completed" : "Workflow failed",
+          currentRun.statusSummary,
+          node.id
+        );
+        persistAutomationWorkflowRuns();
+      }, 550);
+    };
+
+    runNext(liveRun.currentNodeId ?? liveRun.entryNodeId);
   }, waitMs);
 }
 
@@ -1353,6 +1880,103 @@ export const browserRuntime = {
     automationJobs = automationJobs.filter((item) => item.id !== jobId);
     persistAutomationJobs();
   },
+  async listAutomationWorkflows() {
+    return structuredClone(automationWorkflows);
+  },
+  async getAutomationWorkflow(workflowId: string) {
+    const workflow = automationWorkflows.find((item) => item.id === workflowId);
+    if (!workflow) throw new Error("Automation workflow not found.");
+    return structuredClone(workflow);
+  },
+  async createAutomationWorkflow(workflow: AutomationWorkflowDraft) {
+    const nodes = workflow.nodes.map((node, index) =>
+      normalizeAutomationWorkflowNode(node, index)
+    );
+    if (nodes.length === 0) {
+      throw new Error("At least one workflow node is required.");
+    }
+    const created: AutomationWorkflow = {
+      ...workflow,
+      id: createId("wf"),
+      name: workflow.name.trim() || `工作流 ${automationWorkflows.length + 1}`,
+      description: workflow.description?.trim() || null,
+      cronExpression: workflow.cronExpression?.trim() || null,
+      emailNotificationEnabled: workflow.emailNotificationEnabled === true,
+      enabled: workflow.enabled !== false,
+      entryNodeId: workflow.entryNodeId?.trim() || nodes[0].id,
+      defaultContextStrategy: normalizeAutomationWorkflowContextStrategy(
+        workflow.defaultContextStrategy
+      ),
+      defaultExecutionMode:
+        workflow.defaultExecutionMode === "codex" ||
+        workflow.defaultExecutionMode === "claude" ||
+        workflow.defaultExecutionMode === "gemini"
+          ? workflow.defaultExecutionMode
+          : "auto",
+      defaultPermissionProfile: normalizeAutomationPermissionProfile(
+        workflow.defaultPermissionProfile
+      ),
+      nodes,
+      edges: workflow.edges.map((edge) => normalizeAutomationWorkflowEdge(edge)),
+      lastTriggeredAt: null,
+      createdAt: nowISO(),
+      updatedAt: nowISO(),
+    };
+    automationWorkflows = [created, ...automationWorkflows];
+    persistAutomationWorkflows();
+    return structuredClone(created);
+  },
+  async updateAutomationWorkflow(workflowId: string, workflow: AutomationWorkflowDraft) {
+    const index = automationWorkflows.findIndex((item) => item.id === workflowId);
+    if (index < 0) throw new Error("Automation workflow not found.");
+    const nodes = workflow.nodes.map((node, nodeIndex) =>
+      normalizeAutomationWorkflowNode(node, nodeIndex)
+    );
+    if (nodes.length === 0) {
+      throw new Error("At least one workflow node is required.");
+    }
+    const updated: AutomationWorkflow = {
+      ...automationWorkflows[index],
+      ...workflow,
+      name: workflow.name.trim() || automationWorkflows[index].name,
+      description: workflow.description?.trim() || null,
+      cronExpression: workflow.cronExpression?.trim() || null,
+      emailNotificationEnabled: workflow.emailNotificationEnabled === true,
+      enabled: workflow.enabled !== false,
+      entryNodeId: workflow.entryNodeId?.trim() || nodes[0].id,
+      defaultContextStrategy: normalizeAutomationWorkflowContextStrategy(
+        workflow.defaultContextStrategy
+      ),
+      defaultExecutionMode:
+        workflow.defaultExecutionMode === "codex" ||
+        workflow.defaultExecutionMode === "claude" ||
+        workflow.defaultExecutionMode === "gemini"
+          ? workflow.defaultExecutionMode
+          : "auto",
+      defaultPermissionProfile: normalizeAutomationPermissionProfile(
+        workflow.defaultPermissionProfile
+      ),
+      nodes,
+      edges: workflow.edges.map((edge) => normalizeAutomationWorkflowEdge(edge)),
+      updatedAt: nowISO(),
+    };
+    automationWorkflows[index] = updated;
+    persistAutomationWorkflows();
+    return structuredClone(updated);
+  },
+  async deleteAutomationWorkflow(workflowId: string) {
+    if (
+      automationWorkflowRuns.some(
+        (run) =>
+          run.workflowId === workflowId &&
+          (run.status === "scheduled" || run.status === "running")
+      )
+    ) {
+      throw new Error("This workflow has active runs and cannot be deleted yet.");
+    }
+    automationWorkflows = automationWorkflows.filter((item) => item.id !== workflowId);
+    persistAutomationWorkflows();
+  },
   async listAutomationJobRuns(jobId?: string | null) {
     return structuredClone(
       automationRuns
@@ -1386,6 +2010,18 @@ export const browserRuntime = {
   },
   async listAutomationRuns() {
     return structuredClone(automationRuns);
+  },
+  async listAutomationWorkflowRuns(workflowId?: string | null) {
+    return structuredClone(
+      automationWorkflowRuns
+        .filter((run) => (workflowId ? run.workflowId === workflowId : true))
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    );
+  },
+  async getAutomationWorkflowRunDetail(workflowRunId: string) {
+    const run = automationWorkflowRuns.find((item) => item.id === workflowRunId);
+    if (!run) throw new Error("Workflow run not found.");
+    return structuredClone(toAutomationWorkflowRunDetail(run));
   },
   async createAutomationRun(request: CreateAutomationRunRequest) {
     const runId = createId("auto-run");
@@ -1522,6 +2158,72 @@ export const browserRuntime = {
     scheduleBrowserAutomationRun(run.id);
     return structuredClone(toAutomationRunRecord(run));
   },
+  async createAutomationWorkflowRun(request: CreateAutomationWorkflowRunRequest) {
+    const workflow = automationWorkflows.find((item) => item.id === request.workflowId);
+    if (!workflow) throw new Error("Automation workflow not found.");
+    if (workflow.nodes.length === 0) {
+      throw new Error("The workflow does not contain any nodes.");
+    }
+    const run: AutomationWorkflowRun = {
+      id: createId("wf-run"),
+      workflowId: workflow.id,
+      workflowName: workflow.name,
+      triggerSource: request.scheduledStartAt ? "schedule" : "manual",
+      workspaceId: workflow.workspaceId,
+      projectRoot: workflow.projectRoot,
+      projectName: workflow.projectName,
+      status: "scheduled",
+      statusSummary: request.scheduledStartAt
+        ? "Scheduled and waiting to start."
+        : "Queued to start immediately.",
+      scheduledStartAt: request.scheduledStartAt ?? nowISO(),
+      sharedTerminalTabId: createId("wf-tab"),
+      entryNodeId: workflow.entryNodeId,
+      currentNodeId: workflow.entryNodeId,
+      emailNotificationEnabled: workflow.emailNotificationEnabled === true,
+      cliSessions: [],
+      nodeRuns: workflow.nodes.map((node) => ({
+        id: createId("wf-node-run"),
+        workflowRunId: "",
+        nodeId: node.id,
+        label: node.label,
+        goal: node.goal,
+        automationRunId: null,
+        status: "queued",
+        branchResult: null,
+        usedCli: null,
+        transportSession: null,
+        statusSummary:
+          node.id === workflow.entryNodeId
+            ? "Ready to run as the entry node."
+            : "Waiting for dependency resolution.",
+        startedAt: null,
+        completedAt: null,
+        updatedAt: nowISO(),
+      })),
+      events: [],
+      startedAt: null,
+      completedAt: null,
+      createdAt: nowISO(),
+      updatedAt: nowISO(),
+    };
+    run.nodeRuns = run.nodeRuns.map((nodeRun) => ({
+      ...nodeRun,
+      workflowRunId: run.id,
+    }));
+    pushWorkflowEvent(
+      run,
+      "info",
+      "Workflow run created",
+      request.scheduledStartAt
+        ? "Browser fallback queued the workflow for a scheduled start."
+        : "Browser fallback queued the workflow to start immediately."
+    );
+    automationWorkflowRuns = [run, ...automationWorkflowRuns];
+    persistAutomationWorkflowRuns();
+    scheduleBrowserWorkflowRun(run.id);
+    return structuredClone(run);
+  },
   async startAutomationRun(runId: string) {
     const run = automationRuns.find((item) => item.id === runId);
     if (!run) throw new Error("Automation run not found.");
@@ -1651,6 +2353,31 @@ export const browserRuntime = {
     }
     automationRuns = automationRuns.filter((item) => item.id !== runId);
     persistAutomationRuns();
+  },
+  async cancelAutomationWorkflowRun(workflowRunId: string) {
+    const run = automationWorkflowRuns.find((item) => item.id === workflowRunId);
+    if (!run) throw new Error("Workflow run not found.");
+    run.status = "cancelled";
+    run.statusSummary = "Cancelled manually.";
+    run.completedAt = nowISO();
+    run.updatedAt = nowISO();
+    pushWorkflowEvent(run, "warning", "Workflow cancelled", run.statusSummary);
+    persistAutomationWorkflowRuns();
+    return structuredClone(run);
+  },
+  async deleteAutomationWorkflowRun(workflowRunId: string) {
+    const run = automationWorkflowRuns.find((item) => item.id === workflowRunId);
+    if (!run) throw new Error("Workflow run not found.");
+    if (run.status === "running") {
+      throw new Error("Running workflow runs must be cancelled before deletion.");
+    }
+    const childRunIds = new Set(
+      run.nodeRuns.map((entry) => entry.automationRunId).filter(Boolean)
+    );
+    automationRuns = automationRuns.filter((item) => !childRunIds.has(item.id));
+    automationWorkflowRuns = automationWorkflowRuns.filter((item) => item.id !== workflowRunId);
+    persistAutomationRuns();
+    persistAutomationWorkflowRuns();
   },
   async saveTextToDownloads(fileName: string, content: string) {
     const blob = new Blob([content], { type: "text/plain;charset=utf-8" });

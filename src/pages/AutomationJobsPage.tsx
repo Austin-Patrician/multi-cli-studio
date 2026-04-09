@@ -13,10 +13,10 @@ import refreshIcon from "../media/svg/refresh.svg";
 import { cn, executionModeLabel, formatDuration, formatStamp, isActiveRunStatus } from "./automationUi";
 import {
   AutomationRunConversationSection,
-  buildAutomationConversationLog,
   AutomationRunSnapshotSection,
   StatusBadge,
 } from "./AutomationRunDetailSections";
+import { buildAutomationConversationLog } from "./automationLog";
 
 const PlusIcon = ({ className }: { className?: string }) => (
   <svg viewBox="0 0 24 24" fill="none" className={className}>
@@ -614,10 +614,11 @@ export function AutomationJobsPage() {
             <button
               type="button"
               onClick={() => navigate("/automation/jobs/new")}
-              className={buttonClass("primary", "md")}
+              className={headerIconButtonClass("primary")}
+              title="新建任务"
+              aria-label="新建任务"
             >
               <PlusIcon className="h-4 w-4" />
-              新建任务
             </button>
           </div>
         </section>
