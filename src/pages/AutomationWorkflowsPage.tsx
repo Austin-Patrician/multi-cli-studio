@@ -13,7 +13,6 @@ import {
   cn,
   executionModeLabel,
   formatDuration,
-  formatStamp,
   statusText,
   statusTone,
   workflowContextStrategyLabel,
@@ -70,6 +69,32 @@ const LogIcon = ({ className }: { className?: string }) => (
 
 const buttonClass =
   "inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-sm transition hover:bg-slate-50 active:scale-95 disabled:opacity-50";
+
+function workflowCardClass(status?: string | null, isSelected = false) {
+  const stateTone = (() => {
+    switch (status) {
+      case "completed":
+        return "border-emerald-200 bg-emerald-50 hover:border-emerald-300";
+      case "running":
+        return "border-sky-200 bg-sky-50 hover:border-sky-300";
+      case "validating":
+      case "scheduled":
+        return "border-indigo-200 bg-indigo-50 hover:border-indigo-300";
+      case "blocked":
+        return "border-amber-200 bg-amber-50 hover:border-amber-300";
+      case "failed":
+      case "cancelled":
+        return "border-rose-200 bg-rose-50 hover:border-rose-300";
+      default:
+        return "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50";
+    }
+  })();
+
+  if (isSelected) {
+    return `${stateTone} border-slate-400 shadow-sm`;
+  }
+  return stateTone;
+}
 
 function workflowSummary(run: AutomationWorkflowRun | null) {
   if (!run) return "还没有运行记录。";
@@ -308,11 +333,12 @@ export function AutomationWorkflowsPage() {
               <button 
                 type="button" 
                 onClick={() => navigate("/automation/workflows/new")} 
-                className="inline-flex h-8 items-center gap-1.5 rounded-xl bg-slate-900 px-3 text-xs font-semibold text-white shadow-sm transition hover:bg-slate-800 active:scale-95 disabled:opacity-50"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm transition hover:bg-slate-800 active:scale-95 disabled:opacity-50"
                 disabled={busyKey !== null}
+                title="新建工作流"
+                aria-label="新建工作流"
               >
                 <PlusIcon className="h-3.5 w-3.5" />
-                新建
               </button>
             </div>
             <div className="relative">
@@ -341,25 +367,18 @@ export function AutomationWorkflowsPage() {
                     onClick={() => setSelectedWorkflowId(workflow.id)}
                     className={cn(
                       "w-full rounded-2xl border p-4 text-left transition-all",
-                      isSelected
-                        ? "border-sky-300 bg-sky-50/80 shadow-sm ring-1 ring-sky-500/10"
-                        : "border-transparent bg-transparent hover:bg-slate-50"
+                      workflowCardClass(latest?.status, isSelected)
                     )}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
-                        <div className={cn("truncate text-sm font-bold tracking-tight", isSelected ? "text-sky-900" : "text-slate-900")}>
+                        <div className="truncate text-sm font-bold tracking-tight text-slate-900">
                           {workflow.name}
                         </div>
                         <div className="mt-1 truncate text-[11px] font-medium text-slate-500">
                           {workflow.projectName}
                         </div>
                       </div>
-                      {latest ? (
-                        <div className="shrink-0 pt-0.5">
-                          <StatusBadge status={latest.status} />
-                        </div>
-                      ) : null}
                     </div>
                     <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] font-medium text-slate-400">
                       <span className="rounded-md bg-white px-1.5 py-0.5 ring-1 ring-slate-200/80 shadow-sm">{workflow.nodes.length} 节点</span>
@@ -398,11 +417,12 @@ export function AutomationWorkflowsPage() {
                     <button 
                       type="button" 
                       onClick={() => void withBusy(`wf-run-${selectedWorkflow.id}`, () => runWorkflow(selectedWorkflow))} 
-                      className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-slate-900 px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-slate-800 active:scale-95 disabled:opacity-50"
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm transition hover:bg-slate-800 active:scale-95 disabled:opacity-50"
                       disabled={busyKey !== null}
+                      title="运行工作流"
+                      aria-label="运行工作流"
                     >
                       <PlayIcon className="h-3.5 w-3.5" />
-                      运行
                     </button>
                     <button 
                       type="button" 
@@ -429,57 +449,58 @@ export function AutomationWorkflowsPage() {
                   className="mt-4 flex items-center gap-1.5 self-start text-xs font-bold text-sky-600 transition hover:text-sky-700"
                 >
                   <ChevronDownIcon className={cn("h-4 w-4 transition-transform", showWorkflowDetails ? "rotate-180" : "")} />
-                  {showWorkflowDetails ? "收起工作流配置与节点明细" : "展开工作流配置与节点明细"}
+                  {showWorkflowDetails ? "收起工作流配置" : "展开工作流配置"}
                 </button>
               </div>
 
               {/* Expanded Workflow Details */}
               {showWorkflowDetails && (
-                <div className="shrink-0 border-b border-slate-100 bg-slate-50/80 p-6 shadow-inner max-h-[300px] overflow-y-auto">
-                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-6">
-                    <div className="rounded-xl border border-slate-200/60 bg-white p-3 shadow-sm">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">当前状态</div>
-                      <div className="mt-1.5 font-semibold text-slate-900">{latestRun ? statusText(latestRun.status) : "未运行"}</div>
+                <div className="shrink-0 border-b border-slate-100 bg-slate-50/80 p-5 shadow-inner max-h-[300px] overflow-y-auto custom-scrollbar">
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs font-medium text-slate-500 mb-5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-400">当前状态</span>
+                      <div className="pt-0.5"><StatusBadge status={latestRun?.status ?? "unknown"} /></div>
                     </div>
-                    <div className="rounded-xl border border-slate-200/60 bg-white p-3 shadow-sm">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">最新执行</div>
-                      <div className="mt-1.5 font-semibold text-slate-900">{workflowSummary(latestRun)}</div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-400">最新执行</span>
+                      <span className="text-slate-700">{workflowSummary(latestRun)}</span>
                     </div>
-                    <div className="rounded-xl border border-slate-200/60 bg-white p-3 shadow-sm">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">任务交接方式</div>
-                      <div className="mt-1.5 font-semibold text-slate-900">{workflowContextStrategyLabel(selectedWorkflow.defaultContextStrategy)}</div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-400">上下文策略</span>
+                      <span className="text-slate-700">{workflowContextStrategyLabel(selectedWorkflow.defaultContextStrategy)}</span>
                     </div>
-                    <div className="rounded-xl border border-slate-200/60 bg-white p-3 shadow-sm">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">统一执行模式</div>
-                      <div className="mt-1.5 font-semibold text-slate-900">{executionModeLabel(selectedWorkflow.defaultExecutionMode)}</div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-400">统一执行模式</span>
+                      <span className="text-slate-700">{executionModeLabel(selectedWorkflow.defaultExecutionMode)}</span>
                     </div>
                   </div>
 
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">节点编排预览</h3>
-                  <div className="space-y-3">
+                  <h3 className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2.5">节点流转预览</h3>
+                  <div className="flex flex-col gap-1.5">
                     {selectedWorkflow.nodes.map((node, index) => {
                       const successEdge = selectedWorkflow.edges.find((edge) => edge.fromNodeId === node.id && edge.on === "success");
                       const failEdge = selectedWorkflow.edges.find((edge) => edge.fromNodeId === node.id && edge.on === "fail");
                       return (
-                        <div key={node.id} className="flex items-center justify-between gap-4 rounded-xl border border-slate-200/60 bg-white p-3 shadow-sm">
-                          <div className="flex items-center gap-3 min-w-0">
-                            <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[10px] font-bold text-slate-600">
+                        <div key={node.id} className="flex items-center justify-between gap-4 rounded-lg border border-slate-200/60 bg-white px-3 py-2 shadow-sm">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-slate-100 text-[9px] font-bold text-slate-600">
                               {index + 1}
                             </div>
-                            <div className="truncate">
-                              <div className="text-sm font-bold text-slate-900">{node.label}</div>
-                              <div className="text-[10px] text-slate-500">
-                                {node.executionMode === "inherit" ? "继承执行模式" : executionModeLabel(node.executionMode)}
-                              </div>
+                            <div className="flex items-center gap-2 truncate">
+                              <span className="text-xs font-bold text-slate-700">{node.label}</span>
+                              <span className="text-[9px] text-slate-400 border-l border-slate-200 pl-2">
+                                {node.executionMode === "inherit" ? "继承模式" : executionModeLabel(node.executionMode)}
+                              </span>
                             </div>
                           </div>
-                          <div className="flex items-center gap-4 text-[10px] font-medium shrink-0">
+                          <div className="flex items-center gap-3 text-[9px] font-medium shrink-0 bg-slate-50/50 px-2 py-1 rounded-md border border-slate-100">
                             <div className="flex items-center gap-1 text-emerald-600">
-                              <span>成功 ➔</span>
+                              <span className="opacity-70">成功 ➔</span>
                               <span className="truncate max-w-[80px]">{successEdge ? selectedWorkflow.nodes.find((item) => item.id === successEdge.toNodeId)?.label ?? successEdge.toNodeId : "结束"}</span>
                             </div>
+                            <div className="w-px h-3 bg-slate-200" />
                             <div className="flex items-center gap-1 text-rose-500">
-                              <span>失败 ➔</span>
+                              <span className="opacity-70">失败 ➔</span>
                               <span className="truncate max-w-[80px]">{failEdge ? selectedWorkflow.nodes.find((item) => item.id === failEdge.toNodeId)?.label ?? failEdge.toNodeId : "结束"}</span>
                             </div>
                           </div>
@@ -490,49 +511,6 @@ export function AutomationWorkflowsPage() {
                 </div>
               )}
 
-              {/* Run History Horizontal Tape */}
-              <div className="border-b border-slate-100 bg-white px-6 py-5 shrink-0">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">运行历史</h3>
-                  <span className="text-[10px] font-medium text-slate-400">共 {runsForSelectedWorkflow.length} 次运行</span>
-                </div>
-                
-                {runsForSelectedWorkflow.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50/50 p-4 text-center text-[11px] text-slate-500">
-                    还没有运行记录，点击右上角"运行"开始。
-                  </div>
-                ) : (
-                  <div className="flex gap-3 overflow-x-auto pb-2 snap-x custom-scrollbar">
-                    {runsForSelectedWorkflow.map((run) => {
-                      const isSelected = currentRun?.id === run.id;
-                      return (
-                        <button 
-                          key={run.id} 
-                          type="button" 
-                          onClick={() => setSelectedRunId(run.id)} 
-                          className={cn(
-                            "flex w-56 shrink-0 snap-start flex-col gap-2 rounded-xl border p-3 text-left transition-all", 
-                            isSelected 
-                              ? "border-sky-300 bg-sky-50/50 shadow-sm ring-1 ring-sky-500/10" 
-                              : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
-                          )}
-                        >
-                          <div className="flex w-full items-center justify-between gap-2">
-                            <span className={cn("text-[11px] font-bold tracking-tight", isSelected ? "text-sky-900" : "text-slate-700")}>
-                              {formatStamp(run.createdAt)}
-                            </span>
-                            <StatusBadge status={run.status} />
-                          </div>
-                          <div className="text-[10px] font-medium text-slate-500 truncate">
-                            {run.statusSummary || workflowSummary(run)}
-                          </div>
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-
               {/* Active Run Overview & Logs */}
               {!currentRun ? (
                 <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-slate-50/30">
@@ -541,21 +519,21 @@ export function AutomationWorkflowsPage() {
                       <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
                   </div>
-                  <p className="text-xs text-slate-500">选择一条运行记录查看详细日志</p>
+                  <p className="text-xs text-slate-500">还没有运行记录，点击右上角“运行”开始。</p>
                 </div>
               ) : (
                 <div className="flex-1 flex flex-col min-h-0">
                   {/* Current Run Mini Header */}
-                  <div className="flex shrink-0 items-center justify-between border-b border-slate-100 bg-slate-50/30 px-6 py-3">
+                  <div className="flex shrink-0 items-center justify-between border-b border-slate-100 bg-slate-50/30 px-6 py-2.5">
                     <div className="flex items-center gap-4">
                       <div className="flex items-center gap-2">
                         <StatusBadge status={currentRun.status} />
-                        <span className="text-xs font-bold text-slate-700">执行概览</span>
+                        <span className="text-xs font-bold text-slate-700">执行追踪</span>
                       </div>
-                      <div className="h-4 w-px bg-slate-200" />
+                      <div className="h-3 w-px bg-slate-200 mx-1" />
                       <div className="flex items-center gap-3 text-[11px] font-medium text-slate-500">
-                        <span>耗时: <strong className="text-slate-700">{formatDuration(currentRun.startedAt, currentRun.completedAt)}</strong></span>
-                        <span>会话数: <strong className="text-slate-700">{currentRun.cliSessions.length}</strong></span>
+                        <span>耗时 <strong className="text-slate-700 font-mono ml-0.5">{formatDuration(currentRun.startedAt, currentRun.completedAt)}</strong></span>
+                        <span>会话 <strong className="text-slate-700 font-mono ml-0.5">{currentRun.cliSessions.length}</strong></span>
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5">
@@ -581,7 +559,7 @@ export function AutomationWorkflowsPage() {
                   </div>
                   
                   {/* Node Executions Row */}
-                  <div className="border-b border-slate-100 bg-white px-6 py-3 shrink-0">
+                  <div className="border-b border-slate-100 bg-white px-6 py-2.5 shrink-0">
                     <div className="flex gap-2 overflow-x-auto pb-1 custom-scrollbar">
                       {currentRun.nodeRuns.map((nodeRun) => (
                         <button
@@ -613,10 +591,10 @@ export function AutomationWorkflowsPage() {
                               : `节点 ${nodeRun.label} 暂无独立执行日志`
                           }
                         >
-                          <StatusBadge status={nodeRun.status} />
-                          <div className="flex flex-col">
-                            <span className="text-[10px] font-bold text-slate-700 max-w-[100px] truncate">{nodeRun.label}</span>
-                            <span className="text-[9px] text-slate-400 truncate max-w-[100px]">{nodeRun.statusSummary || "等待执行"}</span>
+                          <div className={cn("h-2 w-2 shrink-0 rounded-full", statusTone(nodeRun.status).split(' ')[0].replace('text-', 'bg-').replace('ring-', 'bg-'))} />
+                          <div className="flex flex-col items-start text-left">
+                            <span className="text-[10px] font-bold text-slate-700 max-w-[100px] truncate leading-tight">{nodeRun.label}</span>
+                            <span className="text-[9px] text-slate-400 truncate max-w-[100px] leading-tight">{nodeRun.statusSummary || "等待执行"}</span>
                           </div>
                         </button>
                       ))}

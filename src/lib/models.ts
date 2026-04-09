@@ -427,6 +427,11 @@ export type AutomationWorkflowContextStrategy =
 
 export type AutomationWorkflowBranchResult = "success" | "fail";
 
+export interface AutomationWorkflowNodeLayout {
+  x: number;
+  y: number;
+}
+
 export interface AutomationWorkflowNodeDraft {
   id?: string | null;
   label?: string | null;
@@ -435,6 +440,7 @@ export interface AutomationWorkflowNodeDraft {
   executionMode: AutomationExecutionMode | "inherit";
   permissionProfile: AutomationPermissionProfile | "inherit";
   reuseSession: boolean;
+  layout?: AutomationWorkflowNodeLayout | null;
 }
 
 export interface AutomationWorkflowEdgeDraft {
@@ -468,6 +474,7 @@ export interface AutomationWorkflowNode {
   executionMode: AutomationExecutionMode | "inherit";
   permissionProfile: AutomationPermissionProfile | "inherit";
   reuseSession: boolean;
+  layout: AutomationWorkflowNodeLayout;
 }
 
 export interface AutomationWorkflowEdge {

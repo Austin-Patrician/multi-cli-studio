@@ -591,6 +591,13 @@ function normalizeWorkflowNodePermissionProfile(
     : "inherit";
 }
 
+function defaultWorkflowNodeLayout(index: number) {
+  return {
+    x: 160 + (index % 3) * 320,
+    y: 140 + Math.floor(index / 3) * 220,
+  };
+}
+
 function normalizeAutomationWorkflowNode(
   node: Partial<AutomationWorkflowNodeDraft>,
   index: number
@@ -620,6 +627,12 @@ function normalizeAutomationWorkflowNode(
         (node as { permissionProfileOverride?: unknown }).permissionProfileOverride
     ),
     reuseSession: node.reuseSession !== false,
+    layout:
+      node.layout &&
+      Number.isFinite(node.layout.x) &&
+      Number.isFinite(node.layout.y)
+        ? { x: node.layout.x, y: node.layout.y }
+        : defaultWorkflowNodeLayout(index),
   };
 }
 

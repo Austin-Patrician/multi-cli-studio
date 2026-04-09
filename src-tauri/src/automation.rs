@@ -149,6 +149,8 @@ pub struct AutomationWorkflowNodeDraft {
     #[serde(default = "default_reuse_session")]
     pub reuse_session: bool,
     #[serde(default)]
+    pub layout: Option<AutomationWorkflowNodeLayout>,
+    #[serde(default)]
     pub job_id: Option<String>,
 }
 
@@ -205,7 +207,16 @@ pub struct AutomationWorkflowNode {
     #[serde(default = "default_reuse_session")]
     pub reuse_session: bool,
     #[serde(default)]
+    pub layout: Option<AutomationWorkflowNodeLayout>,
+    #[serde(default)]
     pub job_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationWorkflowNodeLayout {
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -754,7 +765,7 @@ pub fn normalize_workflows_on_startup(
             normalize_execution_mode(&workflow.default_execution_mode);
         workflow.default_permission_profile =
             normalize_permission_profile(&workflow.default_permission_profile);
-        for node in &mut workflow.nodes {
+        for (index, node) in workflow.nodes.iter_mut().enumerate() {
             let legacy_job = node
                 .job_id
                 .as_deref()
@@ -802,6 +813,12 @@ pub fn normalize_workflows_on_startup(
             } else {
                 node.permission_profile = normalized_node_permission_profile;
             }
+            let normalized_layout = node
+                .layout
+                .clone()
+                .filter(|layout| layout.x.is_finite() && layout.y.is_finite())
+                .unwrap_or_else(|| default_workflow_node_layout_for_index(index));
+            node.layout = Some(normalized_layout);
         }
         if let Some(first_node) = workflow.nodes.first() {
             if workflow
@@ -1668,6 +1685,13 @@ fn default_workflow_node_permission_profile() -> String {
     "inherit".to_string()
 }
 
+fn default_workflow_node_layout_for_index(index: usize) -> AutomationWorkflowNodeLayout {
+    AutomationWorkflowNodeLayout {
+        x: 160.0 + (index as f64 % 3.0) * 320.0,
+        y: 140.0 + (index / 3) as f64 * 220.0,
+    }
+}
+
 fn normalize_parameter_definition(definition: AutomationParameterDefinition) -> AutomationParameterDefinition {
     let kind = match definition.kind.trim().to_ascii_lowercase().as_str() {
         "boolean" => "boolean",
@@ -1824,6 +1848,11 @@ fn normalize_workflow_draft(draft: AutomationWorkflowDraft) -> Result<Normalized
                 execution_mode: normalize_workflow_node_execution_mode(&node.execution_mode),
                 permission_profile: normalize_workflow_node_permission_profile(&node.permission_profile),
                 reuse_session: node.reuse_session,
+                layout: Some(
+                    node.layout
+                        .filter(|layout| layout.x.is_finite() && layout.y.is_finite())
+                        .unwrap_or_else(|| default_workflow_node_layout_for_index(index)),
+                ),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;

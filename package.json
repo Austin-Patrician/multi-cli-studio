@@ -16,6 +16,7 @@
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-notification": "^2.0.0",
+    "@xyflow/react": "^12.10.2",
     "echarts": "^6.0.0",
     "echarts-for-react": "^3.0.6",
     "monaco-editor": "^0.55.1",
