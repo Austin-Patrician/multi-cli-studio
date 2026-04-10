@@ -104,7 +104,7 @@ pub fn command_registry() -> Vec<AcpCommandDef> {
         AcpCommandDef {
             kind: "model".into(),
             slash: "/model".into(),
-            label: "Switch Model".into(),
+            label: "Select Model".into(),
             description: "Change the model for the active CLI".into(),
             args_hint: Some("<model-name>".into()),
             execution: "flag-inject".into(),

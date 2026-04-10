@@ -1674,7 +1674,7 @@ function addConversationTurn(
 }
 
 export const browserRuntime = {
-  async loadAppState(projectRoot?: string) {
+  async loadAppState(projectRoot?: string, _refreshRuntime?: boolean) {
     if (projectRoot && projectRoot !== state.workspace.projectRoot) {
       state = createSeedState(projectRoot);
       state.environment.notes = ["Browser fallback is active. Tauri commands are simulated."];
@@ -2968,11 +2968,10 @@ rename to src/components/chat/GitPanel.tsx`,
     const fallbackModels = {
       codex: [
         { value: "default", label: "Default", description: "Use the CLI default model", source: "fallback" as const },
-        { value: "gpt-5", label: "gpt-5", description: "General-purpose flagship", source: "fallback" as const },
-        { value: "gpt-5-codex", label: "gpt-5-codex", description: "Code-focused GPT-5 profile", source: "fallback" as const },
-        { value: "gpt-5-mini", label: "gpt-5-mini", description: "Lighter GPT-5 variant", source: "fallback" as const },
-        { value: "o3", label: "o3", description: "Reasoning-focused model alias", source: "fallback" as const },
-        { value: "oss", label: "oss", description: "Use local open-source provider mode", source: "fallback" as const },
+        { value: "gpt-5.3-codex", label: "gpt-5.3-codex", description: "Codex-tuned GPT-5.3 model", source: "fallback" as const },
+        { value: "gpt-5.4", label: "gpt-5.4", description: "Latest general-purpose GPT-5.4 model", source: "fallback" as const },
+        { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Codex-tuned GPT-5.2 model", source: "fallback" as const },
+        { value: "gpt-5.2", label: "gpt-5.2", description: "General-purpose GPT-5.2 model", source: "fallback" as const },
       ],
       claude: [
         { value: "default", label: "Default", description: "Use the CLI default model", source: "fallback" as const },
@@ -2981,10 +2980,11 @@ rename to src/components/chat/GitPanel.tsx`,
       ],
       gemini: [
         { value: "default", label: "Default", description: "Use the CLI default model", source: "fallback" as const },
-        { value: "gemini-3-flash-preview", label: "gemini-3-flash-preview", description: "Preview of the next-generation flash model", source: "fallback" as const },
-        { value: "gemini-2.5-pro", label: "gemini-2.5-pro", description: "High-capability Gemini preset", source: "fallback" as const },
-        { value: "gemini-2.5-flash", label: "gemini-2.5-flash", description: "Fast Gemini preset", source: "fallback" as const },
-        { value: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite", description: "Lightweight fast Gemini preset", source: "fallback" as const },
+        { value: "gemini-3.1-pro-preview", label: "gemini-3.1-pro-preview", description: "Preview Gemini 3.1 Pro model", source: "fallback" as const },
+        { value: "gemini-3-flash-preview", label: "gemini-3-flash-preview", description: "Preview Gemini 3 Flash model", source: "fallback" as const },
+        { value: "gemini-2.5-pro", label: "gemini-2.5-pro", description: "High-capability Gemini 2.5 Pro model", source: "fallback" as const },
+        { value: "gemini-2.5-flash", label: "gemini-2.5-flash", description: "Fast Gemini 2.5 Flash model", source: "fallback" as const },
+        { value: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite", description: "Lightweight Gemini 2.5 Flash Lite model", source: "fallback" as const },
       ],
     } satisfies Record<AgentId, AcpCliCapabilities["model"]["options"]>;
 

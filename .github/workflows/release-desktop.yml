@@ -1,0 +1,100 @@
+name: Release Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix, for example 0.1.1"
+        required: true
+        type: string
+      release_name:
+        description: "Optional GitHub Release title"
+        required: false
+        default: ""
+        type: string
+      release_notes:
+        description: "Optional release notes markdown"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-installer:
+    name: Build Windows Installer
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_TAG: v${{ inputs.version }}
+      RELEASE_NAME: ${{ inputs.release_name != '' && inputs.release_name || format('v{0}', inputs.version) }}
+      RELEASE_NOTES: ${{ inputs.release_notes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Validate version metadata
+        run: node ./scripts/sync-version.mjs --check ${{ inputs.version }}
+
+      - name: Build Tauri bundle
+        run: npm run tauri:build
+
+      - name: Resolve installer path
+        id: nsis
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path "src-tauri\target\release\bundle\nsis" -Filter *.exe -File |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw "NSIS installer was not found under src-tauri\target\release\bundle\nsis"
+          }
+          "path=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "name=$($installer.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG
+          $name = $env:RELEASE_NAME
+          $notes = $env:RELEASE_NOTES
+
+          gh release view $tag 1>$null 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            if ([string]::IsNullOrWhiteSpace($notes)) {
+              gh release create $tag --title $name --target $env:GITHUB_SHA --generate-notes
+            } else {
+              $notesFile = Join-Path $env:RUNNER_TEMP "release-notes.md"
+              Set-Content -Path $notesFile -Value $notes -Encoding utf8
+              gh release create $tag --title $name --target $env:GITHUB_SHA --notes-file $notesFile
+            }
+          } else {
+            if ([string]::IsNullOrWhiteSpace($notes)) {
+              gh release edit $tag --title $name
+            } else {
+              $notesFile = Join-Path $env:RUNNER_TEMP "release-notes.md"
+              Set-Content -Path $notesFile -Value $notes -Encoding utf8
+              gh release edit $tag --title $name --notes-file $notesFile
+            }
+          }
+
+      - name: Upload installer to GitHub Release
+        shell: pwsh
+        run: |
+          gh release upload $env:RELEASE_TAG "${{ steps.nsis.outputs.path }}" --clobber

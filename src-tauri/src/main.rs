@@ -1308,10 +1308,14 @@ fn batch_aware_command(command_path: &str, args: &[&str]) -> Command {
     if lower_command.ends_with(".cmd") || lower_command.ends_with(".bat") {
         let mut command = Command::new("cmd.exe");
         command.arg("/C").arg("call").arg(command_path).args(args);
+        #[cfg(target_os = "windows")]
+        command.creation_flags(CREATE_NO_WINDOW);
         command
     } else {
         let mut command = Command::new(command_path);
         command.args(args);
+        #[cfg(target_os = "windows")]
+        command.creation_flags(CREATE_NO_WINDOW);
         command
     }
 }
@@ -5153,6 +5157,7 @@ fn load_app_state(
     app: AppHandle,
     store: State<'_, AppStore>,
     project_root: Option<String>,
+    refresh_runtime: Option<bool>,
 ) -> Result<AppStateDto, String> {
     let project_root = project_root.unwrap_or_else(default_project_root);
     let mut state = load_or_seed_state(&project_root)?;
@@ -5161,7 +5166,9 @@ fn load_app_state(
     state.environment.rust_available = rust_available();
     state.environment.notes = environment_notes();
     sync_workspace_metrics(&mut state);
-    sync_agent_runtime(&mut state);
+    if refresh_runtime == Some(true) {
+        sync_agent_runtime(&mut state);
+    }
     persist_state(&state)?;
 
     {
@@ -9439,19 +9446,36 @@ fn probe_acp_capabilities(cli_id: &str) -> acp::AcpCliCapabilities {
     let permission_runtime_options =
         build_runtime_options(cli_id, "permissions", permission_runtime_values);
     let effort_runtime_options = build_runtime_options(cli_id, "effort", effort_runtime_values);
+    let claude_settings_model_options = if cli_id == "claude" {
+        claude_model_options_from_settings()
+    } else {
+        Vec::new()
+    };
 
     let permission_uses_runtime = !permission_runtime_options.is_empty();
     let effort_uses_runtime = !effort_runtime_options.is_empty();
+    let model_uses_settings = !claude_settings_model_options.is_empty();
 
     acp::AcpCliCapabilities {
         cli_id: cli_id.to_string(),
         model: acp::AcpOptionCatalog {
             supported: true,
-            options: fallback_model_options(cli_id),
-            note: Some(
-                "Installed CLIs do not expose a machine-readable model catalog here, so the picker uses curated presets plus typed fallback."
-                    .to_string(),
-            ),
+            options: if model_uses_settings {
+                claude_settings_model_options
+            } else {
+                fallback_model_options(cli_id)
+            },
+            note: Some(match cli_id {
+                "claude" if model_uses_settings =>
+                    "Loaded Claude model options from ~/.claude/settings.json (model, availableModels, and env overrides)."
+                        .to_string(),
+                "claude" =>
+                    "Could not derive Claude model options from ~/.claude/settings.json, so the picker fell back to curated presets."
+                        .to_string(),
+                _ =>
+                    "Installed CLIs do not expose a machine-readable model catalog here, so the picker uses curated presets plus typed fallback."
+                        .to_string(),
+            }),
         },
         permissions: acp::AcpOptionCatalog {
             supported: true,
@@ -9521,15 +9545,97 @@ fn model_preset(value: &str, description: &str) -> acp::AcpOptionDef {
     }
 }
 
+fn push_claude_model_option(
+    options: &mut Vec<acp::AcpOptionDef>,
+    seen: &mut BTreeSet<String>,
+    value: Option<&str>,
+    description: &str,
+) {
+    let Some(value) = value.map(str::trim).filter(|entry| !entry.is_empty()) else {
+        return;
+    };
+    if seen.insert(value.to_string()) {
+        options.push(acp::AcpOptionDef {
+            value: value.to_string(),
+            label: value.to_string(),
+            description: Some(description.to_string()),
+            source: "runtime".to_string(),
+        });
+    }
+}
+
+fn claude_model_options_from_settings() -> Vec<acp::AcpOptionDef> {
+    let settings_path = user_home_dir().join(".claude").join("settings.json");
+    let Ok(value) = read_json_value(&settings_path) else {
+        return Vec::new();
+    };
+
+    let mut options = vec![acp::AcpOptionDef {
+        value: "default".to_string(),
+        label: "default".to_string(),
+        description: Some("Use Claude CLI default model resolution".to_string()),
+        source: "runtime".to_string(),
+    }];
+    let mut seen = BTreeSet::from(["default".to_string()]);
+    let env = value.get("env");
+
+    push_claude_model_option(
+        &mut options,
+        &mut seen,
+        value.get("model").and_then(Value::as_str),
+        "Configured in ~/.claude/settings.json under model",
+    );
+    push_claude_model_option(
+        &mut options,
+        &mut seen,
+        env.and_then(|entry| entry.get("ANTHROPIC_MODEL"))
+            .and_then(Value::as_str),
+        "Configured in ~/.claude/settings.json under env.ANTHROPIC_MODEL",
+    );
+    push_claude_model_option(
+        &mut options,
+        &mut seen,
+        env.and_then(|entry| entry.get("ANTHROPIC_DEFAULT_SONNET_MODEL"))
+            .and_then(Value::as_str),
+        "Configured in env.ANTHROPIC_DEFAULT_SONNET_MODEL",
+    );
+    push_claude_model_option(
+        &mut options,
+        &mut seen,
+        env.and_then(|entry| entry.get("ANTHROPIC_DEFAULT_OPUS_MODEL"))
+            .and_then(Value::as_str),
+        "Configured in env.ANTHROPIC_DEFAULT_OPUS_MODEL",
+    );
+    push_claude_model_option(
+        &mut options,
+        &mut seen,
+        env.and_then(|entry| entry.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"))
+            .and_then(Value::as_str),
+        "Configured in env.ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    );
+
+    if let Some(available_models) = value.get("availableModels").and_then(Value::as_array) {
+        for model in available_models {
+            push_claude_model_option(
+                &mut options,
+                &mut seen,
+                model.as_str(),
+                "Listed in ~/.claude/settings.json under availableModels",
+            );
+        }
+    }
+
+    options
+}
+
 fn fallback_model_options(cli_id: &str) -> Vec<acp::AcpOptionDef> {
     match cli_id {
         "codex" => vec![
             model_preset("default", "Use the CLI default model"),
-            model_preset("gpt-5", "General-purpose flagship"),
-            model_preset("gpt-5-codex", "Code-focused GPT-5 profile"),
-            model_preset("gpt-5-mini", "Lighter GPT-5 variant"),
-            model_preset("o3", "Reasoning-focused model alias"),
-            model_preset("oss", "Use the local open-source provider mode"),
+            model_preset("gpt-5.3-codex", "Codex-tuned GPT-5.3 model"),
+            model_preset("gpt-5.4", "Latest general-purpose GPT-5.4 model"),
+            model_preset("gpt-5.2-codex", "Codex-tuned GPT-5.2 model"),
+            model_preset("gpt-5.2", "General-purpose GPT-5.2 model"),
         ],
         "claude" => vec![
             model_preset("default", "Use the CLI default model"),
@@ -9538,9 +9644,11 @@ fn fallback_model_options(cli_id: &str) -> Vec<acp::AcpOptionDef> {
         ],
         "gemini" => vec![
             model_preset("default", "Use the CLI default model"),
-            model_preset("gemini-2.5-pro", "High-capability Gemini preset"),
-            model_preset("gemini-2.5-flash", "Fast Gemini preset"),
-            model_preset("gemini-2.0-flash", "Legacy Gemini flash preset"),
+            model_preset("gemini-3.1-pro-preview", "Preview Gemini 3.1 Pro model"),
+            model_preset("gemini-3-flash-preview", "Preview Gemini 3 Flash model"),
+            model_preset("gemini-2.5-pro", "High-capability Gemini 2.5 Pro model"),
+            model_preset("gemini-2.5-flash", "Fast Gemini 2.5 Flash model"),
+            model_preset("gemini-2.5-flash-lite", "Lightweight Gemini 2.5 Flash Lite model"),
         ],
         _ => vec![model_preset("default", "Use the CLI default model")],
     }
@@ -9949,11 +10057,13 @@ fn git_diff_editor_contents(
 
 fn read_git_blob_bytes(project_root: &str, path: &str) -> Option<Vec<u8>> {
     let git_path = path.replace('\\', "/");
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["show", &format!("HEAD:{}", git_path)])
-        .current_dir(project_root)
-        .output()
-        .ok()?;
+        .current_dir(project_root);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().ok()?;
 
     if output.status.success() {
         Some(output.stdout)
@@ -15977,8 +16087,6 @@ fn seed_state(project_root: &str) -> AppStateDto {
         .file_name()
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".to_string());
-
-    let runtimes = detect_runtimes();
     let mut terminal_by_agent = BTreeMap::new();
     terminal_by_agent.insert(
         "codex".to_string(),
@@ -16039,10 +16147,7 @@ fn seed_state(project_root: &str) -> AppStateDto {
                 "Primary execution lane with direct writer ownership.",
                 "Ready to accept execution prompts.",
                 "codex:last",
-                runtimes
-                    .get("codex")
-                    .cloned()
-                    .unwrap_or_else(unavailable_runtime),
+                unavailable_runtime(),
             ),
             base_agent(
                 "claude",
@@ -16053,10 +16158,7 @@ fn seed_state(project_root: &str) -> AppStateDto {
                 "Architecture lane prepared for review and takeover.",
                 "Waiting for an architecture prompt or review request.",
                 "claude:latest",
-                runtimes
-                    .get("claude")
-                    .cloned()
-                    .unwrap_or_else(unavailable_runtime),
+                unavailable_runtime(),
             ),
             base_agent(
                 "gemini",
@@ -16067,10 +16169,7 @@ fn seed_state(project_root: &str) -> AppStateDto {
                 "Interface lane prepared for design critique and visual refinement.",
                 "Waiting for a UI-focused prompt or review request.",
                 "gemini:latest",
-                runtimes
-                    .get("gemini")
-                    .cloned()
-                    .unwrap_or_else(unavailable_runtime),
+                unavailable_runtime(),
             ),
         ],
         handoffs: vec![HandoffPack {
@@ -16271,11 +16370,11 @@ fn git_output(project_root: &str, args: &[&str]) -> Option<String> {
 }
 
 fn git_output_allow_empty(project_root: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(project_root)
-        .output()
-        .ok()?;
+    let mut command = Command::new("git");
+    command.args(args).current_dir(project_root);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().ok()?;
 
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).to_string())

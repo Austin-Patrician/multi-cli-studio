@@ -7,6 +7,8 @@
     "dev": "vite --config vite.config.ts",
     "build": "tsc -b && vite build --config vite.config.ts",
     "preview": "vite preview --config vite.config.ts",
+    "version:sync": "node ./scripts/sync-version.mjs",
+    "version:check": "node ./scripts/sync-version.mjs --check",
     "tauri:dev": "node ./scripts/run-tauri.mjs dev",
     "tauri:build": "node ./scripts/run-tauri.mjs build",
     "tauri:android": "node ./scripts/run-tauri.mjs android"

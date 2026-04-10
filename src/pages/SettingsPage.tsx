@@ -375,7 +375,7 @@ export function SettingsPage() {
     if (!local) return;
     setRefreshing(true);
     try {
-      const state = await bridge.loadAppState(local.projectRoot);
+      const state = await bridge.loadAppState(local.projectRoot, true);
       setAppState(state);
       setBanner("运行时扫描完成");
     } catch {

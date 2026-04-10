@@ -88,7 +88,7 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
     execution: "local", supportedClis: ["codex", "claude", "gemini"],
   },
   {
-    kind: "model", slash: "/model", label: "Switch Model",
+    kind: "model", slash: "/model", label: "Select Model",
     description: "Change the model for the active CLI",
     argsHint: "<model-name>",
     execution: "flag-inject", supportedClis: ["codex", "claude", "gemini"],

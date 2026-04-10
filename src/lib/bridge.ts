@@ -50,7 +50,7 @@ import type {
 type Unlisten = () => void;
 
 export interface RuntimeBridge {
-  loadAppState: (projectRoot?: string) => Promise<AppState>;
+  loadAppState: (projectRoot?: string, refreshRuntime?: boolean) => Promise<AppState>;
   switchActiveAgent: (agentId: AgentId) => Promise<AppState>;
   takeOverWriter: (agentId: AgentId) => Promise<AppState>;
   snapshotWorkspace: () => Promise<AppState>;
@@ -136,9 +136,9 @@ function getRuntimeBridge() {
 }
 
 const tauriRuntime: RuntimeBridge = {
-  async loadAppState(projectRoot) {
+  async loadAppState(projectRoot, refreshRuntime) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<AppState>("load_app_state", { projectRoot });
+    return invoke<AppState>("load_app_state", { projectRoot, refreshRuntime });
   },
   async switchActiveAgent(agentId) {
     const { invoke } = await import("@tauri-apps/api/core");

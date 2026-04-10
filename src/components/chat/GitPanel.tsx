@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { DiffEditor as MonacoDiffEditor } from "@monaco-editor/react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { bridge } from "../../lib/bridge";
 import type { GitFileChange, GitFileDiff } from "../../lib/models";
@@ -13,10 +14,8 @@ type DiffHunk = {
   modifiedCount: number;
 };
 
-const MonacoDiffEditor = lazy(async () => {
-  const module = await import("@monaco-editor/react");
-  return { default: module.DiffEditor };
-});
+const MAX_MONACO_CONTENT_CHARS = 300_000;
+const MAX_MONACO_DIFF_CHARS = 500_000;
 
 const ArrowUpIcon = ({ className }: { className?: string }) => (
   <svg viewBox="0 0 20 20" fill="none" className={className}>
@@ -210,6 +209,17 @@ function isMetadataOnlyDiff(diff: GitFileDiff | null) {
   return !/^@@/m.test(diff.diff);
 }
 
+function monacoDiffTooLarge(diff: GitFileDiff | null) {
+  if (!diff) return false;
+  const originalLength = typeof diff.originalContent === "string" ? diff.originalContent.length : 0;
+  const modifiedLength = typeof diff.modifiedContent === "string" ? diff.modifiedContent.length : 0;
+  return (
+    originalLength > MAX_MONACO_CONTENT_CHARS ||
+    modifiedLength > MAX_MONACO_CONTENT_CHARS ||
+    diff.diff.length > MAX_MONACO_DIFF_CHARS
+  );
+}
+
 function parseDiffHunks(diffText: string) {
   const hunks: DiffHunk[] = [];
   const pattern = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm;
@@ -277,26 +287,38 @@ function DiffStateNotice({
   );
 }
 
-function DiffPatchFallback({ diffText }: { diffText: string }) {
-  return (
-    <div className="h-full overflow-auto bg-[#1e1e1e] px-6 py-5">
-      <pre className="font-mono text-[12px] leading-6 text-slate-200">
-        <code>{diffText}</code>
-      </pre>
-    </div>
-  );
-}
-
 function MonacoDiffView({
   diff,
   mode,
   activeHunk,
+  onReadyChange,
 }: {
   diff: GitFileDiff;
   mode: DiffViewMode;
   activeHunk: DiffHunk | null;
+  onReadyChange?: (ready: boolean) => void;
 }) {
   const editorRef = useRef<any>(null);
+
+  useEffect(() => {
+    onReadyChange?.(false);
+    return () => onReadyChange?.(false);
+  }, [diff.path, onReadyChange]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const rafId = window.requestAnimationFrame(() => {
+      editor.layout?.();
+    });
+    const timeoutId = window.setTimeout(() => {
+      editor.layout?.();
+    }, 120);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearTimeout(timeoutId);
+    };
+  }, [diff.path, mode]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -314,43 +336,43 @@ function MonacoDiffView({
   }, [activeHunk]);
 
   return (
-    <div className="h-full bg-[#1e1e1e]">
-      <Suspense
-        fallback={
-          <div className="flex h-full items-center justify-center text-sm text-slate-400">
-            Loading Monaco diff…
-          </div>
-        }
-      >
-        <MonacoDiffEditor
-          onMount={(editor) => {
-            editorRef.current = editor;
-          }}
-          original={diff.originalContent ?? ""}
-          modified={diff.modifiedContent ?? ""}
-          language={diff.language ?? "plaintext"}
-          theme="vs-dark"
-          height="100%"
-          loading={<div className="flex h-full items-center justify-center text-sm text-slate-400">Loading Monaco diff…</div>}
-          options={{
-            readOnly: true,
-            originalEditable: false,
-            renderSideBySide: mode === "split",
-            minimap: { enabled: false },
-            lineNumbers: "on",
-            scrollBeyondLastLine: false,
-            wordWrap: "off",
-            automaticLayout: true,
-            renderOverviewRuler: true,
-            glyphMargin: false,
-            folding: true,
-            matchBrackets: "always",
-            fixedOverflowWidgets: true,
-            diffWordWrap: "off",
-            ignoreTrimWhitespace: false,
-          }}
-        />
-      </Suspense>
+    <div className="h-full min-h-0 bg-[#1e1e1e]">
+      <MonacoDiffEditor
+        onMount={(editor) => {
+          editorRef.current = editor;
+          window.requestAnimationFrame(() => {
+            editor.layout?.();
+          });
+          onReadyChange?.(true);
+        }}
+        original={diff.originalContent ?? ""}
+        modified={diff.modifiedContent ?? ""}
+        language={diff.language ?? "plaintext"}
+        theme="vs-dark"
+        height="100%"
+        loading={<div className="flex h-full items-center justify-center text-sm text-slate-400">Loading Monaco diff…</div>}
+        options={{
+          readOnly: true,
+          originalEditable: false,
+          renderSideBySide: mode === "split",
+          minimap: { enabled: false },
+          lineNumbers: "on",
+          scrollBeyondLastLine: false,
+          wordWrap: "off",
+          automaticLayout: true,
+          renderOverviewRuler: false,
+          glyphMargin: false,
+          folding: false,
+          matchBrackets: "never",
+          fixedOverflowWidgets: true,
+          diffWordWrap: "off",
+          ignoreTrimWhitespace: false,
+          codeLens: false,
+          renderValidationDecorations: "off",
+          occurrencesHighlight: "off",
+          selectionHighlight: false,
+        }}
+      />
     </div>
   );
 }
@@ -420,6 +442,7 @@ function DiffOverlay({
   const metadataLines = useMemo(() => metadataSummaryLines(diff?.diff ?? ""), [diff?.diff]);
   const renderMonaco = canRenderMonacoDiff(diff);
   const metadataOnly = isMetadataOnlyDiff(diff);
+  const monacoTooLarge = monacoDiffTooLarge(diff);
   const canPrevious = diffHunks.length > 0 ? activeHunkIndex > 0 || hasPreviousFile : hasPreviousFile;
   const canNext = diffHunks.length > 0 ? activeHunkIndex < diffHunks.length - 1 || hasNextFile : hasNextFile;
 
@@ -543,10 +566,23 @@ function DiffOverlay({
               description="This change only carries file-level metadata, such as rename or mode updates. There are no textual hunks to compare."
               lines={metadataLines}
             />
+          ) : monacoTooLarge ? (
+            <DiffStateNotice
+              title="Large change"
+              description="This diff is too large for Monaco DiffEditor in the desktop shell. Open the file directly or narrow the change before previewing it here."
+              lines={[
+                `Diff length: ${diff?.diff.length ?? 0} chars`,
+                `Original length: ${diff?.originalContent?.length ?? 0} chars`,
+                `Modified length: ${diff?.modifiedContent?.length ?? 0} chars`,
+              ]}
+            />
           ) : diff && renderMonaco ? (
-            <MonacoDiffView diff={diff} mode={viewMode} activeHunk={activeHunk} />
-          ) : diff ? (
-            <DiffPatchFallback diffText={diff.diff} />
+            <MonacoDiffView
+              diff={diff}
+              mode={viewMode}
+              activeHunk={activeHunk}
+              onReadyChange={() => {}}
+            />
           ) : null}
         </div>
       </div>

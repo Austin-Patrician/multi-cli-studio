@@ -1,10 +1,11 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { ProjectBar } from "../components/chat/ProjectBar";
 import { ChatConversation } from "../components/chat/ChatConversation";
 import { ChatPromptBar } from "../components/chat/ChatPromptBar";
-import { GitPanel } from "../components/chat/GitPanel";
 import { TerminalTabStrip } from "../components/chat/TerminalTabStrip";
 import { useStore } from "../lib/store";
+
+const GitPanel = lazy(async () => import("../components/chat/GitPanel").then((module) => ({ default: module.GitPanel })));
 
 export function TerminalPage() {
   const activeTerminalTabId = useStore((state) => state.activeTerminalTabId);
@@ -24,7 +25,17 @@ export function TerminalPage() {
           <ChatConversation />
           <ChatPromptBar />
         </div>
-        <GitPanel />
+        <Suspense
+          fallback={
+            <aside className="w-[320px] border-l border-border bg-[#fcfcfd]">
+              <div className="flex h-full items-center justify-center text-sm text-secondary">
+                Loading changes…
+              </div>
+            </aside>
+          }
+        >
+          <GitPanel />
+        </Suspense>
       </div>
     </div>
   );

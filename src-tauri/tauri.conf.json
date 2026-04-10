@@ -21,10 +21,24 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'"
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'"
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": "nsis",
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Desktop orchestration shell for Codex, Claude, and Gemini CLIs.",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "startMenuFolder": "Multi CLI Studio",
+        "installMode": "currentUser"
+      }
+    }
   }
 }
