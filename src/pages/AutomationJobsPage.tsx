@@ -182,7 +182,7 @@ function jobCardClass(status?: string | null, isSelected = false) {
 
 function OverviewCard({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="rounded-[16px] border border-slate-200 bg-slate-50 p-4">
+    <div className="rounded-[10px] border border-slate-200 bg-slate-50 p-4">
       <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-400">{label}</div>
       <div className="mt-3 text-lg font-semibold text-slate-900">{value}</div>
     </div>
@@ -623,11 +623,11 @@ export function AutomationJobsPage() {
           </div>
         </section>
 
-        {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{error}</div> : null}
-        {actionNotice ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">{actionNotice}</div> : null}
+        {error ? <div className="rounded-[10px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{error}</div> : null}
+        {actionNotice ? <div className="rounded-[10px] border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">{actionNotice}</div> : null}
 
         <section className="grid min-h-0 flex-1 gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
-          <aside className="flex min-h-0 flex-col rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
+          <aside className="flex min-h-0 flex-col rounded-[10px] border border-slate-200 bg-white p-5 shadow-sm">
             <div className="shrink-0 space-y-4">
               <div className="space-y-1">
                 <div className="flex items-center justify-between gap-3">
@@ -653,9 +653,9 @@ export function AutomationJobsPage() {
 
             <div className="mt-5 min-h-0 flex-1 overflow-y-auto pr-1">
               {loading ? (
-                <div className="rounded-[16px] border border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-400">正在加载任务...</div>
+                <div className="rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-400">正在加载任务...</div>
               ) : filteredJobs.length === 0 ? (
-                <div className="rounded-[16px] border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">当前没有匹配的自动化任务。</div>
+                <div className="rounded-[10px] border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-slate-500">当前没有匹配的自动化任务。</div>
               ) : (
                 <div className="space-y-2">
                 {pagedJobs.map((job) => {
@@ -674,7 +674,7 @@ export function AutomationJobsPage() {
                         }
                       }}
                       className={cn(
-                        "relative w-full rounded-[14px] border px-4 py-4 text-left transition",
+                        "relative w-full rounded-[10px] border px-4 py-4 text-left transition",
                         jobCardClass(latestRun?.displayStatus, isSelected)
                       )}
                     >
@@ -768,11 +768,11 @@ export function AutomationJobsPage() {
 
           <section className="flex min-h-0 flex-col gap-6">
             {!selectedJob ? (
-              <div className="flex min-h-0 flex-1 items-center justify-center rounded-[20px] border border-dashed border-slate-300 bg-white px-6 py-20 text-center text-sm text-slate-500 shadow-sm">
+              <div className="flex min-h-0 flex-1 items-center justify-center rounded-[10px] border border-dashed border-slate-300 bg-white px-6 py-20 text-center text-sm text-slate-500 shadow-sm">
                 先从左侧选择一个任务，右侧会显示该任务最近一次运行的执行日志。
               </div>
             ) : !latestRunForSelectedJob ? (
-              <div className="flex min-h-0 flex-1 flex-col rounded-[20px] border border-slate-200 bg-white p-8 shadow-sm">
+              <div className="flex min-h-0 flex-1 flex-col rounded-[10px] border border-slate-200 bg-white p-8 shadow-sm">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div>
                     <div className="flex items-center gap-3">
@@ -819,13 +819,13 @@ export function AutomationJobsPage() {
                     </button>
                   </div>
                 </div>
-                <div className="mt-8 rounded-[16px] border border-dashed border-slate-300 px-6 py-12 text-center text-sm text-slate-500">
+                <div className="mt-8 rounded-[10px] border border-dashed border-slate-300 px-6 py-12 text-center text-sm text-slate-500">
                   该任务还没有运行记录。点击右上角运行按钮后，这里会直接显示完整执行日志。
                 </div>
               </div>
             ) : (
               <>
-                <div className="shrink-0 rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="shrink-0 rounded-[10px] border border-slate-200 bg-white p-5 shadow-sm">
                   <div className="space-y-4">
                     <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                       <div className="min-w-0 flex-1 space-y-3">
@@ -909,13 +909,13 @@ export function AutomationJobsPage() {
                     </div>
 
                     <div className="grid gap-3 lg:grid-cols-2">
-                      <div className="min-w-0 rounded-[16px] bg-slate-50 p-3">
+                      <div className="min-w-0 rounded-[10px] bg-slate-50 p-3">
                         <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">任务目标</div>
                         <div className="line-clamp-2 text-xs leading-relaxed text-slate-700" title={detail?.goal ?? selectedJob.goal}>
                           {detail?.goal ?? selectedJob.goal}
                         </div>
                       </div>
-                      <div className="min-w-0 rounded-[16px] bg-slate-50 p-3">
+                      <div className="min-w-0 rounded-[10px] bg-slate-50 p-3">
                         <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">期望结果</div>
                         <div className="line-clamp-2 text-xs leading-relaxed text-slate-700" title={detail?.expectedOutcome ?? selectedJob.expectedOutcome}>
                           {detail?.expectedOutcome ?? selectedJob.expectedOutcome}
@@ -928,7 +928,7 @@ export function AutomationJobsPage() {
                     || validationVerificationSteps.length > 0
                     || validationFeedback
                     || validationEvidence ? (
-                      <div className="rounded-[16px] border border-slate-200 bg-slate-50 p-3">
+                      <div className="rounded-[10px] border border-slate-200 bg-slate-50 p-3">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">最近验收</div>
@@ -959,11 +959,11 @@ export function AutomationJobsPage() {
                         ) : (
                           <>
                             <div className="mt-3 grid gap-3 lg:grid-cols-3">
-                              <div className="rounded-[14px] bg-white/80 p-3">
+                              <div className="rounded-[10px] bg-white/80 p-3">
                                 <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">结论</div>
                                 <div className="text-xs leading-relaxed text-slate-700">{validationSummaryText}</div>
                               </div>
-                              <div className="rounded-[14px] bg-white/80 p-3">
+                              <div className="rounded-[10px] bg-white/80 p-3">
                                 <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">未满足项</div>
                                 {validationMissingChecks.length > 0 ? (
                                   <ul className="space-y-1 text-xs leading-relaxed text-slate-700">
@@ -978,7 +978,7 @@ export function AutomationJobsPage() {
                                   <div className="text-xs text-slate-500">当前没有记录到明确缺口。</div>
                                 )}
                               </div>
-                              <div className="rounded-[14px] bg-white/80 p-3">
+                              <div className="rounded-[10px] bg-white/80 p-3">
                                 <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">下一轮建议</div>
                                 {validationVerificationSteps.length > 0 ? (
                                   <ul className="space-y-1 text-xs leading-relaxed text-slate-700">
@@ -995,7 +995,7 @@ export function AutomationJobsPage() {
                               </div>
                             </div>
                             {validationEvidence ? (
-                              <div className="mt-3 rounded-[14px] bg-white/80 p-3 text-xs leading-relaxed text-slate-600">
+                              <div className="mt-3 rounded-[10px] bg-white/80 p-3 text-xs leading-relaxed text-slate-600">
                                 <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">判定依据</div>
                                 {validationEvidence}
                               </div>
@@ -1008,11 +1008,11 @@ export function AutomationJobsPage() {
                 </div>
 
                 {detailError ? (
-                  <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{detailError}</div>
+                  <div className="rounded-[10px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{detailError}</div>
                 ) : null}
 
                 {detailLoading || !detail ? (
-                  <div className="flex min-h-0 flex-1 items-center justify-center rounded-[28px] border border-slate-200 bg-white p-12 text-center text-sm text-slate-400 shadow-sm">正在加载执行日志...</div>
+                  <div className="flex min-h-0 flex-1 items-center justify-center rounded-[10px] border border-slate-200 bg-white p-12 text-center text-sm text-slate-400 shadow-sm">正在加载执行日志...</div>
                 ) : (
                   <>
                     <div className="min-h-0 flex-1">
@@ -1058,7 +1058,7 @@ export function AutomationJobsPage() {
 
       {jobPendingDelete ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-[20px] border border-slate-200 bg-white p-6 shadow-2xl">
+          <div className="w-full max-w-md rounded-[10px] border border-slate-200 bg-white p-6 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-lg font-semibold tracking-tight text-slate-900">删除任务</div>
@@ -1103,7 +1103,7 @@ export function AutomationJobsPage() {
 
       {runPendingDelete ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-[20px] border border-slate-200 bg-white p-6 shadow-2xl">
+          <div className="w-full max-w-md rounded-[10px] border border-slate-200 bg-white p-6 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-lg font-semibold tracking-tight text-slate-900">删除运行记录</div>
@@ -1121,7 +1121,7 @@ export function AutomationJobsPage() {
               </button>
             </div>
 
-            <div className="mt-4 rounded-[16px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+            <div className="mt-4 rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
               <div className="font-medium text-slate-900">{runPendingDelete.jobName}</div>
               <div className="mt-1">运行时间：{formatStamp(runPendingDelete.startedAt || runPendingDelete.createdAt)}</div>
               <div className="mt-1">当前状态：{runPendingDelete.displayStatus}</div>

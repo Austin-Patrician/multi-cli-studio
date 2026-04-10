@@ -29,6 +29,12 @@ import type {
 } from "../lib/models";
 import { useStore } from "../lib/store";
 import {
+  applyWorkflowBranchConnection,
+  hasWorkflowPath,
+  validateWorkflowGraph,
+  type WorkflowBranch,
+} from "./automationWorkflowGraph";
+import {
   cn,
   executionModeLabel,
   workflowContextStrategyLabel,
@@ -208,33 +214,6 @@ function workflowNodePermissionLabel(
   inherited: AutomationPermissionProfile
 ) {
   return value === "inherit" ? `继承 · ${permissionProfileLabel(inherited)}` : permissionProfileLabel(value);
-}
-
-function hasPath(
-  nodes: NodeState[],
-  startId: string,
-  targetId: string,
-  visited = new Set<string>()
-): boolean {
-  if (startId === targetId) return true;
-  if (visited.has(startId)) return false;
-  visited.add(startId);
-  const node = nodes.find((item) => item.id === startId);
-  if (!node) return false;
-  const nextIds = [node.successNodeId, node.failNodeId].filter(Boolean);
-  return nextIds.some((nextId) => hasPath(nodes, nextId, targetId, visited));
-}
-
-function applyBranchConnection(nodes: NodeState[], sourceId: string, branch: "success" | "fail", targetId: string) {
-  return nodes.map((node) =>
-    node.id === sourceId
-      ? {
-          ...node,
-          successNodeId: branch === "success" ? targetId : node.successNodeId,
-          failNodeId: branch === "fail" ? targetId : node.failNodeId,
-        }
-      : node
-  );
 }
 
 function removeNodeAndReferences(nodes: NodeState[], removedId: string) {
@@ -454,7 +433,6 @@ function AutomationWorkflowEditorContent() {
   const [nodes, setNodes] = useState<NodeState[]>([createEmptyNode(0)]);
   const [canvasNodes, setCanvasNodes, onCanvasNodesChange] = useNodesState<WorkflowCanvasNode>([]);
   const [busy, setBusy] = useState<"save" | "save-run" | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const workspaceOptions = useMemo(() => {
@@ -474,7 +452,6 @@ function AutomationWorkflowEditorContent() {
     [workspaceId, workspaceOptions]
   );
 
-  const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const drawerNode = nodes.find((node) => node.id === drawerNodeId) ?? null;
 
   const openNodeDrawer = useCallback((nodeId: string) => {
@@ -539,8 +516,6 @@ function AutomationWorkflowEditorContent() {
         if (!cancelled) {
           setError(nextError instanceof Error ? nextError.message : "加载工作流失败。");
         }
-      } finally {
-        if (!cancelled) setLoading(false);
       }
     }
 
@@ -645,8 +620,8 @@ function AutomationWorkflowEditorContent() {
         return;
       }
 
-      const candidateNodes = applyBranchConnection(nodes, sourceId, branch, targetId);
-      if (hasPath(candidateNodes, targetId, sourceId)) {
+      const candidateNodes = applyWorkflowBranchConnection(nodes, sourceId, branch, targetId);
+      if (hasWorkflowPath(candidateNodes, targetId, sourceId)) {
         setError("首版工作流不支持环路，请改为无环路由。");
         return;
       }
@@ -660,6 +635,21 @@ function AutomationWorkflowEditorContent() {
 
   function updateNode(nodeId: string, updater: (node: NodeState) => NodeState) {
     setNodes((current) => current.map((node) => (node.id === nodeId ? updater(node) : node)));
+  }
+
+  function updateBranchRoute(nodeId: string, branch: WorkflowBranch, targetId: string) {
+    const candidateNodes = applyWorkflowBranchConnection(nodes, nodeId, branch, targetId);
+    if (!targetId) {
+      setError(null);
+      setNodes(candidateNodes);
+      return;
+    }
+    if (targetId === nodeId || hasWorkflowPath(candidateNodes, targetId, nodeId)) {
+      setError("首版工作流不支持环路，请改为无环路由。");
+      return;
+    }
+    setError(null);
+    setNodes(candidateNodes);
   }
 
   function addNode() {
@@ -706,6 +696,11 @@ function AutomationWorkflowEditorContent() {
     }
     if (!entryNodeId || !nodes.some((node) => node.id === entryNodeId)) {
       setError("请设置一个入口节点。");
+      return;
+    }
+    const graphError = validateWorkflowGraph(nodes, entryNodeId);
+    if (graphError) {
+      setError(graphError);
       return;
     }
 
@@ -1105,7 +1100,7 @@ function AutomationWorkflowEditorContent() {
                                 <span className="h-2 w-2 rounded-full bg-emerald-500"></span> 成功后去往
                               </label>
                               <div className="relative">
-                                <select value={drawerNode.successNodeId} onChange={(event) => updateNode(drawerNode.id, (current) => ({ ...current, successNodeId: event.target.value }))} className={cn(INPUT_CLASS, "appearance-none pr-8 text-[13px] bg-white")}>
+                                <select value={drawerNode.successNodeId} onChange={(event) => updateBranchRoute(drawerNode.id, "success", event.target.value)} className={cn(INPUT_CLASS, "appearance-none pr-8 text-[13px] bg-white")}>
                                   <option value="">结束</option>
                                   {nodes.filter((node) => node.id !== drawerNode.id).map((node) => (
                                     <option key={node.id} value={node.id}>{node.label}</option>
@@ -1121,7 +1116,7 @@ function AutomationWorkflowEditorContent() {
                                 <span className="h-2 w-2 rounded-full bg-rose-500"></span> 失败后去往
                               </label>
                               <div className="relative">
-                                <select value={drawerNode.failNodeId} onChange={(event) => updateNode(drawerNode.id, (current) => ({ ...current, failNodeId: event.target.value }))} className={cn(INPUT_CLASS, "appearance-none pr-8 text-[13px] bg-white")}>
+                                <select value={drawerNode.failNodeId} onChange={(event) => updateBranchRoute(drawerNode.id, "fail", event.target.value)} className={cn(INPUT_CLASS, "appearance-none pr-8 text-[13px] bg-white")}>
                                   <option value="">结束</option>
                                   {nodes.filter((node) => node.id !== drawerNode.id).map((node) => (
                                     <option key={node.id} value={node.id}>{node.label}</option>

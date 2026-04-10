@@ -40,6 +40,8 @@ export function formatDuration(start?: string | null, end?: string | null) {
 
 export function statusText(status: AutomationRunStatus | string) {
   switch (status) {
+    case "queued":
+      return "未执行";
     case "draft":
       return "草稿";
     case "scheduled":
@@ -77,6 +79,8 @@ export function statusText(status: AutomationRunStatus | string) {
 
 export function statusTone(status: AutomationRunStatus | string) {
   switch (status) {
+    case "queued":
+      return "bg-slate-100 text-slate-600 ring-slate-500/10";
     case "completed":
       return "bg-emerald-50 text-emerald-700 ring-emerald-600/20";
     case "running":

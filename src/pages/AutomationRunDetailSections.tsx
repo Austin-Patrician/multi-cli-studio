@@ -27,7 +27,7 @@ export function AutomationRunConversationSection({
   const entryCount = ordered.filter((message) => messageText(message)).length;
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[20px] border border-slate-900 bg-[#050c16] shadow-[0_24px_70px_rgba(2,8,23,0.32)]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[10px] border border-slate-900 bg-[#050c16] shadow-[0_24px_70px_rgba(2,8,23,0.32)]">
       <div className="flex items-center justify-between gap-4 border-b border-slate-800 bg-[#0a1422] px-6 py-4">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">

@@ -97,6 +97,7 @@ export interface RuntimeBridge {
   startAutomationRun: (runId: string) => Promise<AutomationRun>;
   pauseAutomationRun: (runId: string) => Promise<AutomationRun>;
   resumeAutomationRun: (runId: string) => Promise<AutomationRun>;
+  resumeAutomationWorkflowRun: (workflowRunId: string) => Promise<AutomationWorkflowRun>;
   restartAutomationRun: (runId: string) => Promise<AutomationRun>;
   pauseAutomationGoal: (goalId: string) => Promise<AutomationRun>;
   resumeAutomationGoal: (goalId: string) => Promise<AutomationRun>;
@@ -330,6 +331,10 @@ const tauriRuntime: RuntimeBridge = {
   async resumeAutomationRun(runId) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AutomationRun>("resume_automation_run", { runId });
+  },
+  async resumeAutomationWorkflowRun(workflowRunId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<AutomationWorkflowRun>("resume_automation_workflow_run", { workflowRunId });
   },
   async restartAutomationRun(runId) {
     const { invoke } = await import("@tauri-apps/api/core");

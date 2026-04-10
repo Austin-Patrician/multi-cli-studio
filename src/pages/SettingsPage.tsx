@@ -215,8 +215,8 @@ function Panel({
 }) {
   return (
     <section className="mb-10 relative">
-      <div className="absolute inset-0 bg-gradient-to-b from-white/60 to-white/10 rounded-[24px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] pointer-events-none" />
-      <div className="relative overflow-hidden rounded-[24px] bg-white backdrop-blur-xl ring-1 ring-slate-200/60 shadow-sm">
+      <div className="absolute inset-0 bg-gradient-to-b from-white/60 to-white/10 rounded-[10px] shadow-[0_8px_30px_rgb(0,0,0,0.04)] pointer-events-none" />
+      <div className="relative overflow-hidden rounded-[10px] bg-white backdrop-blur-xl ring-1 ring-slate-200/60 shadow-sm">
         <div className="flex flex-col gap-4 border-b border-slate-100/80 bg-slate-50/50 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-4">
             {icon ? (
@@ -514,7 +514,7 @@ export function SettingsPage() {
               </p>
             </div>
 
-            <div className="flex items-center gap-2 bg-white/50 p-1.5 rounded-2xl ring-1 ring-slate-200/50 backdrop-blur-md shadow-sm">
+          <div className="flex items-center gap-2 bg-white/50 p-1.5 rounded-[10px] ring-1 ring-slate-200/50 backdrop-blur-md shadow-sm">
               <IconButton 
                 icon={<img src={refreshIcon} alt="" className={cx("h-4 w-4", refreshing && "animate-spin")} />} 
                 onClick={refreshRuntime} 
@@ -548,7 +548,7 @@ export function SettingsPage() {
           </div>
 
           {dirty ? (
-            <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800 shadow-sm">
+            <div className="mt-4 flex items-center justify-between gap-3 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-amber-800 shadow-sm">
               <div className="text-sm font-semibold">
                 检测到未保存的更改，点击保存后才会生效。
               </div>
@@ -602,7 +602,7 @@ export function SettingsPage() {
 
                           {missing && (
                             <div className="mt-6 pl-14 max-w-2xl">
-                              <div className="bg-white border border-rose-100 rounded-2xl p-5 shadow-sm">
+                              <div className="bg-white border border-rose-100 rounded-[10px] p-5 shadow-sm">
                                 <FieldLabel>请运行以下命令进行安装：</FieldLabel>
                                 <div className="bg-rose-50/30 border border-rose-100 rounded-xl px-4 py-3 font-mono text-[13px] font-bold text-rose-900 mb-4 break-all">
                                   {guide.install[platform]}
@@ -636,7 +636,7 @@ export function SettingsPage() {
                       </div>
                       
                       {agent.runtime.lastError && (
-                        <div className="mt-6 ml-14 rounded-xl border border-rose-200 bg-rose-50 p-4 font-mono text-[12px] text-rose-700 shadow-inner break-all">
+                        <div className="mt-6 ml-14 rounded-[10px] border border-rose-200 bg-rose-50 p-4 font-mono text-[12px] text-rose-700 shadow-inner break-all">
                           <span className="font-bold uppercase tracking-wider block mb-1 text-[10px]">严重错误</span>
                           {agent.runtime.lastError}
                         </div>
@@ -676,7 +676,7 @@ export function SettingsPage() {
                   </div>
                   <p className="mt-2 text-[14px] text-slate-500 leading-relaxed font-medium">当长时间运行的智能体线程执行完成时，接收 Windows/macOS 的桌面提醒。</p>
                 </div>
-                <div className="flex items-center gap-4 bg-white p-3 rounded-2xl ring-1 ring-slate-200 shadow-sm">
+                <div className="flex items-center gap-4 bg-white p-3 rounded-[10px] ring-1 ring-slate-200 shadow-sm">
                   <span className={cx("text-[10px] font-bold uppercase tracking-widest", local.notifyOnTerminalCompletion ? "text-indigo-600" : "text-slate-400")}>
                     {notificationBusy ? "处理中..." : local.notifyOnTerminalCompletion ? "开启" : "关闭"}
                   </span>
@@ -701,7 +701,7 @@ export function SettingsPage() {
                       配置统一的 SMTP 账号与全局收件人。启用了完成邮件通知的自动化任务会复用这里的配置。
                     </p>
                   </div>
-                  <div className="flex items-center gap-4 bg-white p-3 rounded-2xl ring-1 ring-slate-200 shadow-sm">
+                  <div className="flex items-center gap-4 bg-white p-3 rounded-[10px] ring-1 ring-slate-200 shadow-sm">
                     <span className={cx("text-[10px] font-bold uppercase tracking-widest", local.notificationConfig.smtpEnabled ? "text-indigo-600" : "text-slate-400")}>
                       {local.notificationConfig.smtpEnabled ? "开启" : "关闭"}
                     </span>
@@ -817,7 +817,7 @@ export function SettingsPage() {
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+                <div className="rounded-[10px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
                   <div className="font-semibold">Plunk SMTP 提示</div>
                   <div className="mt-1 text-xs leading-relaxed text-sky-700">
                     如果你使用 Plunk，请将主机设置为 <span className="font-mono">smtp.useplunk.com</span>，端口使用 <span className="font-mono">2587</span>（STARTTLS）或 <span className="font-mono">2465</span>（SSL/TLS），用户名填写 <span className="font-mono">plunk</span>，密码填写你的 Plunk Secret API Key。
@@ -842,7 +842,7 @@ export function SettingsPage() {
           <div style={stageStyle(mounted, 200)}>
             <Panel title="执行限制" description="用于自动化智能体操作的安全边界配置。" icon={<CpuIcon />}>
               <div className="grid gap-6 p-8 sm:grid-cols-3">
-                <div className="rounded-2xl border border-slate-100 bg-slate-50/50 p-5">
+                <div className="rounded-[10px] border border-slate-100 bg-slate-50/50 p-5">
                   <FieldLabel>每个智能体轮数</FieldLabel>
                   <input
                     type="number"
@@ -856,7 +856,7 @@ export function SettingsPage() {
                     }
                   />
                 </div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50/50 p-5">
+                <div className="rounded-[10px] border border-slate-100 bg-slate-50/50 p-5">
                   <FieldLabel>输出上限（字符）</FieldLabel>
                   <input
                     type="number"
@@ -870,7 +870,7 @@ export function SettingsPage() {
                     }
                   />
                 </div>
-                <div className="rounded-2xl border border-slate-100 bg-slate-50/50 p-5">
+                <div className="rounded-[10px] border border-slate-100 bg-slate-50/50 p-5">
                   <FieldLabel>超时缓冲（毫秒）</FieldLabel>
                   <input
                     type="number"

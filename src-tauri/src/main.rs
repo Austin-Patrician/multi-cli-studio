@@ -7195,6 +7195,79 @@ fn create_automation_workflow_run(
 }
 
 #[tauri::command]
+fn resume_automation_workflow_run(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    workflow_run_id: String,
+) -> Result<AutomationWorkflowRun, String> {
+    let updated = {
+        let mut runs = store
+            .automation_workflow_runs
+            .lock()
+            .map_err(|err| err.to_string())?;
+        let run = runs
+            .iter_mut()
+            .find(|item| item.id == workflow_run_id)
+            .ok_or_else(|| "Workflow run not found.".to_string())?;
+        if run.status != "paused" {
+            return Err("Only paused workflow runs can be resumed.".to_string());
+        }
+        let now = now_stamp();
+        let current_node_id = run
+            .current_node_id
+            .clone()
+            .unwrap_or_else(|| run.entry_node_id.clone());
+        run.status = "scheduled".to_string();
+        run.status_summary = Some("Re-queued after pause.".to_string());
+        run.scheduled_start_at = Some(now.clone());
+        run.completed_at = None;
+        run.updated_at = now.clone();
+        if let Some(node_run) = run.node_runs.iter_mut().find(|item| item.node_id == current_node_id) {
+            if node_run.status == "paused" {
+                node_run.status = "queued".to_string();
+                node_run.branch_result = None;
+                node_run.status_summary = Some("Re-queued after pause.".to_string());
+                node_run.automation_run_id = None;
+                node_run.transport_session = None;
+                node_run.used_cli = None;
+                node_run.completed_at = None;
+                node_run.updated_at = now.clone();
+            }
+        }
+        push_workflow_event(
+            run,
+            Some(current_node_id.as_str()),
+            "info",
+            "Workflow resumed",
+            "The paused workflow was re-queued from its current node.",
+        );
+        let snapshot = run.clone();
+        persist_automation_workflow_runs_to_disk(&runs)?;
+        snapshot
+    };
+
+    schedule_automation_workflow_run_with_handles(
+        app,
+        store.state.clone(),
+        store.context.clone(),
+        store.settings.clone(),
+        store.terminal_storage.clone(),
+        store.claude_approval_rules.clone(),
+        store.claude_pending_approvals.clone(),
+        store.codex_pending_approvals.clone(),
+        store.automation_jobs.clone(),
+        store.automation_runs.clone(),
+        store.automation_active_runs.clone(),
+        store.automation_workflows.clone(),
+        store.automation_workflow_runs.clone(),
+        store.automation_active_workflow_runs.clone(),
+        updated.id.clone(),
+    );
+
+    Ok(updated)
+}
+
+#[tauri::command]
 fn cancel_automation_workflow_run(
     store: State<'_, AppStore>,
     workflow_run_id: String,
@@ -10961,20 +11034,28 @@ fn detect_automation_rule_pause_reason(
             needles.iter().any(|needle| command.contains(needle))
         })
     };
-    if profile.pause_on_credentials
-        && [
-            "requires credentials",
-            "login required",
-            "api key",
-            "token required",
-            "permission denied",
-            "authentication",
-            "sign in",
-        ]
-        .iter()
-        .any(|needle| normalized.contains(needle))
-    {
-        return Some("Paused because credentials or authentication are required.".to_string());
+    if profile.pause_on_credentials {
+        let credential_needles = [
+            ("requires credentials", "requires credentials"),
+            ("credentials required", "credentials required"),
+            ("login required", "login required"),
+            ("requires login", "requires login"),
+            ("api key required", "api key required"),
+            ("missing api key", "missing api key"),
+            ("token required", "token required"),
+            ("missing token", "missing token"),
+            ("authentication required", "authentication required"),
+            ("sign in to continue", "sign in to continue"),
+        ];
+        if let Some((_, matched)) = credential_needles
+            .iter()
+            .find(|(needle, _)| normalized.contains(needle))
+        {
+            return Some(format!(
+                "Paused because the CLI reported that {}.",
+                matched
+            ));
+        }
     }
 
     if profile.pause_on_external_installs
@@ -15473,13 +15554,18 @@ fn execute_workflow_run_loop(
         let (child_run, transport_session, branch_result, node_summary) = match child_result {
             Ok((completed_run, transport_session)) => {
                 let branch = if completed_run.status == "completed" {
-                    "success".to_string()
+                    Some("success".to_string())
+                } else if completed_run.status == "failed" || completed_run.status == "cancelled" {
+                    Some("fail".to_string())
                 } else {
-                    "fail".to_string()
+                    None
                 };
+                let pause_reason = primary_goal(&completed_run)
+                    .and_then(|goal| goal.requires_attention_reason.clone());
                 let summary = completed_run
                     .status_summary
                     .clone()
+                    .or(pause_reason)
                     .or_else(|| completed_run.summary.clone())
                     .unwrap_or_else(|| "The node run finished.".to_string());
                 (completed_run, transport_session, branch, summary)
@@ -15536,7 +15622,9 @@ fn execute_workflow_run_loop(
             }
         };
 
-        let next_node_id = workflow_next_node_id(&workflow_snapshot, &node_snapshot.id, &branch_result);
+        let next_node_id = branch_result
+            .as_deref()
+            .and_then(|branch| workflow_next_node_id(&workflow_snapshot, &node_snapshot.id, branch));
         let mut finished = false;
         let final_status: String;
         let final_detail: String;
@@ -15555,7 +15643,7 @@ fn execute_workflow_run_loop(
             {
                 node_run.automation_run_id = Some(child_run.id.clone());
                 node_run.status = child_run.status.clone();
-                node_run.branch_result = Some(branch_result.clone());
+                node_run.branch_result = branch_result.clone();
                 node_run.used_cli = primary_goal(&child_run).and_then(|goal| goal.last_owner_cli.clone());
                 node_run.transport_session =
                     transport_session.as_ref().map(workflow_cli_session_ref);
@@ -15567,6 +15655,39 @@ fn execute_workflow_run_loop(
                 upsert_workflow_cli_session(run, session);
             }
 
+            if child_run.status == "paused" {
+                run.current_node_id = Some(node_snapshot.id.clone());
+                run.status = "paused".to_string();
+                run.status_summary = Some(node_summary.clone());
+                run.updated_at = now_stamp();
+                push_workflow_event(
+                    run,
+                    Some(&node_snapshot.id),
+                    "warning",
+                    "Workflow paused",
+                    &node_summary,
+                );
+                let project_name = run.project_name.clone();
+                let log_snapshot = run.clone();
+                let _ = persist_automation_workflow_runs_to_disk(&runs);
+                let _ = append_workflow_log_message(
+                    terminal_storage,
+                    &log_snapshot,
+                    Some(&node_snapshot.id),
+                    Some(&child_run.id),
+                    &format!(
+                        "=== 节点暂停 ===\n节点：{}\n原因：{}",
+                        node_snapshot.label, node_summary
+                    ),
+                );
+                notify_automation_event(
+                    app,
+                    "Workflow paused",
+                    &format!("{} • {}", project_name, node_summary),
+                );
+                return;
+            }
+
             let next_label = next_node_id
                 .as_deref()
                 .and_then(|value| workflow_node_by_id(&workflow_snapshot, value))
@@ -15575,11 +15696,11 @@ fn execute_workflow_run_loop(
             if let Some(next_node_id_value) = next_node_id.clone() {
                 run.current_node_id = Some(next_node_id_value);
                 run.status = "running".to_string();
-                run.status_summary = Some(match (branch_result.as_str(), next_label) {
-                    ("success", Some(label)) => {
+                run.status_summary = Some(match (branch_result.as_deref(), next_label) {
+                    (Some("success"), Some(label)) => {
                         format!("Node `{}` completed. Continuing to `{}`.", node_snapshot.label, label)
                     }
-                    ("fail", Some(label)) => {
+                    (Some("fail"), Some(label)) => {
                         format!("Node `{}` failed. Routing to `{}`.", node_snapshot.label, label)
                     }
                     _ => workflow_run_summary(run),
@@ -15591,8 +15712,8 @@ fn execute_workflow_run_loop(
                 push_workflow_event(
                     run,
                     Some(&node_snapshot.id),
-                    if branch_result == "success" { "success" } else { "warning" },
-                    if branch_result == "success" {
+                    if branch_result.as_deref() == Some("success") { "success" } else { "warning" },
+                    if branch_result.as_deref() == Some("success") {
                         "Workflow node completed"
                     } else {
                         "Workflow node failed"
@@ -15606,7 +15727,7 @@ fn execute_workflow_run_loop(
                 run.current_node_id = None;
                 run.completed_at = Some(now_stamp());
                 run.updated_at = now_stamp();
-                if branch_result == "success" {
+                if branch_result.as_deref() == Some("success") {
                     run.status = "completed".to_string();
                     run.status_summary =
                         Some("Workflow completed successfully.".to_string());
@@ -15643,7 +15764,7 @@ fn execute_workflow_run_loop(
             let mut log_sections = vec![
                 "=== 节点结束 ===".to_string(),
                 format!("节点：{}", node_snapshot.label),
-                format!("结果：{}", if branch_result == "success" { "通过" } else { "失败" }),
+                format!("结果：{}", if branch_result.as_deref() == Some("success") { "通过" } else { "失败" }),
                 format!("说明：{}", node_summary),
             ];
             if let Some(next_label) = next_node_id
@@ -16401,6 +16522,7 @@ pub fn run() {
             start_automation_run,
             pause_automation_run,
             resume_automation_run,
+            resume_automation_workflow_run,
             restart_automation_run,
             pause_automation_goal,
             resume_automation_goal,

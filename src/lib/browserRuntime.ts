@@ -1212,6 +1212,20 @@ function workflowNextNodeId(
   );
 }
 
+function workflowNodeTerminalStatus(
+  node: AutomationWorkflowNode,
+  status: AutomationRunStatus
+) {
+  switch (status) {
+    case "paused":
+      return `Workflow paused after \`${node.label}\` requested manual attention.`;
+    case "failed":
+      return `Workflow stopped after \`${node.label}\` failed.`;
+    default:
+      return "Workflow completed successfully.";
+  }
+}
+
 function workflowNodeEffectiveExecutionMode(
   workflow: AutomationWorkflow,
   node: AutomationWorkflowNode
@@ -1250,12 +1264,19 @@ function createBrowserWorkflowChildRun(
   );
   goal.syntheticTerminalTabId = workflowRun.sharedTerminalTabId;
   const inferred = inferBrowserGoalStatus(goal);
-  const finalStatus = inferred === "completed" ? "completed" : inferred === "paused" ? "failed" : "failed";
+  const finalStatus =
+    inferred === "completed" ? "completed" : inferred === "paused" ? "paused" : "failed";
   goal.status = inferred;
-  goal.lifecycleStatus = "finished";
-  goal.outcomeStatus = inferred === "completed" ? "success" : "failed";
+  goal.lifecycleStatus = inferred === "paused" ? "stopped" : "finished";
+  goal.outcomeStatus =
+    inferred === "completed" ? "success" : inferred === "paused" ? "partial" : "failed";
   goal.attentionStatus = inferred === "paused" ? "waiting_human" : "none";
-  goal.resolutionCode = inferred === "completed" ? "objective_checks_passed" : "objective_checks_failed";
+  goal.resolutionCode =
+    inferred === "completed"
+      ? "objective_checks_passed"
+      : inferred === "paused"
+        ? "waiting_human"
+        : "objective_checks_failed";
   goal.statusSummary =
     inferred === "completed"
       ? "Browser fallback marked this workflow node as completed."
@@ -1288,34 +1309,41 @@ function createBrowserWorkflowChildRun(
     projectRoot: workflow.projectRoot,
     projectName: workflow.projectName,
     ruleProfileId: "safe-autonomy-v1",
-    lifecycleStatus: "finished",
-    outcomeStatus: inferred === "completed" ? "success" : "failed",
+    lifecycleStatus: inferred === "paused" ? "stopped" : "finished",
+    outcomeStatus: inferred === "completed" ? "success" : inferred === "paused" ? "partial" : "failed",
     attentionStatus: inferred === "paused" ? "waiting_human" : "none",
-    resolutionCode: inferred === "completed" ? "objective_checks_passed" : "objective_checks_failed",
+    resolutionCode:
+      inferred === "completed"
+        ? "objective_checks_passed"
+        : inferred === "paused"
+          ? "waiting_human"
+          : "objective_checks_failed",
     statusSummary: goal.statusSummary,
     objectiveSignals: {
       exitCode: goal.lastExitCode,
       checksPassed: inferred === "completed",
-      checksFailed: inferred !== "completed",
+      checksFailed: inferred === "failed",
       artifactsProduced: false,
       filesChanged: 0,
       policyBlocks: inferred === "paused" ? ["waiting_human"] : [],
     },
     judgeAssessment: {
-      madeProgress: inferred === "completed",
+      madeProgress: inferred === "completed" || inferred === "paused",
       expectedOutcomeMet: inferred === "completed",
-      suggestedDecision: inferred === "completed" ? "pass" : "fail_with_feedback",
+      suggestedDecision:
+        inferred === "completed" ? "pass" : inferred === "paused" ? "blocked" : "fail_with_feedback",
       reason: goal.statusSummary,
     },
     validationResult: {
-      decision: inferred === "completed" ? "pass" : "fail_with_feedback",
+      decision:
+        inferred === "completed" ? "pass" : inferred === "paused" ? "blocked" : "fail_with_feedback",
       reason: goal.statusSummary,
       feedback: inferred === "completed" ? null : "Review this node in the desktop runtime.",
       evidenceSummary: goal.statusSummary,
       missingChecks: inferred === "completed" ? [] : [node.expectedOutcome],
       verificationSteps:
         inferred === "completed" ? [] : ["Open the desktop runtime to continue this workflow node."],
-      madeProgress: inferred === "completed",
+      madeProgress: inferred === "completed" || inferred === "paused",
       expectedOutcomeMet: inferred === "completed",
     },
     status: finalStatus,
@@ -1332,7 +1360,11 @@ function createBrowserWorkflowChildRun(
   pushAutomationEvent(
     run,
     inferred === "completed" ? "success" : "warning",
-    inferred === "completed" ? "Workflow node completed" : "Workflow node failed",
+    inferred === "completed"
+      ? "Workflow node completed"
+      : inferred === "paused"
+        ? "Workflow node paused"
+        : "Workflow node failed",
     goal.statusSummary ?? "Workflow node finished."
   );
 
@@ -1421,7 +1453,7 @@ function scheduleBrowserWorkflowRun(runId: string) {
       window.setTimeout(() => {
         const childRun = createBrowserWorkflowChildRun(currentRun, currentWorkflow, node);
         const childGoal = childRun.goals[0];
-        const branchResult = childRun.status === "completed" ? "success" : "fail";
+        const branchResult = childRun.status === "completed" ? "success" : childRun.status === "failed" ? "fail" : null;
         nodeRun.automationRunId = childRun.id;
         nodeRun.status = childRun.status;
         nodeRun.branchResult = branchResult;
@@ -1442,6 +1474,33 @@ function scheduleBrowserWorkflowRun(runId: string) {
               lastSyncAt: nowISO(),
             },
           ];
+        }
+
+        if (childRun.status === "paused") {
+          currentRun.currentNodeId = node.id;
+          currentRun.status = "paused";
+          currentRun.updatedAt = nowISO();
+          currentRun.statusSummary = `Node \`${node.label}\` needs manual attention before the workflow can continue.`;
+          pushWorkflowEvent(
+            currentRun,
+            "warning",
+            "Workflow paused",
+            currentRun.statusSummary,
+            node.id
+          );
+          persistAutomationWorkflowRuns();
+          return;
+        }
+
+        if (!branchResult) {
+          currentRun.currentNodeId = null;
+          currentRun.status = "failed";
+          currentRun.completedAt = nowISO();
+          currentRun.updatedAt = nowISO();
+          currentRun.statusSummary = `Workflow stopped after \`${node.label}\` returned an unsupported status.`;
+          pushWorkflowEvent(currentRun, "error", "Workflow failed", currentRun.statusSummary, node.id);
+          persistAutomationWorkflowRuns();
+          return;
         }
 
         const nextNodeId = workflowNextNodeId(currentWorkflow, node.id, branchResult);
@@ -1465,14 +1524,13 @@ function scheduleBrowserWorkflowRun(runId: string) {
           return;
         }
 
+        const terminalStatus: AutomationRunStatus =
+          branchResult === "success" ? "completed" : "failed";
         currentRun.currentNodeId = null;
-        currentRun.status = branchResult === "success" ? "completed" : "failed";
+        currentRun.status = terminalStatus;
         currentRun.completedAt = nowISO();
         currentRun.updatedAt = nowISO();
-        currentRun.statusSummary =
-          branchResult === "success"
-            ? "Workflow completed successfully."
-            : `Workflow stopped after \`${node.label}\` failed.`;
+        currentRun.statusSummary = workflowNodeTerminalStatus(node, terminalStatus);
         pushWorkflowEvent(
           currentRun,
           branchResult === "success" ? "success" : "error",
@@ -2271,6 +2329,35 @@ export const browserRuntime = {
     pushAutomationEvent(run, "info", "批次继续执行", "浏览器预览已恢复该批次。");
     persistAutomationRuns();
     scheduleBrowserAutomationRun(run.id);
+    return structuredClone(run);
+  },
+  async resumeAutomationWorkflowRun(workflowRunId: string) {
+    const run = automationWorkflowRuns.find((item) => item.id === workflowRunId);
+    if (!run) throw new Error("Workflow run not found.");
+    if (run.status !== "paused") {
+      throw new Error("Only paused workflow runs can be resumed.");
+    }
+    const now = nowISO();
+    run.status = "scheduled";
+    run.statusSummary = "Re-queued after pause.";
+    run.scheduledStartAt = now;
+    run.completedAt = null;
+    run.updatedAt = now;
+    const currentNodeId = run.currentNodeId ?? run.entryNodeId;
+    const currentNodeRun = run.nodeRuns.find((item) => item.nodeId === currentNodeId);
+    if (currentNodeRun && currentNodeRun.status === "paused") {
+      currentNodeRun.status = "queued";
+      currentNodeRun.branchResult = null;
+      currentNodeRun.statusSummary = "Re-queued after pause.";
+      currentNodeRun.automationRunId = null;
+      currentNodeRun.transportSession = null;
+      currentNodeRun.usedCli = null;
+      currentNodeRun.completedAt = null;
+      currentNodeRun.updatedAt = now;
+    }
+    pushWorkflowEvent(run, "info", "Workflow resumed", "Browser fallback re-queued the paused workflow.");
+    persistAutomationWorkflowRuns();
+    scheduleBrowserWorkflowRun(run.id);
     return structuredClone(run);
   },
   async restartAutomationRun(runId: string) {

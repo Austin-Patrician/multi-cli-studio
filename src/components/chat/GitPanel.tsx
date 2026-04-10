@@ -1,10 +1,17 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { bridge } from "../../lib/bridge";
 import type { GitFileChange, GitFileDiff } from "../../lib/models";
 import { useStore } from "../../lib/store";
 
 type DiffViewMode = "split" | "unified";
+
+type DiffHunk = {
+  originalStart: number;
+  originalCount: number;
+  modifiedStart: number;
+  modifiedCount: number;
+};
 
 const MonacoDiffEditor = lazy(async () => {
   const module = await import("@monaco-editor/react");
@@ -203,6 +210,20 @@ function isMetadataOnlyDiff(diff: GitFileDiff | null) {
   return !/^@@/m.test(diff.diff);
 }
 
+function parseDiffHunks(diffText: string) {
+  const hunks: DiffHunk[] = [];
+  const pattern = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm;
+  for (const match of diffText.matchAll(pattern)) {
+    hunks.push({
+      originalStart: Number(match[1] ?? "1"),
+      originalCount: Number(match[2] ?? "1"),
+      modifiedStart: Number(match[3] ?? "1"),
+      modifiedCount: Number(match[4] ?? "1"),
+    });
+  }
+  return hunks;
+}
+
 function DiffModeToggle({
   mode,
   onChange,
@@ -269,10 +290,29 @@ function DiffPatchFallback({ diffText }: { diffText: string }) {
 function MonacoDiffView({
   diff,
   mode,
+  activeHunk,
 }: {
   diff: GitFileDiff;
   mode: DiffViewMode;
+  activeHunk: DiffHunk | null;
 }) {
+  const editorRef = useRef<any>(null);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || !activeHunk) return;
+    const originalEditor = editor.getOriginalEditor?.();
+    const modifiedEditor = editor.getModifiedEditor?.();
+    if (activeHunk.originalCount > 0 && originalEditor) {
+      originalEditor.revealLineInCenter(activeHunk.originalStart);
+      originalEditor.setPosition?.({ lineNumber: activeHunk.originalStart, column: 1 });
+    }
+    if (activeHunk.modifiedCount > 0 && modifiedEditor) {
+      modifiedEditor.revealLineInCenter(activeHunk.modifiedStart);
+      modifiedEditor.setPosition?.({ lineNumber: activeHunk.modifiedStart, column: 1 });
+    }
+  }, [activeHunk]);
+
   return (
     <div className="h-full bg-[#1e1e1e]">
       <Suspense
@@ -283,6 +323,9 @@ function MonacoDiffView({
         }
       >
         <MonacoDiffEditor
+          onMount={(editor) => {
+            editorRef.current = editor;
+          }}
           original={diff.originalContent ?? ""}
           modified={diff.modifiedContent ?? ""}
           language={diff.language ?? "plaintext"}
@@ -318,10 +361,11 @@ function DiffOverlay({
   diff,
   loading,
   error,
-  hasPrevious,
-  hasNext,
-  onPrevious,
-  onNext,
+  hasPreviousFile,
+  hasNextFile,
+  onPreviousFile,
+  onNextFile,
+  initialHunkTarget,
   onClose,
 }: {
   workspaceRoot: string;
@@ -329,29 +373,45 @@ function DiffOverlay({
   diff: GitFileDiff | null;
   loading: boolean;
   error: string | null;
-  hasPrevious: boolean;
-  hasNext: boolean;
-  onPrevious: () => void;
-  onNext: () => void;
+  hasPreviousFile: boolean;
+  hasNextFile: boolean;
+  onPreviousFile: () => void;
+  onNextFile: () => void;
+  initialHunkTarget?: "first" | "last" | null;
   onClose: () => void;
 }) {
   const [isOpeningFile, setIsOpeningFile] = useState(false);
   const [viewMode, setViewMode] = useState<DiffViewMode>("split");
+  const [activeHunkIndex, setActiveHunkIndex] = useState(0);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
-      if (event.key === "[" && hasPrevious) onPrevious();
-      if (event.key === "]" && hasNext) onNext();
+      if (event.key === "[") handlePrevious();
+      if (event.key === "]") handleNext();
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [hasNext, hasPrevious, onClose, onNext, onPrevious]);
+  });
 
   useEffect(() => {
     setViewMode("split");
   }, [diff?.path]);
+
+  const diffHunks = useMemo(() => parseDiffHunks(diff?.diff ?? ""), [diff?.diff]);
+  const activeHunk =
+    diffHunks.length > 0 && activeHunkIndex >= 0 && activeHunkIndex < diffHunks.length
+      ? diffHunks[activeHunkIndex]
+      : null;
+
+  useEffect(() => {
+    if (diffHunks.length === 0) {
+      setActiveHunkIndex(0);
+      return;
+    }
+    setActiveHunkIndex(initialHunkTarget === "last" ? diffHunks.length - 1 : 0);
+  }, [diff?.path, diffHunks.length, initialHunkTarget]);
 
   const titlePath = diff?.path ?? change?.path ?? "";
   const fileType = fileTypeToken(titlePath);
@@ -360,6 +420,24 @@ function DiffOverlay({
   const metadataLines = useMemo(() => metadataSummaryLines(diff?.diff ?? ""), [diff?.diff]);
   const renderMonaco = canRenderMonacoDiff(diff);
   const metadataOnly = isMetadataOnlyDiff(diff);
+  const canPrevious = diffHunks.length > 0 ? activeHunkIndex > 0 || hasPreviousFile : hasPreviousFile;
+  const canNext = diffHunks.length > 0 ? activeHunkIndex < diffHunks.length - 1 || hasNextFile : hasNextFile;
+
+  function handlePrevious() {
+    if (diffHunks.length > 0 && activeHunkIndex > 0) {
+      setActiveHunkIndex((current) => current - 1);
+      return;
+    }
+    if (hasPreviousFile) onPreviousFile();
+  }
+
+  function handleNext() {
+    if (diffHunks.length > 0 && activeHunkIndex < diffHunks.length - 1) {
+      setActiveHunkIndex((current) => current + 1);
+      return;
+    }
+    if (hasNextFile) onNextFile();
+  }
 
   async function handleOpenFile() {
     if (!titlePath || isOpeningFile) return;
@@ -404,8 +482,8 @@ function DiffOverlay({
               <DiffModeToggle mode={viewMode} onChange={setViewMode} />
               <button
                 type="button"
-                onClick={onPrevious}
-                disabled={!hasPrevious}
+                onClick={handlePrevious}
+                disabled={!canPrevious}
                 title="Previous change"
                 aria-label="Previous change"
                 className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
@@ -414,8 +492,8 @@ function DiffOverlay({
               </button>
               <button
                 type="button"
-                onClick={onNext}
-                disabled={!hasNext}
+                onClick={handleNext}
+                disabled={!canNext}
                 title="Next change"
                 aria-label="Next change"
                 className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
@@ -466,7 +544,7 @@ function DiffOverlay({
               lines={metadataLines}
             />
           ) : diff && renderMonaco ? (
-            <MonacoDiffView diff={diff} mode={viewMode} />
+            <MonacoDiffView diff={diff} mode={viewMode} activeHunk={activeHunk} />
           ) : diff ? (
             <DiffPatchFallback diffText={diff.diff} />
           ) : null}
@@ -495,6 +573,7 @@ export function GitPanel() {
   const [diffCacheByPath, setDiffCacheByPath] = useState<Record<string, GitFileDiff>>({});
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
+  const [pendingHunkTarget, setPendingHunkTarget] = useState<"first" | "last" | null>(null);
 
   const workspace = useMemo(
     () =>
@@ -594,6 +673,7 @@ export function GitPanel() {
     if (selectedIndex < 0) return;
     const nextChange = recentChanges[selectedIndex + direction];
     if (!nextChange) return;
+    setPendingHunkTarget(direction < 0 ? "last" : "first");
     setSelectedPath(nextChange.path);
   }
 
@@ -637,7 +717,10 @@ export function GitPanel() {
                     <button
                       key={`${change.previousPath ?? ""}:${change.path}:${change.status}`}
                       type="button"
-                      onClick={() => setSelectedPath(change.path)}
+                      onClick={() => {
+                        setPendingHunkTarget(null);
+                        setSelectedPath(change.path);
+                      }}
                       className={`mb-1.5 flex w-full items-start gap-3 rounded-[20px] px-3 py-3 text-left transition-all ${
                         isSelected
                           ? "bg-[#edf4ff] shadow-[inset_0_0_0_1px_rgba(59,130,246,0.12)]"
@@ -688,15 +771,17 @@ export function GitPanel() {
           diff={selectedDiff}
           loading={isLoadingDiff}
           error={diffError}
-          hasPrevious={hasPrevious}
-          hasNext={hasNext}
-          onPrevious={() => selectRelativeChange(-1)}
-          onNext={() => selectRelativeChange(1)}
+          hasPreviousFile={hasPrevious}
+          hasNextFile={hasNext}
+          onPreviousFile={() => selectRelativeChange(-1)}
+          onNextFile={() => selectRelativeChange(1)}
+          initialHunkTarget={pendingHunkTarget}
           onClose={() => {
             setSelectedPath(null);
             setSelectedDiff(null);
             setDiffError(null);
             setIsLoadingDiff(false);
+            setPendingHunkTarget(null);
           }}
         />
       ) : null}
