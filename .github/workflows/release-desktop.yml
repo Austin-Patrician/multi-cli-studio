@@ -49,6 +49,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Synchronize version metadata
+        run: node ./scripts/sync-version.mjs ${{ inputs.version }}
+
       - name: Validate version metadata
         run: node ./scripts/sync-version.mjs --check ${{ inputs.version }}
 
