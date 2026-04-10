@@ -134,6 +134,29 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # ── Apple code signing setup (skipped if secrets are not configured) ──
+      - name: Import Apple certificate
+        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
       - name: Install frontend dependencies
         run: npm ci
 
@@ -144,7 +167,63 @@ jobs:
         run: node ./scripts/sync-version.mjs --check ${{ inputs.version }}
 
       - name: Build Tauri bundle
+        env:
+          # Tauri v2 reads these env vars for automatic signing
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run tauri:build
+
+      # ── Ad-hoc signing fallback (free, no Apple Developer account needed) ──
+      # Replaces "damaged" error with a bypassable "unidentified developer" dialog
+      - name: Ad-hoc sign app bundle (fallback)
+        if: ${{ secrets.APPLE_SIGNING_IDENTITY == '' }}
+        run: |
+          app_bundle=$(find src-tauri/target/release/bundle/macos -name '*.app' -maxdepth 1 | head -n 1)
+          if [ -n "$app_bundle" ]; then
+            echo "No Apple signing identity configured – applying ad-hoc signature"
+            codesign --force --deep --sign - "$app_bundle"
+            echo "Ad-hoc signed: $app_bundle"
+          fi
+
+      # ── Re-create DMG after ad-hoc signing (the original DMG contains the unsigned app) ──
+      - name: Re-create DMG after ad-hoc signing
+        if: ${{ secrets.APPLE_SIGNING_IDENTITY == '' }}
+        run: |
+          app_bundle=$(find src-tauri/target/release/bundle/macos -name '*.app' -maxdepth 1 | head -n 1)
+          dmg_file=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -n 1)
+          if [ -n "$app_bundle" ] && [ -n "$dmg_file" ]; then
+            dmg_name=$(basename "$dmg_file")
+            dmg_dir=$(dirname "$dmg_file")
+            app_name=$(basename "$app_bundle")
+            rm -f "$dmg_file"
+            hdiutil create -volname "${app_name%.app}" \
+              -srcfolder "$app_bundle" \
+              -ov -format UDZO \
+              "$dmg_dir/$dmg_name"
+            echo "Re-created DMG with ad-hoc signed app: $dmg_dir/$dmg_name"
+          fi
+
+      # ── Notarization (only when Apple credentials are configured) ──
+      - name: Notarize app bundle
+        if: ${{ secrets.APPLE_ID != '' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          dmg_file=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -n 1)
+          if [ -n "$dmg_file" ]; then
+            xcrun notarytool submit "$dmg_file" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait --timeout 600
+            xcrun stapler staple "$dmg_file"
+          fi
 
       - name: Resolve DMG path
         id: dmg
@@ -160,3 +239,11 @@ jobs:
       - name: Upload DMG to GitHub Release
         run: |
           gh release upload "$RELEASE_TAG" "${{ steps.dmg.outputs.path }}" --clobber
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi
