@@ -119,6 +119,12 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_TAG: v${{ inputs.version }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -136,10 +142,7 @@ jobs:
 
       # ── Apple code signing setup (skipped if secrets are not configured) ──
       - name: Import Apple certificate
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        if: env.APPLE_CERTIFICATE != ''
         run: |
           CERT_PATH="$RUNNER_TEMP/certificate.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
@@ -167,20 +170,12 @@ jobs:
         run: node ./scripts/sync-version.mjs --check ${{ inputs.version }}
 
       - name: Build Tauri bundle
-        env:
-          # Tauri v2 reads these env vars for automatic signing
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run tauri:build
 
       # ── Ad-hoc signing fallback (free, no Apple Developer account needed) ──
       # Replaces "damaged" error with a bypassable "unidentified developer" dialog
       - name: Ad-hoc sign app bundle (fallback)
-        if: ${{ secrets.APPLE_SIGNING_IDENTITY == '' }}
+        if: env.APPLE_SIGNING_IDENTITY == ''
         run: |
           app_bundle=$(find src-tauri/target/release/bundle/macos -name '*.app' -maxdepth 1 | head -n 1)
           if [ -n "$app_bundle" ]; then
@@ -191,7 +186,7 @@ jobs:
 
       # ── Re-create DMG after ad-hoc signing (the original DMG contains the unsigned app) ──
       - name: Re-create DMG after ad-hoc signing
-        if: ${{ secrets.APPLE_SIGNING_IDENTITY == '' }}
+        if: env.APPLE_SIGNING_IDENTITY == ''
         run: |
           app_bundle=$(find src-tauri/target/release/bundle/macos -name '*.app' -maxdepth 1 | head -n 1)
           dmg_file=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -n 1)
@@ -209,11 +204,7 @@ jobs:
 
       # ── Notarization (only when Apple credentials are configured) ──
       - name: Notarize app bundle
-        if: ${{ secrets.APPLE_ID != '' }}
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        if: env.APPLE_ID != ''
         run: |
           dmg_file=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -n 1)
           if [ -n "$dmg_file" ]; then
