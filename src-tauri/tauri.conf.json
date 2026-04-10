@@ -26,10 +26,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": "nsis",
+    "targets": "all",
     "icon": [
       "icons/icon.ico",
-      "icons/icon.png"
+      "icons/icon.png",
+      "icons/icon.icns"
     ],
     "category": "DeveloperTool",
     "shortDescription": "Desktop orchestration shell for Codex, Claude, and Gemini CLIs.",
@@ -39,6 +40,9 @@
         "startMenuFolder": "Multi CLI Studio",
         "installMode": "currentUser"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
     }
   }
 }

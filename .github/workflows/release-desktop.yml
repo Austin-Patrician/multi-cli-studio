@@ -22,15 +22,50 @@ permissions:
   contents: write
 
 jobs:
+  # ── 1. Create / update the GitHub Release ──────────────────────────
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create or update GitHub Release
+        env:
+          RELEASE_TAG: v${{ inputs.version }}
+          RELEASE_NAME: ${{ inputs.release_name != '' && inputs.release_name || format('v{0}', inputs.version) }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          tag="$RELEASE_TAG"
+          name="$RELEASE_NAME"
+          notes="$RELEASE_NOTES"
+
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            if [ -z "$notes" ]; then
+              gh release create "$tag" --title "$name" --target "$GITHUB_SHA" --generate-notes
+            else
+              printf '%s' "$notes" > "$RUNNER_TEMP/release-notes.md"
+              gh release create "$tag" --title "$name" --target "$GITHUB_SHA" --notes-file "$RUNNER_TEMP/release-notes.md"
+            fi
+          else
+            if [ -z "$notes" ]; then
+              gh release edit "$tag" --title "$name"
+            else
+              printf '%s' "$notes" > "$RUNNER_TEMP/release-notes.md"
+              gh release edit "$tag" --title "$name" --notes-file "$RUNNER_TEMP/release-notes.md"
+            fi
+          fi
+
+  # ── 2. Build Windows NSIS installer ────────────────────────────────
   build-windows-installer:
     name: Build Windows Installer
+    needs: create-release
     runs-on: windows-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RELEASE_VERSION: ${{ inputs.version }}
       RELEASE_TAG: v${{ inputs.version }}
-      RELEASE_NAME: ${{ inputs.release_name != '' && inputs.release_name || format('v{0}', inputs.version) }}
-      RELEASE_NOTES: ${{ inputs.release_notes }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,33 +106,57 @@ jobs:
           "path=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "name=$($installer.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Create or update GitHub Release
-        shell: pwsh
-        run: |
-          $tag = $env:RELEASE_TAG
-          $name = $env:RELEASE_NAME
-          $notes = $env:RELEASE_NOTES
-
-          gh release view $tag 1>$null 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            if ([string]::IsNullOrWhiteSpace($notes)) {
-              gh release create $tag --title $name --target $env:GITHUB_SHA --generate-notes
-            } else {
-              $notesFile = Join-Path $env:RUNNER_TEMP "release-notes.md"
-              Set-Content -Path $notesFile -Value $notes -Encoding utf8
-              gh release create $tag --title $name --target $env:GITHUB_SHA --notes-file $notesFile
-            }
-          } else {
-            if ([string]::IsNullOrWhiteSpace($notes)) {
-              gh release edit $tag --title $name
-            } else {
-              $notesFile = Join-Path $env:RUNNER_TEMP "release-notes.md"
-              Set-Content -Path $notesFile -Value $notes -Encoding utf8
-              gh release edit $tag --title $name --notes-file $notesFile
-            }
-          }
-
       - name: Upload installer to GitHub Release
         shell: pwsh
         run: |
           gh release upload $env:RELEASE_TAG "${{ steps.nsis.outputs.path }}" --clobber
+
+  # ── 3. Build macOS DMG installer ───────────────────────────────────
+  build-macos-installer:
+    name: Build macOS Installer
+    needs: create-release
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: v${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Synchronize version metadata
+        run: node ./scripts/sync-version.mjs ${{ inputs.version }}
+
+      - name: Validate version metadata
+        run: node ./scripts/sync-version.mjs --check ${{ inputs.version }}
+
+      - name: Build Tauri bundle
+        run: npm run tauri:build
+
+      - name: Resolve DMG path
+        id: dmg
+        run: |
+          dmg_file=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -n 1)
+          if [ -z "$dmg_file" ]; then
+            echo "::error::DMG installer was not found under src-tauri/target/release/bundle/dmg"
+            exit 1
+          fi
+          echo "path=$dmg_file" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$dmg_file")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload DMG to GitHub Release
+        run: |
+          gh release upload "$RELEASE_TAG" "${{ steps.dmg.outputs.path }}" --clobber
