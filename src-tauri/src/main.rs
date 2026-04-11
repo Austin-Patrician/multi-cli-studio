@@ -12972,6 +12972,200 @@ fn automation_mail_html_body(run: &AutomationRun, status: &str) -> String {
     )
 }
 
+fn workflow_node_mail_status_label(status: &str) -> &'static str {
+    match status {
+        "completed" => "已完成",
+        "failed" => "失败",
+        "paused" => "已暂停",
+        "running" => "运行中",
+        "queued" => "待执行",
+        _ => "待确认",
+    }
+}
+
+fn workflow_mail_subject(run: &AutomationWorkflowRun, status: &str) -> String {
+    format!(
+        "[{}] 工作流{}：{}",
+        run.project_name,
+        automation_mail_status_label(status),
+        run.workflow_name
+    )
+}
+
+fn workflow_mail_text_body(run: &AutomationWorkflowRun, status: &str) -> String {
+    let node_summary = if run.node_runs.is_empty() {
+        "- 当前没有节点执行记录。".to_string()
+    } else {
+        run.node_runs
+            .iter()
+            .map(|node| {
+                let detail = node
+                    .status_summary
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("无额外说明");
+                format!(
+                    "- {}：{}；{}",
+                    node.label,
+                    workflow_node_mail_status_label(&node.status),
+                    detail
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "Multi CLI Studio 工作流通知\n\n项目：{}\n工作流：{}\n状态：{}\n运行 ID：{}\n开始时间：{}\n完成时间：{}\n摘要：{}\n节点概览：{}\n\n节点结果：\n{}\n\n此邮件由 Multi CLI Studio 自动发送。",
+        run.project_name,
+        run.workflow_name,
+        automation_mail_status_label(status),
+        run.id,
+        run.started_at.as_deref().unwrap_or("-"),
+        run.completed_at.as_deref().unwrap_or("-"),
+        run.status_summary
+            .clone()
+            .unwrap_or_else(|| workflow_run_summary(run)),
+        workflow_run_summary(run),
+        node_summary,
+    )
+}
+
+fn workflow_mail_html_body(run: &AutomationWorkflowRun, status: &str) -> String {
+    let (status_label, status_bg, status_fg) = email_status_meta(status);
+    let summary = run
+        .status_summary
+        .clone()
+        .unwrap_or_else(|| "本次工作流运行已结束。".to_string());
+    let overview = format!(
+        "<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">
+           <tr>
+             {}
+             {}
+           </tr>
+           <tr>
+             {}
+             {}
+           </tr>
+         </table>",
+        html_metric_card("项目", &run.project_name),
+        html_metric_card("工作流", &run.workflow_name),
+        html_metric_card("开始时间", run.started_at.as_deref().unwrap_or("-")),
+        html_metric_card("完成时间", run.completed_at.as_deref().unwrap_or("-")),
+    );
+    let status_section = html_section(
+        "运行概览",
+        &format!(
+            "<div style=\"display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;\">
+               <span style=\"display:inline-block;padding:7px 12px;border-radius:999px;background:{};color:{};font-size:12px;font-weight:700;\">{}</span>
+             </div>
+             <div style=\"font-size:14px;line-height:1.8;color:#334155;\">{}</div>
+             <div style=\"margin-top:10px;font-size:13px;line-height:1.75;color:#475569;\">节点概览：{}</div>
+             <div style=\"margin-top:10px;font-size:12px;line-height:1.7;color:#64748b;\">运行 ID：{}</div>",
+            status_bg,
+            status_fg,
+            escape_html(status_label),
+            multiline_html(&summary),
+            escape_html(&workflow_run_summary(run)),
+            escape_html(&run.id)
+        ),
+    );
+    let node_rows = if run.node_runs.is_empty() {
+        "<div style=\"font-size:13px;line-height:1.7;color:#64748b;\">当前没有节点执行记录。</div>"
+            .to_string()
+    } else {
+        run.node_runs
+            .iter()
+            .map(|node| {
+                let detail = node
+                    .status_summary
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("无额外说明");
+                format!(
+                    "<div style=\"padding:12px 14px;border:1px solid #e2e8f0;border-radius:14px;background:#f8fafc;\">
+                       <div style=\"display:flex;flex-wrap:wrap;align-items:center;gap:8px;\">
+                         <div style=\"font-size:13px;font-weight:700;color:#0f172a;\">{}</div>
+                         <span style=\"display:inline-block;padding:4px 9px;border-radius:999px;background:{};color:{};font-size:11px;font-weight:700;\">{}</span>
+                       </div>
+                       <div style=\"margin-top:8px;font-size:13px;line-height:1.8;color:#334155;\">{}</div>
+                     </div>",
+                    escape_html(&node.label),
+                    email_status_meta(&node.status).1,
+                    email_status_meta(&node.status).2,
+                    escape_html(workflow_node_mail_status_label(&node.status)),
+                    multiline_html(detail),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    let node_section = html_section(
+        "节点结果",
+        &format!(
+            "<div style=\"display:grid;gap:12px;\">{}</div>",
+            node_rows
+        ),
+    );
+    let body = format!("{}{}{}", overview, status_section, node_section);
+    email_shell_html(
+        &format!("{} · {}", run.workflow_name, status_label),
+        "工作流已进入最终状态，以下是本次运行的汇总结果。",
+        status_label,
+        status_bg,
+        status_fg,
+        &body,
+    )
+}
+
+fn send_workflow_completion_email_if_configured(
+    settings_arc: &Arc<Mutex<AppSettings>>,
+    run: &AutomationWorkflowRun,
+) {
+    if run.status != "completed" && run.status != "failed" {
+        return;
+    }
+    if !run.email_notification_enabled {
+        return;
+    }
+
+    let Some(cfg) = settings_arc
+        .lock()
+        .ok()
+        .map(|settings| settings.notification_config.clone())
+    else {
+        return;
+    };
+
+    if !smtp_notification_ready(&cfg) {
+        return;
+    }
+
+    let host = cfg.smtp_host.clone();
+    let port = cfg.smtp_port;
+    let username = cfg.smtp_username.clone();
+    let password = cfg.smtp_password.clone();
+    let from = cfg.smtp_from.clone();
+    let recipients = cfg.email_recipients.clone();
+    let status = run.status.clone();
+    let subject = workflow_mail_subject(run, &status);
+    let body = workflow_mail_text_body(run, &status);
+    let html_body = workflow_mail_html_body(run, &status);
+
+    std::thread::spawn(move || {
+        let _ = send_email_notification(
+            &host,
+            port,
+            &username,
+            &password,
+            &from,
+            &recipients,
+            &subject,
+            &body,
+            &html_body,
+        );
+    });
+}
+
 fn send_email_notification(
     host: &str,
     port: u16,
@@ -16013,7 +16207,9 @@ fn execute_workflow_run_loop(
                 run.status_summary = Some("The workflow definition no longer exists.".to_string());
                 run.completed_at = Some(now_stamp());
                 run.updated_at = now_stamp();
+                let failed_snapshot = run.clone();
                 let _ = persist_automation_workflow_runs_to_disk(&runs);
+                send_workflow_completion_email_if_configured(settings_arc, &failed_snapshot);
                 return;
             };
             let next_node_id = run
@@ -16026,7 +16222,9 @@ fn execute_workflow_run_loop(
                     Some("The next workflow node definition is missing.".to_string());
                 run.completed_at = Some(now_stamp());
                 run.updated_at = now_stamp();
+                let failed_snapshot = run.clone();
                 let _ = persist_automation_workflow_runs_to_disk(&runs);
+                send_workflow_completion_email_if_configured(settings_arc, &failed_snapshot);
                 return;
             };
 
@@ -16153,6 +16351,7 @@ fn execute_workflow_run_loop(
                     "Workflow failed",
                     &format!("{} • {}", project_name, error),
                 );
+                send_workflow_completion_email_if_configured(settings_arc, &log_snapshot);
                 return;
             }
         };
@@ -16161,6 +16360,7 @@ fn execute_workflow_run_loop(
             workflow_next_node_id(&workflow_snapshot, &node_snapshot.id, branch)
         });
         let mut finished = false;
+        let mut final_run_snapshot: Option<AutomationWorkflowRun> = None;
         let final_status: String;
         let final_detail: String;
         {
@@ -16307,6 +16507,9 @@ fn execute_workflow_run_loop(
 
             run.updated_at = now_stamp();
             let log_snapshot = run.clone();
+            if finished {
+                final_run_snapshot = Some(log_snapshot.clone());
+            }
             let _ = persist_automation_workflow_runs_to_disk(&runs);
             let mut log_sections = vec![
                 "=== 节点结束 ===".to_string(),
@@ -16368,6 +16571,9 @@ fn execute_workflow_run_loop(
             if let Some(state) = snapshot_state.as_ref() {
                 let _ = persist_state(state);
                 emit_state(app, state);
+            }
+            if let Some(run_snapshot) = final_run_snapshot.as_ref() {
+                send_workflow_completion_email_if_configured(settings_arc, run_snapshot);
             }
             return;
         }
