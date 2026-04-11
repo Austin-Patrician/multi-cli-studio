@@ -126,7 +126,11 @@ export function UserBubble({
       </div>
 
       <div className="flex w-fit max-w-[75%] flex-col items-end gap-1.5">
-        <div className="max-w-full rounded-2xl rounded-br-md bg-accent px-3.5 py-2.5 text-sm whitespace-pre-wrap text-white">
+        <div
+          data-chat-searchable-content="true"
+          data-chat-search-message-id={message.id}
+          className="max-w-full rounded-2xl rounded-br-md bg-accent px-3.5 py-2.5 text-sm whitespace-pre-wrap text-white"
+        >
           {message.content}
         </div>
 

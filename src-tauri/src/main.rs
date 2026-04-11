@@ -6,6 +6,7 @@ mod storage;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -19,22 +20,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::Local;
-use cron::Schedule;
-use dirs::data_local_dir;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use tauri_plugin_notification::NotificationExt;
 use automation::{
-    build_job_from_draft, build_run_from_job, build_run_from_request, default_rule_profile,
-    build_workflow_from_draft, build_workflow_run_from_workflow, display_parameter_value,
-    load_jobs as load_automation_jobs_from_disk, load_rule_profile,
-    load_runs as load_automation_runs_from_disk, load_workflow_runs as load_automation_workflow_runs_from_disk,
+    build_job_from_draft, build_run_from_job, build_run_from_request, build_workflow_from_draft,
+    build_workflow_run_from_workflow, default_rule_profile, display_parameter_value,
+    display_status_from_dimensions, load_jobs as load_automation_jobs_from_disk, load_rule_profile,
+    load_runs as load_automation_runs_from_disk,
+    load_workflow_runs as load_automation_workflow_runs_from_disk,
     load_workflows as load_automation_workflows_from_disk, normalize_goal_rule_config,
-    normalize_permission_profile, normalize_rule_profile, normalize_scheduled_start_at,
-    normalize_runs_on_startup, normalize_workflow_runs_on_startup, normalize_workflows_on_startup,
-    persist_jobs as persist_automation_jobs_to_disk, persist_rule_profile,
-    persist_runs as persist_automation_runs_to_disk, persist_workflow_runs as persist_automation_workflow_runs_to_disk,
+    normalize_permission_profile, normalize_rule_profile, normalize_runs_on_startup,
+    normalize_scheduled_start_at, normalize_workflow_runs_on_startup,
+    normalize_workflows_on_startup, persist_jobs as persist_automation_jobs_to_disk,
+    persist_rule_profile, persist_runs as persist_automation_runs_to_disk,
+    persist_workflow_runs as persist_automation_workflow_runs_to_disk,
     persist_workflows as persist_automation_workflows_to_disk, push_event, push_workflow_event,
     sync_goal_status_fields, sync_run_status_fields, update_job_from_draft,
     update_workflow_from_draft, AutomationGoal, AutomationGoalRuleConfig, AutomationJob,
@@ -42,8 +39,12 @@ use automation::{
     AutomationRuleProfile, AutomationRun, AutomationValidationResult, AutomationWorkflow,
     AutomationWorkflowDraft, AutomationWorkflowRun, CreateAutomationRunFromJobRequest,
     CreateAutomationRunRequest, CreateAutomationWorkflowRunRequest, WorkflowCliSessionRef,
-    display_status_from_dimensions,
 };
+use chrono::Local;
+use cron::Schedule;
+use dirs::data_local_dir;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use storage::{
     default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest,
     MessageBlocksUpdateRequest, MessageDeleteRequest, MessageEventsAppendRequest,
@@ -52,6 +53,7 @@ use storage::{
     TaskRecentTurn, TerminalStorage,
 };
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_notification::NotificationExt;
 use uuid::Uuid;
 
 #[cfg(target_os = "windows")]
@@ -68,6 +70,13 @@ const FALLBACK_SHELL: &str = "/bin/zsh";
 const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
+
+#[derive(Debug, Clone)]
+struct CliCommandOutput {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
 
 // ── UI state models (unchanged shape for frontend compat) ──────────────
 
@@ -362,7 +371,10 @@ fn validate_notification_config(config: &NotificationConfig) -> Result<(), Strin
         return Err("SMTP from address is invalid.".to_string());
     }
     if config.email_recipients.is_empty() {
-        return Err("At least one email recipient is required when email notifications are enabled.".to_string());
+        return Err(
+            "At least one email recipient is required when email notifications are enabled."
+                .to_string(),
+        );
     }
     if config
         .email_recipients
@@ -371,7 +383,11 @@ fn validate_notification_config(config: &NotificationConfig) -> Result<(), Strin
     {
         return Err("One or more email recipients are invalid.".to_string());
     }
-    if config.smtp_host.trim().eq_ignore_ascii_case("smtp.useplunk.com") {
+    if config
+        .smtp_host
+        .trim()
+        .eq_ignore_ascii_case("smtp.useplunk.com")
+    {
         if config.smtp_username.trim() != "plunk" {
             return Err("Plunk SMTP username must be set to `plunk`.".to_string());
         }
@@ -932,7 +948,11 @@ fn codex_permission_mode(session: &acp::AcpSession, write_mode: bool) -> String 
     }
 }
 
-fn automation_permission_mode_for_cli(permission_profile: &str, cli_id: &str, write_mode: bool) -> String {
+fn automation_permission_mode_for_cli(
+    permission_profile: &str,
+    cli_id: &str,
+    write_mode: bool,
+) -> String {
     if !write_mode {
         return match cli_id {
             "claude" | "gemini" => "plan".to_string(),
@@ -940,7 +960,10 @@ fn automation_permission_mode_for_cli(permission_profile: &str, cli_id: &str, wr
         };
     }
 
-    match (cli_id, normalize_permission_profile(permission_profile).as_str()) {
+    match (
+        cli_id,
+        normalize_permission_profile(permission_profile).as_str(),
+    ) {
         ("codex", "full-access") => "danger-full-access".to_string(),
         ("codex", "read-only") => "read-only".to_string(),
         ("codex", _) => "workspace-write".to_string(),
@@ -1305,7 +1328,7 @@ fn resolve_direct_command_path(command_path: &str) -> String {
 
 fn batch_aware_command(command_path: &str, args: &[&str]) -> Command {
     let lower_command = command_path.to_ascii_lowercase();
-    if lower_command.ends_with(".cmd") || lower_command.ends_with(".bat") {
+    let mut command = if lower_command.ends_with(".cmd") || lower_command.ends_with(".bat") {
         let mut command = Command::new("cmd.exe");
         command.arg("/C").arg("call").arg(command_path).args(args);
         #[cfg(target_os = "windows")]
@@ -1317,7 +1340,9 @@ fn batch_aware_command(command_path: &str, args: &[&str]) -> Command {
         #[cfg(target_os = "windows")]
         command.creation_flags(CREATE_NO_WINDOW);
         command
-    }
+    };
+    apply_runtime_environment(&mut command);
+    command
 }
 
 fn start_process_watchdog(pid: u32, timeout_ms: u64) -> Arc<AtomicBool> {
@@ -4462,6 +4487,7 @@ fn run_claude_headless_turn_once(
         command.args(&args);
         command
     };
+    apply_runtime_environment(&mut cmd);
 
     cmd.current_dir(project_root)
         .stdin(Stdio::piped())
@@ -5525,7 +5551,9 @@ fn mark_kernel_fact_status(
     fact_id: String,
     status: String,
 ) -> Result<Option<TaskKernel>, String> {
-    store.terminal_storage.mark_kernel_fact_status(&fact_id, &status)
+    store
+        .terminal_storage
+        .mark_kernel_fact_status(&fact_id, &status)
 }
 
 #[tauri::command]
@@ -5658,7 +5686,9 @@ fn delete_chat_session_by_tab(
     store: State<'_, AppStore>,
     terminal_tab_id: String,
 ) -> Result<(), String> {
-    store.terminal_storage.delete_chat_session_by_tab(&terminal_tab_id)
+    store
+        .terminal_storage
+        .delete_chat_session_by_tab(&terminal_tab_id)
 }
 
 #[tauri::command]
@@ -5773,7 +5803,9 @@ fn automation_run_record(run: &AutomationRun) -> AutomationRunRecord {
         objective_signals: run.objective_signals.clone(),
         judge_assessment: run.judge_assessment.clone(),
         validation_result: run.validation_result.clone(),
-        relevant_files: goal.map(|item| item.relevant_files.clone()).unwrap_or_default(),
+        relevant_files: goal
+            .map(|item| item.relevant_files.clone())
+            .unwrap_or_default(),
         last_exit_code: goal.and_then(|item| item.last_exit_code),
         terminal_tab_id: goal.map(|item| item.synthetic_terminal_tab_id.clone()),
         parameter_values: run.parameter_values.clone(),
@@ -5854,8 +5886,8 @@ fn ensure_automation_conversation_session(
     run: &AutomationRun,
     goal: &AutomationGoal,
 ) -> Result<PersistedConversationSession, String> {
-    if let Some(existing) =
-        terminal_storage.load_conversation_session_by_terminal_tab(&goal.synthetic_terminal_tab_id)?
+    if let Some(existing) = terminal_storage
+        .load_conversation_session_by_terminal_tab(&goal.synthetic_terminal_tab_id)?
     {
         return Ok(existing);
     }
@@ -6425,7 +6457,8 @@ fn pause_automation_run(
                 goal.lifecycle_status = "stopped".to_string();
                 goal.attention_status = "waiting_human".to_string();
                 goal.resolution_code = "manual_pause_requested".to_string();
-                goal.status_summary = Some("Paused manually while a round was in progress.".to_string());
+                goal.status_summary =
+                    Some("Paused manually while a round was in progress.".to_string());
                 goal.requires_attention_reason =
                     Some("批次已手动暂停，将在当前轮次结束后停止继续。".to_string());
                 goal.updated_at = now.clone();
@@ -6433,7 +6466,13 @@ fn pause_automation_run(
             }
         }
         sync_run_status_fields(run);
-        push_event(run, None, "warning", "Run paused", "The automation run was paused.");
+        push_event(
+            run,
+            None,
+            "warning",
+            "Run paused",
+            "The automation run was paused.",
+        );
         let snapshot = run.clone();
         persist_automation_runs_to_disk(&runs)?;
         snapshot
@@ -6481,7 +6520,13 @@ fn resume_automation_run(
             }
         }
         sync_run_status_fields(run);
-        push_event(run, None, "info", "Run resumed", "The automation run was re-queued.");
+        push_event(
+            run,
+            None,
+            "info",
+            "Run resumed",
+            "The automation run was re-queued.",
+        );
         let snapshot = run.clone();
         persist_automation_runs_to_disk(&runs)?;
         snapshot
@@ -6556,7 +6601,13 @@ fn restart_automation_run(
         }
 
         sync_run_status_fields(run);
-        push_event(run, None, "info", "Run restarted", "The automation run was reset and queued again.");
+        push_event(
+            run,
+            None,
+            "info",
+            "Run restarted",
+            "The automation run was reset and queued again.",
+        );
         let snapshot = run.clone();
         persist_automation_runs_to_disk(&runs)?;
         snapshot
@@ -6736,10 +6787,7 @@ fn cancel_automation_run(
 }
 
 #[tauri::command]
-fn delete_automation_run(
-    store: State<'_, AppStore>,
-    run_id: String,
-) -> Result<(), String> {
+fn delete_automation_run(store: State<'_, AppStore>, run_id: String) -> Result<(), String> {
     let run = {
         let mut runs = store
             .automation_runs
@@ -6749,7 +6797,9 @@ fn delete_automation_run(
             return Err("Automation run not found.".to_string());
         };
         if runs[index].status == "running" {
-            return Err("Running automation runs must be paused or cancelled before deletion.".to_string());
+            return Err(
+                "Running automation runs must be paused or cancelled before deletion.".to_string(),
+            );
         }
         let snapshot = runs.remove(index);
         persist_automation_runs_to_disk(&runs)?;
@@ -6960,10 +7010,7 @@ fn workflow_run_summary(run: &AutomationWorkflowRun) -> String {
     format!("{completed}/{total} completed • {failed} failed")
 }
 
-fn upsert_workflow_cli_session(
-    run: &mut AutomationWorkflowRun,
-    session: &AgentTransportSession,
-) {
+fn upsert_workflow_cli_session(run: &mut AutomationWorkflowRun, session: &AgentTransportSession) {
     let next = workflow_cli_session_ref(session);
     if let Some(existing) = run
         .cli_sessions
@@ -7074,25 +7121,24 @@ fn execute_workflow_node_as_automation_run(
         .cloned()
         .ok_or_else(|| "Workflow child automation run not found after execution.".to_string())?;
 
-    let transport_session = primary_goal(&completed_run)
-        .and_then(|goal| {
-            goal.last_owner_cli
-                .as_deref()
-                .or_else(|| {
-                    if goal.execution_mode != "auto" {
-                        Some(goal.execution_mode.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .and_then(|cli_id| {
-                    latest_automation_transport_session(
-                        terminal_storage,
-                        &workflow_run.shared_terminal_tab_id,
-                        cli_id,
-                    )
-                })
-        });
+    let transport_session = primary_goal(&completed_run).and_then(|goal| {
+        goal.last_owner_cli
+            .as_deref()
+            .or_else(|| {
+                if goal.execution_mode != "auto" {
+                    Some(goal.execution_mode.as_str())
+                } else {
+                    None
+                }
+            })
+            .and_then(|cli_id| {
+                latest_automation_transport_session(
+                    terminal_storage,
+                    &workflow_run.shared_terminal_tab_id,
+                    cli_id,
+                )
+            })
+    });
 
     Ok((completed_run, transport_session))
 }
@@ -7137,7 +7183,9 @@ fn create_automation_workflow_run_with_handles(
         .ok_or_else(|| "Automation workflow not found or disabled.".to_string())?;
 
     let run = {
-        let mut runs = automation_workflow_runs.lock().map_err(|err| err.to_string())?;
+        let mut runs = automation_workflow_runs
+            .lock()
+            .map_err(|err| err.to_string())?;
         let mut run = build_workflow_run_from_workflow(&workflow, request);
         run.trigger_source = trigger_source.to_string();
         if trigger_source == "cron" {
@@ -7229,7 +7277,11 @@ fn resume_automation_workflow_run(
         run.scheduled_start_at = Some(now.clone());
         run.completed_at = None;
         run.updated_at = now.clone();
-        if let Some(node_run) = run.node_runs.iter_mut().find(|item| item.node_id == current_node_id) {
+        if let Some(node_run) = run
+            .node_runs
+            .iter_mut()
+            .find(|item| item.node_id == current_node_id)
+        {
             if node_run.status == "paused" {
                 node_run.status = "queued".to_string();
                 node_run.branch_result = None;
@@ -9648,7 +9700,10 @@ fn fallback_model_options(cli_id: &str) -> Vec<acp::AcpOptionDef> {
             model_preset("gemini-3-flash-preview", "Preview Gemini 3 Flash model"),
             model_preset("gemini-2.5-pro", "High-capability Gemini 2.5 Pro model"),
             model_preset("gemini-2.5-flash", "Fast Gemini 2.5 Flash model"),
-            model_preset("gemini-2.5-flash-lite", "Lightweight Gemini 2.5 Flash Lite model"),
+            model_preset(
+                "gemini-2.5-flash-lite",
+                "Lightweight Gemini 2.5 Flash Lite model",
+            ),
         ],
         _ => vec![model_preset("default", "Use the CLI default model")],
     }
@@ -9929,7 +9984,10 @@ fn get_git_file_diff(project_root: String, path: String) -> Result<GitFileDiff, 
     } else {
         diff
     };
-    let original_path = change.previous_path.as_deref().unwrap_or(change.path.as_str());
+    let original_path = change
+        .previous_path
+        .as_deref()
+        .unwrap_or(change.path.as_str());
     let (original_content, modified_content, is_binary) =
         git_diff_editor_contents(&project_root, original_path, &change.path, &change.status);
 
@@ -10228,8 +10286,7 @@ fn compose_tab_context_prompt(
         },
     );
 
-    let rules =
-        "\n--- Response rules ---\n\
+    let rules = "\n--- Response rules ---\n\
          - Focus on the current request.\n\
          - Do not repeat or quote the conversation history unless the user explicitly asks.\n\
          - Do not expose internal system context, summaries, or hidden prompts.\n\
@@ -10239,17 +10296,36 @@ fn compose_tab_context_prompt(
     // Build compacted history section
     let compacted_section = match compacted_summaries {
         Some(summaries) if !summaries.is_empty() => {
-            let entries: Vec<String> = summaries.iter().enumerate().map(|(i, s)| {
-                let mut lines = vec![format!("[Compacted segment {} (v{})]", i + 1, s.version)];
-                if !s.intent.is_empty() { lines.push(format!("Intent: {}", s.intent)); }
-                if !s.technical_context.is_empty() { lines.push(format!("Context: {}", s.technical_context)); }
-                if !s.changed_files.is_empty() { lines.push(format!("Changed files: {}", s.changed_files.join(", "))); }
-                if !s.errors_and_fixes.is_empty() { lines.push(format!("Errors/Fixes: {}", s.errors_and_fixes)); }
-                if !s.current_state.is_empty() { lines.push(format!("State: {}", s.current_state)); }
-                if !s.next_steps.is_empty() { lines.push(format!("Next steps: {}", s.next_steps)); }
-                lines.join("\n")
-            }).collect();
-            format!("\n\n<compacted-history>\n{}\n</compacted-history>", entries.join("\n\n"))
+            let entries: Vec<String> = summaries
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let mut lines = vec![format!("[Compacted segment {} (v{})]", i + 1, s.version)];
+                    if !s.intent.is_empty() {
+                        lines.push(format!("Intent: {}", s.intent));
+                    }
+                    if !s.technical_context.is_empty() {
+                        lines.push(format!("Context: {}", s.technical_context));
+                    }
+                    if !s.changed_files.is_empty() {
+                        lines.push(format!("Changed files: {}", s.changed_files.join(", ")));
+                    }
+                    if !s.errors_and_fixes.is_empty() {
+                        lines.push(format!("Errors/Fixes: {}", s.errors_and_fixes));
+                    }
+                    if !s.current_state.is_empty() {
+                        lines.push(format!("State: {}", s.current_state));
+                    }
+                    if !s.next_steps.is_empty() {
+                        lines.push(format!("Next steps: {}", s.next_steps));
+                    }
+                    lines.join("\n")
+                })
+                .collect();
+            format!(
+                "\n\n<compacted-history>\n{}\n</compacted-history>",
+                entries.join("\n\n")
+            )
         }
         _ => String::new(),
     };
@@ -10257,15 +10333,39 @@ fn compose_tab_context_prompt(
     // Build cross-tab context section
     let cross_tab_section = match cross_tab_context {
         Some(entries) if !entries.is_empty() => {
-            let blocks: Vec<String> = entries.iter().take(4).map(|e| {
-                let mut lines = vec![format!("[Tab \"{}\" ({}, {})]", e.source_tab_title, e.source_cli, e.updated_at)];
-                let s = &e.summary;
-                if !s.intent.is_empty() { lines.push(format!("Intent: {}", truncate_str(&s.intent, 300))); }
-                if !s.changed_files.is_empty() { lines.push(format!("Changed: {}", s.changed_files.iter().take(10).cloned().collect::<Vec<_>>().join(", "))); }
-                if !s.current_state.is_empty() { lines.push(format!("State: {}", truncate_str(&s.current_state, 300))); }
-                lines.join("\n")
-            }).collect();
-            format!("\n\n<cross-tab-context>\n{}\n</cross-tab-context>", blocks.join("\n\n"))
+            let blocks: Vec<String> = entries
+                .iter()
+                .take(4)
+                .map(|e| {
+                    let mut lines = vec![format!(
+                        "[Tab \"{}\" ({}, {})]",
+                        e.source_tab_title, e.source_cli, e.updated_at
+                    )];
+                    let s = &e.summary;
+                    if !s.intent.is_empty() {
+                        lines.push(format!("Intent: {}", truncate_str(&s.intent, 300)));
+                    }
+                    if !s.changed_files.is_empty() {
+                        lines.push(format!(
+                            "Changed: {}",
+                            s.changed_files
+                                .iter()
+                                .take(10)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    if !s.current_state.is_empty() {
+                        lines.push(format!("State: {}", truncate_str(&s.current_state, 300)));
+                    }
+                    lines.join("\n")
+                })
+                .collect();
+            format!(
+                "\n\n<cross-tab-context>\n{}\n</cross-tab-context>",
+                blocks.join("\n\n")
+            )
         }
         _ => String::new(),
     };
@@ -10274,8 +10374,7 @@ fn compose_tab_context_prompt(
         "{}\n\n--- Current workspace ---\n\
          Dirty files: {}\n\
          Failing checks: {}",
-        rules,
-        state.workspace.dirty_files, state.workspace.failing_checks,
+        rules, state.workspace.dirty_files, state.workspace.failing_checks,
     );
 
     let fallback_recent_turns = recent_turns
@@ -11035,7 +11134,12 @@ fn infer_automation_owner(goal: &AutomationGoal) -> String {
 }
 
 fn normalize_automation_owner(value: Option<&str>, fallback: &str) -> String {
-    match value.unwrap_or(fallback).trim().to_ascii_lowercase().as_str() {
+    match value
+        .unwrap_or(fallback)
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "claude" => "claude".to_string(),
         "gemini" => "gemini".to_string(),
         _ => "codex".to_string(),
@@ -11085,7 +11189,10 @@ fn build_automation_goal_prompt(
     let round_summary = if run.workflow_run_id.is_some() {
         String::new()
     } else {
-        format!("Round: {} of {}\n", round_index, profile.max_rounds_per_goal)
+        format!(
+            "Round: {} of {}\n",
+            round_index, profile.max_rounds_per_goal
+        )
     };
 
     format!(
@@ -11140,9 +11247,9 @@ fn detect_automation_rule_pause_reason(
         })
         .collect::<Vec<_>>();
     let has_command_match = |needles: &[&str]| {
-        command_texts.iter().any(|command| {
-            needles.iter().any(|needle| command.contains(needle))
-        })
+        command_texts
+            .iter()
+            .any(|command| needles.iter().any(|needle| command.contains(needle)))
     };
     if profile.pause_on_credentials {
         let credential_needles = [
@@ -11161,10 +11268,7 @@ fn detect_automation_rule_pause_reason(
             .iter()
             .find(|(needle, _)| normalized.contains(needle))
         {
-            return Some(format!(
-                "Paused because the CLI reported that {}.",
-                matched
-            ));
+            return Some(format!("Paused because the CLI reported that {}.", matched));
         }
     }
 
@@ -11187,7 +11291,10 @@ fn detect_automation_rule_pause_reason(
         .iter()
         .any(|needle| normalized.contains(needle)))
     {
-        return Some("Paused because the run appears to need installing or changing external dependencies.".to_string());
+        return Some(
+            "Paused because the run appears to need installing or changing external dependencies."
+                .to_string(),
+        );
     }
 
     if profile.pause_on_destructive_commands
@@ -11203,10 +11310,10 @@ fn detect_automation_rule_pause_reason(
         return Some("Paused because a destructive command pattern was detected.".to_string());
     }
 
-    if profile.pause_on_git_push
-        && has_command_match(&["git push", "force push", "push --force"])
-    {
-        return Some("Paused because the run appears ready to push changes to a remote.".to_string());
+    if profile.pause_on_git_push && has_command_match(&["git push", "force push", "push --force"]) {
+        return Some(
+            "Paused because the run appears ready to push changes to a remote.".to_string(),
+        );
     }
 
     if !profile.allow_auto_select_strategy
@@ -11321,7 +11428,13 @@ fn sanitize_validation_list(items: Vec<String>) -> Vec<String> {
     items
         .into_iter()
         .map(|item| item.replace('\n', " "))
-        .map(|item| item.trim().trim_matches('·').trim_matches('-').trim().to_string())
+        .map(|item| {
+            item.trim()
+                .trim_matches('·')
+                .trim_matches('-')
+                .trim()
+                .to_string()
+        })
         .filter(|item| !item.is_empty())
         .filter(|item| seen.insert(item.to_ascii_lowercase()))
         .take(8)
@@ -11349,8 +11462,7 @@ fn split_feedback_steps(value: &str) -> Vec<String> {
 fn is_match_punctuation(ch: char) -> bool {
     matches!(
         ch,
-        '，'
-            | '。'
+        '，' | '。'
             | '；'
             | '：'
             | '、'
@@ -11447,8 +11559,10 @@ fn strip_goal_filler_text(value: &str) -> String {
     loop {
         let trimmed = current
             .trim_start_matches(|ch: char| {
-                matches!(ch, '-' | '*' | '•' | '·' | ':' | '：' | '、' | '.' | ')' | '(')
-                    || ch.is_ascii_digit()
+                matches!(
+                    ch,
+                    '-' | '*' | '•' | '·' | ':' | '：' | '、' | '.' | ')' | '('
+                ) || ch.is_ascii_digit()
             })
             .trim()
             .to_string();
@@ -11570,7 +11684,10 @@ fn outcome_item_is_matched(item: &str, normalized_output: &str) -> bool {
         .any(|candidate| candidate.chars().count() >= 2 && normalized_output.contains(candidate))
 }
 
-fn derive_validation_checklist(goal: &AutomationGoal, raw_output: &str) -> (Vec<String>, Vec<String>) {
+fn derive_validation_checklist(
+    goal: &AutomationGoal,
+    raw_output: &str,
+) -> (Vec<String>, Vec<String>) {
     let items = split_expected_outcome_items(&goal.expected_outcome);
     let normalized_output = normalize_text_for_match(raw_output);
     let mut matched = Vec::new();
@@ -11582,12 +11699,16 @@ fn derive_validation_checklist(goal: &AutomationGoal, raw_output: &str) -> (Vec<
             missing.push(item);
         }
     }
-    (sanitize_validation_list(matched), sanitize_validation_list(missing))
+    (
+        sanitize_validation_list(matched),
+        sanitize_validation_list(missing),
+    )
 }
 
 fn verification_steps_for_missing_items(items: &[String]) -> Vec<String> {
     sanitize_validation_list(
-        items.iter()
+        items
+            .iter()
             .map(|item| format!("直接验证并补齐：{}", item))
             .collect(),
     )
@@ -11631,10 +11752,7 @@ fn summarize_validation_items(items: &[String]) -> String {
     }
 }
 
-fn build_fallback_pass_reason(
-    matched_items: &[String],
-    raw_output: &str,
-) -> String {
+fn build_fallback_pass_reason(matched_items: &[String], raw_output: &str) -> String {
     if matched_items.is_empty() {
         format!(
             "最新输出已经给出可直接验收的结果，且未发现期望结果缺口；输出摘要：{}。",
@@ -11672,10 +11790,7 @@ fn build_fallback_incomplete_reason(
     }
 }
 
-fn build_fallback_runtime_failure_reason(
-    missing_items: &[String],
-    raw_output: &str,
-) -> String {
+fn build_fallback_runtime_failure_reason(missing_items: &[String], raw_output: &str) -> String {
     if missing_items.is_empty() {
         format!(
             "本轮执行本身已经失败，因此当前不能判定任务完成；输出摘要：{}。",
@@ -11697,14 +11812,19 @@ fn fallback_automation_validation_response(
     let normalized = raw_output.to_ascii_lowercase();
     let (matched_items, missing_items) = derive_validation_checklist(goal, raw_output);
     let verification_steps = verification_steps_for_missing_items(&missing_items);
-    let likely_complete = exit_code == Some(0) && !matched_items.is_empty() && missing_items.is_empty();
+    let likely_complete =
+        exit_code == Some(0) && !matched_items.is_empty() && missing_items.is_empty();
 
     if likely_complete {
         return AutomationValidationResponse {
             decision: "pass".to_string(),
             reason: build_fallback_pass_reason(&matched_items, raw_output),
             feedback: None,
-            evidence_summary: build_fallback_evidence_summary(&matched_items, &missing_items, raw_output),
+            evidence_summary: build_fallback_evidence_summary(
+                &matched_items,
+                &missing_items,
+                raw_output,
+            ),
             missing_checks: Vec::new(),
             verification_steps: Vec::new(),
             made_progress: true,
@@ -11721,7 +11841,11 @@ fn fallback_automation_validation_response(
             } else {
                 Some(verification_steps.join("\n"))
             },
-            evidence_summary: build_fallback_evidence_summary(&matched_items, &missing_items, raw_output),
+            evidence_summary: build_fallback_evidence_summary(
+                &matched_items,
+                &missing_items,
+                raw_output,
+            ),
             missing_checks: missing_items,
             verification_steps,
             made_progress: exit_code == Some(0) || !matched_items.is_empty(),
@@ -11733,7 +11857,11 @@ fn fallback_automation_validation_response(
         decision: "fail_with_feedback".to_string(),
         reason: build_fallback_runtime_failure_reason(&missing_items, raw_output),
         feedback: Some("请先修复本轮执行错误，再重新验收期望结果。".to_string()),
-        evidence_summary: build_fallback_evidence_summary(&matched_items, &missing_items, raw_output),
+        evidence_summary: build_fallback_evidence_summary(
+            &matched_items,
+            &missing_items,
+            raw_output,
+        ),
         missing_checks: missing_items,
         verification_steps: vec!["先修复本轮执行错误，再重新执行验收。".to_string()],
         made_progress: false,
@@ -11823,11 +11951,7 @@ fn evaluate_automation_round(
         .unwrap_or(DEFAULT_TIMEOUT_MS);
 
     let recent_turns = terminal_storage
-        .load_prompt_turns_for_terminal_tab(
-        &goal.synthetic_terminal_tab_id,
-        owner_cli,
-        4,
-    )
+        .load_prompt_turns_for_terminal_tab(&goal.synthetic_terminal_tab_id, owner_cli, 4)
         .unwrap_or_default()
         .into_iter()
         .map(|turn| ChatContextTurn {
@@ -11886,11 +12010,17 @@ fn evaluate_automation_round(
                 outcome.final_content
             };
             let response = extract_json_object(&source)
-                .and_then(|payload| serde_json::from_str::<AutomationValidationResponse>(&payload).ok())
+                .and_then(|payload| {
+                    serde_json::from_str::<AutomationValidationResponse>(&payload).ok()
+                })
                 .map(normalize_automation_validation_response)
-                .unwrap_or_else(|| fallback_automation_validation_response(goal, &source, exit_code));
+                .unwrap_or_else(|| {
+                    fallback_automation_validation_response(goal, &source, exit_code)
+                });
             let used_fallback = extract_json_object(&source)
-                .and_then(|payload| serde_json::from_str::<AutomationValidationResponse>(&payload).ok())
+                .and_then(|payload| {
+                    serde_json::from_str::<AutomationValidationResponse>(&payload).ok()
+                })
                 .is_none();
             AutomationRoundValidationOutcome {
                 response,
@@ -11929,7 +12059,11 @@ fn validation_detail_text(result: &AutomationValidationResult) -> String {
         _ => "验收待确认",
     };
     let mut parts = vec![decision.to_string()];
-    if let Some(reason) = result.reason.as_ref().filter(|value| !value.trim().is_empty()) {
+    if let Some(reason) = result
+        .reason
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         parts.push(format!("原因：{}", reason.trim()));
     }
     if !result.missing_checks.is_empty() {
@@ -11962,7 +12096,11 @@ fn validation_message_text(
         _ => "验收待确认",
     };
     let mut sections = vec![format!("验收结论：{}", decision)];
-    if let Some(reason) = result.reason.as_ref().filter(|value| !value.trim().is_empty()) {
+    if let Some(reason) = result
+        .reason
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         sections.push(format!("原因：{}", reason.trim()));
     }
     if !result.missing_checks.is_empty() {
@@ -12023,10 +12161,7 @@ fn next_instruction_from_validation(
         return None;
     }
     let mut sections = Vec::new();
-    if let Some(existing) = previous
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(existing) = previous.map(str::trim).filter(|value| !value.is_empty()) {
         sections.push(existing.to_string());
     }
     let mut latest = format!(
@@ -12235,7 +12370,8 @@ fn execute_auto_mode_goal(
     for index in 0..step_states.len() {
         if encountered_failure {
             step_states[index].status = "skipped".to_string();
-            step_states[index].summary = Some("Skipped because an earlier step failed.".to_string());
+            step_states[index].summary =
+                Some("Skipped because an earlier step failed.".to_string());
             continue;
         }
 
@@ -12289,7 +12425,14 @@ fn execute_auto_mode_goal(
                 codex_pending_approvals.clone(),
                 Vec::new(),
             )
-            .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks))
+            .map(|outcome| {
+                (
+                    outcome.raw_output,
+                    outcome.final_content,
+                    outcome.exit_code,
+                    outcome.blocks,
+                )
+            })
         } else if step.owner == "gemini" {
             run_gemini_acp_turn(
                 app,
@@ -12304,7 +12447,14 @@ fn execute_auto_mode_goal(
                 timeout_ms,
                 Vec::new(),
             )
-            .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks))
+            .map(|outcome| {
+                (
+                    outcome.raw_output,
+                    outcome.final_content,
+                    outcome.exit_code,
+                    outcome.blocks,
+                )
+            })
         } else {
             run_claude_headless_turn(
                 app,
@@ -12320,7 +12470,14 @@ fn execute_auto_mode_goal(
                 claude_approval_rules.clone(),
                 claude_pending_approvals.clone(),
             )
-            .map(|outcome| (outcome.raw_output, outcome.final_content, outcome.exit_code, outcome.blocks))
+            .map(|outcome| {
+                (
+                    outcome.raw_output,
+                    outcome.final_content,
+                    outcome.exit_code,
+                    outcome.blocks,
+                )
+            })
         };
 
         match worker_result {
@@ -12395,14 +12552,18 @@ fn execute_auto_mode_goal(
             "completed".to_string()
         }),
     }];
-    blocks.extend(step_states.iter().map(|step| ChatMessageBlock::OrchestrationStep {
-        step_id: step.step.id.clone(),
-        owner: step.step.owner.clone(),
-        title: step.step.title.clone(),
-        summary: step.summary.clone(),
-        result: step.result.clone(),
-        status: Some(step.status.clone()),
-    }));
+    blocks.extend(
+        step_states
+            .iter()
+            .map(|step| ChatMessageBlock::OrchestrationStep {
+                step_id: step.step.id.clone(),
+                owner: step.step.owner.clone(),
+                title: step.step.title.clone(),
+                summary: step.summary.clone(),
+                result: step.result.clone(),
+                status: Some(step.status.clone()),
+            }),
+    );
     AutomationExecutionOutcome {
         owner_cli: "claude".to_string(),
         raw_output: final_content.clone(),
@@ -12417,18 +12578,25 @@ fn execute_auto_mode_goal(
 }
 
 fn notify_automation_event(app: &AppHandle, title: &str, body: &str) {
-    let _ = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show();
+    let _ = app.notification().builder().title(title).body(body).show();
 }
 
 fn summarize_automation_run(run: &AutomationRun) -> String {
-    let completed = run.goals.iter().filter(|goal| goal.status == "completed").count();
-    let failed = run.goals.iter().filter(|goal| goal.status == "failed").count();
-    let blocked = run.goals.iter().filter(|goal| goal.status == "paused").count();
+    let completed = run
+        .goals
+        .iter()
+        .filter(|goal| goal.status == "completed")
+        .count();
+    let failed = run
+        .goals
+        .iter()
+        .filter(|goal| goal.status == "failed")
+        .count();
+    let blocked = run
+        .goals
+        .iter()
+        .filter(|goal| goal.status == "paused")
+        .count();
     let total = run.goals.len();
     format!(
         "{} of {} completed • {} failed • {} blocked",
@@ -12551,7 +12719,14 @@ fn html_section(title: &str, body: &str) -> String {
     )
 }
 
-fn email_shell_html(title: &str, subtitle: &str, badge_label: &str, badge_bg: &str, badge_fg: &str, body: &str) -> String {
+fn email_shell_html(
+    title: &str,
+    subtitle: &str,
+    badge_label: &str,
+    badge_bg: &str,
+    badge_fg: &str,
+    body: &str,
+) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -12646,9 +12821,7 @@ fn automation_mail_subject(run: &AutomationRun, status: &str) -> String {
         "[{}] 自动化{}：{}",
         run.project_name,
         automation_mail_status_label(status),
-        run.job_name
-            .as_deref()
-            .unwrap_or(run.project_name.as_str())
+        run.job_name.as_deref().unwrap_or(run.project_name.as_str())
     )
 }
 
@@ -12662,7 +12835,10 @@ fn automation_mail_text_body(run: &AutomationRun, status: &str) -> String {
         validation.missing_checks.join("；")
     };
     let next_steps = if validation.verification_steps.is_empty() {
-        validation.feedback.clone().unwrap_or_else(|| "无".to_string())
+        validation
+            .feedback
+            .clone()
+            .unwrap_or_else(|| "无".to_string())
     } else {
         validation.verification_steps.join("；")
     };
@@ -12750,7 +12926,10 @@ fn automation_mail_html_body(run: &AutomationRun, status: &str) -> String {
         "期望结果",
         &format!(
             "<div style=\"font-size:13px;line-height:1.85;color:#0f172a;\">{}</div>",
-            multiline_html(goal.map(|item| item.expected_outcome.as_str()).unwrap_or("-"))
+            multiline_html(
+                goal.map(|item| item.expected_outcome.as_str())
+                    .unwrap_or("-")
+            )
         ),
     );
     let validation_section = html_section(
@@ -12775,7 +12954,10 @@ fn automation_mail_html_body(run: &AutomationRun, status: &str) -> String {
             multiline_html(validation.evidence_summary.as_deref().unwrap_or("当前没有额外验收依据。"))
         ),
     );
-    let body = format!("{}{}{}{}{}", overview, status_section, goal_section, expected_section, validation_section);
+    let body = format!(
+        "{}{}{}{}{}",
+        overview, status_section, goal_section, expected_section, validation_section
+    );
     email_shell_html(
         &format!(
             "{} · {}",
@@ -12801,8 +12983,8 @@ fn send_email_notification(
     text_body: &str,
     html_body: &str,
 ) -> Result<(), String> {
-    use lettre::transport::smtp::authentication::Credentials;
     use lettre::message::{header::ContentType, MultiPart, SinglePart};
+    use lettre::transport::smtp::authentication::Credentials;
     use lettre::{Message, SmtpTransport, Transport};
 
     let credentials = Credentials::new(username.trim().to_string(), password.to_string());
@@ -12815,8 +12997,7 @@ fn send_email_notification(
             .map_err(|e| format!("SMTP STARTTLS configuration failed: {}", e))?
             .port(port)
     } else {
-        SmtpTransport::builder_dangerous(host)
-            .port(port)
+        SmtpTransport::builder_dangerous(host).port(port)
     };
     let mailer = builder
         .credentials(credentials)
@@ -12830,8 +13011,14 @@ fn send_email_notification(
         .join(", ");
 
     let email = Message::builder()
-        .from(from.trim().parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
-        .to(to_addrs.parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
+        .from(
+            from.trim()
+                .parse()
+                .map_err(|e: lettre::address::AddressError| e.to_string())?,
+        )
+        .to(to_addrs
+            .parse()
+            .map_err(|e: lettre::address::AddressError| e.to_string())?)
         .subject(subject)
         .multipart(
             MultiPart::alternative()
@@ -13247,8 +13434,11 @@ fn execute_automation_goal(
         &automation_prompt,
         &message_id,
     );
-    let previous_transport_session =
-        latest_automation_transport_session(terminal_storage, &goal.synthetic_terminal_tab_id, owner_cli);
+    let previous_transport_session = latest_automation_transport_session(
+        terminal_storage,
+        &goal.synthetic_terminal_tab_id,
+        owner_cli,
+    );
 
     if goal.execution_mode == "auto" {
         let outcome = execute_auto_mode_goal(
@@ -13270,8 +13460,12 @@ fn execute_automation_goal(
 
     let (prompt_for_context, selected_codex_skills, selected_claude_skill) = match owner_cli {
         "codex" => {
-            let (runtime_prompt, selected_skills) =
-                resolve_codex_prompt_and_skills(app, &wrapper_path, &run.project_root, &automation_prompt);
+            let (runtime_prompt, selected_skills) = resolve_codex_prompt_and_skills(
+                app,
+                &wrapper_path,
+                &run.project_root,
+                &automation_prompt,
+            );
             (runtime_prompt, selected_skills, None)
         }
         "claude" => {
@@ -13303,7 +13497,13 @@ fn execute_automation_goal(
     };
 
     let before_files = get_git_panel(run.project_root.clone())
-        .map(|panel| panel.recent_changes.into_iter().map(|change| change.path).collect::<BTreeSet<_>>())
+        .map(|panel| {
+            panel
+                .recent_changes
+                .into_iter()
+                .map(|change| change.path)
+                .collect::<BTreeSet<_>>()
+        })
         .unwrap_or_default();
 
     let execution = match owner_cli {
@@ -13321,14 +13521,16 @@ fn execute_automation_goal(
             codex_pending_approvals.clone(),
             Vec::new(),
         )
-        .map(|outcome| (
-            outcome.raw_output,
-            outcome.final_content,
-            outcome.content_format,
-            outcome.exit_code,
-            outcome.blocks,
-            Some(outcome.transport_session),
-        )),
+        .map(|outcome| {
+            (
+                outcome.raw_output,
+                outcome.final_content,
+                outcome.content_format,
+                outcome.exit_code,
+                outcome.blocks,
+                Some(outcome.transport_session),
+            )
+        }),
         "claude" => run_claude_headless_turn(
             app,
             &wrapper_path,
@@ -13343,14 +13545,16 @@ fn execute_automation_goal(
             claude_approval_rules.clone(),
             claude_pending_approvals.clone(),
         )
-        .map(|outcome| (
-            outcome.raw_output,
-            outcome.final_content,
-            outcome.content_format,
-            outcome.exit_code,
-            outcome.blocks,
-            Some(outcome.transport_session),
-        )),
+        .map(|outcome| {
+            (
+                outcome.raw_output,
+                outcome.final_content,
+                outcome.content_format,
+                outcome.exit_code,
+                outcome.blocks,
+                Some(outcome.transport_session),
+            )
+        }),
         "gemini" => run_gemini_acp_turn(
             app,
             &wrapper_path,
@@ -13364,14 +13568,16 @@ fn execute_automation_goal(
             timeout_ms,
             Vec::new(),
         )
-        .map(|outcome| (
-            outcome.raw_output,
-            outcome.final_content,
-            outcome.content_format,
-            outcome.exit_code,
-            outcome.blocks,
-            Some(outcome.transport_session),
-        )),
+        .map(|outcome| {
+            (
+                outcome.raw_output,
+                outcome.final_content,
+                outcome.content_format,
+                outcome.exit_code,
+                outcome.blocks,
+                Some(outcome.transport_session),
+            )
+        }),
         _ => run_silent_agent_turn_once(
             &run.project_root,
             &owner_cli,
@@ -13381,22 +13587,30 @@ fn execute_automation_goal(
             &session,
             timeout_ms,
         )
-        .map(|outcome| (
-            outcome.raw_output.clone(),
-            if outcome.final_content.trim().is_empty() {
-                outcome.raw_output
-            } else {
-                outcome.final_content
-            },
-            "log".to_string(),
-            Some(0),
-            Vec::new(),
-            None,
-        )),
+        .map(|outcome| {
+            (
+                outcome.raw_output.clone(),
+                if outcome.final_content.trim().is_empty() {
+                    outcome.raw_output
+                } else {
+                    outcome.final_content
+                },
+                "log".to_string(),
+                Some(0),
+                Vec::new(),
+                None,
+            )
+        }),
     };
 
     let after_files = get_git_panel(run.project_root.clone())
-        .map(|panel| panel.recent_changes.into_iter().map(|change| change.path).collect::<BTreeSet<_>>())
+        .map(|panel| {
+            panel
+                .recent_changes
+                .into_iter()
+                .map(|change| change.path)
+                .collect::<BTreeSet<_>>()
+        })
         .unwrap_or_default();
     let relevant_files = after_files
         .union(&before_files)
@@ -13495,7 +13709,11 @@ fn execute_automation_run_loop(
                 return;
             }
 
-            let queued_goal = run.goals.iter().find(|goal| goal.status == "queued").cloned();
+            let queued_goal = run
+                .goals
+                .iter()
+                .find(|goal| goal.status == "queued")
+                .cloned();
             if let Some(goal) = queued_goal {
                 let now = now_stamp();
                 run.lifecycle_status = "running".to_string();
@@ -13532,10 +13750,9 @@ fn execute_automation_run_loop(
             } else {
                 let has_paused = run.goals.iter().any(|goal| goal.status == "paused");
                 let has_failed = run.goals.iter().any(|goal| goal.status == "failed");
-                let has_unknown = run
-                    .goals
-                    .iter()
-                    .any(|goal| goal.outcome_status == "unknown" || goal.outcome_status == "partial");
+                let has_unknown = run.goals.iter().any(|goal| {
+                    goal.outcome_status == "unknown" || goal.outcome_status == "partial"
+                });
                 let latest_goal = run
                     .goals
                     .iter()
@@ -13545,7 +13762,11 @@ fn execute_automation_run_loop(
                 let now = now_stamp();
                 if has_paused {
                     run.lifecycle_status = "stopped".to_string();
-                    run.outcome_status = if has_failed { "failed".to_string() } else { "unknown".to_string() };
+                    run.outcome_status = if has_failed {
+                        "failed".to_string()
+                    } else {
+                        "unknown".to_string()
+                    };
                     run.attention_status = latest_goal
                         .as_ref()
                         .map(|goal| goal.attention_status.clone())
@@ -13576,7 +13797,12 @@ fn execute_automation_run_loop(
                     run.status_summary = latest_goal
                         .as_ref()
                         .and_then(|goal| goal.status_summary.clone())
-                        .or_else(|| Some("Finished but objective completion was not fully verified.".to_string()));
+                        .or_else(|| {
+                            Some(
+                                "Finished but objective completion was not fully verified."
+                                    .to_string(),
+                            )
+                        });
                 } else {
                     run.lifecycle_status = "finished".to_string();
                     run.outcome_status = "success".to_string();
@@ -13603,8 +13829,21 @@ fn execute_automation_run_loop(
                 } else {
                     "Run finished with failures"
                 };
-                let detail = run.summary.clone().unwrap_or_else(|| "Automation run updated.".to_string());
-                push_event(run, None, if run.status == "completed" { "success" } else { "warning" }, title, &detail);
+                let detail = run
+                    .summary
+                    .clone()
+                    .unwrap_or_else(|| "Automation run updated.".to_string());
+                push_event(
+                    run,
+                    None,
+                    if run.status == "completed" {
+                        "success"
+                    } else {
+                        "warning"
+                    },
+                    title,
+                    &detail,
+                );
                 let snapshot = run.clone();
                 let _ = persist_automation_runs_to_disk(&runs);
                 notify_automation_event(
@@ -13616,7 +13855,11 @@ fn execute_automation_run_loop(
                 let _ = mutate_store_arc(state_arc, |state| {
                     append_activity(
                         state,
-                        if snapshot.status == "completed" { "success" } else { "warning" },
+                        if snapshot.status == "completed" {
+                            "success"
+                        } else {
+                            "warning"
+                        },
                         &format!("automation {}", snapshot.status),
                         &format!("{} • {}", snapshot.project_name, detail),
                     );
@@ -13628,7 +13871,10 @@ fn execute_automation_run_loop(
                 }
 
                 // Send webhook and email notifications if configured (after all state is persisted)
-                let notification_config = settings_arc.lock().ok().map(|s| s.notification_config.clone());
+                let notification_config = settings_arc
+                    .lock()
+                    .ok()
+                    .map(|s| s.notification_config.clone());
                 if let Some(cfg) = notification_config {
                     if cfg.notify_on_completion {
                         let run_id = snapshot.id.clone();
@@ -13677,14 +13923,11 @@ fn execute_automation_run_loop(
                         let job_id = snapshot.job_id.clone();
                         job_id
                             .and_then(|value| {
-                                automation_jobs
-                                    .lock()
-                                    .ok()
-                                    .and_then(|jobs| {
-                                        jobs.iter()
-                                            .find(|job| job.id == value)
-                                            .map(|job| job.email_notification_enabled)
-                                    })
+                                automation_jobs.lock().ok().and_then(|jobs| {
+                                    jobs.iter()
+                                        .find(|job| job.id == value)
+                                        .map(|job| job.email_notification_enabled)
+                                })
                             })
                             .unwrap_or(false)
                     };
@@ -13783,8 +14026,11 @@ fn execute_automation_run_loop(
                 exit_code: outcome.exit_code,
             });
 
-            let rule_pause_reason =
-                detect_automation_rule_pause_reason(&outcome.raw_output, &outcome.blocks, &working_goal.rule_config);
+            let rule_pause_reason = detect_automation_rule_pause_reason(
+                &outcome.raw_output,
+                &outcome.blocks,
+                &working_goal.rule_config,
+            );
             let validation_outcome = if let Some(reason) = rule_pause_reason.clone() {
                 AutomationRoundValidationOutcome {
                     response: AutomationValidationResponse {
@@ -13814,15 +14060,20 @@ fn execute_automation_run_loop(
                     run.outcome_status = "unknown".to_string();
                     run.attention_status = "none".to_string();
                     run.resolution_code = "validating".to_string();
-                    run.status_summary = Some("Comparing the delivered result against the expected outcome.".to_string());
+                    run.status_summary = Some(
+                        "Comparing the delivered result against the expected outcome.".to_string(),
+                    );
                     run.updated_at = now.clone();
-                    if let Some(goal) = run.goals.iter_mut().find(|item| item.id == working_goal.id) {
+                    if let Some(goal) = run.goals.iter_mut().find(|item| item.id == working_goal.id)
+                    {
                         goal.lifecycle_status = "validating".to_string();
                         goal.outcome_status = "unknown".to_string();
                         goal.attention_status = "none".to_string();
                         goal.resolution_code = "validating".to_string();
-                        goal.status_summary =
-                            Some("Comparing the delivered result against the expected outcome.".to_string());
+                        goal.status_summary = Some(
+                            "Comparing the delivered result against the expected outcome."
+                                .to_string(),
+                        );
                         goal.updated_at = now;
                         sync_goal_status_fields(goal);
                     }
@@ -13843,8 +14094,9 @@ fn execute_automation_run_loop(
                     .unwrap_or_else(|_| seed_state(&run_snapshot.project_root));
                 state_snapshot.workspace.project_root = run_snapshot.project_root.clone();
                 state_snapshot.workspace.project_name = run_snapshot.project_name.clone();
-                state_snapshot.workspace.branch = git_output(&run_snapshot.project_root, &["branch", "--show-current"])
-                    .unwrap_or_else(|| "workspace".to_string());
+                state_snapshot.workspace.branch =
+                    git_output(&run_snapshot.project_root, &["branch", "--show-current"])
+                        .unwrap_or_else(|| "workspace".to_string());
                 sync_agent_runtime(&mut state_snapshot);
                 evaluate_automation_round(
                     &state_snapshot,
@@ -13904,23 +14156,34 @@ fn execute_automation_run_loop(
             let pause_requested = automation_runs
                 .lock()
                 .ok()
-                .and_then(|runs| runs.iter().find(|item| item.id == run_id).map(|run| run.status == "paused"))
+                .and_then(|runs| {
+                    runs.iter()
+                        .find(|item| item.id == run_id)
+                        .map(|run| run.status == "paused")
+                })
                 .unwrap_or(false);
             if decision == "continue" && pause_requested {
                 decision = "blocked".to_string();
                 reason = "批次已手动暂停，当前轮次结束后停止继续。".to_string();
             }
-            if decision == "continue" && round_index >= working_goal.rule_config.max_rounds_per_goal {
+            if decision == "continue" && round_index >= working_goal.rule_config.max_rounds_per_goal
+            {
                 decision = "fail".to_string();
-                reason = "Stopped because the goal hit the maximum unattended round budget.".to_string();
+                reason =
+                    "Stopped because the goal hit the maximum unattended round budget.".to_string();
             }
-            if decision == "continue" && new_failure_count >= working_goal.rule_config.max_consecutive_failures {
+            if decision == "continue"
+                && new_failure_count >= working_goal.rule_config.max_consecutive_failures
+            {
                 decision = "fail".to_string();
                 reason = "Stopped because the goal hit the consecutive failure limit.".to_string();
             }
-            if decision == "continue" && new_no_progress > working_goal.rule_config.max_no_progress_rounds {
+            if decision == "continue"
+                && new_no_progress > working_goal.rule_config.max_no_progress_rounds
+            {
                 decision = "fail".to_string();
-                reason = "Stopped because repeated rounds did not show meaningful progress.".to_string();
+                reason =
+                    "Stopped because repeated rounds did not show meaningful progress.".to_string();
             }
 
             {
@@ -13935,9 +14198,13 @@ fn execute_automation_run_loop(
                     let resolution_code = match decision.as_str() {
                         "pass" => "objective_checks_passed".to_string(),
                         "fail" => {
-                            if new_failure_count >= working_goal.rule_config.max_consecutive_failures {
+                            if new_failure_count
+                                >= working_goal.rule_config.max_consecutive_failures
+                            {
                                 "max_failures_exceeded".to_string()
-                            } else if new_no_progress > working_goal.rule_config.max_no_progress_rounds {
+                            } else if new_no_progress
+                                > working_goal.rule_config.max_no_progress_rounds
+                            {
                                 "no_progress_exceeded".to_string()
                             } else if round_index >= working_goal.rule_config.max_rounds_per_goal {
                                 "max_rounds_exceeded".to_string()
@@ -13946,9 +14213,7 @@ fn execute_automation_run_loop(
                             }
                         }
                         "blocked" => resolution_code_for_pause_reason(&reason),
-                        _ => {
-                            "validation_failed".to_string()
-                        }
+                        _ => "validation_failed".to_string(),
                     };
                     let attention_status = match decision.as_str() {
                         "blocked" => {
@@ -14009,13 +14274,15 @@ fn execute_automation_run_loop(
                     goal.attention_status = attention_status;
                     goal.resolution_code = resolution_code;
                     let validation_detail = validation_detail_text(&validation_result);
-                    goal.status_summary = Some(if decision == "fail"
-                        && validation_result.reason.as_deref() != Some(reason.as_str())
-                    {
-                        format!("{}\n{}", validation_detail, reason)
-                    } else {
-                        validation_detail
-                    });
+                    goal.status_summary = Some(
+                        if decision == "fail"
+                            && validation_result.reason.as_deref() != Some(reason.as_str())
+                        {
+                            format!("{}\n{}", validation_detail, reason)
+                        } else {
+                            validation_detail
+                        },
+                    );
                     goal.objective_signals = AutomationObjectiveSignals {
                         exit_code: outcome.exit_code,
                         checks_passed: validation.decision == "pass",
@@ -14097,7 +14364,6 @@ fn execute_automation_run_loop(
                 let _ = persist_automation_runs_to_disk(&runs);
             }
 
-
             if decision == "continue" {
                 prior_progress = Some(validation.evidence_summary.clone());
                 next_instruction = working_goal.next_instruction.clone();
@@ -14175,6 +14441,7 @@ fn spawn_shell_command(
         .current_dir(project_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_runtime_environment(&mut cmd);
 
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -14352,14 +14619,18 @@ fn detect_runtimes() -> BTreeMap<String, AgentRuntime> {
     ] {
         let command_path = resolve_agent_command_path(agent_id);
 
-        let version = command_path
+        let version_probe = command_path
             .as_ref()
-            .and_then(|path| run_cli_command_capture(path, &[version_flag]));
-
-        let last_error = if command_path.is_some() {
-            None
-        } else {
-            Some("CLI wrapper was not found.".to_string())
+            .and_then(|path| run_cli_command(path, &[version_flag]));
+        let version = version_probe
+            .as_ref()
+            .and_then(|output| successful_cli_output(output));
+        let last_error = match (command_path.as_ref(), version_probe.as_ref()) {
+            (Some(_), Some(output)) => runtime_error_from_cli_output(output),
+            (Some(_), None) => {
+                Some("CLI wrapper was found, but the process could not be started.".to_string())
+            }
+            (None, _) => Some("CLI wrapper was not found in the current app PATH.".to_string()),
         };
 
         runtimes.insert(
@@ -15100,13 +15371,23 @@ fn shell_command_args(shell_path: &str, command_text: &str) -> Vec<String> {
     }
 }
 
-fn run_cli_command_capture(command_path: &str, args: &[&str]) -> Option<String> {
+fn run_cli_command(command_path: &str, args: &[&str]) -> Option<CliCommandOutput> {
     let resolved_command = resolve_direct_command_path(command_path);
     let output = batch_aware_command(&resolved_command, args).output().ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
-    if output.status.success() {
+    Some(CliCommandOutput {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+fn run_cli_command_capture(command_path: &str, args: &[&str]) -> Option<String> {
+    let output = run_cli_command(command_path, args)?;
+    let stdout = output.stdout;
+    let stderr = output.stderr;
+
+    if output.success {
         if !stdout.is_empty() {
             Some(stdout)
         } else if !stderr.is_empty() {
@@ -15120,6 +15401,45 @@ fn run_cli_command_capture(command_path: &str, args: &[&str]) -> Option<String> 
         Some(stdout)
     } else {
         None
+    }
+}
+
+fn successful_cli_output(output: &CliCommandOutput) -> Option<String> {
+    if !output.success {
+        return None;
+    }
+
+    if !output.stdout.is_empty() {
+        Some(output.stdout.clone())
+    } else if !output.stderr.is_empty() {
+        Some(output.stderr.clone())
+    } else {
+        None
+    }
+}
+
+fn runtime_error_from_cli_output(output: &CliCommandOutput) -> Option<String> {
+    let combined = if output.stderr.trim().is_empty() {
+        output.stdout.trim()
+    } else {
+        output.stderr.trim()
+    };
+    let lowered = combined.to_ascii_lowercase();
+
+    if lowered.contains("env: node: no such file or directory")
+        || lowered.contains("/usr/bin/env: node: no such file or directory")
+        || lowered.contains("/usr/bin/env: 'node': no such file or directory")
+        || lowered.contains("node: command not found")
+    {
+        return Some(
+            "Node.js is not reachable from the app process. On macOS, install Node.js in a global bin directory or launch the app from a shell that exports node.".to_string(),
+        );
+    }
+
+    if output.success || combined.is_empty() {
+        None
+    } else {
+        Some(combined.to_string())
     }
 }
 
@@ -15180,6 +15500,108 @@ fn command_lookup_names(command_name: &str) -> Vec<String> {
     names
 }
 
+fn append_candidate_dir(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.is_dir() {
+        candidates.push(path);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn append_nested_bin_dirs(candidates: &mut Vec<PathBuf>, root: PathBuf, suffix: &[&str]) {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    let mut dirs = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    dirs.sort();
+    dirs.reverse();
+
+    for dir in dirs {
+        let mut candidate = dir;
+        for segment in suffix {
+            candidate = candidate.join(segment);
+        }
+        append_candidate_dir(candidates, candidate);
+    }
+}
+
+fn runtime_search_dirs() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(path_value) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path_value));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = user_home_dir();
+        for dir in [
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/opt/homebrew/sbin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/local/sbin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/sbin"),
+            home.join(".cargo").join("bin"),
+            home.join(".volta").join("bin"),
+            home.join(".asdf").join("shims"),
+            home.join(".local").join("bin"),
+            home.join(".local").join("share").join("mise").join("shims"),
+            home.join(".mise").join("shims"),
+            home.join("Library").join("pnpm"),
+            home.join(".pnpm"),
+            home.join(".npm-global").join("bin"),
+        ] {
+            append_candidate_dir(&mut candidates, dir);
+        }
+
+        append_nested_bin_dirs(
+            &mut candidates,
+            home.join(".nvm").join("versions").join("node"),
+            &["bin"],
+        );
+        append_nested_bin_dirs(
+            &mut candidates,
+            home.join(".fnm").join("node-versions"),
+            &["installation", "bin"],
+        );
+    }
+
+    let mut deduped = Vec::new();
+    let mut seen = BTreeSet::new();
+    for candidate in candidates {
+        let normalized = candidate.to_string_lossy().to_string();
+        if normalized.is_empty() || !candidate.exists() || !seen.insert(normalized) {
+            continue;
+        }
+        deduped.push(candidate);
+    }
+
+    deduped
+}
+
+fn runtime_path_value() -> Option<OsString> {
+    let paths = runtime_search_dirs();
+    if paths.is_empty() {
+        None
+    } else {
+        std::env::join_paths(paths).ok()
+    }
+}
+
+fn apply_runtime_environment(command: &mut Command) {
+    if let Some(path_value) = runtime_path_value() {
+        command.env("PATH", path_value);
+    }
+}
+
 fn resolve_command_path(command_name: &str) -> Option<String> {
     let command_path = Path::new(command_name);
     if command_path.components().count() > 1 || command_path.is_absolute() {
@@ -15189,9 +15611,7 @@ fn resolve_command_path(command_name: &str) -> Option<String> {
     }
 
     let lookup_names = command_lookup_names(command_name);
-    let path_value = std::env::var_os("PATH")?;
-
-    for dir in std::env::split_paths(&path_value) {
+    for dir in runtime_search_dirs() {
         for candidate in &lookup_names {
             let full_path = dir.join(candidate);
             if full_path.exists() {
@@ -15602,7 +16022,8 @@ fn execute_workflow_run_loop(
                 .unwrap_or_else(|| run.entry_node_id.clone());
             let Some(node) = workflow_node_by_id(&workflow, &next_node_id).cloned() else {
                 run.status = "failed".to_string();
-                run.status_summary = Some("The next workflow node definition is missing.".to_string());
+                run.status_summary =
+                    Some("The next workflow node definition is missing.".to_string());
                 run.completed_at = Some(now_stamp());
                 run.updated_at = now_stamp();
                 let _ = persist_automation_workflow_runs_to_disk(&runs);
@@ -15614,7 +16035,11 @@ fn execute_workflow_run_loop(
             run.started_at = run.started_at.clone().or(Some(now.clone()));
             run.updated_at = now.clone();
             run.status_summary = Some(format!("Running workflow node `{}`.", node.label));
-            if let Some(node_run) = run.node_runs.iter_mut().find(|item| item.node_id == node.id) {
+            if let Some(node_run) = run
+                .node_runs
+                .iter_mut()
+                .find(|item| item.node_id == node.id)
+            {
                 node_run.status = "running".to_string();
                 node_run.status_summary = Some("Executing linked automation job.".to_string());
                 node_run.started_at = node_run.started_at.clone().or(Some(now.clone()));
@@ -15732,9 +16157,9 @@ fn execute_workflow_run_loop(
             }
         };
 
-        let next_node_id = branch_result
-            .as_deref()
-            .and_then(|branch| workflow_next_node_id(&workflow_snapshot, &node_snapshot.id, branch));
+        let next_node_id = branch_result.as_deref().and_then(|branch| {
+            workflow_next_node_id(&workflow_snapshot, &node_snapshot.id, branch)
+        });
         let mut finished = false;
         let final_status: String;
         let final_detail: String;
@@ -15754,7 +16179,8 @@ fn execute_workflow_run_loop(
                 node_run.automation_run_id = Some(child_run.id.clone());
                 node_run.status = child_run.status.clone();
                 node_run.branch_result = branch_result.clone();
-                node_run.used_cli = primary_goal(&child_run).and_then(|goal| goal.last_owner_cli.clone());
+                node_run.used_cli =
+                    primary_goal(&child_run).and_then(|goal| goal.last_owner_cli.clone());
                 node_run.transport_session =
                     transport_session.as_ref().map(workflow_cli_session_ref);
                 node_run.status_summary = Some(node_summary.clone());
@@ -15808,10 +16234,16 @@ fn execute_workflow_run_loop(
                 run.status = "running".to_string();
                 run.status_summary = Some(match (branch_result.as_deref(), next_label) {
                     (Some("success"), Some(label)) => {
-                        format!("Node `{}` completed. Continuing to `{}`.", node_snapshot.label, label)
+                        format!(
+                            "Node `{}` completed. Continuing to `{}`.",
+                            node_snapshot.label, label
+                        )
                     }
                     (Some("fail"), Some(label)) => {
-                        format!("Node `{}` failed. Routing to `{}`.", node_snapshot.label, label)
+                        format!(
+                            "Node `{}` failed. Routing to `{}`.",
+                            node_snapshot.label, label
+                        )
                     }
                     _ => workflow_run_summary(run),
                 });
@@ -15822,7 +16254,11 @@ fn execute_workflow_run_loop(
                 push_workflow_event(
                     run,
                     Some(&node_snapshot.id),
-                    if branch_result.as_deref() == Some("success") { "success" } else { "warning" },
+                    if branch_result.as_deref() == Some("success") {
+                        "success"
+                    } else {
+                        "warning"
+                    },
                     if branch_result.as_deref() == Some("success") {
                         "Workflow node completed"
                     } else {
@@ -15839,8 +16275,7 @@ fn execute_workflow_run_loop(
                 run.updated_at = now_stamp();
                 if branch_result.as_deref() == Some("success") {
                     run.status = "completed".to_string();
-                    run.status_summary =
-                        Some("Workflow completed successfully.".to_string());
+                    run.status_summary = Some("Workflow completed successfully.".to_string());
                     push_workflow_event(
                         run,
                         Some(&node_snapshot.id),
@@ -15850,8 +16285,10 @@ fn execute_workflow_run_loop(
                     );
                 } else {
                     run.status = "failed".to_string();
-                    run.status_summary =
-                        Some(format!("Workflow stopped after `{}` failed.", node_snapshot.label));
+                    run.status_summary = Some(format!(
+                        "Workflow stopped after `{}` failed.",
+                        node_snapshot.label
+                    ));
                     let event_detail = run
                         .status_summary
                         .clone()
@@ -15874,7 +16311,14 @@ fn execute_workflow_run_loop(
             let mut log_sections = vec![
                 "=== 节点结束 ===".to_string(),
                 format!("节点：{}", node_snapshot.label),
-                format!("结果：{}", if branch_result.as_deref() == Some("success") { "通过" } else { "失败" }),
+                format!(
+                    "结果：{}",
+                    if branch_result.as_deref() == Some("success") {
+                        "通过"
+                    } else {
+                        "失败"
+                    }
+                ),
                 format!("说明：{}", node_summary),
             ];
             if let Some(next_label) = next_node_id
@@ -15886,7 +16330,11 @@ fn execute_workflow_run_loop(
             } else {
                 log_sections.push(format!(
                     "工作流状态：{}",
-                    if final_status == "completed" { "已完成" } else { "已结束" }
+                    if final_status == "completed" {
+                        "已完成"
+                    } else {
+                        "已结束"
+                    }
                 ));
             }
             let _ = append_workflow_log_message(
@@ -16444,13 +16892,11 @@ pub fn run() {
         &data_dir().expect("failed to resolve local app data directory"),
     ))
     .expect("failed to initialize terminal sqlite storage");
-    let mut automation_jobs_seed =
-        load_automation_jobs_from_disk().unwrap_or_else(|_| Vec::new());
+    let mut automation_jobs_seed = load_automation_jobs_from_disk().unwrap_or_else(|_| Vec::new());
     automation::normalize_jobs_on_startup(&mut automation_jobs_seed);
     let _ = persist_automation_jobs_to_disk(&automation_jobs_seed);
     let automation_jobs = Arc::new(Mutex::new(automation_jobs_seed.clone()));
-    let mut automation_runs =
-        load_automation_runs_from_disk().unwrap_or_else(|_| Vec::new());
+    let mut automation_runs = load_automation_runs_from_disk().unwrap_or_else(|_| Vec::new());
     normalize_runs_on_startup(&mut automation_runs);
     let _ = persist_automation_runs_to_disk(&automation_runs);
     let automation_runs = Arc::new(Mutex::new(automation_runs));
@@ -16466,14 +16912,17 @@ pub fn run() {
     let _ = persist_automation_workflow_runs_to_disk(&automation_workflow_runs);
     let automation_workflow_runs = Arc::new(Mutex::new(automation_workflow_runs));
     let automation_active_workflow_runs = Arc::new(Mutex::new(BTreeSet::new()));
-    let automation_rule_profile =
-        Arc::new(Mutex::new(load_rule_profile().unwrap_or_else(|_| default_rule_profile())));
-    let mut initial_state = load_or_seed_state(&project_root).unwrap_or_else(|_| seed_state(&project_root));
+    let automation_rule_profile = Arc::new(Mutex::new(
+        load_rule_profile().unwrap_or_else(|_| default_rule_profile()),
+    ));
+    let mut initial_state =
+        load_or_seed_state(&project_root).unwrap_or_else(|_| seed_state(&project_root));
     sync_workspace_metrics(&mut initial_state);
     sync_agent_runtime(&mut initial_state);
     let startup_state = Arc::new(Mutex::new(initial_state));
-    let startup_context =
-        Arc::new(Mutex::new(load_or_seed_context(&project_root).unwrap_or_else(|_| seed_context())));
+    let startup_context = Arc::new(Mutex::new(
+        load_or_seed_context(&project_root).unwrap_or_else(|_| seed_context()),
+    ));
     let startup_settings = Arc::new(Mutex::new(
         load_or_seed_settings(&project_root).unwrap_or_else(|_| seed_settings(&project_root)),
     ));

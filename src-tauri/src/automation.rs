@@ -1,4 +1,9 @@
-use std::{collections::{BTreeMap, BTreeSet}, fs, path::PathBuf, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::PathBuf,
+    str::FromStr,
+};
 
 use chrono::{DateTime, Local};
 use cron::Schedule;
@@ -142,9 +147,15 @@ pub struct AutomationWorkflowNodeDraft {
     pub goal: String,
     #[serde(default)]
     pub expected_outcome: String,
-    #[serde(default = "default_workflow_node_execution_mode", alias = "executionModeOverride")]
+    #[serde(
+        default = "default_workflow_node_execution_mode",
+        alias = "executionModeOverride"
+    )]
     pub execution_mode: String,
-    #[serde(default = "default_workflow_node_permission_profile", alias = "permissionProfileOverride")]
+    #[serde(
+        default = "default_workflow_node_permission_profile",
+        alias = "permissionProfileOverride"
+    )]
     pub permission_profile: String,
     #[serde(default = "default_reuse_session")]
     pub reuse_session: bool,
@@ -200,9 +211,15 @@ pub struct AutomationWorkflowNode {
     pub goal: String,
     #[serde(default)]
     pub expected_outcome: String,
-    #[serde(default = "default_workflow_node_execution_mode", alias = "executionModeOverride")]
+    #[serde(
+        default = "default_workflow_node_execution_mode",
+        alias = "executionModeOverride"
+    )]
     pub execution_mode: String,
-    #[serde(default = "default_workflow_node_permission_profile", alias = "permissionProfileOverride")]
+    #[serde(
+        default = "default_workflow_node_permission_profile",
+        alias = "permissionProfileOverride"
+    )]
     pub permission_profile: String,
     #[serde(default = "default_reuse_session")]
     pub reuse_session: bool,
@@ -555,7 +572,8 @@ pub fn load_jobs() -> Result<Vec<AutomationJob>, String> {
     if raw.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let mut jobs = serde_json::from_str::<Vec<AutomationJob>>(&raw).map_err(|err| err.to_string())?;
+    let mut jobs =
+        serde_json::from_str::<Vec<AutomationJob>>(&raw).map_err(|err| err.to_string())?;
     normalize_jobs_on_startup(&mut jobs);
     Ok(jobs)
 }
@@ -740,7 +758,9 @@ pub fn normalize_jobs_on_startup(jobs: &mut [AutomationJob]) {
         job.default_execution_mode = normalize_execution_mode(&job.default_execution_mode);
         job.permission_profile = normalize_permission_profile(&job.permission_profile);
         job.rule_config = normalize_goal_rule_config(job.rule_config.clone());
-        job.cron_expression = normalize_cron_expression(job.cron_expression.clone()).ok().flatten();
+        job.cron_expression = normalize_cron_expression(job.cron_expression.clone())
+            .ok()
+            .flatten();
         job.parameter_definitions = job
             .parameter_definitions
             .iter()
@@ -757,8 +777,9 @@ pub fn normalize_workflows_on_startup(
     for workflow in workflows {
         workflow.name = normalize_required_text(&workflow.name, "工作流");
         workflow.project_name = normalize_required_text(&workflow.project_name, "Workspace");
-        workflow.cron_expression =
-            normalize_cron_expression(workflow.cron_expression.clone()).ok().flatten();
+        workflow.cron_expression = normalize_cron_expression(workflow.cron_expression.clone())
+            .ok()
+            .flatten();
         workflow.default_context_strategy =
             normalize_workflow_context_strategy(&workflow.default_context_strategy);
         workflow.default_execution_mode =
@@ -899,7 +920,10 @@ pub fn normalize_runs_on_startup(runs: &mut [AutomationRun]) {
     let now = now_rfc3339();
     for run in runs {
         if run.status == "running"
-            || matches!(normalize_lifecycle_status(&run.lifecycle_status).as_str(), "running" | "validating")
+            || matches!(
+                normalize_lifecycle_status(&run.lifecycle_status).as_str(),
+                "running" | "validating"
+            )
         {
             run.status = "scheduled".to_string();
             run.lifecycle_status = "queued".to_string();
@@ -918,14 +942,17 @@ pub fn normalize_runs_on_startup(runs: &mut [AutomationRun]) {
                 None,
                 "warning",
                 "Host restarted",
-                "The app restarted while this run was active. Pending goals were re-queued."
+                "The app restarted while this run was active. Pending goals were re-queued.",
             );
         }
 
         for goal in &mut run.goals {
             goal.execution_mode = normalize_execution_mode(&goal.execution_mode);
             if goal.status == "running"
-                || matches!(normalize_lifecycle_status(&goal.lifecycle_status).as_str(), "running" | "validating")
+                || matches!(
+                    normalize_lifecycle_status(&goal.lifecycle_status).as_str(),
+                    "running" | "validating"
+                )
             {
                 goal.status = "queued".to_string();
                 goal.lifecycle_status = "queued".to_string();
@@ -1027,7 +1054,10 @@ pub fn build_job_from_draft(draft: AutomationJobDraft) -> Result<AutomationJob, 
     })
 }
 
-pub fn update_job_from_draft(existing: &AutomationJob, draft: AutomationJobDraft) -> Result<AutomationJob, String> {
+pub fn update_job_from_draft(
+    existing: &AutomationJob,
+    draft: AutomationJobDraft,
+) -> Result<AutomationJob, String> {
     let normalized_cron = normalize_cron_expression(draft.cron_expression)?;
     let reset_last_trigger = normalized_cron != existing.cron_expression;
     Ok(AutomationJob {
@@ -1692,7 +1722,9 @@ fn default_workflow_node_layout_for_index(index: usize) -> AutomationWorkflowNod
     }
 }
 
-fn normalize_parameter_definition(definition: AutomationParameterDefinition) -> AutomationParameterDefinition {
+fn normalize_parameter_definition(
+    definition: AutomationParameterDefinition,
+) -> AutomationParameterDefinition {
     let kind = match definition.kind.trim().to_ascii_lowercase().as_str() {
         "boolean" => "boolean",
         "enum" => "enum",
@@ -1722,11 +1754,7 @@ fn normalize_parameter_definition(definition: AutomationParameterDefinition) -> 
         } else {
             definition.id
         },
-        key: if key.is_empty() {
-            new_id("param")
-        } else {
-            key
-        },
+        key: if key.is_empty() { new_id("param") } else { key },
         label,
         kind,
         description: normalize_optional_text(definition.description),
@@ -1781,7 +1809,8 @@ fn normalize_workflow_node_permission_profile(value: &str) -> String {
 }
 
 fn normalize_workflow_node_label(value: Option<String>, fallback: &str) -> String {
-    value.map(|item| item.trim().to_string())
+    value
+        .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty())
         .unwrap_or_else(|| fallback.to_string())
 }
@@ -1811,7 +1840,9 @@ struct NormalizedWorkflowDraft {
     edges: Vec<AutomationWorkflowEdge>,
 }
 
-fn normalize_workflow_draft(draft: AutomationWorkflowDraft) -> Result<NormalizedWorkflowDraft, String> {
+fn normalize_workflow_draft(
+    draft: AutomationWorkflowDraft,
+) -> Result<NormalizedWorkflowDraft, String> {
     if draft.nodes.is_empty() {
         return Err("At least one workflow node is required.".to_string());
     }
@@ -1834,7 +1865,9 @@ fn normalize_workflow_draft(draft: AutomationWorkflowDraft) -> Result<Normalized
             let fallback_label = format!("节点 {}", index + 1);
             Ok(AutomationWorkflowNode {
                 id: node_id,
-                job_id: node.job_id.and_then(|value| normalize_optional_text(Some(value))),
+                job_id: node
+                    .job_id
+                    .and_then(|value| normalize_optional_text(Some(value))),
                 label: normalize_workflow_node_label(
                     node.label,
                     &if node.goal.trim().is_empty() {
@@ -1846,7 +1879,9 @@ fn normalize_workflow_draft(draft: AutomationWorkflowDraft) -> Result<Normalized
                 goal: normalize_required_text(&node.goal, ""),
                 expected_outcome: normalize_required_text(&node.expected_outcome, ""),
                 execution_mode: normalize_workflow_node_execution_mode(&node.execution_mode),
-                permission_profile: normalize_workflow_node_permission_profile(&node.permission_profile),
+                permission_profile: normalize_workflow_node_permission_profile(
+                    &node.permission_profile,
+                ),
                 reuse_session: node.reuse_session,
                 layout: Some(
                     node.layout
@@ -1884,7 +1919,9 @@ fn normalize_workflow_draft(draft: AutomationWorkflowDraft) -> Result<Normalized
             let from_node_id = edge.from_node_id.trim().to_string();
             let to_node_id = edge.to_node_id.trim().to_string();
             if from_node_id.is_empty() || to_node_id.is_empty() {
-                return Err("Workflow edges must reference both source and target nodes.".to_string());
+                return Err(
+                    "Workflow edges must reference both source and target nodes.".to_string(),
+                );
             }
             if !nodes.iter().any(|node| node.id == from_node_id)
                 || !nodes.iter().any(|node| node.id == to_node_id)
@@ -1915,7 +1952,9 @@ fn normalize_workflow_draft(draft: AutomationWorkflowDraft) -> Result<Normalized
         email_notification_enabled: draft.email_notification_enabled,
         enabled: draft.enabled,
         entry_node_id,
-        default_context_strategy: normalize_workflow_context_strategy(&draft.default_context_strategy),
+        default_context_strategy: normalize_workflow_context_strategy(
+            &draft.default_context_strategy,
+        ),
         default_execution_mode: normalize_execution_mode(&draft.default_execution_mode),
         default_permission_profile: normalize_permission_profile(&draft.default_permission_profile),
         nodes,
@@ -1980,15 +2019,16 @@ fn normalize_required_text(value: &str, fallback: &str) -> String {
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
-    value.map(|entry| entry.trim().to_string()).filter(|entry| !entry.is_empty())
+    value
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
 }
 
 fn normalize_cron_expression(value: Option<String>) -> Result<Option<String>, String> {
     let Some(raw) = normalize_optional_text(value) else {
         return Ok(None);
     };
-    Schedule::from_str(&raw)
-        .map_err(|err| format!("Invalid cron expression: {err}"))?;
+    Schedule::from_str(&raw).map_err(|err| format!("Invalid cron expression: {err}"))?;
     Ok(Some(raw))
 }
 
@@ -2021,7 +2061,13 @@ fn slugify_key(value: &str) -> String {
     value
         .trim()
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .split('-')
         .filter(|part| !part.is_empty())

@@ -496,10 +496,7 @@ impl TerminalStorage {
         }))
     }
 
-    pub fn append_chat_messages(
-        &self,
-        request: &MessageEventsAppendRequest,
-    ) -> Result<(), String> {
+    pub fn append_chat_messages(&self, request: &MessageEventsAppendRequest) -> Result<(), String> {
         let mut conn = self.open_connection()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -610,7 +607,9 @@ impl TerminalStorage {
         request: &MessageFinalizeRequest,
     ) -> Result<(), String> {
         let conn = self.open_connection()?;
-        let Some(session) = self.load_chat_session_by_terminal_tab(&conn, &request.terminal_tab_id)? else {
+        let Some(session) =
+            self.load_chat_session_by_terminal_tab(&conn, &request.terminal_tab_id)?
+        else {
             return Ok(());
         };
         let Some(message_index) = session
@@ -638,7 +637,10 @@ impl TerminalStorage {
             .map(|candidate| candidate.content.clone())
             .unwrap_or_else(|| format!("Continue work in {}", session.project_name));
         let assistant_summary = truncate_text(
-            message.raw_content.as_deref().unwrap_or(message.content.as_str()),
+            message
+                .raw_content
+                .as_deref()
+                .unwrap_or(message.content.as_str()),
             600,
         );
         let relevant_files = collect_relevant_files_from_blocks_option(message.blocks.as_ref());
@@ -680,14 +682,19 @@ impl TerminalStorage {
             &bundle.task_packet.id,
             &request.terminal_tab_id,
             &cli_id,
-            request.transport_kind.clone().or(message.transport_kind.clone()),
+            request
+                .transport_kind
+                .clone()
+                .or(message.transport_kind.clone()),
             request.transport_session.as_ref(),
             &request.updated_at,
             request.exit_code,
         )?;
 
-        let linked_session_ids =
-            merge_string_lists(&bundle.task_packet.linked_session_ids, &[session.id.clone()]);
+        let linked_session_ids = merge_string_lists(
+            &bundle.task_packet.linked_session_ids,
+            &[session.id.clone()],
+        );
         tx.execute(
             "UPDATE task_packets
              SET linked_session_ids_json = ?1,
@@ -786,7 +793,11 @@ impl TerminalStorage {
                     .and_then(|session| session.thread_id.as_ref())
                     .map(|value| !value.trim().is_empty())
                     .unwrap_or(false),
-                if exit_code == Some(0) { "active" } else { "stale" },
+                if exit_code == Some(0) {
+                    "active"
+                } else {
+                    "stale"
+                },
                 updated_at,
             ],
         )
@@ -843,9 +854,18 @@ impl TerminalStorage {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|err| err.to_string())?;
 
-        for (existing_id, existing_statement, existing_status, existing_polarity, existing_confidence, existing_evidence_ids) in existing {
+        for (
+            existing_id,
+            existing_statement,
+            existing_status,
+            existing_polarity,
+            existing_confidence,
+            existing_evidence_ids,
+        ) in existing
+        {
             if existing_statement == fact.statement {
-                let merged_evidence = merge_string_lists(&existing_evidence_ids, &fact.source_evidence_ids);
+                let merged_evidence =
+                    merge_string_lists(&existing_evidence_ids, &fact.source_evidence_ids);
                 tx.execute(
                     "UPDATE kernel_facts
                      SET status = ?1,
@@ -873,7 +893,10 @@ impl TerminalStorage {
                 continue;
             }
 
-            if fact.subject == "general" || fact.polarity == "neutral" || existing_polarity == "neutral" {
+            if fact.subject == "general"
+                || fact.polarity == "neutral"
+                || existing_polarity == "neutral"
+            {
                 continue;
             }
 
@@ -951,11 +974,7 @@ impl TerminalStorage {
         Ok(())
     }
 
-    fn upsert_kernel_plan_in_tx(
-        &self,
-        tx: &Connection,
-        plan: &KernelPlan,
-    ) -> Result<(), String> {
+    fn upsert_kernel_plan_in_tx(&self, tx: &Connection, plan: &KernelPlan) -> Result<(), String> {
         tx.execute(
             "INSERT INTO kernel_plans (
                 id, task_id, title, goal, summary, status, updated_at
@@ -1110,14 +1129,23 @@ impl TerminalStorage {
         .map_err(|err| err.to_string())?;
 
         if let Some(task_id) = task_id {
-            tx.execute("DELETE FROM compact_boundaries WHERE task_id = ?1", [&task_id])
-                .map_err(|err| err.to_string())?;
+            tx.execute(
+                "DELETE FROM compact_boundaries WHERE task_id = ?1",
+                [&task_id],
+            )
+            .map_err(|err| err.to_string())?;
             tx.execute("DELETE FROM context_packs WHERE task_id = ?1", [&task_id])
                 .map_err(|err| err.to_string())?;
-            tx.execute("DELETE FROM context_package_logs WHERE task_id = ?1", [&task_id])
-                .map_err(|err| err.to_string())?;
-            tx.execute("DELETE FROM context_snapshots WHERE task_id = ?1", [&task_id])
-                .map_err(|err| err.to_string())?;
+            tx.execute(
+                "DELETE FROM context_package_logs WHERE task_id = ?1",
+                [&task_id],
+            )
+            .map_err(|err| err.to_string())?;
+            tx.execute(
+                "DELETE FROM context_snapshots WHERE task_id = ?1",
+                [&task_id],
+            )
+            .map_err(|err| err.to_string())?;
             tx.execute("DELETE FROM handoff_events WHERE task_id = ?1", [&task_id])
                 .map_err(|err| err.to_string())?;
             tx.execute("DELETE FROM task_packets WHERE id = ?1", [&task_id])
@@ -1547,24 +1575,9 @@ impl TerminalStorage {
         )
         .map_err(|err| err.to_string())?;
 
-        ensure_column_exists(
-            conn,
-            "chat_messages",
-            "automation_run_id",
-            "TEXT",
-        )?;
-        ensure_column_exists(
-            conn,
-            "chat_messages",
-            "workflow_run_id",
-            "TEXT",
-        )?;
-        ensure_column_exists(
-            conn,
-            "chat_messages",
-            "workflow_node_id",
-            "TEXT",
-        )?;
+        ensure_column_exists(conn, "chat_messages", "automation_run_id", "TEXT")?;
+        ensure_column_exists(conn, "chat_messages", "workflow_run_id", "TEXT")?;
+        ensure_column_exists(conn, "chat_messages", "workflow_node_id", "TEXT")?;
 
         ensure_column_exists(
             conn,
@@ -1603,12 +1616,7 @@ impl TerminalStorage {
             "pin_state",
             "TEXT NOT NULL DEFAULT 'auto'",
         )?;
-        ensure_column_exists(
-            conn,
-            "kernel_memory_entries",
-            "last_used_at",
-            "TEXT",
-        )?;
+        ensure_column_exists(conn, "kernel_memory_entries", "last_used_at", "TEXT")?;
         ensure_column_exists(
             conn,
             "kernel_memory_entries",
@@ -1904,16 +1912,22 @@ impl TerminalStorage {
             let latest_conclusion = request
                 .latest_assistant_summary
                 .clone()
-                .or_else(|| current_work_item.as_ref().and_then(|item| item.summary.clone()))
+                .or_else(|| {
+                    current_work_item
+                        .as_ref()
+                        .and_then(|item| item.summary.clone())
+                })
                 .or_else(|| active_plan.as_ref().and_then(|plan| plan.summary.clone()))
                 .or_else(|| task.latest_conclusion.clone());
             let merged_files = merge_string_lists(&task.relevant_files, &request.relevant_files);
             let next_step = Some(
                 current_work_item
                     .as_ref()
-                    .map(|item| format!("Continue work item '{}' in {}.", item.title, request.to_cli))
+                    .map(|item| {
+                        format!("Continue work item '{}' in {}.", item.title, request.to_cli)
+                    })
                     .or_else(|| task.next_step.clone())
-                    .unwrap_or_else(|| format!("Continue the active task in {}.", request.to_cli))
+                    .unwrap_or_else(|| format!("Continue the active task in {}.", request.to_cli)),
             );
 
             tx.execute(
@@ -2199,10 +2213,7 @@ impl TerminalStorage {
         self.load_task_kernel_by_terminal_tab(&terminal_tab_id)
     }
 
-    pub fn pin_kernel_memory(
-        &self,
-        fact_id: &str,
-    ) -> Result<Option<TaskKernel>, String> {
+    pub fn pin_kernel_memory(&self, fact_id: &str) -> Result<Option<TaskKernel>, String> {
         let mut conn = self.open_connection()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2267,9 +2278,17 @@ impl TerminalStorage {
             updated_at: now_rfc3339(),
         };
         self.upsert_kernel_memory_in_tx(&tx, &workspace_entry)?;
-        if matches!(workspace_entry.kind.as_str(), "decision" | "requirement" | "risk") {
+        if matches!(
+            workspace_entry.kind.as_str(),
+            "decision" | "requirement" | "risk"
+        ) {
             let global_entry = KernelMemoryEntry {
-                id: stable_memory_id("global", "global", &workspace_entry.kind, &workspace_entry.content),
+                id: stable_memory_id(
+                    "global",
+                    "global",
+                    &workspace_entry.kind,
+                    &workspace_entry.content,
+                ),
                 scope: "global".to_string(),
                 scope_ref: "global".to_string(),
                 kind: workspace_entry.kind.clone(),
@@ -2369,8 +2388,7 @@ impl TerminalStorage {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|err| err.to_string())?;
-        let result =
-            self.compact_terminal_tab_in_tx(&tx, terminal_tab_id, "auto-budget", false)?;
+        let result = self.compact_terminal_tab_in_tx(&tx, terminal_tab_id, "auto-budget", false)?;
         tx.commit().map_err(|err| err.to_string())?;
         Ok(result)
     }
@@ -2433,7 +2451,11 @@ impl TerminalStorage {
         Ok(())
     }
 
-    fn count_messages_for_session(&self, tx: &Connection, session_id: &str) -> Result<usize, String> {
+    fn count_messages_for_session(
+        &self,
+        tx: &Connection,
+        session_id: &str,
+    ) -> Result<usize, String> {
         let count = tx
             .query_row(
                 "SELECT COUNT(*) FROM chat_messages WHERE session_id = ?1",
@@ -2565,7 +2587,12 @@ impl TerminalStorage {
         let mut included_layers = Vec::new();
         let mut included_pack_ids = Vec::new();
 
-        push_layer(&mut lines, &mut included_layers, "workspace", workspace_preamble);
+        push_layer(
+            &mut lines,
+            &mut included_layers,
+            "workspace",
+            workspace_preamble,
+        );
         push_layer(
             &mut lines,
             &mut included_layers,
@@ -2612,12 +2639,16 @@ impl TerminalStorage {
                 &mut lines,
                 &mut included_layers,
                 "snapshot",
-                &format!("--- Latest compacted task snapshot ---\n{}", snapshot.summary),
+                &format!(
+                    "--- Latest compacted task snapshot ---\n{}",
+                    snapshot.summary
+                ),
             );
         }
 
         let kernel_facts = self.load_kernel_facts_for_task(&conn, &bundle.task_packet.id, 8)?;
-        let kernel_evidence = self.load_kernel_evidence_for_task(&conn, &bundle.task_packet.id, 8)?;
+        let kernel_evidence =
+            self.load_kernel_evidence_for_task(&conn, &bundle.task_packet.id, 8)?;
         let active_plan = self.load_kernel_plan_for_task(&conn, &bundle.task_packet.id)?;
         let work_items = self.load_kernel_work_items_for_task(&conn, &bundle.task_packet.id, 8)?;
         let current_work_item = select_current_work_item(&work_items);
@@ -2629,12 +2660,7 @@ impl TerminalStorage {
             &bundle.task_packet.workspace_id,
             4,
         )?);
-        memory_entries.extend(self.load_kernel_memory_for_scope(
-            &conn,
-            "global",
-            "global",
-            4,
-        )?);
+        memory_entries.extend(self.load_kernel_memory_for_scope(&conn, "global", "global", 4)?);
         let selected_work_items = select_work_items_for_cli(&work_items, target_cli);
         let selected_facts = select_kernel_facts_for_cli(&kernel_facts, target_cli);
         let selected_evidence = select_kernel_evidence_for_cli(&kernel_evidence, target_cli);
@@ -2769,11 +2795,14 @@ impl TerminalStorage {
         }
 
         if !hot_turns.is_empty() {
-            let hot_text = format_turns_block("--- Active hot turns after compaction ---", &hot_turns);
+            let hot_text =
+                format_turns_block("--- Active hot turns after compaction ---", &hot_turns);
             push_layer(&mut lines, &mut included_layers, "hot_turns", &hot_text);
         } else if !fallback_recent_turns.is_empty() {
-            let fallback_text =
-                format_turns_block("--- Recent conversation in this terminal tab only ---", fallback_recent_turns);
+            let fallback_text = format_turns_block(
+                "--- Recent conversation in this terminal tab only ---",
+                fallback_recent_turns,
+            );
             push_layer(
                 &mut lines,
                 &mut included_layers,
@@ -2797,7 +2826,9 @@ impl TerminalStorage {
             }
         }
 
-        if raw_turns.len() > hot_turns.len() && estimate_joined_len(&lines, "", prompt) < profile.max_chars {
+        if raw_turns.len() > hot_turns.len()
+            && estimate_joined_len(&lines, "", prompt) < profile.max_chars
+        {
             let older_raw = raw_turns
                 .into_iter()
                 .rev()
@@ -3479,11 +3510,7 @@ impl TerminalStorage {
             .map_err(|err| err.to_string())
     }
 
-    fn touch_memory_usage(
-        &self,
-        conn: &Connection,
-        ids: &[String],
-    ) -> Result<(), String> {
+    fn touch_memory_usage(&self, conn: &Connection, ids: &[String]) -> Result<(), String> {
         let now = now_rfc3339();
         for id in ids {
             conn.execute(
@@ -3892,7 +3919,12 @@ fn select_current_work_item(items: &[KernelWorkItem]) -> Option<KernelWorkItem> 
 
     items
         .iter()
-        .min_by_key(|item| (priority(&item.status), std::cmp::Reverse(item.updated_at.clone())))
+        .min_by_key(|item| {
+            (
+                priority(&item.status),
+                std::cmp::Reverse(item.updated_at.clone()),
+            )
+        })
         .cloned()
 }
 
@@ -3924,7 +3956,10 @@ fn select_kernel_facts_for_cli<'a>(
             } else if target_cli == "gemini" {
                 matches!(fact.kind.as_str(), "decision" | "codebase" | "output")
             } else {
-                matches!(fact.kind.as_str(), "runtime" | "codebase" | "output" | "decision")
+                matches!(
+                    fact.kind.as_str(),
+                    "runtime" | "codebase" | "output" | "decision"
+                )
             }
         })
         .take(limit)
@@ -3941,9 +3976,15 @@ fn select_kernel_evidence_for_cli<'a>(
             if target_cli == "claude" {
                 true
             } else if target_cli == "gemini" {
-                matches!(entry.evidence_type.as_str(), "fileChange" | "assistantMessage" | "toolCall")
+                matches!(
+                    entry.evidence_type.as_str(),
+                    "fileChange" | "assistantMessage" | "toolCall"
+                )
             } else {
-                matches!(entry.evidence_type.as_str(), "command" | "fileChange" | "assistantMessage")
+                matches!(
+                    entry.evidence_type.as_str(),
+                    "command" | "fileChange" | "assistantMessage"
+                )
             }
         })
         .take(if target_cli == "claude" { 8 } else { 5 })
@@ -3969,15 +4010,19 @@ fn select_memory_for_cli_with_budget<'a>(
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| right.0.cmp(&left.0));
     let budget = if target_cli == "claude" { 8 } else { 4 };
-    scored.into_iter().take(budget).map(|(_, entry)| entry).collect()
+    scored
+        .into_iter()
+        .take(budget)
+        .map(|(_, entry)| entry)
+        .collect()
 }
 
-fn extract_fact_subject(
-    kind: &str,
-    entry: &KernelEvidence,
-    assistant_summary: &str,
-) -> String {
-    if let Some(payload) = entry.payload_ref.as_ref().filter(|value| !value.trim().is_empty()) {
+fn extract_fact_subject(kind: &str, entry: &KernelEvidence, assistant_summary: &str) -> String {
+    if let Some(payload) = entry
+        .payload_ref
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         return normalized_identity_key(payload);
     }
     if entry.evidence_type == "assistantMessage" {
@@ -3995,11 +4040,7 @@ fn extract_fact_subject(
     "general".to_string()
 }
 
-fn detect_fact_polarity(
-    kind: &str,
-    summary: &str,
-    status: &str,
-) -> String {
+fn detect_fact_polarity(kind: &str, summary: &str, status: &str) -> String {
     let lowered = summary.to_ascii_lowercase();
     if kind == "risk" {
         return "negative".to_string();
@@ -4109,7 +4150,11 @@ fn score_memory_for_cli(
     let relevance_score = current_work_item
         .map(|item| {
             let title = item.title.to_ascii_lowercase();
-            let summary = item.summary.clone().unwrap_or_default().to_ascii_lowercase();
+            let summary = item
+                .summary
+                .clone()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             let content = entry.content.to_ascii_lowercase();
             if content.contains(&title) || (!summary.is_empty() && content.contains(&summary)) {
                 20
@@ -4130,13 +4175,21 @@ fn score_memory_for_cli(
         } else {
             0
         };
-    let decay_penalty = if entry.decay_eligible && entry.pin_state != "manual" && freshness_score == 0 {
-        12
-    } else {
-        0
-    };
+    let decay_penalty =
+        if entry.decay_eligible && entry.pin_state != "manual" && freshness_score == 0 {
+            12
+        } else {
+            0
+        };
 
-    scope_score + pin_score + priority_score + affinity_score + freshness_score + usage_score + relevance_score - decay_penalty
+    scope_score
+        + pin_score
+        + priority_score
+        + affinity_score
+        + freshness_score
+        + usage_score
+        + relevance_score
+        - decay_penalty
 }
 
 fn merge_fact_status(existing: &str, incoming: &str) -> String {
@@ -4161,7 +4214,9 @@ fn merge_fact_confidence(existing: &str, incoming: &str) -> String {
     }
 }
 
-fn collect_relevant_files_from_blocks_option(blocks: Option<&Vec<ChatMessageBlock>>) -> Vec<String> {
+fn collect_relevant_files_from_blocks_option(
+    blocks: Option<&Vec<ChatMessageBlock>>,
+) -> Vec<String> {
     let mut files = Vec::new();
     let Some(blocks) = blocks else {
         return files;
@@ -4222,15 +4277,20 @@ fn build_kernel_evidence_records(
                     } else {
                         "failed"
                     },
-                    truncate_text(if label.trim().is_empty() { command } else { label }, 180)
+                    truncate_text(
+                        if label.trim().is_empty() {
+                            command
+                        } else {
+                            label
+                        },
+                        180
+                    )
                 ),
                 payload_ref: Some(truncate_text(command, 220)),
                 timestamp: timestamp.to_string(),
             }),
             ChatMessageBlock::FileChange {
-                path,
-                change_type,
-                ..
+                path, change_type, ..
             } => Some(KernelEvidence {
                 id: new_id("evidence"),
                 task_id: task_id.to_string(),
@@ -4243,7 +4303,10 @@ fn build_kernel_evidence_records(
                 timestamp: timestamp.to_string(),
             }),
             ChatMessageBlock::Tool {
-                tool, summary, source, ..
+                tool,
+                summary,
+                source,
+                ..
             } => Some(KernelEvidence {
                 id: new_id("evidence"),
                 task_id: task_id.to_string(),
@@ -4338,7 +4401,9 @@ fn build_kernel_fact_records(
             "fileChange" => ("codebase", "verified", "high"),
             "command" if entry.summary.contains("failed") => ("runtime", "pending", "high"),
             "command" => ("runtime", "verified", "high"),
-            "status" if entry.summary.to_ascii_lowercase().contains("error") => ("risk", "pending", "medium"),
+            "status" if entry.summary.to_ascii_lowercase().contains("error") => {
+                ("risk", "pending", "medium")
+            }
             "toolCall" => ("decision", "inferred", "medium"),
             _ => ("output", "inferred", "low"),
         };
@@ -4475,4 +4540,3 @@ fn build_kernel_work_item_records(
 
     items
 }
-

@@ -1329,7 +1329,11 @@ export function CliBubble({
       </div>
 
       <div className="w-full">
-        <div className="overflow-hidden rounded-[26px] rounded-bl-lg border border-[#dce4f2] bg-white/96 px-4 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-sm">
+        <div
+          data-chat-searchable-content="true"
+          data-chat-search-message-id={message.id}
+          className="overflow-hidden rounded-[26px] rounded-bl-lg border border-[#dce4f2] bg-white/96 px-4 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-sm"
+        >
           {renderMode === "raw" ? (
             <AssistantMessageContent
               content={message.content}

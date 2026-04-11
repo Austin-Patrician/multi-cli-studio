@@ -129,16 +129,23 @@ jobs:
           HAS_CERT: ${{ secrets.APPLE_CERTIFICATE }}
           HAS_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           HAS_APPLE_ID: ${{ secrets.APPLE_ID }}
+          HAS_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          HAS_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ -n "$HAS_CERT" ] && [ -n "$HAS_IDENTITY" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
-          if [ -n "$HAS_APPLE_ID" ]; then
+          if [ -n "$HAS_APPLE_ID" ] && [ -n "$HAS_APPLE_PASSWORD" ] && [ -n "$HAS_APPLE_TEAM_ID" ]; then
             echo "notarize=true" >> "$GITHUB_OUTPUT"
           else
             echo "notarize=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$HAS_CERT" ] && [ -n "$HAS_IDENTITY" ] && [ -n "$HAS_APPLE_ID" ] && [ -n "$HAS_APPLE_PASSWORD" ] && [ -n "$HAS_APPLE_TEAM_ID" ]; then
+            echo "release_ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_ready=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup Node.js
@@ -152,9 +159,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # ── Apple code signing setup (skipped if secrets are not configured) ──
+      # ── Apple code signing setup (required for public macOS release) ──
       - name: Import Apple certificate
-        if: steps.signing.outputs.enabled == 'true'
+        if: steps.signing.outputs.release_ready == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -184,9 +191,15 @@ jobs:
       - name: Validate version metadata
         run: node ./scripts/sync-version.mjs --check ${{ inputs.version }}
 
-      # ── Build with Developer ID signing (when secrets are configured) ──
+      - name: Skip unsigned macOS release
+        if: steps.signing.outputs.release_ready != 'true'
+        run: |
+          echo "::warning::Skipping macOS release packaging because Apple Developer signing and notarization secrets are not configured."
+          echo "::warning::Unsigned or ad-hoc signed DMGs are routinely blocked by Gatekeeper and should not be uploaded as release artifacts."
+
+      # ── Build with Developer ID signing + notarization (required for release) ──
       - name: Build Tauri bundle (signed)
-        if: steps.signing.outputs.enabled == 'true'
+        if: steps.signing.outputs.release_ready == 'true'
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -196,44 +209,9 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run tauri:build
 
-      # ── Build without signing (no Apple secrets) ──
-      - name: Build Tauri bundle (unsigned)
-        if: steps.signing.outputs.enabled != 'true'
-        run: npm run tauri:build
-
-      # ── Ad-hoc signing fallback (free, no Apple Developer account needed) ──
-      # Replaces "damaged" error with a bypassable "unidentified developer" dialog
-      - name: Ad-hoc sign app bundle (fallback)
-        if: steps.signing.outputs.enabled != 'true'
-        run: |
-          app_bundle=$(find src-tauri/target/release/bundle/macos -name '*.app' -maxdepth 1 | head -n 1)
-          if [ -n "$app_bundle" ]; then
-            echo "No Apple signing identity configured – applying ad-hoc signature"
-            codesign --force --deep --sign - "$app_bundle"
-            echo "Ad-hoc signed: $app_bundle"
-          fi
-
-      # ── Re-create DMG after ad-hoc signing (the original DMG contains the unsigned app) ──
-      - name: Re-create DMG after ad-hoc signing
-        if: steps.signing.outputs.enabled != 'true'
-        run: |
-          app_bundle=$(find src-tauri/target/release/bundle/macos -name '*.app' -maxdepth 1 | head -n 1)
-          dmg_file=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -n 1)
-          if [ -n "$app_bundle" ] && [ -n "$dmg_file" ]; then
-            dmg_name=$(basename "$dmg_file")
-            dmg_dir=$(dirname "$dmg_file")
-            app_name=$(basename "$app_bundle")
-            rm -f "$dmg_file"
-            hdiutil create -volname "${app_name%.app}" \
-              -srcfolder "$app_bundle" \
-              -ov -format UDZO \
-              "$dmg_dir/$dmg_name"
-            echo "Re-created DMG with ad-hoc signed app: $dmg_dir/$dmg_name"
-          fi
-
-      # ── Notarization (only when Apple credentials are configured) ──
+      # ── Notarization (required for public release) ──
       - name: Notarize app bundle
-        if: steps.signing.outputs.notarize == 'true'
+        if: steps.signing.outputs.release_ready == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -251,6 +229,7 @@ jobs:
 
       - name: Resolve DMG path
         id: dmg
+        if: steps.signing.outputs.release_ready == 'true'
         run: |
           dmg_file=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -n 1)
           if [ -z "$dmg_file" ]; then
@@ -261,6 +240,7 @@ jobs:
           echo "name=$(basename "$dmg_file")" >> "$GITHUB_OUTPUT"
 
       - name: Upload DMG to GitHub Release
+        if: steps.signing.outputs.release_ready == 'true'
         run: |
           gh release upload "$RELEASE_TAG" "${{ steps.dmg.outputs.path }}" --clobber
 
