@@ -6,11 +6,18 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { AgentId, AssistantApprovalDecision, AutoRouteAction } from "../../lib/models";
+import {
+  AgentId,
+  AssistantApprovalDecision,
+  AutoRouteAction,
+  TerminalCliId,
+} from "../../lib/models";
 import { useStore } from "../../lib/store";
 import { CliBubble } from "./CliBubble";
+import { CLI_OPTIONS } from "./CliSelector";
 import { ChatSearchBar } from "./ChatSearchBar";
 import { UserBubble } from "./UserBubble";
 
@@ -248,6 +255,112 @@ function focusSearchInput(
   }
 }
 
+function formatQueuedPromptPreview(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function QueuedIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <circle cx="10" cy="10" r="6.25" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M10 6.6V10l2.3 1.6"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function EditIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path
+        d="M13.9 3.9a1.9 1.9 0 112.7 2.7l-8 8L5 15l.5-3.6 8.4-7.5z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ClearIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <path
+        d="M5.5 5.5l9 9m0-9l-9 9"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function queuedCliTone(cliId: TerminalCliId) {
+  if (cliId === "claude") return "border-amber-200 bg-amber-50 text-amber-700";
+  if (cliId === "gemini") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  return "border-blue-200 bg-blue-50 text-blue-700";
+}
+
+function QueuedIconButton({
+  label,
+  icon,
+  onClick,
+  tone = "neutral",
+}: {
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+  tone?: "neutral" | "danger";
+}) {
+  const toneClass =
+    tone === "danger"
+      ? "border-rose-200/90 bg-rose-50/90 text-rose-600 hover:border-rose-300 hover:bg-rose-100 hover:text-rose-700"
+      : "border-slate-200/90 bg-white/92 text-slate-500 hover:border-slate-300 hover:bg-slate-100 hover:text-slate-800";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-full border transition-colors ${toneClass}`}
+    >
+      {icon}
+    </button>
+  );
+}
+
+function QueuedCliBadge({ cliId }: { cliId: TerminalCliId }) {
+  const option = CLI_OPTIONS.find((item) => item.id === cliId) ?? null;
+
+  return (
+    <span
+      className={`inline-flex h-6 w-6 items-center justify-center rounded-full border bg-white/85 ${queuedCliTone(
+        cliId
+      )}`}
+      title={`Queued for ${option?.label ?? cliId}`}
+      aria-label={`Queued for ${option?.label ?? cliId}`}
+    >
+      {option?.icon ? (
+        <img
+          src={option.icon}
+          alt=""
+          aria-hidden="true"
+          className="h-3.5 w-3.5 select-none object-contain"
+        />
+      ) : (
+        <span className="text-[9px] font-bold uppercase leading-none">A</span>
+      )}
+    </span>
+  );
+}
+
 export function ChatConversation() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -295,6 +408,9 @@ export function ChatConversation() {
   const activeSession = useStore((state) =>
     state.activeTerminalTabId ? state.chatSessions[state.activeTerminalTabId] ?? null : null
   );
+  const queuedPrompt = useStore((state) =>
+    state.activeTerminalTabId ? state.queuedChatByTab[state.activeTerminalTabId] ?? null : null
+  );
   const workspace = useStore(
     useShallow((state) => {
       const tab = state.terminalTabs.find((item) => item.id === state.activeTerminalTabId);
@@ -310,9 +426,12 @@ export function ChatConversation() {
   );
   const setTabSelectedCli = useStore((state) => state.setTabSelectedCli);
   const sendChatMessage = useStore((state) => state.sendChatMessage);
+  const interruptChatTurn = useStore((state) => state.interruptChatTurn);
   const deleteChatMessage = useStore((state) => state.deleteChatMessage);
   const respondAssistantApproval = useStore((state) => state.respondAssistantApproval);
   const respondAutoRoute = useStore((state) => state.respondAutoRoute);
+  const clearQueuedChatMessage = useStore((state) => state.clearQueuedChatMessage);
+  const editQueuedChatMessage = useStore((state) => state.editQueuedChatMessage);
 
   useEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -323,7 +442,7 @@ export function ChatConversation() {
       behavior: activeTab?.status === "streaming" ? "auto" : "smooth",
       block: "end",
     });
-  }, [activeSession?.messages, activeTab?.status, isSearchOpen]);
+  }, [activeSession?.messages, activeTab?.status, isSearchOpen, queuedPrompt?.queuedAt]);
 
   useEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -479,6 +598,18 @@ export function ChatConversation() {
         setIsSearchOpen(false);
         setSearchQuery("");
         setCurrentMatchIndex(0);
+        return;
+      }
+
+      if (event.key === "Escape" && activeTab.status === "streaming") {
+        const target =
+          event.target instanceof HTMLElement ? event.target : null;
+        if (target?.closest("[data-chat-prompt-surface='true']")) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        void interruptChatTurn(activeTab.id);
       }
     }
 
@@ -486,7 +617,7 @@ export function ChatConversation() {
     return () => {
       document.removeEventListener("keydown", handleGlobalKeyDown, true);
     };
-  }, [activeTab, isSearchOpen]);
+  }, [activeTab, interruptChatTurn, isSearchOpen]);
 
   const emptyMessage = useMemo(() => {
     if (!workspace) return "No workspace attached yet.";
@@ -495,6 +626,10 @@ export function ChatConversation() {
 
   const activeMatchNumber =
     matchCount === 0 ? 0 : Math.min(currentMatchIndex + 1, matchCount);
+  const queuedPromptPreview = useMemo(
+    () => (queuedPrompt ? formatQueuedPromptPreview(queuedPrompt.text) : ""),
+    [queuedPrompt]
+  );
 
   function openSearch(selectAll = false) {
     shouldAutoFollowRef.current = false;
@@ -567,6 +702,18 @@ export function ChatConversation() {
     const scrollContainer = scrollContainerRef.current;
     if (!scrollContainer) return;
     shouldAutoFollowRef.current = isNearBottom(scrollContainer);
+  }
+
+  function handleEditQueuedPrompt() {
+    if (!activeTab) return;
+    const applied = editQueuedChatMessage(activeTab.id);
+    if (!applied) return;
+    window.dispatchEvent(new Event("terminal-queue-edit-focus"));
+  }
+
+  function handleClearQueuedPrompt() {
+    if (!activeTab) return;
+    clearQueuedChatMessage(activeTab.id);
   }
 
   if (!activeSession || !activeTab) {
@@ -649,11 +796,15 @@ export function ChatConversation() {
 
             return activeSession.messages.map((msg) => {
               if (msg.role === "system") {
+                const systemTone =
+                  msg.exitCode != null && msg.exitCode !== 0
+                    ? "border-rose-200 bg-rose-50 text-rose-700"
+                    : "border-border bg-white text-secondary";
                 return (
                   <div key={msg.id} className="flex justify-center">
                     <span
                       data-chat-search-ignore="true"
-                      className="rounded-full border border-border bg-white px-3 py-1 text-xs text-secondary"
+                      className={`rounded-full border px-3 py-1 text-xs ${systemTone}`}
                     >
                       {msg.content}
                     </span>
@@ -698,6 +849,45 @@ export function ChatConversation() {
               );
             });
           })()}
+
+          {queuedPrompt && (
+            <div className="flex justify-end">
+              <div
+                data-chat-search-ignore="true"
+                className="flex w-fit max-w-[75%] flex-col items-end gap-2"
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-sky-100 text-sky-700"
+                    title="Queued message"
+                    aria-label="Queued message"
+                  >
+                    <QueuedIcon />
+                  </span>
+                  <QueuedCliBadge cliId={queuedPrompt.cliId} />
+                </div>
+                <div
+                  className="max-w-full rounded-2xl rounded-br-md border border-sky-200/90 bg-sky-50/90 px-3.5 py-2.5 text-sm whitespace-pre-wrap text-sky-950 shadow-[0_14px_34px_rgba(14,116,144,0.08)]"
+                  title={queuedPrompt.text}
+                >
+                  {queuedPromptPreview || queuedPrompt.text}
+                </div>
+                <div className="flex items-center justify-end gap-1 pr-1">
+                  <QueuedIconButton
+                    label="Edit queued message (Ctrl+B)"
+                    icon={<EditIcon />}
+                    onClick={handleEditQueuedPrompt}
+                  />
+                  <QueuedIconButton
+                    label="Clear queued message"
+                    icon={<ClearIcon />}
+                    onClick={handleClearQueuedPrompt}
+                    tone="danger"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
 
           <div ref={bottomRef} />
         </div>

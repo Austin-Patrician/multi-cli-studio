@@ -1248,10 +1248,8 @@ export function CliBubble({
   const runtimeBlocks = message.blocks ?? null;
   const hasTextRuntimeBlocks =
     runtimeBlocks?.some((block) => block.kind === "text") ?? false;
-  const hasOrchestrationBlocks =
-    runtimeBlocks?.some(
-      (block) => block.kind === "orchestrationPlan" || block.kind === "orchestrationStep"
-    ) ?? false;
+  const shouldRenderRuntimeFallbackText =
+    !hasTextRuntimeBlocks && message.content.trim().length > 0;
   const formatLabel =
     runtimeBlocks?.length
       ? "structured"
@@ -1265,7 +1263,9 @@ export function CliBubble({
       parsed.hasSpecialBlocks ||
       contentFormat !== "plain" ||
       rawText.includes("\n"));
+  const showDurationFooter = !message.isStreaming && message.durationMs != null;
   const showBottomActions = Boolean(onRegenerate || onDelete);
+  const showBottomFooter = showDurationFooter || showBottomActions;
 
   return (
     <div className="flex w-full max-w-[min(90%,960px)] flex-col items-start gap-2">
@@ -1276,9 +1276,6 @@ export function CliBubble({
           </span>
         )}
         <span>{time}</span>
-        {!message.isStreaming && message.durationMs != null && (
-          <span>{(message.durationMs / 1000).toFixed(1)}s</span>
-        )}
         {!message.isStreaming && message.exitCode != null && (
           <span
             className={`rounded-full px-2 py-1 text-[10px] font-medium ${
@@ -1351,22 +1348,7 @@ export function CliBubble({
                 onApprovalDecision={onApprovalDecision}
                 onAutoRouteAction={onAutoRouteAction}
               />
-              {message.isStreaming &&
-                !hasOrchestrationBlocks &&
-                !hasTextRuntimeBlocks &&
-                message.content.trim() && (
-                <AssistantMessageContent
-                  content={message.content}
-                  rawContent={message.rawContent}
-                  contentFormat={contentFormat}
-                  isStreaming={message.isStreaming}
-                  renderMode="rich"
-                />
-              )}
-              {!message.isStreaming &&
-                hasOrchestrationBlocks &&
-                !hasTextRuntimeBlocks &&
-                message.content.trim() && (
+              {shouldRenderRuntimeFallbackText && (
                 <AssistantMessageContent
                   content={message.content}
                   rawContent={message.rawContent}
@@ -1389,24 +1371,33 @@ export function CliBubble({
           )}
         </div>
 
-        {showBottomActions && (
-          <div className="mt-1.5 flex items-center gap-1 pl-1">
-            {onRegenerate && (
-              <MessageActionButton
-                label="Regenerate"
-                icon={<RefreshIcon />}
-                onClick={onRegenerate}
-                disabled={actionsDisabled}
-              />
+        {showBottomFooter && (
+          <div className="mt-1.5 flex min-h-7 items-center gap-3 pl-1">
+            {showDurationFooter && (
+              <span className="text-[11px] font-medium text-muted">
+                {(message.durationMs! / 1000).toFixed(1)}s
+              </span>
             )}
-            {onDelete && (
-              <MessageActionButton
-                label="Delete"
-                icon={<DeleteIcon />}
-                onClick={() => onDelete(message.id)}
-                disabled={actionsDisabled}
-                tone="danger"
-              />
+            {showBottomActions && (
+              <div className="flex items-center gap-1">
+                {onRegenerate && (
+                  <MessageActionButton
+                    label="Regenerate"
+                    icon={<RefreshIcon />}
+                    onClick={onRegenerate}
+                    disabled={actionsDisabled}
+                  />
+                )}
+                {onDelete && (
+                  <MessageActionButton
+                    label="Delete"
+                    icon={<DeleteIcon />}
+                    onClick={() => onDelete(message.id)}
+                    disabled={actionsDisabled}
+                    tone="danger"
+                  />
+                )}
+              </div>
             )}
           </div>
         )}

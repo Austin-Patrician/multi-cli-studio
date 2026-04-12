@@ -572,6 +572,7 @@ export function ChatPromptBar() {
   const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
   const [dismissedSkillKey, setDismissedSkillKey] = useState<string | null>(null);
   const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
+  const [queueFeedback, setQueueFeedback] = useState<string | null>(null);
 
   const terminalTabs = useStore((s) => s.terminalTabs);
   const workspaces = useStore((s) => s.workspaces);
@@ -579,6 +580,9 @@ export function ChatPromptBar() {
   const busyAction = useStore((s) => s.busyAction);
   const activeSession = useStore((s) =>
     s.activeTerminalTabId ? s.chatSessions[s.activeTerminalTabId] ?? null : null
+  );
+  const queuedPrompt = useStore((s) =>
+    s.activeTerminalTabId ? s.queuedChatByTab[s.activeTerminalTabId] ?? null : null
   );
   const acpCapabilitiesByCli = useStore((s) => s.acpCapabilitiesByCli);
   const acpCapabilityStatusByCli = useStore((s) => s.acpCapabilityStatusByCli);
@@ -594,6 +598,9 @@ export function ChatPromptBar() {
   const loadCliSkills = useStore((s) => s.loadCliSkills);
   const loadAcpCapabilities = useStore((s) => s.loadAcpCapabilities);
   const appendChatSystemMessage = useStore((s) => s.appendChatSystemMessage);
+  const queueChatMessage = useStore((s) => s.queueChatMessage);
+  const editQueuedChatMessage = useStore((s) => s.editQueuedChatMessage);
+  const interruptChatTurn = useStore((s) => s.interruptChatTurn);
 
   const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
   const workspace = workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null;
@@ -628,6 +635,10 @@ export function ChatPromptBar() {
       index: null,
       draft: "",
     };
+  }, [activeTab?.id]);
+
+  useEffect(() => {
+    setQueueFeedback(null);
   }, [activeTab?.id]);
 
   const mentionToken = useMemo(() => {
@@ -819,6 +830,27 @@ export function ChatPromptBar() {
     };
   }, [isActionMenuOpen]);
 
+  useEffect(() => {
+    function handleFocusQueuedEdit() {
+      focusPromptAtEnd();
+    }
+
+    window.addEventListener("terminal-queue-edit-focus", handleFocusQueuedEdit);
+    return () => {
+      window.removeEventListener("terminal-queue-edit-focus", handleFocusQueuedEdit);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!queueFeedback || typeof window === "undefined") return;
+    const timer = window.setTimeout(() => {
+      setQueueFeedback(null);
+    }, 2600);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [queueFeedback]);
+
   function setPrompt(value: string) {
     if (!activeTab) return;
     setTabDraftPrompt(activeTab.id, value);
@@ -921,7 +953,26 @@ export function ChatPromptBar() {
       index: null,
       draft: "",
     };
+
+    if (isStreaming) {
+      const result = queueChatMessage(activeTab.id, prompt, activeTab.selectedCli);
+      if (result === "full") {
+        setQueueFeedback("Only one queued message is allowed. Press Ctrl+B to edit it.");
+      } else if (result === "queued") {
+        setQueueFeedback(null);
+      }
+      return;
+    }
+
     void sendChatMessage(activeTab.id);
+  }
+
+  function handleEditQueuedMessage() {
+    if (!activeTab) return;
+    const applied = editQueuedChatMessage(activeTab.id);
+    if (!applied) return;
+    setQueueFeedback(null);
+    focusPromptAtEnd();
   }
 
   function selectCommand(command: AcpCommandDef) {
@@ -1068,6 +1119,19 @@ export function ChatPromptBar() {
       return;
     }
 
+    if (
+      activeTab &&
+      queuedPrompt &&
+      (event.ctrlKey || event.metaKey) &&
+      !event.altKey &&
+      !event.shiftKey &&
+      event.key.toLowerCase() === "b"
+    ) {
+      event.preventDefault();
+      handleEditQueuedMessage();
+      return;
+    }
+
     if (hasInteractiveOverlay) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -1110,6 +1174,12 @@ export function ChatPromptBar() {
       return;
     }
 
+    if (event.key === "Escape" && activeTab && isStreaming) {
+      event.preventDefault();
+      void interruptChatTurn(activeTab.id);
+      return;
+    }
+
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       handleSend();
@@ -1121,7 +1191,10 @@ export function ChatPromptBar() {
   const isAutoMode = activeTab.selectedCli === "auto";
 
   return (
-    <div className="border-t border-border bg-[radial-gradient(circle_at_top,#f8fbff_0%,#ffffff_48%)] px-5 py-4">
+    <div
+      data-chat-prompt-surface="true"
+      className="border-t border-border bg-[radial-gradient(circle_at_top,#f8fbff_0%,#ffffff_48%)] px-5 py-4"
+    >
       <div className="mx-auto max-w-5xl">
         <div className="relative overflow-visible">
           {(commandOverlay || showSkillOverlay || showMentionOverlay) && (
@@ -1239,14 +1312,21 @@ export function ChatPromptBar() {
               onKeyDown={handleKeyDown}
               placeholder={
                 isStreaming
-                  ? "Waiting for response..."
+                  ? queuedPrompt
+                    ? "Response in progress. One queued message is waiting."
+                    : "Response in progress. Keep typing and press Enter to queue one message."
                   : isAutoMode
                     ? "Describe the task and Auto will let Claude plan and route the work"
                     : `Message ${cliLabel}`
               }
-              disabled={isStreaming}
-              className="min-h-[3.5rem] w-full resize-none bg-transparent px-0 py-0 text-[15px] leading-8 text-text placeholder:text-secondary/65 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+              className="min-h-[3.5rem] w-full resize-none bg-transparent px-0 py-0 text-[15px] leading-8 text-text placeholder:text-secondary/65 focus:outline-none"
             />
+
+            {queueFeedback && (
+              <div className="mt-2 text-[11px] font-medium text-amber-600">
+                {queueFeedback}
+              </div>
+            )}
           </div>
 
           <div className="mt-4 flex flex-col gap-4 border-t border-slate-100 pt-4 text-[10px] font-medium text-slate-400 select-none md:flex-row md:items-center md:justify-between">
@@ -1276,12 +1356,20 @@ export function ChatPromptBar() {
             <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-slate-100 md:border-l md:pl-5">
               <div className="flex items-center gap-2">
                 <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">ENTER</kbd>
-                <span className="tracking-tight">发送</span>
+                <span className="tracking-tight">
+                  {isStreaming ? (queuedPrompt ? "队列已满" : "加入队列") : "发送"}
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">SHIFT + ↵</kbd>
                 <span className="tracking-tight">换行</span>
               </div>
+              {queuedPrompt && (
+                <div className="flex items-center gap-2">
+                  <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">CTRL + B</kbd>
+                  <span className="tracking-tight">编辑队列</span>
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">↑ ↓</kbd>
                 <span className="tracking-tight">历史记录</span>

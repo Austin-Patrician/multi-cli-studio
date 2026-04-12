@@ -21,6 +21,7 @@ import {
   ChatMessageFinalizeRequest,
   ChatMessagesAppendRequest,
   ChatMessageStreamUpdateRequest,
+  ChatInterruptResult,
   ChatPromptRequest,
   AssistantApprovalDecision,
   CliHandoffRequest,
@@ -35,6 +36,8 @@ import {
   GitPanelData,
   NotificationConfig,
   PersistedTerminalState,
+  SemanticMemoryChunk,
+  SemanticRecallRequest,
   StreamEvent,
   TerminalEvent,
   WorkspacePickResult,
@@ -108,6 +111,7 @@ export interface RuntimeBridge {
   saveTextToDownloads: (fileName: string, content: string) => Promise<string>;
   // Chat methods
   sendChatMessage: (request: ChatPromptRequest) => Promise<string>;
+  interruptChatTurn: (terminalTabId: string, messageId: string) => Promise<ChatInterruptResult>;
   runAutoOrchestration: (request: AutoOrchestrationRequest) => Promise<string>;
   respondAssistantApproval: (requestId: string, decision: AssistantApprovalDecision) => Promise<boolean>;
   getGitPanel: (projectRoot: string) => Promise<GitPanelData>;
@@ -122,6 +126,8 @@ export interface RuntimeBridge {
   getAcpCommands: (cliId: AgentId) => Promise<AcpCommandDef[]>;
   getAcpSession: () => Promise<AcpSession>;
   getAcpCapabilities: (cliId: AgentId) => Promise<AcpCliCapabilities>;
+  // Semantic memory
+  semanticRecall: (request: SemanticRecallRequest) => Promise<SemanticMemoryChunk[]>;
 }
 
 export function isTauriRuntime() {
@@ -372,6 +378,10 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<string>("send_chat_message", { request });
   },
+  async interruptChatTurn(terminalTabId, messageId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<ChatInterruptResult>("interrupt_chat_turn", { terminalTabId, messageId });
+  },
   async runAutoOrchestration(request) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<string>("run_auto_orchestration", { request });
@@ -434,11 +444,15 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AcpCliCapabilities>("get_acp_capabilities", { cliId });
   },
+  async semanticRecall(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<SemanticMemoryChunk[]>("semantic_recall", { request });
+  },
 };
 
 export const bridge = new Proxy({} as RuntimeBridge, {
   get(_target, prop) {
-    const runtime = getRuntimeBridge() as Record<PropertyKey, unknown>;
+    const runtime = getRuntimeBridge() as unknown as Record<PropertyKey, unknown>;
     const value = runtime[prop];
     if (typeof value === "function") {
       return (...args: unknown[]) =>

@@ -6,7 +6,7 @@ import openaiIcon from "../../media/svg/openai.svg";
 import claudeIcon from "../../media/svg/claude-color.svg";
 import geminiIcon from "../../media/svg/gemini-color.svg";
 
-const CLI_OPTIONS: { id: TerminalCliId; label: string; icon?: string }[] = [
+export const CLI_OPTIONS: { id: TerminalCliId; label: string; icon?: string }[] = [
   { id: "auto", label: "Auto" },
   { id: "codex", label: "Codex", icon: openaiIcon },
   { id: "claude", label: "Claude", icon: claudeIcon },

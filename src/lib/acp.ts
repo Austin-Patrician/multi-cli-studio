@@ -3,7 +3,7 @@ import { AgentId } from "./models";
 export type AcpCommandKind =
   | "plan" | "model" | "compact" | "clear" | "rewind"
   | "diff" | "permissions" | "cost" | "help" | "export"
-  | "status" | "effort" | "fast" | "context" | "memory";
+  | "status" | "effort" | "fast" | "context" | "memory" | "recall";
 
 export type CommandExecution = "local" | "flag-inject" | "git-local";
 
@@ -158,6 +158,12 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
   {
     kind: "memory", slash: "/memory", label: "Memory",
     description: "View/edit project memory (CLAUDE.md / AGENTS.md)",
+    execution: "local", supportedClis: ["codex", "claude", "gemini"],
+  },
+  {
+    kind: "recall", slash: "/recall", label: "Recall",
+    description: "Search conversation history across all CLIs in this tab",
+    argsHint: "<search-query>",
     execution: "local", supportedClis: ["codex", "claude", "gemini"],
   },
 ];

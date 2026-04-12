@@ -6,20 +6,26 @@
  *   2. Turn-compact   — summarise early turns into a CompactedSummary
  *   3. Full-compact   — emergency: summarise everything, keep only recent turns
  *
- * Plus cross-tab context helpers.
+ * Plus cross-tab context helpers, working memory, and handoff document generation.
  */
 
 import type {
   AgentId,
   ChatMessage,
   ChatMessageBlock,
+  ChatContextTurn,
   CompactedSummary,
   ConversationSession,
+  HandoffDocument,
   SharedContextEntry,
   TerminalTab,
+  WorkingMemory,
 } from "./models";
 import { summarizeForContext } from "./messageFormatting";
 import {
+  computeDynamicTurnLimit,
+  CONTEXT_TURNS_BUDGET_BY_CLI,
+  CONTEXT_TURNS_MAX_BUDGET,
   estimateMessageTokens,
   estimateSessionTokens,
   estimateTokens,
@@ -460,6 +466,307 @@ export function formatCompactedSummaries(summaries: CompactedSummary[]): string 
   });
 
   return `<compacted-history>\n${blocks.join("\n\n")}\n</compacted-history>`;
+}
+
+// ── Working Memory ───────────────────────────────────────────────────
+
+/**
+ * Build a live WorkingMemory snapshot from a conversation session.
+ * Scans all messages to extract structured project state.
+ */
+export function buildWorkingMemory(
+  messages: ChatMessage[],
+  existingMemory?: WorkingMemory | null
+): WorkingMemory {
+  const modifiedFiles = new Set<string>(existingMemory?.modifiedFiles ?? []);
+  const activeErrors: string[] = [];
+  const recentCommands: string[] = [];
+  const keyDecisions = new Set<string>(existingMemory?.keyDecisions ?? []);
+  const contributingClis = new Set<AgentId>(existingMemory?.contributingClis ?? []);
+  let buildStatus: WorkingMemory["buildStatus"] = existingMemory?.buildStatus ?? "unknown";
+
+  for (const msg of messages) {
+    if (msg.cliId) contributingClis.add(msg.cliId);
+    if (!msg.blocks) continue;
+
+    for (const block of msg.blocks) {
+      if (block.kind === "fileChange") {
+        modifiedFiles.add(block.path);
+      }
+      if (block.kind === "command") {
+        recentCommands.push(block.command);
+        if (block.exitCode != null && block.exitCode !== 0) {
+          activeErrors.push(`${block.command}: exit ${block.exitCode}`);
+          // A failing command involving build/test/check keywords
+          if (/\b(build|compile|test|check|lint)\b/i.test(block.command)) {
+            buildStatus = "failing";
+          }
+        } else if (block.exitCode === 0 && /\b(build|compile|test|check|lint)\b/i.test(block.command)) {
+          buildStatus = "passing";
+        }
+      }
+      if (block.kind === "status" && block.level === "error") {
+        activeErrors.push(block.text.slice(0, 200));
+      }
+    }
+  }
+
+  // Keep only the most recent errors (resolved ones may be stale)
+  const latestErrors = activeErrors.slice(-8);
+
+  return {
+    modifiedFiles: [...modifiedFiles].slice(-30),
+    activeErrors: latestErrors,
+    recentCommands: recentCommands.slice(-10),
+    buildStatus,
+    keyDecisions: [...keyDecisions].slice(-10),
+    contributingClis: [...contributingClis],
+    updatedAt: nowIso(),
+  };
+}
+
+/**
+ * Format working memory as a prompt-injectable block.
+ */
+export function formatWorkingMemory(wm: WorkingMemory): string {
+  const lines: string[] = [];
+  if (wm.modifiedFiles.length > 0)
+    lines.push(`Modified files: ${wm.modifiedFiles.join(", ")}`);
+  if (wm.activeErrors.length > 0)
+    lines.push(`Active errors:\n${wm.activeErrors.map((e) => `  - ${e}`).join("\n")}`);
+  if (wm.recentCommands.length > 0)
+    lines.push(`Recent commands: ${wm.recentCommands.slice(-5).join(", ")}`);
+  if (wm.buildStatus !== "unknown")
+    lines.push(`Build status: ${wm.buildStatus}`);
+  if (wm.keyDecisions.length > 0)
+    lines.push(`Key decisions:\n${wm.keyDecisions.map((d) => `  - ${d}`).join("\n")}`);
+  if (wm.contributingClis.length > 0)
+    lines.push(`Contributing CLIs: ${wm.contributingClis.join(", ")}`);
+
+  if (lines.length === 0) return "";
+  return `<working-memory>\n${lines.join("\n")}\n</working-memory>`;
+}
+
+// ── Handoff Document ─────────────────────────────────────────────────
+
+/**
+ * Build a token-budget-aware list of recent turns for context injection.
+ * Unlike the fixed-limit version, this fits as many turns as the budget allows.
+ */
+export function buildDynamicContextTurns(
+  messages: ChatMessage[],
+  fallbackCli: AgentId,
+  targetCli?: AgentId
+): ChatContextTurn[] {
+  const rawTurns: { turn: ChatContextTurn; tokens: number }[] = [];
+  let pendingUser: ChatMessage | null = null;
+  const budget = CONTEXT_TURNS_BUDGET_BY_CLI[targetCli ?? fallbackCli] ?? CONTEXT_TURNS_MAX_BUDGET;
+
+  for (const message of messages) {
+    if (message.role === "user") {
+      pendingUser = message;
+      continue;
+    }
+    if (
+      message.role !== "assistant" ||
+      message.isStreaming ||
+      !pendingUser
+    ) {
+      continue;
+    }
+
+    const failed = message.exitCode != null && message.exitCode !== 0;
+    const userContent = pendingUser.content;
+    const assistantContent = message.rawContent ?? message.content;
+    // Failed turns get shorter summaries but are still included for error context
+    const summaryLimit = failed ? 1500 : 3000;
+    const replyText = summarizeForContext(assistantContent, summaryLimit);
+    const turn: ChatContextTurn = {
+      cliId: (message.cliId ?? fallbackCli) as AgentId,
+      userPrompt: userContent,
+      assistantReply: failed ? `[FAILED exit=${message.exitCode}] ${replyText}` : replyText,
+      timestamp: message.timestamp,
+    };
+    const tokens = estimateTokens(userContent) + estimateTokens(turn.assistantReply) + 8;
+    rawTurns.push({ turn, tokens });
+    pendingUser = null;
+  }
+
+  const limit = computeDynamicTurnLimit(rawTurns.map((t) => t.tokens), budget);
+  return rawTurns.slice(-limit).map((t) => t.turn);
+}
+
+/**
+ * Build a structured handoff document when switching CLIs.
+ * This provides deep context to the incoming CLI, far beyond a simple summary.
+ */
+export function buildHandoffDocument(
+  session: ConversationSession,
+  fromCli: AgentId,
+  toCli: AgentId,
+  crossTabEntries: SharedContextEntry[]
+): HandoffDocument {
+  const recentTurns = buildDynamicContextTurns(session.messages, fromCli, toCli);
+
+  const workingMemory = buildWorkingMemory(session.messages);
+
+  // Extract high-confidence facts from messages (heuristic: error resolutions, key findings)
+  const kernelFacts: string[] = [];
+  for (const msg of session.messages) {
+    if (msg.role !== "assistant" || !msg.blocks) continue;
+    for (const block of msg.blocks) {
+      if (block.kind === "status" && block.level === "error") {
+        kernelFacts.push(`Error: ${block.text.slice(0, 200)}`);
+      }
+      if (block.kind === "fileChange") {
+        kernelFacts.push(`${block.changeType}: ${block.path}`);
+      }
+    }
+  }
+
+  return {
+    fromCli,
+    toCli,
+    recentTurns,
+    workingMemory,
+    kernelFacts: kernelFacts.slice(-20),
+    compactedSummaries: session.compactedSummaries,
+    crossTabEntries,
+    timestamp: nowIso(),
+  };
+}
+
+/**
+ * Format a HandoffDocument as a prompt-injectable block.
+ */
+export function formatHandoffDocument(doc: HandoffDocument): string {
+  const sections: string[] = [];
+
+  sections.push(`[CLI Handoff: ${doc.fromCli} → ${doc.toCli}]`);
+
+  // Working memory
+  const wmText = formatWorkingMemory(doc.workingMemory);
+  if (wmText) sections.push(wmText);
+
+  // Kernel facts
+  if (doc.kernelFacts.length > 0) {
+    sections.push(
+      `<kernel-facts>\n${doc.kernelFacts.map((f) => `- ${f}`).join("\n")}\n</kernel-facts>`
+    );
+  }
+
+  // Recent turns with CLI attribution
+  if (doc.recentTurns.length > 0) {
+    const turnLines = doc.recentTurns.map((t) => {
+      const ago = formatRelativeTime(t.timestamp);
+      return `[${t.cliId}, ${ago}] User: ${truncate(t.userPrompt, 600)}\nAssistant: ${truncate(t.assistantReply, 1200)}`;
+    });
+    sections.push(
+      `<recent-conversation count="${doc.recentTurns.length}">\n${turnLines.join("\n\n")}\n</recent-conversation>`
+    );
+  }
+
+  // Compacted summaries
+  if (doc.compactedSummaries.length > 0) {
+    sections.push(formatCompactedSummaries(doc.compactedSummaries));
+  }
+
+  if (doc.crossTabEntries.length > 0) {
+    const crossTabLines = doc.crossTabEntries.map((entry) => {
+      const parts = [
+        `[Tab "${entry.sourceTabTitle}" (${entry.sourceCli}, ${formatRelativeTime(entry.updatedAt)})]`,
+      ];
+      if (entry.summary.intent) parts.push(`Intent: ${truncate(entry.summary.intent, 400)}`);
+      if (entry.summary.technicalContext) {
+        parts.push(`Context: ${truncate(entry.summary.technicalContext, 500)}`);
+      }
+      if (entry.summary.changedFiles.length > 0) {
+        parts.push(`Changed: ${entry.summary.changedFiles.slice(0, 20).join(", ")}`);
+      }
+      if (entry.summary.currentState) {
+        parts.push(`State: ${truncate(entry.summary.currentState, 500)}`);
+      }
+      if (entry.summary.nextSteps) {
+        parts.push(`Next steps: ${truncate(entry.summary.nextSteps, 300)}`);
+      }
+      return parts.join("\n");
+    });
+    sections.push(
+      `<cross-tab-context count="${doc.crossTabEntries.length}">\n${crossTabLines.join("\n\n")}\n</cross-tab-context>`
+    );
+  }
+
+  // Semantic recall context (FTS5-based, Mem0-inspired)
+  if (doc.semanticContext && doc.semanticContext.length > 0) {
+    const semanticLines = doc.semanticContext.map((chunk) => {
+      return `[${chunk.cliId}/${chunk.chunkType}] ${truncate(chunk.content, 400)}`;
+    });
+    sections.push(
+      `<semantic-memory count="${doc.semanticContext.length}">\n${semanticLines.join("\n")}\n</semantic-memory>`
+    );
+  }
+
+  return `<handoff-context>\n${sections.join("\n\n")}\n</handoff-context>`;
+}
+
+// ── Recall Search ────────────────────────────────────────────────────
+
+/**
+ * Search conversation history for messages matching a query string.
+ * Returns formatted results for display or context injection.
+ */
+export function recallSearch(
+  session: ConversationSession,
+  query: string,
+  maxResults = 10
+): string {
+  const queryLower = query.toLowerCase();
+  const matches: { msg: ChatMessage; score: number }[] = [];
+
+  for (const msg of session.messages) {
+    if (msg.role === "system") continue;
+    const content = (msg.rawContent ?? msg.content).toLowerCase();
+    if (!content.includes(queryLower)) continue;
+
+    // Simple relevance: count occurrences + recency bonus
+    const occurrences = content.split(queryLower).length - 1;
+    const recencyMs = Date.now() - new Date(msg.timestamp).getTime();
+    const recencyBonus = Math.max(0, 1 - recencyMs / (7 * 24 * 3600 * 1000));
+    matches.push({ msg, score: occurrences + recencyBonus });
+  }
+
+  // Also search compacted summaries
+  const summaryMatches: string[] = [];
+  for (const s of session.compactedSummaries) {
+    const text = compactedSummaryToText(s).toLowerCase();
+    if (text.includes(queryLower)) {
+      summaryMatches.push(`[Compacted v${s.version}, ${s.sourceCli}] ${truncate(compactedSummaryToText(s), 400)}`);
+    }
+  }
+
+  matches.sort((a, b) => b.score - a.score);
+  const topMatches = matches.slice(0, maxResults);
+
+  if (topMatches.length === 0 && summaryMatches.length === 0) {
+    return `No results found for "${query}" in this conversation.`;
+  }
+
+  const lines: string[] = [`Recall results for "${query}":`];
+
+  for (const { msg } of topMatches) {
+    const cli = msg.cliId ?? "system";
+    const role = msg.role;
+    const ago = formatRelativeTime(msg.timestamp);
+    const snippet = summarizeForContext(msg.rawContent ?? msg.content, 300);
+    lines.push(`  [${cli}/${role}, ${ago}] ${snippet}`);
+  }
+
+  if (summaryMatches.length > 0) {
+    lines.push("  --- From compacted history ---");
+    lines.push(...summaryMatches.map((s) => `  ${s}`));
+  }
+
+  return lines.join("\n");
 }
 
 // ── Utilities ────────────────────────────────────────────────────────

@@ -134,6 +134,10 @@ pub struct HandoffEvent {
     pub files: Vec<String>,
     pub risks: Vec<String>,
     pub next_step: Option<String>,
+    pub payload_json: Option<String>,
+    pub delivery_state: String,
+    pub delivered_at: Option<String>,
+    pub delivered_message_id: Option<String>,
     pub created_at: String,
 }
 
@@ -335,6 +339,7 @@ pub struct CliHandoffStorageRequest {
     pub latest_user_prompt: Option<String>,
     pub latest_assistant_summary: Option<String>,
     pub relevant_files: Vec<String>,
+    pub handoff_payload_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -358,6 +363,26 @@ pub struct TaskTurnUpdate {
     pub relevant_files: Vec<String>,
     pub recent_turns: Vec<TaskRecentTurn>,
     pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticMemoryChunk {
+    pub terminal_tab_id: String,
+    pub cli_id: String,
+    pub message_id: String,
+    pub chunk_type: String,
+    pub content: String,
+    pub created_at: String,
+    pub rank: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticRecallRequest {
+    pub query: String,
+    pub terminal_tab_id: Option<String>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -665,7 +690,7 @@ impl TerminalStorage {
             project_root: session.project_root.clone(),
             project_name: session.project_name.clone(),
             cli_id: cli_id.clone(),
-            user_prompt: latest_user_prompt,
+            user_prompt: latest_user_prompt.clone(),
             assistant_summary: assistant_summary.clone(),
             relevant_files: relevant_files.clone(),
             recent_turns,
@@ -751,7 +776,225 @@ impl TerminalStorage {
             self.upsert_kernel_work_item_in_tx(&tx, item)?;
         }
 
+        let should_mark_handoff_delivered = request
+            .transport_session
+            .as_ref()
+            .and_then(|session| session.thread_id.as_ref())
+            .is_some()
+            || request.exit_code == Some(0);
+        if should_mark_handoff_delivered {
+            self.mark_pending_handoff_delivered_in_tx(
+                &tx,
+                &bundle.task_packet.id,
+                &cli_id,
+                &request.message_id,
+                &request.updated_at,
+            )?;
+        }
+
+        // Index semantic memory chunks for FTS5-based recall
+        self.index_semantic_chunks_for_message(
+            &tx,
+            &request.terminal_tab_id,
+            &cli_id,
+            &request.message_id,
+            &latest_user_prompt,
+            &assistant_summary,
+            message.blocks.as_ref(),
+            &request.updated_at,
+        )?;
+
         tx.commit().map_err(|err| err.to_string())
+    }
+
+    fn index_semantic_chunks_for_message(
+        &self,
+        conn: &Connection,
+        terminal_tab_id: &str,
+        cli_id: &str,
+        message_id: &str,
+        user_prompt: &str,
+        assistant_summary: &str,
+        blocks: Option<&Vec<ChatMessageBlock>>,
+        timestamp: &str,
+    ) -> Result<(), String> {
+        let insert_sql =
+            "INSERT INTO semantic_memory_fts(terminal_tab_id, cli_id, message_id, chunk_type, created_at, content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+
+        // Index user prompt
+        if !user_prompt.trim().is_empty() {
+            conn.execute(
+                insert_sql,
+                params![
+                    terminal_tab_id,
+                    cli_id,
+                    message_id,
+                    "user_prompt",
+                    timestamp,
+                    user_prompt
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+        }
+
+        // Index assistant summary
+        if !assistant_summary.trim().is_empty() {
+            conn.execute(
+                insert_sql,
+                params![
+                    terminal_tab_id,
+                    cli_id,
+                    message_id,
+                    "assistant_summary",
+                    timestamp,
+                    assistant_summary
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+        }
+
+        // Index structured chunks from message blocks
+        if let Some(blocks) = blocks {
+            for block in blocks {
+                let chunk: Option<(&str, String)> = match block {
+                    ChatMessageBlock::FileChange {
+                        path, change_type, ..
+                    } => Some(("file_change", format!("{} file: {}", change_type, path))),
+                    ChatMessageBlock::Command {
+                        command,
+                        exit_code,
+                        output,
+                        label,
+                        ..
+                    } => {
+                        let status = if *exit_code == Some(0) || exit_code.is_none() {
+                            "ok"
+                        } else {
+                            "failed"
+                        };
+                        let label_str = if label.trim().is_empty() {
+                            command.as_str()
+                        } else {
+                            label.as_str()
+                        };
+                        let output_snippet = output
+                            .as_ref()
+                            .map(|o| truncate_text(o, 300))
+                            .unwrap_or_default();
+                        Some((
+                            "command",
+                            format!(
+                                "command {}: {}{}",
+                                status,
+                                label_str,
+                                if output_snippet.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("\n{}", output_snippet)
+                                }
+                            ),
+                        ))
+                    }
+                    ChatMessageBlock::Tool { tool, summary, .. } => {
+                        let summary_text = summary
+                            .as_ref()
+                            .filter(|s| !s.trim().is_empty())
+                            .map(|s| format!(": {}", truncate_text(s, 200)))
+                            .unwrap_or_default();
+                        Some(("tool_use", format!("tool {}{}", tool, summary_text)))
+                    }
+                    ChatMessageBlock::Status { text, level } if level == "error" => {
+                        Some(("error", format!("error: {}", truncate_text(text, 300))))
+                    }
+                    ChatMessageBlock::Text { text, .. } if text.len() > 80 => {
+                        Some(("text", truncate_text(text, 600)))
+                    }
+                    _ => None,
+                };
+
+                if let Some((chunk_type, content)) = chunk {
+                    conn.execute(
+                        insert_sql,
+                        params![
+                            terminal_tab_id,
+                            cli_id,
+                            message_id,
+                            chunk_type,
+                            timestamp,
+                            content
+                        ],
+                    )
+                    .map_err(|err| err.to_string())?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn semantic_recall(
+        &self,
+        request: &SemanticRecallRequest,
+    ) -> Result<Vec<SemanticMemoryChunk>, String> {
+        let conn = self.open_connection()?;
+        let limit = request.limit.unwrap_or(20).min(50) as i64;
+
+        // Sanitize FTS5 query: escape special chars and wrap tokens for prefix matching
+        let sanitized_query = sanitize_fts5_query(&request.query);
+        if sanitized_query.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let (sql, use_tab_filter) = if request.terminal_tab_id.is_some() {
+            (
+                "SELECT terminal_tab_id, cli_id, message_id, chunk_type, created_at, content, rank
+                 FROM semantic_memory_fts
+                 WHERE semantic_memory_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+                true,
+            )
+        } else {
+            (
+                "SELECT terminal_tab_id, cli_id, message_id, chunk_type, created_at, content, rank
+                 FROM semantic_memory_fts
+                 WHERE semantic_memory_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+                false,
+            )
+        };
+
+        let mut stmt = conn.prepare(sql).map_err(|err| err.to_string())?;
+        let rows = stmt
+            .query_map(params![sanitized_query, limit], |row| {
+                Ok(SemanticMemoryChunk {
+                    terminal_tab_id: row.get(0)?,
+                    cli_id: row.get(1)?,
+                    message_id: row.get(2)?,
+                    chunk_type: row.get(3)?,
+                    created_at: row.get(4)?,
+                    content: row.get(5)?,
+                    rank: row.get(6)?,
+                })
+            })
+            .map_err(|err| err.to_string())?;
+
+        let all_chunks: Vec<SemanticMemoryChunk> = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?;
+
+        // Post-filter by terminal_tab_id if specified (UNINDEXED columns can't be WEHREd efficiently)
+        if use_tab_filter {
+            let tab_id = request.terminal_tab_id.as_deref().unwrap();
+            Ok(all_chunks
+                .into_iter()
+                .filter(|c| c.terminal_tab_id == tab_id)
+                .collect())
+        } else {
+            Ok(all_chunks)
+        }
     }
 
     fn upsert_kernel_session_ref_in_tx(
@@ -1385,6 +1628,10 @@ impl TerminalStorage {
                 files_json TEXT NOT NULL,
                 risks_json TEXT NOT NULL,
                 next_step TEXT,
+                payload_json TEXT,
+                delivery_state TEXT NOT NULL DEFAULT 'delivered',
+                delivered_at TEXT,
+                delivered_message_id TEXT,
                 created_at TEXT NOT NULL
             );
 
@@ -1575,9 +1822,32 @@ impl TerminalStorage {
         )
         .map_err(|err| err.to_string())?;
 
+        // FTS5 virtual table for semantic memory search (Mem0-inspired)
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS semantic_memory_fts USING fts5(
+                terminal_tab_id UNINDEXED,
+                cli_id UNINDEXED,
+                message_id UNINDEXED,
+                chunk_type UNINDEXED,
+                created_at UNINDEXED,
+                content,
+                tokenize='porter unicode61'
+            );",
+        )
+        .map_err(|err| err.to_string())?;
+
         ensure_column_exists(conn, "chat_messages", "automation_run_id", "TEXT")?;
         ensure_column_exists(conn, "chat_messages", "workflow_run_id", "TEXT")?;
         ensure_column_exists(conn, "chat_messages", "workflow_node_id", "TEXT")?;
+        ensure_column_exists(conn, "handoff_events", "payload_json", "TEXT")?;
+        ensure_column_exists(
+            conn,
+            "handoff_events",
+            "delivery_state",
+            "TEXT NOT NULL DEFAULT 'delivered'",
+        )?;
+        ensure_column_exists(conn, "handoff_events", "delivered_at", "TEXT")?;
+        ensure_column_exists(conn, "handoff_events", "delivered_message_id", "TEXT")?;
 
         ensure_column_exists(
             conn,
@@ -1931,10 +2201,19 @@ impl TerminalStorage {
             );
 
             tx.execute(
+                "UPDATE handoff_events
+                 SET delivery_state = 'superseded'
+                 WHERE task_id = ?1 AND delivery_state = 'pending'",
+                params![task.id],
+            )
+            .map_err(|err| err.to_string())?;
+
+            tx.execute(
                 "INSERT INTO handoff_events (
                     id, task_id, terminal_tab_id, from_cli, to_cli, reason, latest_conclusion,
-                    files_json, risks_json, next_step, created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    files_json, risks_json, next_step, payload_json, delivery_state,
+                    delivered_at, delivered_message_id, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     new_id("handoff"),
                     task.id,
@@ -1946,6 +2225,10 @@ impl TerminalStorage {
                     to_json(&merged_files)?,
                     to_json(&task.risks)?,
                     next_step,
+                    request.handoff_payload_json,
+                    "pending",
+                    Option::<String>::None,
+                    Option::<String>::None,
                     now,
                 ],
             )
@@ -2740,7 +3023,7 @@ impl TerminalStorage {
                         "- [{} / {}] {}",
                         fact.status,
                         fact.kind,
-                        truncate_text(&fact.statement, 220)
+                        truncate_text(&fact.statement, 500)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -2760,7 +3043,7 @@ impl TerminalStorage {
                     format!(
                         "- [{}] {}",
                         entry.evidence_type,
-                        truncate_text(&entry.summary, 220)
+                        truncate_text(&entry.summary, 500)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -2781,7 +3064,7 @@ impl TerminalStorage {
                         "- [{} / {}] {}",
                         entry.scope,
                         entry.kind,
-                        truncate_text(&entry.content, 220)
+                        truncate_text(&entry.content, 500)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -2845,6 +3128,42 @@ impl TerminalStorage {
                     "expanded_raw_turns",
                     &raw_text,
                 );
+            }
+        }
+
+        // Inject semantic memory recall (FTS5-based) for cross-CLI context
+        if estimate_joined_len(&lines, "", prompt) < profile.max_chars {
+            let semantic_request = SemanticRecallRequest {
+                query: prompt.to_string(),
+                terminal_tab_id: Some(request.terminal_tab_id.clone()),
+                limit: Some(15),
+            };
+            if let Ok(chunks) = self.semantic_recall(&semantic_request) {
+                if !chunks.is_empty() {
+                    let semantic_lines: Vec<String> = chunks
+                        .iter()
+                        .map(|c| {
+                            format!(
+                                "- [{}/{}] {}",
+                                c.cli_id,
+                                c.chunk_type,
+                                truncate_text(&c.content, 600)
+                            )
+                        })
+                        .collect();
+                    let semantic_section = format!(
+                        "--- Semantic memory recall ---\n{}",
+                        semantic_lines.join("\n")
+                    );
+                    if estimate_joined_len(&lines, &semantic_section, prompt) <= profile.max_chars {
+                        push_layer(
+                            &mut lines,
+                            &mut included_layers,
+                            "semantic_recall",
+                            &semantic_section,
+                        );
+                    }
+                }
             }
         }
 
@@ -2933,7 +3252,7 @@ impl TerminalStorage {
             ),
             facts_confirmed: summarized_turns
                 .iter()
-                .map(|turn| truncate_text(&turn.assistant_reply, 240))
+                .map(|turn| truncate_text(&turn.assistant_reply, 500))
                 .collect(),
             work_completed: summarized_turns
                 .iter()
@@ -2941,7 +3260,7 @@ impl TerminalStorage {
                     format!(
                         "[{}] {}",
                         turn.cli_id,
-                        truncate_text(&turn.assistant_reply, 180)
+                        truncate_text(&turn.assistant_reply, 400)
                     )
                 })
                 .collect(),
@@ -2955,7 +3274,7 @@ impl TerminalStorage {
             source_user_prompt: summarized_turns.last().map(|turn| turn.user_prompt.clone()),
             source_assistant_summary: summarized_turns
                 .last()
-                .map(|turn| truncate_text(&turn.assistant_reply, 240)),
+                .map(|turn| truncate_text(&turn.assistant_reply, 500)),
             created_at: now.clone(),
         };
 
@@ -3195,7 +3514,8 @@ impl TerminalStorage {
     ) -> Result<Option<HandoffEvent>, String> {
         conn.query_row(
             "SELECT id, task_id, terminal_tab_id, from_cli, to_cli, reason, latest_conclusion,
-                    files_json, risks_json, next_step, created_at
+                    files_json, risks_json, next_step, payload_json, delivery_state,
+                    delivered_at, delivered_message_id, created_at
              FROM handoff_events
              WHERE task_id = ?1
              ORDER BY created_at DESC
@@ -3213,12 +3533,93 @@ impl TerminalStorage {
                     files: parse_json_default(row.get::<_, String>(7)?),
                     risks: parse_json_default(row.get::<_, String>(8)?),
                     next_step: row.get(9)?,
-                    created_at: row.get(10)?,
+                    payload_json: row.get(10)?,
+                    delivery_state: row.get(11)?,
+                    delivered_at: row.get(12)?,
+                    delivered_message_id: row.get(13)?,
+                    created_at: row.get(14)?,
                 })
             },
         )
         .optional()
         .map_err(|err| err.to_string())
+    }
+
+    pub fn load_pending_handoff_for_terminal_tab(
+        &self,
+        terminal_tab_id: &str,
+        target_cli: &str,
+    ) -> Result<Option<HandoffEvent>, String> {
+        let conn = self.open_connection()?;
+        let Some(task) = self.load_task_packet_by_terminal_tab(&conn, terminal_tab_id)? else {
+            return Ok(None);
+        };
+        self.load_pending_handoff_for_task_and_cli(&conn, &task.id, target_cli)
+    }
+
+    fn load_pending_handoff_for_task_and_cli(
+        &self,
+        conn: &Connection,
+        task_id: &str,
+        target_cli: &str,
+    ) -> Result<Option<HandoffEvent>, String> {
+        conn.query_row(
+            "SELECT id, task_id, terminal_tab_id, from_cli, to_cli, reason, latest_conclusion,
+                    files_json, risks_json, next_step, payload_json, delivery_state,
+                    delivered_at, delivered_message_id, created_at
+             FROM handoff_events
+             WHERE task_id = ?1 AND to_cli = ?2 AND delivery_state = 'pending'
+             ORDER BY created_at DESC
+             LIMIT 1",
+            params![task_id, target_cli],
+            |row| {
+                Ok(HandoffEvent {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    terminal_tab_id: row.get(2)?,
+                    from_cli: row.get(3)?,
+                    to_cli: row.get(4)?,
+                    reason: row.get(5)?,
+                    latest_conclusion: row.get(6)?,
+                    files: parse_json_default(row.get::<_, String>(7)?),
+                    risks: parse_json_default(row.get::<_, String>(8)?),
+                    next_step: row.get(9)?,
+                    payload_json: row.get(10)?,
+                    delivery_state: row.get(11)?,
+                    delivered_at: row.get(12)?,
+                    delivered_message_id: row.get(13)?,
+                    created_at: row.get(14)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|err| err.to_string())
+    }
+
+    fn mark_pending_handoff_delivered_in_tx(
+        &self,
+        tx: &Connection,
+        task_id: &str,
+        cli_id: &str,
+        message_id: &str,
+        delivered_at: &str,
+    ) -> Result<(), String> {
+        tx.execute(
+            "UPDATE handoff_events
+             SET delivery_state = 'delivered',
+                 delivered_at = ?1,
+                 delivered_message_id = ?2
+             WHERE id IN (
+                 SELECT id
+                 FROM handoff_events
+                 WHERE task_id = ?3 AND to_cli = ?4 AND delivery_state = 'pending'
+                 ORDER BY created_at DESC
+                 LIMIT 1
+             )",
+            params![delivered_at, message_id, task_id, cli_id],
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(())
     }
 
     fn load_latest_snapshot_for_task(
@@ -3604,23 +4005,23 @@ impl TerminalStorage {
 
     fn context_budget_profile(&self, target_cli: &str, write_mode: bool) -> ContextBudgetProfile {
         let max_chars = if write_mode {
-            180_000
+            400_000
         } else if target_cli == "claude" {
-            240_000
+            500_000
         } else {
-            160_000
+            400_000
         };
         ContextBudgetProfile {
-            profile_id: if max_chars >= 240_000 {
+            profile_id: if max_chars >= 500_000 {
                 "xlarge".to_string()
-            } else if max_chars >= 180_000 {
+            } else if max_chars >= 400_000 {
                 "large".to_string()
             } else {
                 "medium".to_string()
             },
             max_chars,
-            max_hot_turns: 6,
-            max_raw_turns: 12,
+            max_hot_turns: 20,
+            max_raw_turns: 40,
             allow_pack_expansion: true,
         }
     }
@@ -3794,13 +4195,13 @@ fn build_manual_compaction_summary(
     }
 
     parts.push("Newly compacted turns:".to_string());
-    for turn in summarized_turns.iter().rev().take(8).rev() {
+    for turn in summarized_turns.iter().rev().take(16).rev() {
         parts.push(format!(
             "- [{} at {}] User: {} | Summary: {}",
             turn.cli_id,
             turn.timestamp,
-            truncate_text(&turn.user_prompt, 160),
-            truncate_text(&turn.assistant_reply, 220)
+            truncate_text(&turn.user_prompt, 400),
+            truncate_text(&turn.assistant_reply, 500)
         ));
     }
 
@@ -3838,6 +4239,29 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// Sanitize user input for FTS5 MATCH queries.
+/// Strips FTS5 operators, wraps tokens with quotes, joins with OR for broad matching.
+fn sanitize_fts5_query(raw: &str) -> String {
+    let tokens: Vec<String> = raw
+        .split_whitespace()
+        .map(|token| {
+            // Strip FTS5 special chars: * " ( ) : ^ { } -
+            let cleaned: String = token
+                .chars()
+                .filter(|c| !matches!(c, '*' | '"' | '(' | ')' | ':' | '^' | '{' | '}' | '-'))
+                .collect();
+            cleaned
+        })
+        .filter(|t| !t.is_empty() && !matches!(t.as_str(), "AND" | "OR" | "NOT" | "NEAR"))
+        .map(|t| format!("\"{}\"", t))
+        .collect();
+
+    if tokens.is_empty() {
+        return String::new();
+    }
+    tokens.join(" OR ")
+}
+
 fn push_layer(
     lines: &mut Vec<String>,
     included_layers: &mut Vec<String>,
@@ -3867,7 +4291,7 @@ fn format_turns_block(title: &str, turns: &[TaskRecentTurn]) -> String {
             turn.cli_id,
             turn.timestamp,
             turn.user_prompt,
-            truncate_text(&turn.assistant_reply, 280)
+            truncate_text(&turn.assistant_reply, 1200)
         ));
     }
     lines.join("\n")

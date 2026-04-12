@@ -30,6 +30,7 @@ import {
   AgentPromptRequest,
   AssistantApprovalDecision,
   AutoOrchestrationRequest,
+  ChatInterruptResult,
   ChatMessageBlocksUpdateRequest,
   ChatMessageDeleteRequest,
   ChatMessageFinalizeRequest,
@@ -55,6 +56,7 @@ import {
   GitPanelData,
   GitFileChange,
   PersistedTerminalState,
+  SemanticMemoryChunk,
   WorkspacePickResult,
 } from "./models";
 import {
@@ -2551,6 +2553,14 @@ export const browserRuntime = {
 
     return messageId;
   },
+  async interruptChatTurn(_terminalTabId: string, _messageId: string): Promise<ChatInterruptResult> {
+    return {
+      status: "notRunning",
+      accepted: false,
+      pending: false,
+      message: "Interrupt is only available in the desktop runtime.",
+    };
+  },
   async runAutoOrchestration(request: AutoOrchestrationRequest) {
     const messageId = createId("msg");
     const startTime = Date.now();
@@ -3039,5 +3049,9 @@ rename to src/components/chat/GitPanel.tsx`,
         note: cliId === "claude" ? null : "Reasoning effort is only exposed by Claude CLI.",
       },
     };
+  },
+
+  async semanticRecall(): Promise<SemanticMemoryChunk[]> {
+    return [];
   },
 };

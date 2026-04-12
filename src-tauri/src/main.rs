@@ -46,11 +46,11 @@ use dirs::data_local_dir;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use storage::{
-    default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest,
+    default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest, HandoffEvent,
     MessageBlocksUpdateRequest, MessageDeleteRequest, MessageEventsAppendRequest,
     MessageFinalizeRequest, MessageSessionSeed, MessageStreamUpdateRequest, PersistedChatMessage,
-    PersistedConversationSession, PersistedTerminalState, TaskContextBundle, TaskKernel,
-    TaskRecentTurn, TerminalStorage,
+    PersistedConversationSession, PersistedTerminalState, SemanticMemoryChunk,
+    SemanticRecallRequest, TaskContextBundle, TaskKernel, TaskRecentTurn, TerminalStorage,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
@@ -429,12 +429,71 @@ struct SharedContextEntry {
     updated_at: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatContextTurn {
     cli_id: String,
     user_prompt: String,
     assistant_reply: String,
+    timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WorkingMemoryPayload {
+    #[serde(default)]
+    modified_files: Vec<String>,
+    #[serde(default)]
+    active_errors: Vec<String>,
+    #[serde(default)]
+    recent_commands: Vec<String>,
+    #[serde(default)]
+    build_status: String,
+    #[serde(default)]
+    key_decisions: Vec<String>,
+    #[serde(default)]
+    contributing_clis: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SemanticMemoryChunkPayload {
+    #[serde(default)]
+    terminal_tab_id: String,
+    #[serde(default)]
+    cli_id: String,
+    #[serde(default)]
+    message_id: String,
+    #[serde(default)]
+    chunk_type: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    rank: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct HandoffDocument {
+    #[serde(default)]
+    from_cli: String,
+    #[serde(default)]
+    to_cli: String,
+    #[serde(default)]
+    recent_turns: Vec<ChatContextTurn>,
+    #[serde(default)]
+    working_memory: WorkingMemoryPayload,
+    #[serde(default)]
+    kernel_facts: Vec<String>,
+    #[serde(default)]
+    compacted_summaries: Vec<CompactedSummary>,
+    #[serde(default)]
+    cross_tab_entries: Vec<SharedContextEntry>,
+    #[serde(default)]
+    semantic_context: Vec<SemanticMemoryChunkPayload>,
+    #[serde(default)]
     timestamp: String,
 }
 
@@ -461,6 +520,11 @@ struct ChatPromptRequest {
     compacted_summaries: Option<Vec<CompactedSummary>>,
     #[serde(default)]
     cross_tab_context: Option<Vec<SharedContextEntry>>,
+    #[serde(default)]
+    working_memory: Option<WorkingMemoryPayload>,
+    /// Pre-formatted handoff context injected on the first turn after a CLI switch
+    #[serde(default)]
+    handoff_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -508,6 +572,8 @@ struct CliHandoffRequest {
     compacted_history: Option<CompactedSummary>,
     #[serde(default)]
     cross_tab_context: Option<Vec<SharedContextEntry>>,
+    #[serde(default)]
+    handoff_document: Option<HandoffDocument>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -535,6 +601,18 @@ struct StreamEvent {
     transport_session: Option<AgentTransportSession>,
     #[serde(skip_serializing_if = "Option::is_none")]
     blocks: Option<Vec<ChatMessageBlock>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interrupted_by_user: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatInterruptResult {
+    status: String,
+    accepted: bool,
+    pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -793,6 +871,7 @@ struct AppStore {
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    live_chat_turns: Arc<Mutex<BTreeMap<String, Arc<LiveChatTurnHandle>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -812,6 +891,50 @@ struct PendingClaudeApproval {
 #[derive(Debug)]
 struct PendingCodexApproval {
     sender: mpsc::Sender<ClaudeApprovalDecision>,
+}
+
+type SharedChildStdin = Arc<Mutex<std::process::ChildStdin>>;
+type SharedRpcCounter = Arc<Mutex<u64>>;
+
+#[derive(Debug, Clone)]
+struct LiveCodexTurnTarget {
+    child_pid: u32,
+    writer: SharedChildStdin,
+    next_id: SharedRpcCounter,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    interrupt_sent: bool,
+}
+
+#[derive(Debug, Clone)]
+struct LiveGeminiTurnTarget {
+    child_pid: u32,
+    writer: SharedChildStdin,
+    session_id: Option<String>,
+    interrupt_sent: bool,
+}
+
+#[derive(Debug, Clone)]
+struct LiveProcessTurnTarget {
+    cli_id: String,
+    child_pid: u32,
+    interrupt_sent: bool,
+}
+
+#[derive(Debug, Clone)]
+enum LiveChatTurnTarget {
+    Idle,
+    Codex(LiveCodexTurnTarget),
+    Gemini(LiveGeminiTurnTarget),
+    Process(LiveProcessTurnTarget),
+}
+
+#[derive(Debug)]
+struct LiveChatTurnHandle {
+    terminal_tab_id: String,
+    message_id: String,
+    interrupted_by_user: AtomicBool,
+    target: Mutex<LiveChatTurnTarget>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1094,10 +1217,10 @@ fn list_codex_skills_for_workspace(
     let mut child = cmd
         .spawn()
         .map_err(|err| format!("Failed to start Codex app-server: {}", err))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Failed to open Codex app-server stdin".to_string())?;
+    let stdin =
+        Arc::new(Mutex::new(child.stdin.take().ok_or_else(|| {
+            "Failed to open Codex app-server stdin".to_string()
+        })?));
     let stdout = child
         .stdout
         .take()
@@ -1120,15 +1243,15 @@ fn list_codex_skills_for_workspace(
     });
 
     let mut reader = BufReader::new(stdout);
-    let mut next_id = 1_u64;
+    let next_id = Arc::new(Mutex::new(1_u64));
     let mut stream_state = CodexStreamState::default();
     let approvals = Arc::new(Mutex::new(BTreeMap::new()));
 
     let result = (|| {
         codex_rpc_call(
             &mut reader,
-            &mut stdin,
-            &mut next_id,
+            &stdin,
+            &next_id,
             "initialize",
             json!({
                 "clientInfo": {
@@ -1141,14 +1264,15 @@ fn list_codex_skills_for_workspace(
             "",
             &mut stream_state,
             &approvals,
+            None,
         )?;
 
-        write_jsonrpc_message(&mut stdin, &json!({ "method": "initialized" }))?;
+        write_jsonrpc_message_shared(&stdin, &json!({ "method": "initialized" }))?;
 
         let response = codex_rpc_call(
             &mut reader,
-            &mut stdin,
-            &mut next_id,
+            &stdin,
+            &next_id,
             "skills/list",
             json!({
                 "cwds": [project_root],
@@ -1159,6 +1283,7 @@ fn list_codex_skills_for_workspace(
             "",
             &mut stream_state,
             &approvals,
+            None,
         )?;
         Ok(parse_codex_skills_list(&response))
     })();
@@ -1385,6 +1510,240 @@ fn terminate_process_tree(pid: u32) {
     {
         let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LiveInterruptDispatch {
+    Sent,
+    Pending,
+    AlreadySent,
+}
+
+fn live_chat_turn_key(terminal_tab_id: &str, message_id: &str) -> String {
+    format!("{}:{}", terminal_tab_id, message_id)
+}
+
+fn new_live_chat_turn_handle(terminal_tab_id: &str, message_id: &str) -> Arc<LiveChatTurnHandle> {
+    Arc::new(LiveChatTurnHandle {
+        terminal_tab_id: terminal_tab_id.to_string(),
+        message_id: message_id.to_string(),
+        interrupted_by_user: AtomicBool::new(false),
+        target: Mutex::new(LiveChatTurnTarget::Idle),
+    })
+}
+
+fn register_live_chat_turn(
+    store: &AppStore,
+    terminal_tab_id: &str,
+    message_id: &str,
+) -> Result<Arc<LiveChatTurnHandle>, String> {
+    let handle = new_live_chat_turn_handle(terminal_tab_id, message_id);
+    let mut live_turns = store
+        .live_chat_turns
+        .lock()
+        .map_err(|err| err.to_string())?;
+    live_turns.insert(
+        live_chat_turn_key(terminal_tab_id, message_id),
+        handle.clone(),
+    );
+    Ok(handle)
+}
+
+fn unregister_live_chat_turn(
+    live_chat_turns: &Arc<Mutex<BTreeMap<String, Arc<LiveChatTurnHandle>>>>,
+    terminal_tab_id: &str,
+    message_id: &str,
+) {
+    if let Ok(mut turns) = live_chat_turns.lock() {
+        turns.remove(&live_chat_turn_key(terminal_tab_id, message_id));
+    }
+}
+
+fn clear_live_chat_turn_target(handle: &Arc<LiveChatTurnHandle>) {
+    if let Ok(mut target) = handle.target.lock() {
+        *target = LiveChatTurnTarget::Idle;
+    }
+}
+
+fn set_live_chat_turn_target(handle: &Arc<LiveChatTurnHandle>, target: LiveChatTurnTarget) {
+    if let Ok(mut current) = handle.target.lock() {
+        *current = target;
+    }
+    let _ = maybe_dispatch_live_chat_interrupt(handle);
+}
+
+fn was_live_chat_turn_interrupted(handle: Option<&Arc<LiveChatTurnHandle>>) -> bool {
+    handle
+        .map(|item| item.interrupted_by_user.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+fn interrupted_fallback_status_block() -> ChatMessageBlock {
+    ChatMessageBlock::Status {
+        level: "warning".to_string(),
+        text: "Response interrupted before completion.".to_string(),
+    }
+}
+
+fn shared_next_request_id(counter: &SharedRpcCounter) -> Result<u64, String> {
+    let mut next_id = counter.lock().map_err(|err| err.to_string())?;
+    let request_id = *next_id;
+    *next_id += 1;
+    Ok(request_id)
+}
+
+fn write_jsonrpc_message_shared(writer: &SharedChildStdin, payload: &Value) -> Result<(), String> {
+    let mut locked = writer.lock().map_err(|err| err.to_string())?;
+    write_jsonrpc_message(&mut *locked, payload)
+}
+
+fn write_line_json_message_shared(
+    writer: &SharedChildStdin,
+    payload: &Value,
+) -> Result<(), String> {
+    let mut locked = writer.lock().map_err(|err| err.to_string())?;
+    write_line_json_message(&mut *locked, payload)
+}
+
+fn send_process_interrupt(pid: u32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        terminate_process_tree(pid);
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .output()
+            .map_err(|err| err.to_string())?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        }
+    }
+}
+
+fn dispatch_codex_interrupt(
+    target: &mut LiveCodexTurnTarget,
+) -> Result<LiveInterruptDispatch, String> {
+    if target.interrupt_sent {
+        return Ok(LiveInterruptDispatch::AlreadySent);
+    }
+    let Some(thread_id) = target.thread_id.clone() else {
+        return Ok(LiveInterruptDispatch::Pending);
+    };
+    let Some(turn_id) = target.turn_id.clone() else {
+        return Ok(LiveInterruptDispatch::Pending);
+    };
+
+    let request_id = shared_next_request_id(&target.next_id)?;
+    write_jsonrpc_message_shared(
+        &target.writer,
+        &json!({
+            "id": request_id,
+            "method": "turn/interrupt",
+            "params": {
+                "threadId": thread_id,
+                "turnId": turn_id,
+            }
+        }),
+    )?;
+    target.interrupt_sent = true;
+    Ok(LiveInterruptDispatch::Sent)
+}
+
+fn dispatch_gemini_interrupt(
+    target: &mut LiveGeminiTurnTarget,
+) -> Result<LiveInterruptDispatch, String> {
+    if target.interrupt_sent {
+        return Ok(LiveInterruptDispatch::AlreadySent);
+    }
+    let Some(session_id) = target.session_id.clone() else {
+        return Ok(LiveInterruptDispatch::Pending);
+    };
+
+    write_jsonrpc_message_shared(
+        &target.writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": {
+                "sessionId": session_id,
+            }
+        }),
+    )?;
+    target.interrupt_sent = true;
+    Ok(LiveInterruptDispatch::Sent)
+}
+
+fn dispatch_process_interrupt(
+    target: &mut LiveProcessTurnTarget,
+) -> Result<LiveInterruptDispatch, String> {
+    if target.interrupt_sent {
+        return Ok(LiveInterruptDispatch::AlreadySent);
+    }
+    send_process_interrupt(target.child_pid)?;
+    target.interrupt_sent = true;
+    Ok(LiveInterruptDispatch::Sent)
+}
+
+fn maybe_dispatch_live_chat_interrupt(
+    handle: &Arc<LiveChatTurnHandle>,
+) -> Result<LiveInterruptDispatch, String> {
+    if !handle.interrupted_by_user.load(Ordering::SeqCst) {
+        return Ok(LiveInterruptDispatch::Pending);
+    }
+
+    let mut target = handle.target.lock().map_err(|err| err.to_string())?;
+    match &mut *target {
+        LiveChatTurnTarget::Idle => Ok(LiveInterruptDispatch::Pending),
+        LiveChatTurnTarget::Codex(target) => dispatch_codex_interrupt(target),
+        LiveChatTurnTarget::Gemini(target) => dispatch_gemini_interrupt(target),
+        LiveChatTurnTarget::Process(target) => dispatch_process_interrupt(target),
+    }
+}
+
+fn update_live_codex_turn_state(
+    handle: Option<&Arc<LiveChatTurnHandle>>,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+) {
+    let Some(handle) = handle else {
+        return;
+    };
+
+    if let Ok(mut target) = handle.target.lock() {
+        if let LiveChatTurnTarget::Codex(current) = &mut *target {
+            if let Some(thread_id) = thread_id {
+                current.thread_id = Some(thread_id);
+            }
+            if let Some(turn_id) = turn_id {
+                current.turn_id = Some(turn_id);
+            }
+        }
+    }
+    let _ = maybe_dispatch_live_chat_interrupt(handle);
+}
+
+fn update_live_gemini_turn_session(
+    handle: Option<&Arc<LiveChatTurnHandle>>,
+    session_id: Option<String>,
+) {
+    let Some(handle) = handle else {
+        return;
+    };
+
+    if let Ok(mut target) = handle.target.lock() {
+        if let LiveChatTurnTarget::Gemini(current) = &mut *target {
+            if let Some(session_id) = session_id {
+                current.session_id = Some(session_id);
+            }
+        }
+    }
+    let _ = maybe_dispatch_live_chat_interrupt(handle);
 }
 
 fn write_jsonrpc_message<W: Write>(writer: &mut W, payload: &Value) -> Result<(), String> {
@@ -2280,8 +2639,8 @@ fn gemini_flush_tool_call(stream_state: &mut GeminiStreamState, tool_call_id: &s
     }
 }
 
-fn handle_gemini_request<W: Write>(
-    writer: &mut W,
+fn handle_gemini_request(
+    writer: &SharedChildStdin,
     method: &str,
     params: &Value,
     request_id: &Value,
@@ -2303,7 +2662,7 @@ fn handle_gemini_request<W: Write>(
         }),
     };
 
-    write_jsonrpc_message(writer, &response)
+    write_jsonrpc_message_shared(writer, &response)
 }
 
 fn handle_gemini_notification(
@@ -2314,6 +2673,7 @@ fn handle_gemini_notification(
     params: &Value,
     stream_state: &mut GeminiStreamState,
     current_prompt: Option<&str>,
+    live_turn: Option<&Arc<LiveChatTurnHandle>>,
 ) -> Result<(), String> {
     if method != "session/update" {
         return Ok(());
@@ -2322,7 +2682,9 @@ fn handle_gemini_notification(
     let mut blocks_changed = false;
 
     if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
-        stream_state.session_id = Some(session_id.to_string());
+        let session_id = session_id.to_string();
+        stream_state.session_id = Some(session_id.clone());
+        update_live_gemini_turn_session(live_turn, Some(session_id));
     }
 
     let update = params.get("update").unwrap_or(&Value::Null);
@@ -2350,7 +2712,7 @@ fn handle_gemini_notification(
                 }
             }
         }
-        _ if stream_state.awaiting_current_user_prompt => {}
+        _ if stream_state.awaiting_current_user_prompt && current_prompt.is_none() => {}
         "agent_message_chunk" => {
             if stream_state.awaiting_current_user_prompt {
                 stream_state.active_turn_started = true;
@@ -2372,6 +2734,7 @@ fn handle_gemini_notification(
                         transport_kind: None,
                         transport_session: None,
                         blocks: None,
+                        interrupted_by_user: None,
                     },
                 );
             }
@@ -2383,6 +2746,8 @@ fn handle_gemini_notification(
             }
             if let Some(text) = gemini_text_content(update) {
                 append_text_chunk(&mut stream_state.reasoning_text, &text);
+                upsert_reasoning_block(&mut stream_state.blocks, &stream_state.reasoning_text);
+                blocks_changed = true;
             }
         }
         "tool_call" => {
@@ -2445,10 +2810,10 @@ fn handle_gemini_notification(
     Ok(())
 }
 
-fn gemini_rpc_call<R: BufRead, W: Write>(
+fn gemini_rpc_call<R: BufRead>(
     reader: &mut R,
-    writer: &mut W,
-    next_id: &mut u64,
+    writer: &SharedChildStdin,
+    next_id: &SharedRpcCounter,
     method: &str,
     params: Value,
     app: &AppHandle,
@@ -2457,11 +2822,11 @@ fn gemini_rpc_call<R: BufRead, W: Write>(
     stream_state: &mut GeminiStreamState,
     current_prompt: Option<&str>,
     local_permission_mode: &str,
+    live_turn: Option<&Arc<LiveChatTurnHandle>>,
 ) -> Result<Value, String> {
-    let request_id = *next_id;
-    *next_id += 1;
+    let request_id = shared_next_request_id(next_id)?;
 
-    write_jsonrpc_message(
+    write_jsonrpc_message_shared(
         writer,
         &json!({
             "jsonrpc": "2.0",
@@ -2493,6 +2858,7 @@ fn gemini_rpc_call<R: BufRead, W: Write>(
                     message.get("params").unwrap_or(&Value::Null),
                     stream_state,
                     current_prompt,
+                    live_turn,
                 )?;
             }
             continue;
@@ -2611,6 +2977,25 @@ fn upsert_plan_block(blocks: &mut Vec<ChatMessageBlock>, text: &str) {
         };
     } else {
         blocks.push(ChatMessageBlock::Plan {
+            text: trimmed.to_string(),
+        });
+    }
+}
+
+fn upsert_reasoning_block(blocks: &mut Vec<ChatMessageBlock>, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if let Some(index) = blocks
+        .iter()
+        .position(|block| matches!(block, ChatMessageBlock::Reasoning { .. }))
+    {
+        blocks[index] = ChatMessageBlock::Reasoning {
+            text: trimmed.to_string(),
+        };
+    } else {
+        blocks.push(ChatMessageBlock::Reasoning {
             text: trimmed.to_string(),
         });
     }
@@ -2814,10 +3199,10 @@ fn render_chat_blocks(
     sections.join("\n\n")
 }
 
-fn codex_rpc_call<R: BufRead, W: Write>(
+fn codex_rpc_call<R: BufRead>(
     reader: &mut R,
-    writer: &mut W,
-    next_id: &mut u64,
+    writer: &SharedChildStdin,
+    next_id: &SharedRpcCounter,
     method: &str,
     params: Value,
     app: &AppHandle,
@@ -2825,11 +3210,11 @@ fn codex_rpc_call<R: BufRead, W: Write>(
     message_id: &str,
     stream_state: &mut CodexStreamState,
     codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
+    live_turn: Option<&Arc<LiveChatTurnHandle>>,
 ) -> Result<Value, String> {
-    let request_id = *next_id;
-    *next_id += 1;
+    let request_id = shared_next_request_id(next_id)?;
 
-    write_jsonrpc_message(
+    write_jsonrpc_message_shared(
         writer,
         &json!({
             "id": request_id,
@@ -2863,6 +3248,7 @@ fn codex_rpc_call<R: BufRead, W: Write>(
                     notification_method,
                     message.get("params").unwrap_or(&Value::Null),
                     stream_state,
+                    live_turn,
                 )?;
             }
             continue;
@@ -2882,7 +3268,7 @@ fn codex_rpc_call<R: BufRead, W: Write>(
 
 fn codex_startup_error(
     mut child: std::process::Child,
-    stdin: std::process::ChildStdin,
+    stdin: SharedChildStdin,
     stderr_handle: std::thread::JoinHandle<()>,
     stderr_buffer: Arc<Mutex<String>>,
     error: String,
@@ -2911,8 +3297,8 @@ fn codex_startup_error(
     }
 }
 
-fn handle_codex_server_request<W: Write>(
-    writer: &mut W,
+fn handle_codex_server_request(
+    writer: &SharedChildStdin,
     app: &AppHandle,
     terminal_tab_id: &str,
     message_id: &str,
@@ -3003,7 +3389,7 @@ fn handle_codex_server_request<W: Write>(
         &stream_state.blocks,
     );
 
-    write_jsonrpc_message(
+    write_jsonrpc_message_shared(
         writer,
         &json!({
             "id": request_id.clone(),
@@ -3019,13 +3405,25 @@ fn handle_codex_notification(
     method: &str,
     params: &Value,
     stream_state: &mut CodexStreamState,
+    live_turn: Option<&Arc<LiveChatTurnHandle>>,
 ) -> Result<(), String> {
     let mut blocks_changed = false;
-    if let Some(thread_id) = params.get("threadId").and_then(Value::as_str) {
-        stream_state.thread_id = Some(thread_id.to_string());
+    let next_thread_id = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .map(|value| value.to_string());
+    let next_turn_id = params
+        .get("turnId")
+        .and_then(Value::as_str)
+        .map(|value| value.to_string());
+    if let Some(thread_id) = next_thread_id.clone() {
+        stream_state.thread_id = Some(thread_id);
     }
-    if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
-        stream_state.turn_id = Some(turn_id.to_string());
+    if let Some(turn_id) = next_turn_id.clone() {
+        stream_state.turn_id = Some(turn_id);
+    }
+    if next_thread_id.is_some() || next_turn_id.is_some() {
+        update_live_codex_turn_state(live_turn, next_thread_id, next_turn_id);
     }
 
     match method {
@@ -3054,6 +3452,7 @@ fn handle_codex_notification(
                         transport_kind: None,
                         transport_session: None,
                         blocks: None,
+                        interrupted_by_user: None,
                     },
                 );
             }
@@ -3384,6 +3783,7 @@ fn run_codex_app_server_turn(
     write_mode: bool,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     block_prefix: Vec<ChatMessageBlock>,
+    live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<CodexTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
     let mut cmd = batch_aware_command(&resolved_command, &["app-server", "--listen", "stdio://"]);
@@ -3399,10 +3799,10 @@ fn run_codex_app_server_turn(
     let mut child = cmd
         .spawn()
         .map_err(|err| format!("Failed to start Codex app-server: {}", err))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Failed to open Codex app-server stdin".to_string())?;
+    let stdin =
+        Arc::new(Mutex::new(child.stdin.take().ok_or_else(|| {
+            "Failed to open Codex app-server stdin".to_string()
+        })?));
     let stdout = child
         .stdout
         .take()
@@ -3425,7 +3825,7 @@ fn run_codex_app_server_turn(
     });
 
     let mut reader = BufReader::new(stdout);
-    let mut next_id = 1_u64;
+    let next_id = Arc::new(Mutex::new(1_u64));
     let mut stream_state = CodexStreamState::default();
     stream_state.block_prefix = block_prefix;
     let permission_mode = codex_permission_mode(session, write_mode);
@@ -3433,10 +3833,26 @@ fn run_codex_app_server_turn(
     let requested_model = session.model.get("codex").cloned();
     let effort_override = codex_reasoning_effort(session);
 
+    if let Some(handle) = live_turn.as_ref() {
+        set_live_chat_turn_target(
+            handle,
+            LiveChatTurnTarget::Codex(LiveCodexTurnTarget {
+                child_pid: child.id(),
+                writer: stdin.clone(),
+                next_id: next_id.clone(),
+                thread_id: previous_transport_session
+                    .as_ref()
+                    .and_then(|session| session.thread_id.clone()),
+                turn_id: None,
+                interrupt_sent: false,
+            }),
+        );
+    }
+
     let _initialize = match codex_rpc_call(
         &mut reader,
-        &mut stdin,
-        &mut next_id,
+        &stdin,
+        &next_id,
         "initialize",
         json!({
             "clientInfo": {
@@ -3449,19 +3865,26 @@ fn run_codex_app_server_turn(
         message_id,
         &mut stream_state,
         &codex_pending_approvals,
+        live_turn.as_ref(),
     ) {
         Ok(result) => result,
         Err(err) => {
+            if let Some(handle) = live_turn.as_ref() {
+                clear_live_chat_turn_target(handle);
+            }
             return Err(codex_startup_error(
                 child,
                 stdin,
                 stderr_handle,
                 stderr_buffer,
                 err,
-            ))
+            ));
         }
     };
-    if let Err(err) = write_jsonrpc_message(&mut stdin, &json!({ "method": "initialized" })) {
+    if let Err(err) = write_jsonrpc_message_shared(&stdin, &json!({ "method": "initialized" })) {
+        if let Some(handle) = live_turn.as_ref() {
+            clear_live_chat_turn_target(handle);
+        }
         return Err(codex_startup_error(
             child,
             stdin,
@@ -3477,8 +3900,8 @@ fn run_codex_app_server_turn(
     {
         match codex_rpc_call(
             &mut reader,
-            &mut stdin,
-            &mut next_id,
+            &stdin,
+            &next_id,
             "thread/resume",
             json!({
                 "threadId": thread_id,
@@ -3493,23 +3916,27 @@ fn run_codex_app_server_turn(
             message_id,
             &mut stream_state,
             &codex_pending_approvals,
+            live_turn.as_ref(),
         ) {
             Ok(result) => result,
             Err(err) => {
+                if let Some(handle) = live_turn.as_ref() {
+                    clear_live_chat_turn_target(handle);
+                }
                 return Err(codex_startup_error(
                     child,
                     stdin,
                     stderr_handle,
                     stderr_buffer,
                     err,
-                ))
+                ));
             }
         }
     } else {
         match codex_rpc_call(
             &mut reader,
-            &mut stdin,
-            &mut next_id,
+            &stdin,
+            &next_id,
             "thread/start",
             json!({
                 "cwd": project_root,
@@ -3524,16 +3951,20 @@ fn run_codex_app_server_turn(
             message_id,
             &mut stream_state,
             &codex_pending_approvals,
+            live_turn.as_ref(),
         ) {
             Ok(result) => result,
             Err(err) => {
+                if let Some(handle) = live_turn.as_ref() {
+                    clear_live_chat_turn_target(handle);
+                }
                 return Err(codex_startup_error(
                     child,
                     stdin,
                     stderr_handle,
                     stderr_buffer,
                     err,
-                ))
+                ));
             }
         }
     };
@@ -3545,6 +3976,11 @@ fn run_codex_app_server_turn(
     {
         stream_state.thread_id = Some(thread_id.to_string());
     }
+    update_live_codex_turn_state(
+        live_turn.as_ref(),
+        stream_state.thread_id.clone(),
+        stream_state.turn_id.clone(),
+    );
 
     let effective_model = thread_result
         .get("model")
@@ -3579,8 +4015,8 @@ fn run_codex_app_server_turn(
 
     let _turn_start = match codex_rpc_call(
         &mut reader,
-        &mut stdin,
-        &mut next_id,
+        &stdin,
+        &next_id,
         "turn/start",
         json!({
             "threadId": thread_id,
@@ -3597,18 +4033,27 @@ fn run_codex_app_server_turn(
         message_id,
         &mut stream_state,
         &codex_pending_approvals,
+        live_turn.as_ref(),
     ) {
         Ok(result) => result,
         Err(err) => {
+            if let Some(handle) = live_turn.as_ref() {
+                clear_live_chat_turn_target(handle);
+            }
             return Err(codex_startup_error(
                 child,
                 stdin,
                 stderr_handle,
                 stderr_buffer,
                 err,
-            ))
+            ));
         }
     };
+    update_live_codex_turn_state(
+        live_turn.as_ref(),
+        stream_state.thread_id.clone(),
+        stream_state.turn_id.clone(),
+    );
 
     while stream_state.completion.is_none() {
         let message = read_jsonrpc_message(&mut reader)?
@@ -3616,7 +4061,7 @@ fn run_codex_app_server_turn(
         if let Some(method) = message.get("method").and_then(Value::as_str) {
             if let Some(server_request_id) = message.get("id") {
                 handle_codex_server_request(
-                    &mut stdin,
+                    &stdin,
                     app,
                     terminal_tab_id,
                     message_id,
@@ -3634,11 +4079,15 @@ fn run_codex_app_server_turn(
                     method,
                     message.get("params").unwrap_or(&Value::Null),
                     &mut stream_state,
+                    live_turn.as_ref(),
                 )?;
             }
         }
     }
 
+    if let Some(handle) = live_turn.as_ref() {
+        clear_live_chat_turn_target(handle);
+    }
     drop(stdin);
     let _ = child.wait();
     let _ = stderr_handle.join();
@@ -3745,6 +4194,7 @@ fn handle_claude_stream_event(
                                 transport_kind: None,
                                 transport_session: None,
                                 blocks: None,
+                                interrupted_by_user: None,
                             },
                         );
                     }
@@ -3839,6 +4289,7 @@ fn handle_claude_stream_event(
                                     transport_kind: None,
                                     transport_session: None,
                                     blocks: None,
+                                    interrupted_by_user: None,
                                 },
                             );
                         }
@@ -3981,7 +4432,7 @@ fn handle_claude_stream_event(
 
 fn handle_claude_stream_record(
     app: &AppHandle,
-    stdin: &mut std::process::ChildStdin,
+    stdin: &SharedChildStdin,
     terminal_tab_id: &str,
     message_id: &str,
     project_root: &str,
@@ -4051,7 +4502,7 @@ fn handle_claude_stream_record(
                     .unwrap_or(false);
 
                 if auto_allow {
-                    write_line_json_message(
+                    write_line_json_message_shared(
                         stdin,
                         &json!({
                             "type": "control_response",
@@ -4137,7 +4588,7 @@ fn handle_claude_stream_record(
                         }
                     };
 
-                    write_line_json_message(
+                    write_line_json_message_shared(
                         stdin,
                         &json!({
                             "type": "control_response",
@@ -4252,6 +4703,39 @@ fn emit_stream_block_update_with_prefix(
             transport_kind: None,
             transport_session: None,
             blocks: Some(merged_blocks),
+            interrupted_by_user: None,
+        },
+    );
+}
+
+fn emit_chat_done_event(
+    app: &AppHandle,
+    terminal_tab_id: &str,
+    message_id: &str,
+    exit_code: Option<i32>,
+    duration_ms: u64,
+    final_content: String,
+    content_format: Option<String>,
+    transport_kind: Option<String>,
+    transport_session: Option<AgentTransportSession>,
+    blocks: Option<Vec<ChatMessageBlock>>,
+    interrupted_by_user: bool,
+) {
+    let _ = app.emit(
+        "stream-chunk",
+        StreamEvent {
+            terminal_tab_id: terminal_tab_id.to_string(),
+            message_id: message_id.to_string(),
+            chunk: String::new(),
+            done: true,
+            exit_code,
+            duration_ms: Some(duration_ms),
+            final_content: Some(final_content),
+            content_format,
+            transport_kind,
+            transport_session,
+            blocks,
+            interrupted_by_user: Some(interrupted_by_user),
         },
     );
 }
@@ -4435,6 +4919,7 @@ fn run_claude_headless_turn_once(
     timeout_ms: u64,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<ClaudeTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
     let requested_model = claude_requested_model(session, previous_transport_session.as_ref());
@@ -4505,17 +4990,19 @@ fn run_claude_headless_turn_once(
         .stdout
         .take()
         .ok_or_else(|| "Failed to capture Claude stdout".to_string())?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Failed to capture Claude stdin".to_string())?;
+    let stdin = Arc::new(Mutex::new(
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| "Failed to capture Claude stdin".to_string())?,
+    ));
     let stderr = child
         .stderr
         .take()
         .ok_or_else(|| "Failed to capture Claude stderr".to_string())?;
 
-    write_line_json_message(
-        &mut stdin,
+    write_line_json_message_shared(
+        &stdin,
         &json!({
             "type": "user",
             "session_id": "",
@@ -4527,6 +5014,17 @@ fn run_claude_headless_turn_once(
         }),
     )
     .map_err(|err| format!("Failed to write Claude prompt: {}", err))?;
+
+    if let Some(handle) = live_turn.as_ref() {
+        set_live_chat_turn_target(
+            handle,
+            LiveChatTurnTarget::Process(LiveProcessTurnTarget {
+                cli_id: "claude".to_string(),
+                child_pid: child.id(),
+                interrupt_sent: false,
+            }),
+        );
+    }
 
     let completed = Arc::new(AtomicBool::new(false));
     let timed_out = Arc::new(AtomicBool::new(false));
@@ -4566,7 +5064,7 @@ fn run_claude_headless_turn_once(
         match serde_json::from_str::<Value>(trimmed) {
             Ok(record) => handle_claude_stream_record(
                 app,
-                &mut stdin,
+                &stdin,
                 terminal_tab_id,
                 message_id,
                 project_root,
@@ -4587,6 +5085,9 @@ fn run_claude_headless_turn_once(
         }
     }
 
+    if let Some(handle) = live_turn.as_ref() {
+        clear_live_chat_turn_target(handle);
+    }
     drop(stdin);
     let status = child.wait().map_err(|err| err.to_string())?;
     completed.store(true, Ordering::SeqCst);
@@ -4705,6 +5206,7 @@ fn run_claude_headless_turn(
     timeout_ms: u64,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<ClaudeTurnOutcome, String> {
     let resume_session_id = previous_transport_session
         .as_ref()
@@ -4724,6 +5226,7 @@ fn run_claude_headless_turn(
         timeout_ms,
         claude_approval_rules.clone(),
         claude_pending_approvals.clone(),
+        live_turn.clone(),
     ) {
         Ok(outcome) => Ok(outcome),
         Err(error) if resume_session_id.is_some() && claude_should_retry_without_resume(&error) => {
@@ -4745,6 +5248,7 @@ fn run_claude_headless_turn(
                 timeout_ms,
                 claude_approval_rules,
                 claude_pending_approvals,
+                live_turn,
             )
         }
         Err(error) => Err(error),
@@ -4763,6 +5267,7 @@ fn run_gemini_acp_turn(
     write_mode: bool,
     timeout_ms: u64,
     block_prefix: Vec<ChatMessageBlock>,
+    live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<GeminiTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
     let mut cmd = batch_aware_command(&resolved_command, &["--acp"]);
@@ -4779,10 +5284,12 @@ fn run_gemini_acp_turn(
         .spawn()
         .map_err(|err| format!("Failed to start Gemini ACP: {}", err))?;
     let watchdog = start_process_watchdog(child.id(), timeout_ms);
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Failed to open Gemini ACP stdin".to_string())?;
+    let stdin = Arc::new(Mutex::new(
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| "Failed to open Gemini ACP stdin".to_string())?,
+    ));
     let stdout = child
         .stdout
         .take()
@@ -4805,7 +5312,7 @@ fn run_gemini_acp_turn(
     });
 
     let mut reader = BufReader::new(stdout);
-    let mut next_id = 1_u64;
+    let next_id = Arc::new(Mutex::new(1_u64));
     let mut stream_state = GeminiStreamState::default();
     stream_state.block_prefix = block_prefix;
 
@@ -4821,10 +5328,24 @@ fn run_gemini_acp_turn(
         gemini_local_permission_mode(session, write_mode, previous_transport_session.as_ref());
     let requested_mode_id = gemini_mode_to_acp(&requested_local_permission);
 
+    if let Some(handle) = live_turn.as_ref() {
+        set_live_chat_turn_target(
+            handle,
+            LiveChatTurnTarget::Gemini(LiveGeminiTurnTarget {
+                child_pid: child.id(),
+                writer: stdin.clone(),
+                session_id: previous_transport_session
+                    .as_ref()
+                    .and_then(|session| session.thread_id.clone()),
+                interrupt_sent: false,
+            }),
+        );
+    }
+
     let initialize_result = gemini_rpc_call(
         &mut reader,
-        &mut stdin,
-        &mut next_id,
+        &stdin,
+        &next_id,
         "initialize",
         json!({
             "protocolVersion": 1,
@@ -4840,6 +5361,7 @@ fn run_gemini_acp_turn(
         &mut stream_state,
         None,
         &requested_local_permission,
+        live_turn.as_ref(),
     )?;
 
     if let Some(auth_method_id) = gemini_auth_method_from_settings() {
@@ -4856,8 +5378,8 @@ fn run_gemini_acp_turn(
         if supports_auth_method {
             let _ = gemini_rpc_call(
                 &mut reader,
-                &mut stdin,
-                &mut next_id,
+                &stdin,
+                &next_id,
                 "authenticate",
                 json!({
                     "methodId": auth_method_id
@@ -4868,6 +5390,7 @@ fn run_gemini_acp_turn(
                 &mut stream_state,
                 None,
                 &requested_local_permission,
+                live_turn.as_ref(),
             )?;
         }
     }
@@ -4877,8 +5400,8 @@ fn run_gemini_acp_turn(
         stream_state.active_turn_started = false;
         match gemini_rpc_call(
             &mut reader,
-            &mut stdin,
-            &mut next_id,
+            &stdin,
+            &next_id,
             "session/load",
             json!({
                 "sessionId": session_id,
@@ -4891,9 +5414,14 @@ fn run_gemini_acp_turn(
             &mut stream_state,
             None,
             &requested_local_permission,
+            live_turn.as_ref(),
         ) {
             Ok(result) => {
                 stream_state.session_id = Some(session_id);
+                update_live_gemini_turn_session(
+                    live_turn.as_ref(),
+                    stream_state.session_id.clone(),
+                );
                 result
             }
             Err(_) => {
@@ -4901,8 +5429,8 @@ fn run_gemini_acp_turn(
                 stream_state.active_turn_started = true;
                 let result = gemini_rpc_call(
                     &mut reader,
-                    &mut stdin,
-                    &mut next_id,
+                    &stdin,
+                    &next_id,
                     "session/new",
                     json!({
                         "cwd": project_root,
@@ -4914,9 +5442,14 @@ fn run_gemini_acp_turn(
                     &mut stream_state,
                     None,
                     &requested_local_permission,
+                    live_turn.as_ref(),
                 )?;
                 if let Some(session_id) = result.get("sessionId").and_then(Value::as_str) {
                     stream_state.session_id = Some(session_id.to_string());
+                    update_live_gemini_turn_session(
+                        live_turn.as_ref(),
+                        stream_state.session_id.clone(),
+                    );
                 }
                 result
             }
@@ -4926,8 +5459,8 @@ fn run_gemini_acp_turn(
         stream_state.active_turn_started = true;
         let result = gemini_rpc_call(
             &mut reader,
-            &mut stdin,
-            &mut next_id,
+            &stdin,
+            &next_id,
             "session/new",
             json!({
                 "cwd": project_root,
@@ -4939,12 +5472,40 @@ fn run_gemini_acp_turn(
             &mut stream_state,
             None,
             &requested_local_permission,
+            live_turn.as_ref(),
         )?;
         if let Some(session_id) = result.get("sessionId").and_then(Value::as_str) {
             stream_state.session_id = Some(session_id.to_string());
+            update_live_gemini_turn_session(live_turn.as_ref(), stream_state.session_id.clone());
         }
         result
     };
+
+    if was_live_chat_turn_interrupted(live_turn.as_ref()) && !stream_state.active_turn_started {
+        stream_state.prompt_stop_reason = Some("cancelled".to_string());
+        if let Some(handle) = live_turn.as_ref() {
+            clear_live_chat_turn_target(handle);
+        }
+        drop(stdin);
+        watchdog.store(true, Ordering::SeqCst);
+        let _ = child.wait();
+        let _ = stderr_handle.join();
+        return Ok(GeminiTurnOutcome {
+            final_content: String::new(),
+            content_format: "markdown".to_string(),
+            raw_output: String::new(),
+            exit_code: Some(130),
+            blocks: stream_state.blocks,
+            transport_session: build_transport_session(
+                "gemini",
+                previous_transport_session,
+                stream_state.session_id.clone(),
+                None,
+                requested_model,
+                Some(requested_local_permission),
+            ),
+        });
+    }
 
     let session_id = stream_state
         .session_id
@@ -4971,8 +5532,8 @@ fn run_gemini_acp_turn(
     if mode_available && current_mode_id.as_deref() != Some(requested_mode_id.as_str()) {
         let _ = gemini_rpc_call(
             &mut reader,
-            &mut stdin,
-            &mut next_id,
+            &stdin,
+            &next_id,
             "session/set_mode",
             json!({
                 "sessionId": session_id,
@@ -4984,6 +5545,7 @@ fn run_gemini_acp_turn(
             &mut stream_state,
             None,
             &requested_local_permission,
+            live_turn.as_ref(),
         )?;
         stream_state.current_mode_id = Some(requested_mode_id.clone());
     }
@@ -5009,8 +5571,8 @@ fn run_gemini_acp_turn(
         if model_available && current_model_id.as_deref() != Some(model_id.as_str()) {
             let _ = gemini_rpc_call(
                 &mut reader,
-                &mut stdin,
-                &mut next_id,
+                &stdin,
+                &next_id,
                 "session/set_model",
                 json!({
                     "sessionId": session_id,
@@ -5022,6 +5584,7 @@ fn run_gemini_acp_turn(
                 &mut stream_state,
                 None,
                 &requested_local_permission,
+                live_turn.as_ref(),
             )?;
             stream_state.current_model_id = Some(model_id);
         }
@@ -5029,8 +5592,8 @@ fn run_gemini_acp_turn(
 
     let prompt_result = gemini_rpc_call(
         &mut reader,
-        &mut stdin,
-        &mut next_id,
+        &stdin,
+        &next_id,
         "session/prompt",
         json!({
             "sessionId": session_id,
@@ -5047,6 +5610,7 @@ fn run_gemini_acp_turn(
         &mut stream_state,
         Some(prompt),
         &requested_local_permission,
+        live_turn.as_ref(),
     )?;
 
     stream_state.prompt_stop_reason = prompt_result
@@ -5059,6 +5623,9 @@ fn run_gemini_acp_turn(
         gemini_flush_tool_call(&mut stream_state, &tool_call_id);
     }
 
+    if let Some(handle) = live_turn.as_ref() {
+        clear_live_chat_turn_target(handle);
+    }
     drop(stdin);
     watchdog.store(true, Ordering::SeqCst);
     let shutdown_deadline = Instant::now() + Duration::from_millis(300);
@@ -5097,27 +5664,27 @@ fn run_gemini_acp_turn(
         .map(gemini_mode_from_acp)
         .unwrap_or_else(|| requested_local_permission.clone());
 
-    let mut blocks = Vec::new();
-    if !stream_state.final_content.trim().is_empty() {
-        blocks.push(ChatMessageBlock::Text {
-            text: stream_state.final_content.clone(),
-            format: "markdown".to_string(),
-        });
-    }
+    let mut blocks = stream_state.blocks;
     if !stream_state.reasoning_text.trim().is_empty() {
-        blocks.push(ChatMessageBlock::Reasoning {
-            text: stream_state.reasoning_text.trim().to_string(),
-        });
+        upsert_reasoning_block(&mut blocks, &stream_state.reasoning_text);
     }
-    let has_plan_block = stream_state
-        .blocks
+    let has_plan_block = blocks
         .iter()
         .any(|block| matches!(block, ChatMessageBlock::Plan { .. }));
-    blocks.extend(stream_state.blocks);
     if let Some(plan_text) = stream_state.latest_plan_text.clone() {
         if !has_plan_block {
             blocks.push(ChatMessageBlock::Plan { text: plan_text });
         }
+    }
+    if !stream_state.final_content.trim().is_empty()
+        && blocks
+            .iter()
+            .all(|block| !matches!(block, ChatMessageBlock::Text { .. }))
+    {
+        blocks.push(ChatMessageBlock::Text {
+            text: stream_state.final_content.clone(),
+            format: "markdown".to_string(),
+        });
     }
 
     let stop_reason = stream_state
@@ -5697,6 +6264,14 @@ fn update_chat_message_blocks(
     request: MessageBlocksUpdateRequest,
 ) -> Result<(), String> {
     store.terminal_storage.update_chat_message_blocks(&request)
+}
+
+#[tauri::command]
+fn semantic_recall(
+    store: State<'_, AppStore>,
+    request: SemanticRecallRequest,
+) -> Result<Vec<SemanticMemoryChunk>, String> {
+    store.terminal_storage.semantic_recall(&request)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -7469,6 +8044,30 @@ fn switch_cli_for_task(
     let project_name = request.project_name.clone();
     let latest_user_prompt = request.latest_user_prompt.clone();
     let relevant_files = request.relevant_files.clone();
+    let fallback_handoff_document = if request.handoff_document.is_none()
+        && (request.compacted_history.is_some() || request.cross_tab_context.is_some())
+    {
+        Some(HandoffDocument {
+            from_cli: request.from_cli.clone(),
+            to_cli: request.to_cli.clone(),
+            recent_turns: Vec::new(),
+            working_memory: WorkingMemoryPayload::default(),
+            kernel_facts: Vec::new(),
+            compacted_summaries: request.compacted_history.clone().into_iter().collect(),
+            cross_tab_entries: request.cross_tab_context.clone().unwrap_or_default(),
+            semantic_context: Vec::new(),
+            timestamp: Local::now().to_rfc3339(),
+        })
+    } else {
+        None
+    };
+    let handoff_document = request
+        .handoff_document
+        .as_ref()
+        .or(fallback_handoff_document.as_ref());
+    let handoff_payload_json = handoff_document
+        .map(|doc| serde_json::to_string(doc).map_err(|err| err.to_string()))
+        .transpose()?;
     let bundle = store
         .terminal_storage
         .switch_cli_for_task(&CliHandoffStorageRequest {
@@ -7482,6 +8081,7 @@ fn switch_cli_for_task(
             latest_user_prompt: latest_user_prompt.clone(),
             latest_assistant_summary: request.latest_assistant_summary.clone(),
             relevant_files: relevant_files.clone(),
+            handoff_payload_json,
         })?;
 
     if let Ok(mut ctx) = store.context.lock() {
@@ -7781,6 +8381,16 @@ fn send_chat_message(
     let requested_transport_session = request.transport_session.clone();
     let transport_kind = default_transport_kind(&cli_id);
     let terminal_storage = store.terminal_storage.clone();
+    let pending_handoff = terminal_storage
+        .load_pending_handoff_for_terminal_tab(&terminal_tab_id, &cli_id)
+        .ok()
+        .flatten();
+    let force_fresh_session = pending_handoff.is_some();
+    let effective_previous_transport_session = if force_fresh_session {
+        None
+    } else {
+        requested_transport_session.clone()
+    };
 
     let mut request_session = acp::AcpSession::default();
     request_session.plan_mode = request.plan_mode;
@@ -7831,6 +8441,20 @@ fn send_chat_message(
         state.workspace.project_name = project_name.clone();
         state.workspace.branch = git_output(&project_root, &["branch", "--show-current"])
             .unwrap_or_else(|| "workspace".to_string());
+        let is_resuming = effective_previous_transport_session
+            .as_ref()
+            .and_then(|s| s.thread_id.as_ref())
+            .is_some();
+        let stored_handoff_context = pending_handoff.as_ref().map(|handoff| {
+            handoff
+                .payload_json
+                .as_deref()
+                .and_then(|payload| serde_json::from_str::<HandoffDocument>(payload).ok())
+                .map(|doc| format_handoff_document(&doc))
+                .unwrap_or_else(|| format_handoff_event_fallback(handoff))
+        });
+        let effective_handoff_context =
+            stored_handoff_context.or_else(|| request.handoff_context.clone());
         compose_tab_context_prompt(
             &state,
             &terminal_storage,
@@ -7844,6 +8468,9 @@ fn send_chat_message(
             write_mode,
             request.compacted_summaries.as_ref(),
             request.cross_tab_context.as_ref(),
+            request.working_memory.as_ref(),
+            is_resuming,
+            effective_handoff_context.as_deref(),
         )
     };
     let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
@@ -7875,17 +8502,21 @@ fn send_chat_message(
             timestamp: turn.timestamp.clone(),
         })
         .collect();
+    let live_turn = register_live_chat_turn(&store, &terminal_tab_id, &message_id)?;
+    let live_chat_turns = store.live_chat_turns.clone();
 
     if cli_id == "codex" {
         let codex_wrapper_path = wrapper_path.clone();
         let codex_project_root = project_root.clone();
-        let codex_requested_transport_session = requested_transport_session.clone();
+        let codex_requested_transport_session = effective_previous_transport_session.clone();
         let codex_transport_kind = transport_kind.clone();
         let codex_pending_approvals = store.codex_pending_approvals.clone();
         let codex_terminal_storage = terminal_storage.clone();
         let codex_workspace_id = workspace_id_for_thread.clone();
         let codex_project_name = project_name_for_thread.clone();
         let codex_recent_turns = recent_turns_for_thread.clone();
+        let codex_live_turn = live_turn.clone();
+        let codex_live_chat_turns = live_chat_turns.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -7902,9 +8533,11 @@ fn send_chat_message(
                 turn_write_mode,
                 codex_pending_approvals,
                 Vec::new(),
+                Some(codex_live_turn.clone()),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
+            let interrupted_by_user = was_live_chat_turn_interrupted(Some(&codex_live_turn));
             let (raw_output, exit_code, final_content, content_format, blocks, transport_session) =
                 match outcome {
                     Ok(outcome) => (
@@ -7926,15 +8559,25 @@ fn send_chat_message(
                             request_session_for_thread.model.get("codex").cloned(),
                             Some(permission_mode),
                         );
-                        (
-                            error.clone(),
-                            Some(1),
-                            error.clone(),
-                            "log".to_string(),
+                        let final_content = if interrupted_by_user {
+                            String::new()
+                        } else {
+                            error.clone()
+                        };
+                        let blocks = if interrupted_by_user {
+                            vec![interrupted_fallback_status_block()]
+                        } else {
                             vec![ChatMessageBlock::Status {
                                 level: "error".to_string(),
-                                text: error,
-                            }],
+                                text: error.clone(),
+                            }]
+                        };
+                        (
+                            error,
+                            Some(if interrupted_by_user { 130 } else { 1 }),
+                            final_content,
+                            "log".to_string(),
+                            blocks,
                             transport_session,
                         )
                     }
@@ -7987,7 +8630,7 @@ fn send_chat_message(
                 "stream-chunk",
                 StreamEvent {
                     terminal_tab_id: done_tab_id,
-                    message_id: msg_id,
+                    message_id: msg_id.clone(),
                     chunk: String::new(),
                     done: true,
                     exit_code,
@@ -7997,8 +8640,11 @@ fn send_chat_message(
                     transport_kind: Some(codex_transport_kind),
                     transport_session: Some(transport_session),
                     blocks: Some(blocks),
+                    interrupted_by_user: Some(interrupted_by_user),
                 },
             );
+
+            unregister_live_chat_turn(&codex_live_chat_turns, &stream_tab_id, &msg_id);
 
             if let Ok(mut state) = state_arc.lock() {
                 sync_workspace_metrics(&mut state);
@@ -8013,12 +8659,14 @@ fn send_chat_message(
     if cli_id == "gemini" {
         let gemini_wrapper_path = wrapper_path.clone();
         let gemini_project_root = project_root.clone();
-        let gemini_requested_transport_session = requested_transport_session.clone();
+        let gemini_requested_transport_session = effective_previous_transport_session.clone();
         let gemini_transport_kind = transport_kind.clone();
         let gemini_terminal_storage = terminal_storage.clone();
         let gemini_workspace_id = workspace_id_for_thread.clone();
         let gemini_project_name = project_name_for_thread.clone();
         let gemini_recent_turns = recent_turns_for_thread.clone();
+        let gemini_live_turn = live_turn.clone();
+        let gemini_live_chat_turns = live_chat_turns.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -8034,9 +8682,11 @@ fn send_chat_message(
                 turn_write_mode,
                 timeout_ms,
                 Vec::new(),
+                Some(gemini_live_turn.clone()),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
+            let interrupted_by_user = was_live_chat_turn_interrupted(Some(&gemini_live_turn));
             let (raw_output, exit_code, final_content, content_format, blocks, transport_session) =
                 match outcome {
                     Ok(outcome) => (
@@ -8061,15 +8711,25 @@ fn send_chat_message(
                             request_session_for_thread.model.get("gemini").cloned(),
                             Some(permission_mode),
                         );
-                        (
-                            error.clone(),
-                            Some(1),
-                            error.clone(),
-                            "log".to_string(),
+                        let final_content = if interrupted_by_user {
+                            String::new()
+                        } else {
+                            error.clone()
+                        };
+                        let blocks = if interrupted_by_user {
+                            vec![interrupted_fallback_status_block()]
+                        } else {
                             vec![ChatMessageBlock::Status {
                                 level: "error".to_string(),
-                                text: error,
-                            }],
+                                text: error.clone(),
+                            }]
+                        };
+                        (
+                            error,
+                            Some(if interrupted_by_user { 130 } else { 1 }),
+                            final_content,
+                            "log".to_string(),
+                            blocks,
                             transport_session,
                         )
                     }
@@ -8122,7 +8782,7 @@ fn send_chat_message(
                 "stream-chunk",
                 StreamEvent {
                     terminal_tab_id: done_tab_id,
-                    message_id: msg_id,
+                    message_id: msg_id.clone(),
                     chunk: String::new(),
                     done: true,
                     exit_code,
@@ -8132,8 +8792,11 @@ fn send_chat_message(
                     transport_kind: Some(gemini_transport_kind),
                     transport_session: Some(transport_session),
                     blocks: Some(blocks),
+                    interrupted_by_user: Some(interrupted_by_user),
                 },
             );
+
+            unregister_live_chat_turn(&gemini_live_chat_turns, &stream_tab_id, &msg_id);
 
             if let Ok(mut state) = state_arc.lock() {
                 sync_workspace_metrics(&mut state);
@@ -8148,7 +8811,7 @@ fn send_chat_message(
     if cli_id == "claude" {
         let claude_wrapper_path = wrapper_path.clone();
         let claude_project_root = project_root.clone();
-        let claude_requested_transport_session = requested_transport_session.clone();
+        let claude_requested_transport_session = effective_previous_transport_session.clone();
         let claude_transport_kind = transport_kind.clone();
         let claude_approval_rules = store.claude_approval_rules.clone();
         let claude_pending_approvals = store.claude_pending_approvals.clone();
@@ -8156,6 +8819,8 @@ fn send_chat_message(
         let claude_workspace_id = workspace_id_for_thread.clone();
         let claude_project_name = project_name_for_thread.clone();
         let claude_recent_turns = recent_turns_for_thread.clone();
+        let claude_live_turn = live_turn.clone();
+        let claude_live_chat_turns = live_chat_turns.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -8172,9 +8837,11 @@ fn send_chat_message(
                 timeout_ms,
                 claude_approval_rules,
                 claude_pending_approvals,
+                Some(claude_live_turn.clone()),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
+            let interrupted_by_user = was_live_chat_turn_interrupted(Some(&claude_live_turn));
             let (raw_output, exit_code, final_content, content_format, blocks, transport_session) =
                 match outcome {
                     Ok(outcome) => (
@@ -8199,15 +8866,25 @@ fn send_chat_message(
                             request_session_for_thread.model.get("claude").cloned(),
                             Some(permission_mode),
                         );
-                        (
-                            error.clone(),
-                            Some(1),
-                            error.clone(),
-                            "log".to_string(),
+                        let final_content = if interrupted_by_user {
+                            String::new()
+                        } else {
+                            error.clone()
+                        };
+                        let blocks = if interrupted_by_user {
+                            vec![interrupted_fallback_status_block()]
+                        } else {
                             vec![ChatMessageBlock::Status {
                                 level: "error".to_string(),
-                                text: error,
-                            }],
+                                text: error.clone(),
+                            }]
+                        };
+                        (
+                            error,
+                            Some(if interrupted_by_user { 130 } else { 1 }),
+                            final_content,
+                            "log".to_string(),
+                            blocks,
                             transport_session,
                         )
                     }
@@ -8260,7 +8937,7 @@ fn send_chat_message(
                 "stream-chunk",
                 StreamEvent {
                     terminal_tab_id: done_tab_id,
-                    message_id: msg_id,
+                    message_id: msg_id.clone(),
                     chunk: String::new(),
                     done: true,
                     exit_code,
@@ -8270,8 +8947,11 @@ fn send_chat_message(
                     transport_kind: Some(claude_transport_kind),
                     transport_session: Some(transport_session),
                     blocks: Some(blocks),
+                    interrupted_by_user: Some(interrupted_by_user),
                 },
             );
+
+            unregister_live_chat_turn(&claude_live_chat_turns, &stream_tab_id, &msg_id);
 
             if let Ok(mut state) = state_arc.lock() {
                 sync_workspace_metrics(&mut state);
@@ -8294,6 +8974,8 @@ fn send_chat_message(
     let shell_workspace_id = workspace_id_for_thread.clone();
     let shell_project_name = project_name_for_thread.clone();
     let shell_recent_turns = recent_turns_for_thread.clone();
+    let shell_live_turn = live_turn.clone();
+    let shell_live_chat_turns = live_chat_turns.clone();
 
     thread::spawn(move || {
         let start = Instant::now();
@@ -8311,11 +8993,12 @@ fn send_chat_message(
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
+                unregister_live_chat_turn(&shell_live_chat_turns, &stream_tab_id, &msg_id);
                 let _ = app_handle.emit(
                     "stream-chunk",
                     StreamEvent {
                         terminal_tab_id: stream_tab_id.clone(),
-                        message_id: msg_id,
+                        message_id: msg_id.clone(),
                         chunk: format!("Error: {}", e),
                         done: true,
                         exit_code: Some(1),
@@ -8325,7 +9008,7 @@ fn send_chat_message(
                         transport_kind: Some(transport_kind.clone()),
                         transport_session: Some(build_transport_session(
                             &agent_id,
-                            requested_transport_session.clone(),
+                            effective_previous_transport_session.clone(),
                             None,
                             None,
                             request_session_for_thread.model.get(&agent_id).cloned(),
@@ -8338,11 +9021,21 @@ fn send_chat_message(
                             level: "error".to_string(),
                             text: format!("Error: {}", e),
                         }]),
+                        interrupted_by_user: Some(false),
                     },
                 );
                 return;
             }
         };
+
+        set_live_chat_turn_target(
+            &shell_live_turn,
+            LiveChatTurnTarget::Process(LiveProcessTurnTarget {
+                cli_id: agent_id.clone(),
+                child_pid: child.id(),
+                interrupt_sent: false,
+            }),
+        );
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -8374,6 +9067,7 @@ fn send_chat_message(
                             transport_kind: None,
                             transport_session: None,
                             blocks: None,
+                            interrupted_by_user: None,
                         },
                     );
                 }
@@ -8406,6 +9100,7 @@ fn send_chat_message(
                             transport_kind: None,
                             transport_session: None,
                             blocks: None,
+                            interrupted_by_user: None,
                         },
                     );
                 }
@@ -8419,9 +9114,11 @@ fn send_chat_message(
         let duration_ms = start.elapsed().as_millis() as u64;
         let exit_code = status.and_then(|s| s.code());
         let raw_output = output_buffer.lock().map(|b| b.clone()).unwrap_or_default();
+        let interrupted_by_user = was_live_chat_turn_interrupted(Some(&shell_live_turn));
+        clear_live_chat_turn_target(&shell_live_turn);
         let transport_session = build_transport_session(
             &agent_id,
-            requested_transport_session,
+            effective_previous_transport_session,
             None,
             None,
             request_session_for_thread.model.get(&agent_id).cloned(),
@@ -8482,7 +9179,7 @@ fn send_chat_message(
             "stream-chunk",
             StreamEvent {
                 terminal_tab_id: done_tab_id,
-                message_id: msg_id,
+                message_id: msg_id.clone(),
                 chunk: String::new(),
                 done: true,
                 exit_code,
@@ -8492,8 +9189,10 @@ fn send_chat_message(
                 transport_kind: Some(transport_kind),
                 transport_session: Some(transport_session),
                 blocks: None,
+                interrupted_by_user: Some(interrupted_by_user),
             },
         );
+        unregister_live_chat_turn(&shell_live_chat_turns, &stream_tab_id, &msg_id);
 
         // Update workspace metrics
         if let Ok(mut state) = state_arc.lock() {
@@ -8507,12 +9206,65 @@ fn send_chat_message(
 }
 
 #[tauri::command]
+fn interrupt_chat_turn(
+    store: State<'_, AppStore>,
+    terminal_tab_id: String,
+    message_id: String,
+) -> Result<ChatInterruptResult, String> {
+    let live_turn = {
+        let live_turns = store
+            .live_chat_turns
+            .lock()
+            .map_err(|err| err.to_string())?;
+        live_turns
+            .get(&live_chat_turn_key(&terminal_tab_id, &message_id))
+            .cloned()
+    };
+
+    let Some(live_turn) = live_turn else {
+        return Ok(ChatInterruptResult {
+            status: "notRunning".to_string(),
+            accepted: false,
+            pending: false,
+            message: None,
+        });
+    };
+
+    live_turn.interrupted_by_user.store(true, Ordering::SeqCst);
+    let dispatch = maybe_dispatch_live_chat_interrupt(&live_turn);
+    match dispatch {
+        Ok(LiveInterruptDispatch::Sent | LiveInterruptDispatch::AlreadySent) => {
+            Ok(ChatInterruptResult {
+                status: "accepted".to_string(),
+                accepted: true,
+                pending: false,
+                message: None,
+            })
+        }
+        Ok(LiveInterruptDispatch::Pending) => Ok(ChatInterruptResult {
+            status: "accepted".to_string(),
+            accepted: true,
+            pending: true,
+            message: None,
+        }),
+        Err(error) => Ok(ChatInterruptResult {
+            status: "failed".to_string(),
+            accepted: false,
+            pending: false,
+            message: Some(error),
+        }),
+    }
+}
+
+#[tauri::command]
 fn run_auto_orchestration(
     app: AppHandle,
     store: State<'_, AppStore>,
     request: AutoOrchestrationRequest,
 ) -> Result<String, String> {
     let message_id = request.assistant_message_id.clone();
+    let live_turn = register_live_chat_turn(&store, &request.terminal_tab_id, &message_id)?;
+    let live_chat_turns = store.live_chat_turns.clone();
     let timeout_ms = {
         let settings = store.settings.lock().map_err(|err| err.to_string())?;
         settings.process_timeout_ms
@@ -8536,6 +9288,8 @@ fn run_auto_orchestration(
     let composed_state = state_snapshot.clone();
     let msg_id = message_id.clone();
     let terminal_storage = store.terminal_storage.clone();
+    let auto_live_turn = live_turn.clone();
+    let auto_live_chat_turns = live_chat_turns.clone();
 
     thread::spawn(move || {
         let started_at = Instant::now();
@@ -8557,6 +9311,30 @@ fn run_auto_orchestration(
                 &step_states,
             ),
         );
+        let finish_auto = |final_content: String,
+                           final_exit_code: Option<i32>,
+                           final_blocks: Vec<ChatMessageBlock>,
+                           interrupted_by_user: bool| {
+            emit_chat_done_event(
+                &app_handle,
+                &terminal_tab_id,
+                &msg_id,
+                final_exit_code,
+                started_at.elapsed().as_millis() as u64,
+                final_content,
+                Some("markdown".to_string()),
+                Some("claude-cli".to_string()),
+                None,
+                Some(final_blocks),
+                interrupted_by_user,
+            );
+            unregister_live_chat_turn(&auto_live_chat_turns, &terminal_tab_id, &msg_id);
+            if let Ok(mut state) = state_arc.lock() {
+                sync_workspace_metrics(&mut state);
+                let _ = persist_state(&state);
+                emit_state(&app_handle, &state);
+            }
+        };
 
         let mut planner_session = acp::AcpSession::default();
         planner_session.plan_mode = true;
@@ -8578,7 +9356,18 @@ fn run_auto_orchestration(
             false,
             &planner_session,
             timeout_ms,
+            Some(auto_live_turn.clone()),
         );
+        if was_live_chat_turn_interrupted(Some(&auto_live_turn)) {
+            let blocks = build_auto_orchestration_blocks(
+                &seed_plan,
+                "cancelled",
+                Some("User interrupted the orchestration."),
+                &step_states,
+            );
+            finish_auto(String::new(), Some(130), blocks, true);
+            return;
+        }
 
         let plan = match planner_result {
             Ok(outcome) => {
@@ -8630,8 +9419,8 @@ fn run_auto_orchestration(
             let _ = app_handle.emit(
                 "stream-chunk",
                 StreamEvent {
-                    terminal_tab_id,
-                    message_id: msg_id,
+                    terminal_tab_id: terminal_tab_id.clone(),
+                    message_id: msg_id.clone(),
                     chunk: String::new(),
                     done: true,
                     exit_code: Some(0),
@@ -8641,8 +9430,10 @@ fn run_auto_orchestration(
                     transport_kind: Some("claude-cli".to_string()),
                     transport_session: None,
                     blocks: Some(blocks),
+                    interrupted_by_user: Some(false),
                 },
             );
+            unregister_live_chat_turn(&auto_live_chat_turns, &terminal_tab_id, &msg_id);
             return;
         }
 
@@ -8659,7 +9450,14 @@ fn run_auto_orchestration(
         );
 
         let mut encountered_failure = false;
+        let mut interrupted = false;
         for index in 0..step_states.len() {
+            if was_live_chat_turn_interrupted(Some(&auto_live_turn)) {
+                step_states[index].status = "cancelled".to_string();
+                step_states[index].summary = Some("Interrupted by user.".to_string());
+                interrupted = true;
+                break;
+            }
             if encountered_failure {
                 step_states[index].status = "skipped".to_string();
                 step_states[index].summary =
@@ -8720,6 +9518,9 @@ fn run_auto_orchestration(
                 step.write,
                 None,
                 None,
+                None,
+                false,
+                None,
             );
 
             let block_prefix = {
@@ -8747,6 +9548,7 @@ fn run_auto_orchestration(
                     step.write,
                     codex_pending_approvals.clone(),
                     block_prefix,
+                    Some(auto_live_turn.clone()),
                 ) {
                     Ok(outcome) => {
                         worker_trace_blocks.extend(outcome.blocks.clone());
@@ -8783,6 +9585,7 @@ fn run_auto_orchestration(
                     step.write,
                     timeout_ms,
                     block_prefix,
+                    Some(auto_live_turn.clone()),
                 ) {
                     Ok(outcome) => {
                         worker_trace_blocks.extend(outcome.blocks.clone());
@@ -8815,6 +9618,7 @@ fn run_auto_orchestration(
                     step.write,
                     &worker_session,
                     timeout_ms,
+                    Some(auto_live_turn.clone()),
                 ) {
                     Ok(outcome) => {
                         step_states[index].status = "completed".to_string();
@@ -8839,6 +9643,13 @@ fn run_auto_orchestration(
                 }
             }
 
+            if was_live_chat_turn_interrupted(Some(&auto_live_turn)) {
+                step_states[index].status = "cancelled".to_string();
+                step_states[index].summary = Some("Interrupted by user.".to_string());
+                interrupted = true;
+                break;
+            }
+
             emit_stream_block_update(&app_handle, &terminal_tab_id, &msg_id, &{
                 let mut merged = build_auto_orchestration_blocks(
                     &plan,
@@ -8849,6 +9660,20 @@ fn run_auto_orchestration(
                 merged.extend(worker_trace_blocks.clone());
                 merged
             });
+        }
+
+        if interrupted {
+            let final_blocks = build_auto_orchestration_blocks(
+                &plan,
+                "cancelled",
+                Some("User interrupted the orchestration."),
+                &step_states,
+            )
+            .into_iter()
+            .chain(worker_trace_blocks.clone())
+            .collect::<Vec<_>>();
+            finish_auto(String::new(), Some(130), final_blocks, true);
+            return;
         }
 
         emit_stream_block_update(&app_handle, &terminal_tab_id, &msg_id, &{
@@ -8882,6 +9707,7 @@ fn run_auto_orchestration(
             false,
             &synthesis_session,
             timeout_ms,
+            Some(auto_live_turn.clone()),
         )
         .ok()
         .map(|outcome| {
@@ -8891,6 +9717,19 @@ fn run_auto_orchestration(
                 outcome.final_content
             }
         });
+        if was_live_chat_turn_interrupted(Some(&auto_live_turn)) {
+            let final_blocks = build_auto_orchestration_blocks(
+                &plan,
+                "cancelled",
+                Some("User interrupted the orchestration."),
+                &step_states,
+            )
+            .into_iter()
+            .chain(worker_trace_blocks.clone())
+            .collect::<Vec<_>>();
+            finish_auto(String::new(), Some(130), final_blocks, true);
+            return;
+        }
 
         let fallback_summary = {
             let mut lines = Vec::new();
@@ -8984,28 +9823,7 @@ fn run_auto_orchestration(
             exit_code: final_exit_code,
         });
 
-        let _ = app_handle.emit(
-            "stream-chunk",
-            StreamEvent {
-                terminal_tab_id: terminal_tab_id.clone(),
-                message_id: msg_id.clone(),
-                chunk: String::new(),
-                done: true,
-                exit_code: final_exit_code,
-                duration_ms: Some(started_at.elapsed().as_millis() as u64),
-                final_content: Some(final_content),
-                content_format: Some("markdown".to_string()),
-                transport_kind: Some("claude-cli".to_string()),
-                transport_session: None,
-                blocks: Some(final_blocks),
-            },
-        );
-
-        if let Ok(mut state) = state_arc.lock() {
-            sync_workspace_metrics(&mut state);
-            let _ = persist_state(&state);
-            emit_state(&app_handle, &state);
-        }
+        finish_auto(final_content, final_exit_code, final_blocks, false);
     });
 
     Ok(message_id)
@@ -10253,6 +11071,287 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+fn format_working_memory_section(wm: Option<&WorkingMemoryPayload>) -> String {
+    let Some(wm) = wm else {
+        return String::new();
+    };
+    let mut lines = Vec::new();
+    if !wm.modified_files.is_empty() {
+        lines.push(format!(
+            "Modified files: {}",
+            wm.modified_files
+                .iter()
+                .take(30)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !wm.active_errors.is_empty() {
+        lines.push(format!(
+            "Active errors:\n{}",
+            wm.active_errors
+                .iter()
+                .take(8)
+                .map(|e| format!("  - {}", e))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if !wm.recent_commands.is_empty() {
+        lines.push(format!(
+            "Recent commands: {}",
+            wm.recent_commands
+                .iter()
+                .rev()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if wm.build_status != "unknown" && !wm.build_status.is_empty() {
+        lines.push(format!("Build status: {}", wm.build_status));
+    }
+    if !wm.key_decisions.is_empty() {
+        lines.push(format!(
+            "Key decisions:\n{}",
+            wm.key_decisions
+                .iter()
+                .take(10)
+                .map(|d| format!("  - {}", d))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if !wm.contributing_clis.is_empty() {
+        lines.push(format!(
+            "Contributing CLIs: {}",
+            wm.contributing_clis.join(", ")
+        ));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\n<working-memory>\n{}\n</working-memory>",
+        lines.join("\n")
+    )
+}
+
+fn format_compacted_summaries_section(summaries: &[CompactedSummary]) -> String {
+    if summaries.is_empty() {
+        return String::new();
+    }
+
+    let entries = summaries
+        .iter()
+        .enumerate()
+        .map(|(index, summary)| {
+            let mut lines = vec![format!(
+                "[Compacted segment {} (v{})]",
+                index + 1,
+                summary.version
+            )];
+            if !summary.intent.is_empty() {
+                lines.push(format!("Intent: {}", summary.intent));
+            }
+            if !summary.technical_context.is_empty() {
+                lines.push(format!("Context: {}", summary.technical_context));
+            }
+            if !summary.changed_files.is_empty() {
+                lines.push(format!(
+                    "Changed files: {}",
+                    summary.changed_files.join(", ")
+                ));
+            }
+            if !summary.errors_and_fixes.is_empty() {
+                lines.push(format!("Errors/Fixes: {}", summary.errors_and_fixes));
+            }
+            if !summary.current_state.is_empty() {
+                lines.push(format!("State: {}", summary.current_state));
+            }
+            if !summary.next_steps.is_empty() {
+                lines.push(format!("Next steps: {}", summary.next_steps));
+            }
+            lines.join("\n")
+        })
+        .collect::<Vec<_>>();
+
+    format!(
+        "\n\n<compacted-history>\n{}\n</compacted-history>",
+        entries.join("\n\n")
+    )
+}
+
+fn format_cross_tab_entries_section(entries: &[SharedContextEntry], detailed: bool) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    let blocks = entries
+        .iter()
+        .take(8)
+        .map(|entry| {
+            let mut lines = vec![format!(
+                "[Tab \"{}\" ({}, {})]",
+                entry.source_tab_title, entry.source_cli, entry.updated_at
+            )];
+            let summary = &entry.summary;
+            if !summary.intent.is_empty() {
+                lines.push(format!("Intent: {}", truncate_str(&summary.intent, 600)));
+            }
+            if detailed && !summary.technical_context.is_empty() {
+                lines.push(format!(
+                    "Context: {}",
+                    truncate_str(&summary.technical_context, 800)
+                ));
+            }
+            if !summary.changed_files.is_empty() {
+                lines.push(format!(
+                    "Changed: {}",
+                    summary
+                        .changed_files
+                        .iter()
+                        .take(20)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if detailed && !summary.errors_and_fixes.is_empty() {
+                lines.push(format!(
+                    "Errors/Fixes: {}",
+                    truncate_str(&summary.errors_and_fixes, 600)
+                ));
+            }
+            if !summary.current_state.is_empty() {
+                lines.push(format!(
+                    "State: {}",
+                    truncate_str(&summary.current_state, 600)
+                ));
+            }
+            if detailed && !summary.next_steps.is_empty() {
+                lines.push(format!(
+                    "Next steps: {}",
+                    truncate_str(&summary.next_steps, 400)
+                ));
+            }
+            lines.join("\n")
+        })
+        .collect::<Vec<_>>();
+
+    format!(
+        "\n\n<cross-tab-context>\n{}\n</cross-tab-context>",
+        blocks.join("\n\n")
+    )
+}
+
+fn format_handoff_document(doc: &HandoffDocument) -> String {
+    let mut sections = Vec::new();
+    sections.push(format!("[CLI Handoff: {} -> {}]", doc.from_cli, doc.to_cli));
+
+    let working_memory = format_working_memory_section(Some(&doc.working_memory));
+    if !working_memory.is_empty() {
+        sections.push(working_memory.trim().to_string());
+    }
+
+    if !doc.kernel_facts.is_empty() {
+        sections.push(format!(
+            "<kernel-facts>\n{}\n</kernel-facts>",
+            doc.kernel_facts
+                .iter()
+                .take(20)
+                .map(|fact| format!("- {}", truncate_str(fact, 400)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    if !doc.recent_turns.is_empty() {
+        sections.push(format!(
+            "<recent-conversation count=\"{}\">\n{}\n</recent-conversation>",
+            doc.recent_turns.len(),
+            doc.recent_turns
+                .iter()
+                .map(|turn| {
+                    format!(
+                        "[{}, {}] User: {}\nAssistant: {}",
+                        turn.cli_id,
+                        turn.timestamp,
+                        truncate_str(&turn.user_prompt, 600),
+                        truncate_str(&turn.assistant_reply, 1200)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        ));
+    }
+
+    let compacted = format_compacted_summaries_section(&doc.compacted_summaries);
+    if !compacted.is_empty() {
+        sections.push(compacted.trim().to_string());
+    }
+
+    let cross_tab = format_cross_tab_entries_section(&doc.cross_tab_entries, true);
+    if !cross_tab.is_empty() {
+        sections.push(cross_tab.trim().to_string());
+    }
+
+    if !doc.semantic_context.is_empty() {
+        sections.push(format!(
+            "<semantic-memory count=\"{}\">\n{}\n</semantic-memory>",
+            doc.semantic_context.len(),
+            doc.semantic_context
+                .iter()
+                .map(|chunk| {
+                    format!(
+                        "[{}/{}] {}",
+                        chunk.cli_id,
+                        chunk.chunk_type,
+                        truncate_str(&chunk.content, 400)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    format!(
+        "<handoff-context>\n{}\n</handoff-context>",
+        sections.join("\n\n")
+    )
+}
+
+fn format_handoff_event_fallback(handoff: &HandoffEvent) -> String {
+    let mut lines = vec![format!(
+        "[CLI Handoff: {} -> {}]",
+        handoff.from_cli, handoff.to_cli
+    )];
+    if let Some(reason) = handoff.reason.as_deref() {
+        if !reason.trim().is_empty() {
+            lines.push(format!("Reason: {}", reason));
+        }
+    }
+    if let Some(conclusion) = handoff.latest_conclusion.as_deref() {
+        if !conclusion.trim().is_empty() {
+            lines.push(format!("Conclusion: {}", truncate_str(conclusion, 600)));
+        }
+    }
+    if !handoff.files.is_empty() {
+        lines.push(format!("Files: {}", handoff.files.join(", ")));
+    }
+    if let Some(next_step) = handoff.next_step.as_deref() {
+        if !next_step.trim().is_empty() {
+            lines.push(format!("Next step: {}", truncate_str(next_step, 400)));
+        }
+    }
+    format!(
+        "<handoff-context>\n{}\n</handoff-context>",
+        lines.join("\n")
+    )
+}
+
 /// Builds a unified context prompt including conversation history from all CLIs
 fn compose_tab_context_prompt(
     state: &AppStateDto,
@@ -10267,6 +11366,9 @@ fn compose_tab_context_prompt(
     write_mode: bool,
     compacted_summaries: Option<&Vec<CompactedSummary>>,
     cross_tab_context: Option<&Vec<SharedContextEntry>>,
+    working_memory: Option<&WorkingMemoryPayload>,
+    is_session_resuming: bool,
+    handoff_context: Option<&str>,
 ) -> String {
     let workspace_preamble = format!(
         "You are operating inside Multi CLI Studio.\n\
@@ -10294,88 +11396,42 @@ fn compose_tab_context_prompt(
          - Use fenced code blocks only for commands, code, patches, or logs.";
 
     // Build compacted history section
-    let compacted_section = match compacted_summaries {
-        Some(summaries) if !summaries.is_empty() => {
-            let entries: Vec<String> = summaries
-                .iter()
-                .enumerate()
-                .map(|(i, s)| {
-                    let mut lines = vec![format!("[Compacted segment {} (v{})]", i + 1, s.version)];
-                    if !s.intent.is_empty() {
-                        lines.push(format!("Intent: {}", s.intent));
-                    }
-                    if !s.technical_context.is_empty() {
-                        lines.push(format!("Context: {}", s.technical_context));
-                    }
-                    if !s.changed_files.is_empty() {
-                        lines.push(format!("Changed files: {}", s.changed_files.join(", ")));
-                    }
-                    if !s.errors_and_fixes.is_empty() {
-                        lines.push(format!("Errors/Fixes: {}", s.errors_and_fixes));
-                    }
-                    if !s.current_state.is_empty() {
-                        lines.push(format!("State: {}", s.current_state));
-                    }
-                    if !s.next_steps.is_empty() {
-                        lines.push(format!("Next steps: {}", s.next_steps));
-                    }
-                    lines.join("\n")
-                })
-                .collect();
-            format!(
-                "\n\n<compacted-history>\n{}\n</compacted-history>",
-                entries.join("\n\n")
-            )
-        }
-        _ => String::new(),
+    let compacted_section = if is_session_resuming {
+        String::new()
+    } else {
+        compacted_summaries
+            .map(|summaries| format_compacted_summaries_section(summaries))
+            .unwrap_or_default()
     };
 
-    // Build cross-tab context section
-    let cross_tab_section = match cross_tab_context {
-        Some(entries) if !entries.is_empty() => {
-            let blocks: Vec<String> = entries
-                .iter()
-                .take(4)
-                .map(|e| {
-                    let mut lines = vec![format!(
-                        "[Tab \"{}\" ({}, {})]",
-                        e.source_tab_title, e.source_cli, e.updated_at
-                    )];
-                    let s = &e.summary;
-                    if !s.intent.is_empty() {
-                        lines.push(format!("Intent: {}", truncate_str(&s.intent, 300)));
-                    }
-                    if !s.changed_files.is_empty() {
-                        lines.push(format!(
-                            "Changed: {}",
-                            s.changed_files
-                                .iter()
-                                .take(10)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ));
-                    }
-                    if !s.current_state.is_empty() {
-                        lines.push(format!("State: {}", truncate_str(&s.current_state, 300)));
-                    }
-                    lines.join("\n")
-                })
-                .collect();
-            format!(
-                "\n\n<cross-tab-context>\n{}\n</cross-tab-context>",
-                blocks.join("\n\n")
-            )
-        }
-        _ => String::new(),
-    };
+    let cross_tab_section = cross_tab_context
+        .map(|entries| format_cross_tab_entries_section(entries, false))
+        .unwrap_or_default();
 
     let workspace_tail = format!(
         "{}\n\n--- Current workspace ---\n\
          Dirty files: {}\n\
-         Failing checks: {}",
-        rules, state.workspace.dirty_files, state.workspace.failing_checks,
+         Failing checks: {}{}",
+        rules,
+        state.workspace.dirty_files,
+        state.workspace.failing_checks,
+        format_working_memory_section(working_memory),
     );
+
+    // Format the optional handoff context block (injected on first turn after CLI switch)
+    let handoff_section = handoff_context
+        .map(|ctx| format!("\n\n{}", ctx))
+        .unwrap_or_default();
+
+    // When resuming a native CLI session, skip the heavy context assembly
+    // (conversation history is already maintained by the CLI's session).
+    // Only include lightweight per-turn metadata + any handoff context.
+    if is_session_resuming {
+        return format!(
+            "{}\n\n{}{}{}\n\n--- User request ---\n{}",
+            workspace_preamble, workspace_tail, cross_tab_section, handoff_section, prompt
+        );
+    }
 
     let fallback_recent_turns = recent_turns
         .iter()
@@ -10399,15 +11455,27 @@ fn compose_tab_context_prompt(
             },
             cli_id,
             prompt,
-            &format!("{}\n\n{}", workspace_preamble, workspace_tail),
+            &format!(
+                "{}\n\n{}{}{}{}",
+                workspace_preamble,
+                workspace_tail,
+                compacted_section,
+                cross_tab_section,
+                handoff_section
+            ),
             &fallback_recent_turns,
             write_mode,
         )
         .map(|assembled| assembled.prompt)
         .unwrap_or_else(|_| {
             format!(
-                "{}\n\n{}{}{}\n\n--- User request ---\n{}",
-                workspace_preamble, workspace_tail, compacted_section, cross_tab_section, prompt
+                "{}\n\n{}{}{}{}\n\n--- User request ---\n{}",
+                workspace_preamble,
+                workspace_tail,
+                compacted_section,
+                cross_tab_section,
+                handoff_section,
+                prompt
             )
         })
 }
@@ -10887,6 +11955,9 @@ fn build_auto_plan_prompt(
         false,
         None,
         None,
+        None,
+        false,
+        None,
     ));
     parts.push(
         "\n--- Auto orchestration contract ---\n\
@@ -11021,6 +12092,7 @@ fn run_silent_agent_turn_once(
     write_mode: bool,
     session: &acp::AcpSession,
     timeout_ms: u64,
+    live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<SilentAgentTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
     let args = build_agent_args(agent_id, prompt, write_mode, session)?;
@@ -11035,8 +12107,21 @@ fn run_silent_agent_turn_once(
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let child = cmd.spawn().map_err(|err| err.to_string())?;
+    if let Some(handle) = live_turn.as_ref() {
+        set_live_chat_turn_target(
+            handle,
+            LiveChatTurnTarget::Process(LiveProcessTurnTarget {
+                cli_id: agent_id.to_string(),
+                child_pid: child.id(),
+                interrupt_sent: false,
+            }),
+        );
+    }
     let watchdog = start_process_watchdog(child.id(), timeout_ms);
     let output = child.wait_with_output().map_err(|err| err.to_string())?;
+    if let Some(handle) = live_turn.as_ref() {
+        clear_live_chat_turn_target(handle);
+    }
     watchdog.store(true, Ordering::SeqCst);
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -11991,6 +13076,9 @@ fn evaluate_automation_round(
         false,
         None,
         None,
+        None,
+        false,
+        None,
     );
     let result = run_silent_agent_turn_once(
         &run.project_root,
@@ -12000,6 +13088,7 @@ fn evaluate_automation_round(
         false,
         &validation_session,
         timeout_ms,
+        None,
     );
 
     match result {
@@ -12338,6 +13427,7 @@ fn execute_auto_mode_goal(
         false,
         &planner_session,
         timeout_ms,
+        None,
     );
 
     let plan = match planner_result {
@@ -12407,6 +13497,9 @@ fn execute_auto_mode_goal(
             step.write,
             None,
             None,
+            None,
+            false,
+            None,
         );
 
         let message_id = create_id("auto-step");
@@ -12424,6 +13517,7 @@ fn execute_auto_mode_goal(
                 step.write,
                 codex_pending_approvals.clone(),
                 Vec::new(),
+                None,
             )
             .map(|outcome| {
                 (
@@ -12446,6 +13540,7 @@ fn execute_auto_mode_goal(
                 step.write,
                 timeout_ms,
                 Vec::new(),
+                None,
             )
             .map(|outcome| {
                 (
@@ -12469,6 +13564,7 @@ fn execute_auto_mode_goal(
                 timeout_ms,
                 claude_approval_rules.clone(),
                 claude_pending_approvals.clone(),
+                None,
             )
             .map(|outcome| {
                 (
@@ -12514,6 +13610,7 @@ fn execute_auto_mode_goal(
         false,
         &synthesis_session,
         timeout_ms,
+        None,
     )
     .ok()
     .map(|outcome| {
@@ -13101,10 +14198,7 @@ fn workflow_mail_html_body(run: &AutomationWorkflowRun, status: &str) -> String 
     };
     let node_section = html_section(
         "节点结果",
-        &format!(
-            "<div style=\"display:grid;gap:12px;\">{}</div>",
-            node_rows
-        ),
+        &format!("<div style=\"display:grid;gap:12px;\">{}</div>", node_rows),
     );
     let body = format!("{}{}{}", overview, status_section, node_section);
     email_shell_html(
@@ -13670,6 +14764,10 @@ fn execute_automation_goal(
         _ => (automation_prompt, Vec::new(), None),
     };
 
+    let is_resuming = previous_transport_session
+        .as_ref()
+        .and_then(|s| s.thread_id.as_ref())
+        .is_some();
     let composed_prompt_base = compose_tab_context_prompt(
         &state_snapshot,
         terminal_storage,
@@ -13682,6 +14780,9 @@ fn execute_automation_goal(
         &recent_turns,
         profile.allow_safe_workspace_edits,
         None,
+        None,
+        None,
+        is_resuming,
         None,
     );
     let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
@@ -13714,6 +14815,7 @@ fn execute_automation_goal(
             true,
             codex_pending_approvals.clone(),
             Vec::new(),
+            None,
         )
         .map(|outcome| {
             (
@@ -13738,6 +14840,7 @@ fn execute_automation_goal(
             timeout_ms,
             claude_approval_rules.clone(),
             claude_pending_approvals.clone(),
+            None,
         )
         .map(|outcome| {
             (
@@ -13761,6 +14864,7 @@ fn execute_automation_goal(
             true,
             timeout_ms,
             Vec::new(),
+            None,
         )
         .map(|outcome| {
             (
@@ -13780,6 +14884,7 @@ fn execute_automation_goal(
             true,
             &session,
             timeout_ms,
+            None,
         )
         .map(|outcome| {
             (
@@ -17168,6 +18273,7 @@ pub fn run() {
             claude_approval_rules,
             claude_pending_approvals,
             codex_pending_approvals,
+            live_chat_turns: Arc::new(Mutex::new(BTreeMap::new())),
         })
         .setup(move |app| {
             schedule_existing_automation_runs(
@@ -17287,6 +18393,7 @@ pub fn run() {
             save_text_to_downloads,
             switch_cli_for_task,
             send_chat_message,
+            interrupt_chat_turn,
             run_auto_orchestration,
             respond_assistant_approval,
             get_git_panel,
@@ -17301,7 +18408,8 @@ pub fn run() {
             execute_acp_command,
             get_acp_commands,
             get_acp_session,
-            get_acp_capabilities
+            get_acp_capabilities,
+            semantic_recall
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

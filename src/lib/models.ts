@@ -739,6 +739,55 @@ export interface SharedContextEntry {
   updatedAt: string;
 }
 
+/** Live working memory — structured project state updated after every finalize */
+export interface WorkingMemory {
+  modifiedFiles: string[];
+  activeErrors: string[];
+  recentCommands: string[];
+  buildStatus: "unknown" | "passing" | "failing";
+  keyDecisions: string[];
+  /** Which CLIs contributed to this working memory */
+  contributingClis: AgentId[];
+  updatedAt: string;
+}
+
+/** Structured handoff document generated on CLI switch for deep context injection */
+export interface HandoffDocument {
+  fromCli: AgentId;
+  toCli: AgentId;
+  /** Full recent turns (token-budget-aware, not fixed count) */
+  recentTurns: ChatContextTurn[];
+  /** Structured working memory snapshot */
+  workingMemory: WorkingMemory;
+  /** High-confidence kernel facts */
+  kernelFacts: string[];
+  /** Compacted history summaries */
+  compactedSummaries: CompactedSummary[];
+  /** Cross-tab context entries */
+  crossTabEntries: SharedContextEntry[];
+  /** Semantic memory recall results for deep context (from FTS5 search) */
+  semanticContext?: SemanticMemoryChunk[];
+  timestamp: string;
+}
+
+/** A chunk returned from semantic FTS5-based recall search */
+export interface SemanticMemoryChunk {
+  terminalTabId: string;
+  cliId: string;
+  messageId: string;
+  chunkType: string;
+  content: string;
+  createdAt: string;
+  rank: number;
+}
+
+/** Request payload for semantic recall queries */
+export interface SemanticRecallRequest {
+  query: string;
+  terminalTabId?: string | null;
+  limit?: number | null;
+}
+
 export interface KernelSessionRef {
   id: string;
   taskId: string;
@@ -960,6 +1009,10 @@ export interface ChatPromptRequest {
   compactedSummaries?: CompactedSummary[] | null;
   /** Summaries from sibling tabs in the same workspace */
   crossTabContext?: SharedContextEntry[] | null;
+  /** Structured working memory for context continuity */
+  workingMemory?: WorkingMemory | null;
+  /** Handoff document injected on the first turn after a CLI switch */
+  handoffContext?: string | null;
 }
 
 export interface AutoOrchestrationRequest {
@@ -992,6 +1045,8 @@ export interface CliHandoffRequest {
   compactedHistory?: CompactedSummary | null;
   /** Summaries from sibling tabs */
   crossTabContext?: SharedContextEntry[] | null;
+  /** Structured handoff document for deep context injection */
+  handoffDocument?: HandoffDocument | null;
 }
 
 export type AssistantApprovalDecision = "allowOnce" | "allowAlways" | "deny";
@@ -1012,6 +1067,14 @@ export interface StreamEvent {
   transportKind?: AgentTransportKind | null;
   transportSession?: AgentTransportSession | null;
   blocks?: ChatMessageBlock[] | null;
+  interruptedByUser?: boolean | null;
+}
+
+export interface ChatInterruptResult {
+  status: "accepted" | "notRunning" | "failed";
+  accepted: boolean;
+  pending: boolean;
+  message?: string | null;
 }
 
 export interface FileMentionCandidate {

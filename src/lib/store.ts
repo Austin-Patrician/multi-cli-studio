@@ -26,9 +26,14 @@ import {
 } from "./models";
 import {
   autoCompact,
+  buildDynamicContextTurns,
+  buildHandoffDocument,
   buildSharedContextEntry,
+  buildWorkingMemory,
   formatCrossTabContext,
   formatCompactedSummaries,
+  formatHandoffDocument,
+  recallSearch,
 } from "./compaction";
 import { estimateSessionTokens } from "./tokenEstimation";
 import { ACP_COMMANDS, AcpCliCapabilities, AcpCommand } from "./acp";
@@ -47,6 +52,16 @@ const INTERRUPTED_STREAM_TEXT = "Response interrupted before completion. You can
 const PARTIAL_STREAM_TEXT = "Streaming stopped before completion. This response may be partial.";
 
 type PersistenceScope = "terminalState" | "chatMessages";
+
+interface QueuedChatMessage {
+  text: string;
+  cliId: TerminalCliId;
+  queuedAt: string;
+}
+
+interface SendChatMessageOptions {
+  cliIdOverride?: TerminalCliId;
+}
 
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -103,6 +118,18 @@ function createTransportSession(
     permissionMode: partial?.permissionMode ?? null,
     lastSyncAt: partial?.lastSyncAt ?? null,
   };
+}
+
+function invalidateTransportSession(
+  cliId: AgentId,
+  existing?: AgentTransportSession | null
+): AgentTransportSession {
+  return createTransportSession(cliId, {
+    ...existing,
+    threadId: null,
+    turnId: null,
+    lastSyncAt: null,
+  });
 }
 
 function normalizeAutoRouteTarget(value: string): AgentId {
@@ -608,39 +635,35 @@ function normalizeTransportSessions(
   return next;
 }
 
+function rebuildSharedContextMap(
+  chatSessions: Record<string, ConversationSession>,
+  terminalTabs: TerminalTab[],
+  workspaces: WorkspaceRef[]
+): Record<string, SharedContextEntry> {
+  const sharedContext: Record<string, SharedContextEntry> = {};
+
+  for (const tab of terminalTabs) {
+    const session = chatSessions[tab.id];
+    const workspace = workspaces.find((item) => item.id === tab.workspaceId);
+    if (!session || !workspace) continue;
+
+    const effectiveCli = resolveTerminalCliId(tab.selectedCli, workspace.activeAgent);
+    const entry = buildSharedContextEntry(session, tab, effectiveCli);
+    if (entry) {
+      sharedContext[tab.id] = entry;
+    }
+  }
+
+  return sharedContext;
+}
+
 function buildRecentTabContextTurns(
   messages: ChatMessage[],
   fallbackCli: AgentId,
-  limit = 4
+  _limit?: number
 ): ChatContextTurn[] {
-  const turns: ChatContextTurn[] = [];
-  let pendingUser: ChatMessage | null = null;
-
-  for (const message of messages) {
-    if (message.role === "user") {
-      pendingUser = message;
-      continue;
-    }
-
-    if (
-      message.role !== "assistant" ||
-      message.isStreaming ||
-      !pendingUser ||
-      (message.exitCode != null && message.exitCode !== 0)
-    ) {
-      continue;
-    }
-
-    turns.push({
-      cliId: (message.cliId ?? fallbackCli) as AgentId,
-      userPrompt: pendingUser.content,
-      assistantReply: summarizeForContext(message.rawContent ?? message.content),
-      timestamp: message.timestamp,
-    });
-    pendingUser = null;
-  }
-
-  return turns.slice(-limit);
+  // Delegate to token-budget-aware dynamic version with CLI-specific budget
+  return buildDynamicContextTurns(messages, fallbackCli, fallbackCli);
 }
 
 function extractLatestTaskContext(
@@ -804,6 +827,7 @@ interface StoreState {
   chatSessions: Record<string, ConversationSession>;
   gitPanelsByWorkspace: Record<string, GitPanelData>;
   sharedContext: Record<string, SharedContextEntry>;
+  queuedChatByTab: Record<string, QueuedChatMessage>;
 
   loadInitialState: (projectRoot?: string) => Promise<void>;
   switchAgent: (agentId: AgentId) => Promise<void>;
@@ -830,8 +854,16 @@ interface StoreState {
   setTabSelectedCli: (tabId: string, cliId: TerminalCliId) => void;
   setTabDraftPrompt: (tabId: string, prompt: string) => void;
   togglePlanMode: (tabId?: string) => void;
+  queueChatMessage: (
+    tabId: string,
+    prompt?: string,
+    cliIdOverride?: TerminalCliId
+  ) => "queued" | "full" | "empty" | "unavailable";
+  clearQueuedChatMessage: (tabId: string) => void;
+  editQueuedChatMessage: (tabId: string) => boolean;
+  interruptChatTurn: (tabId?: string) => Promise<boolean>;
 
-  sendChatMessage: (tabId: string, prompt?: string) => Promise<void>;
+  sendChatMessage: (tabId: string, prompt?: string, options?: SendChatMessageOptions) => Promise<void>;
   respondAutoRoute: (tabId: string, action: AutoRouteAction) => Promise<void>;
   appendStreamChunk: (
     tabId: string,
@@ -848,7 +880,8 @@ interface StoreState {
     contentFormat?: ChatMessage["contentFormat"],
     blocks?: ChatMessageBlock[] | null,
     transportSession?: AgentTransportSession | null,
-    transportKind?: AgentTransportKind | null
+    transportKind?: AgentTransportKind | null,
+    interruptedByUser?: boolean | null
   ) => void;
   loadGitPanel: (workspaceId: string, projectRoot: string) => Promise<void>;
   refreshGitPanel: (workspaceId?: string) => Promise<void>;
@@ -869,6 +902,22 @@ export const useStore = create<StoreState>((set, get) => {
     set((state) => (state.persistenceIssue === message ? {} : { persistenceIssue: message }));
   };
 
+  const consumeQueuedChatMessage = (tabId: string) => {
+    const queued = get().queuedChatByTab[tabId] ?? null;
+    if (!queued) return;
+
+    set((state) => {
+      if (!state.queuedChatByTab[tabId]) return {};
+      const queuedChatByTab = { ...state.queuedChatByTab };
+      delete queuedChatByTab[tabId];
+      return { queuedChatByTab };
+    });
+
+    queueMicrotask(() => {
+      void get().sendChatMessage(tabId, queued.text, { cliIdOverride: queued.cliId });
+    });
+  };
+
   return {
   appState: null,
   contextStore: null,
@@ -885,6 +934,7 @@ export const useStore = create<StoreState>((set, get) => {
   chatSessions: {},
   gitPanelsByWorkspace: {},
   sharedContext: {},
+  queuedChatByTab: {},
 
   setAppState: (state) =>
     set((current) => ({
@@ -1005,7 +1055,10 @@ export const useStore = create<StoreState>((set, get) => {
           ...state.chatSessions,
           [tabId]: normalizedSession,
         };
-        return { chatSessions };
+        return {
+          chatSessions,
+          sharedContext: rebuildSharedContextMap(chatSessions, state.terminalTabs, state.workspaces),
+        };
       });
     } catch (error) {
       updatePersistenceIssue("terminalState", error);
@@ -1132,6 +1185,8 @@ export const useStore = create<StoreState>((set, get) => {
       activeTerminalTabId,
       chatSessions,
       gitPanelsByWorkspace: {},
+      sharedContext: rebuildSharedContextMap(chatSessions, terminalTabs, workspaces),
+      queuedChatByTab: {},
     });
 
     persistTerminalState(workspaces, terminalTabs, activeTerminalTabId, chatSessions);
@@ -1508,17 +1563,23 @@ export const useStore = create<StoreState>((set, get) => {
 
     const chatSessions = { ...current.chatSessions };
     delete chatSessions[tabId];
+    const sharedContext = { ...current.sharedContext };
+    delete sharedContext[tabId];
 
     set((state) => {
       const appState = state.appState
         ? deriveActiveWorkspaceState(state.appState, state.workspaces, remainingTabs, nextActive)
         : null;
       persistTerminalState(state.workspaces, remainingTabs, nextActive, chatSessions);
+      const queuedChatByTab = { ...state.queuedChatByTab };
+      delete queuedChatByTab[tabId];
       return {
         appState,
         terminalTabs: remainingTabs,
         activeTerminalTabId: nextActive,
         chatSessions,
+        sharedContext,
+        queuedChatByTab,
       };
     });
     enqueueMessagePersistence(() => bridge.deleteChatSessionByTab(tabId));
@@ -1545,10 +1606,26 @@ export const useStore = create<StoreState>((set, get) => {
     const session = current.chatSessions[tabId] ?? null;
     const fromCli = resolveTerminalCliId(currentTab?.selectedCli, workspace?.activeAgent ?? "codex");
     const targetCli = cliId === "auto" ? null : cliId;
+    const shouldInvalidateTargetSession = !!targetCli && targetCli !== fromCli;
 
     set((state) => {
       const terminalTabs = state.terminalTabs.map((tab) =>
-        tab.id === tabId ? { ...tab, selectedCli: cliId } : tab
+        tab.id === tabId
+          ? {
+              ...tab,
+              selectedCli: cliId,
+              transportSessions:
+                shouldInvalidateTargetSession && targetCli
+                  ? {
+                      ...normalizeTransportSessions(tab),
+                      [targetCli]: invalidateTransportSession(
+                        targetCli,
+                        normalizeTransportSessions(tab)[targetCli] ?? null
+                      ),
+                    }
+                  : tab.transportSessions,
+            }
+          : tab
       );
       const activeTab = terminalTabs.find((tab) => tab.id === tabId);
       const workspaces = state.workspaces.map((nextWorkspace) =>
@@ -1570,20 +1647,47 @@ export const useStore = create<StoreState>((set, get) => {
       ? session.compactedSummaries[session.compactedSummaries.length - 1]
       : null;
     const crossTabContextEntries = get().getRelatedTabContexts(tabId);
-    void bridge.switchCliForTask({
-      terminalTabId: tabId,
-      workspaceId: workspace.id,
-      projectRoot: workspace.rootPath,
-      projectName: workspace.name,
+    const handoffDocument = buildHandoffDocument(
+      session,
       fromCli,
-      toCli: targetCli,
-      reason: "manual-switch",
-      latestUserPrompt: latest.latestUserPrompt,
-      latestAssistantSummary: latest.latestAssistantSummary,
-      relevantFiles: latest.relevantFiles,
-      compactedHistory,
-      crossTabContext: crossTabContextEntries.length > 0 ? crossTabContextEntries : null,
-    });
+      targetCli,
+      crossTabContextEntries
+    );
+
+    // Enrich handoff with semantic recall — fire handoff with results when ready
+    const doHandoff = async () => {
+      try {
+        const semanticQuery = latest.latestUserPrompt || workspace.name;
+        if (semanticQuery) {
+          const chunks = await bridge.semanticRecall({
+            query: semanticQuery,
+            terminalTabId: tabId,
+            limit: 12,
+          });
+          if (chunks.length > 0) {
+            handoffDocument.semanticContext = chunks;
+          }
+        }
+      } catch {
+        // Semantic recall failure is non-critical
+      }
+      await bridge.switchCliForTask({
+        terminalTabId: tabId,
+        workspaceId: workspace.id,
+        projectRoot: workspace.rootPath,
+        projectName: workspace.name,
+        fromCli,
+        toCli: targetCli,
+        reason: "manual-switch",
+        latestUserPrompt: latest.latestUserPrompt,
+        latestAssistantSummary: latest.latestAssistantSummary,
+        relevantFiles: latest.relevantFiles,
+        compactedHistory,
+        crossTabContext: crossTabContextEntries.length > 0 ? crossTabContextEntries : null,
+        handoffDocument,
+      });
+    };
+    void doHandoff();
   },
 
   setTabDraftPrompt: (tabId, prompt) => {
@@ -1606,6 +1710,107 @@ export const useStore = create<StoreState>((set, get) => {
         chatSessions: state.chatSessions,
       };
     });
+  },
+
+  queueChatMessage: (tabId, prompt, cliIdOverride) => {
+    const state = get();
+    const tab = state.terminalTabs.find((item) => item.id === tabId) ?? null;
+    if (!tab) return "unavailable";
+
+    const text = (prompt ?? tab.draftPrompt).trim();
+    if (!text) return "empty";
+    if (state.queuedChatByTab[tabId]) return "full";
+
+    set((current) => {
+      const currentTab = current.terminalTabs.find((item) => item.id === tabId) ?? null;
+      if (!currentTab) return {};
+      const terminalTabs = current.terminalTabs.map((item) =>
+        item.id === tabId ? { ...item, draftPrompt: "" } : item
+      );
+      return {
+        terminalTabs,
+        queuedChatByTab: {
+          ...current.queuedChatByTab,
+          [tabId]: {
+            text,
+            cliId: cliIdOverride ?? currentTab.selectedCli,
+            queuedAt: nowIso(),
+          },
+        },
+      };
+    });
+
+    scheduleDraftPromptPersistence(() => {
+      const current = get();
+      return {
+        workspaces: current.workspaces,
+        terminalTabs: current.terminalTabs,
+        activeTerminalTabId: current.activeTerminalTabId,
+        chatSessions: current.chatSessions,
+      };
+    });
+
+    return "queued";
+  },
+
+  clearQueuedChatMessage: (tabId) => {
+    set((state) => {
+      if (!state.queuedChatByTab[tabId]) return {};
+      const queuedChatByTab = { ...state.queuedChatByTab };
+      delete queuedChatByTab[tabId];
+      return { queuedChatByTab };
+    });
+  },
+
+  editQueuedChatMessage: (tabId) => {
+    const queued = get().queuedChatByTab[tabId] ?? null;
+    if (!queued) return false;
+
+    set((state) => {
+      const currentTab = state.terminalTabs.find((item) => item.id === tabId) ?? null;
+      if (!currentTab) return {};
+      const terminalTabs = state.terminalTabs.map((item) =>
+        item.id === tabId ? { ...item, draftPrompt: queued.text } : item
+      );
+      const queuedChatByTab = { ...state.queuedChatByTab };
+      delete queuedChatByTab[tabId];
+      return { terminalTabs, queuedChatByTab };
+    });
+
+    scheduleDraftPromptPersistence(() => {
+      const current = get();
+      return {
+        workspaces: current.workspaces,
+        terminalTabs: current.terminalTabs,
+        activeTerminalTabId: current.activeTerminalTabId,
+        chatSessions: current.chatSessions,
+      };
+    });
+
+    return true;
+  },
+
+  interruptChatTurn: async (tabId) => {
+    const targetTabId = tabId ?? get().activeTerminalTabId;
+    if (!targetTabId) return false;
+
+    const state = get();
+    const tab = state.terminalTabs.find((item) => item.id === targetTabId) ?? null;
+    const session = state.chatSessions[targetTabId] ?? null;
+    if (!tab || tab.status !== "streaming" || !session) return false;
+
+    const activeMessage =
+      [...session.messages]
+        .reverse()
+        .find((message) => message.role === "assistant" && message.isStreaming) ?? null;
+    if (!activeMessage) return false;
+
+    try {
+      const result = await bridge.interruptChatTurn(targetTabId, activeMessage.id);
+      return result.accepted;
+    } catch {
+      return false;
+    }
   },
 
   togglePlanMode: (tabId) => {
@@ -1747,18 +1952,20 @@ export const useStore = create<StoreState>((set, get) => {
     );
   },
 
-  sendChatMessage: async (tabId, prompt) => {
+  sendChatMessage: async (tabId, prompt, options) => {
     const state = get();
     const tab = state.terminalTabs.find((item) => item.id === tabId);
     const workspace = state.workspaces.find((item) => item.id === tab?.workspaceId);
     const session = state.chatSessions[tabId];
     if (!tab || !workspace || !session) return;
-    const effectiveCli = resolveTerminalCliId(tab.selectedCli, workspace.activeAgent);
+    const selectedCliForSend = options?.cliIdOverride ?? tab.selectedCli;
+    const effectiveCli = resolveTerminalCliId(selectedCliForSend, workspace.activeAgent);
+    const shouldClearDraft = prompt == null;
 
     const text = (prompt ?? tab.draftPrompt).trim();
     if (!text || tab.status === "streaming") return;
 
-    if (tab.selectedCli === "auto") {
+    if (selectedCliForSend === "auto") {
       const userMessage: ChatMessage = {
         id: createId("msg"),
         role: "user",
@@ -1796,7 +2003,13 @@ export const useStore = create<StoreState>((set, get) => {
 
       set((current) => {
         const terminalTabs = current.terminalTabs.map((item) =>
-          item.id === tabId ? { ...item, draftPrompt: "", status: "streaming" as const } : item
+          item.id === tabId
+            ? {
+                ...item,
+                draftPrompt: shouldClearDraft ? "" : item.draftPrompt,
+                status: "streaming" as const,
+              }
+            : item
         );
         const chatSessions = {
           ...current.chatSessions,
@@ -1949,6 +2162,7 @@ export const useStore = create<StoreState>((set, get) => {
             }));
           }
         );
+        consumeQueuedChatMessage(tabId);
       }
       return;
     }
@@ -1982,7 +2196,13 @@ export const useStore = create<StoreState>((set, get) => {
 
     set((current) => {
       const terminalTabs = current.terminalTabs.map((item) =>
-        item.id === tabId ? { ...item, draftPrompt: "", status: "streaming" as const } : item
+        item.id === tabId
+          ? {
+              ...item,
+              draftPrompt: shouldClearDraft ? "" : item.draftPrompt,
+              status: "streaming" as const,
+            }
+          : item
       );
       const chatSessions = {
         ...current.chatSessions,
@@ -2028,6 +2248,23 @@ export const useStore = create<StoreState>((set, get) => {
       const writeMode = !tab.planMode;
       const recentTurns = buildRecentTabContextTurns(session.messages, effectiveCli);
       const crossTabContextEntries = get().getRelatedTabContexts(tab.id);
+      const workingMemory = buildWorkingMemory(session.messages);
+
+      // Build handoff context when this is the first turn for the current CLI
+      // and there are messages from a different CLI in the session.
+      let handoffContext: string | null = null;
+      const hasExistingSession = !!tab.transportSessions[effectiveCli]?.threadId;
+      if (!hasExistingSession) {
+        const otherCliMessages = session.messages.filter(
+          (m) => m.role !== "system" && m.cliId && m.cliId !== effectiveCli
+        );
+        if (otherCliMessages.length > 0) {
+          const previousCli = otherCliMessages[otherCliMessages.length - 1].cliId ?? effectiveCli;
+          const handoffDoc = buildHandoffDocument(session, previousCli, effectiveCli, crossTabContextEntries);
+          handoffContext = formatHandoffDocument(handoffDoc);
+        }
+      }
+
       const messageId = await bridge.sendChatMessage({
         cliId: effectiveCli,
         terminalTabId: tab.id,
@@ -2046,6 +2283,10 @@ export const useStore = create<StoreState>((set, get) => {
         transportSession: tab.transportSessions[effectiveCli] ?? null,
         compactedSummaries: session.compactedSummaries.length > 0 ? session.compactedSummaries : null,
         crossTabContext: crossTabContextEntries.length > 0 ? crossTabContextEntries : null,
+        workingMemory: workingMemory.modifiedFiles.length > 0 || workingMemory.activeErrors.length > 0
+          ? workingMemory
+          : null,
+        handoffContext,
       });
 
       if (messageId !== pendingMessage.id) {
@@ -2138,6 +2379,7 @@ export const useStore = create<StoreState>((set, get) => {
           }));
         }
       );
+      consumeQueuedChatMessage(tabId);
     }
   },
 
@@ -2197,16 +2439,35 @@ export const useStore = create<StoreState>((set, get) => {
     contentFormat,
     blocks,
     transportSession,
-    transportKind
+    transportKind,
+    interruptedByUser
   ) => {
-    const completionNotice = buildTerminalCompletionNotice(
-      get(),
-      tabId,
-      messageId,
-      exitCode,
-      durationMs,
-      finalContent
-    );
+    const completionNotice = interruptedByUser
+      ? null
+      : buildTerminalCompletionNotice(
+          get(),
+          tabId,
+          messageId,
+          exitCode,
+          durationMs,
+          finalContent
+        );
+    const systemMessage = interruptedByUser
+      ? ({
+          id: createId("msg"),
+          role: "system" as const,
+          cliId:
+            get().chatSessions[tabId]?.messages.find((message) => message.id === messageId)?.cliId ??
+            null,
+          timestamp: nowIso(),
+          content: "用户中断回复",
+          transportKind: null,
+          blocks: null,
+          isStreaming: false,
+          durationMs: null,
+          exitCode: 130,
+        } satisfies ChatMessage)
+      : null;
 
     set((state) => {
       const session = state.chatSessions[tabId];
@@ -2234,30 +2495,51 @@ export const useStore = create<StoreState>((set, get) => {
         transportKind ??
         session.messages.find((message) => message.id === targetMessageId)?.transportKind ??
         null;
+      const resolvedBlocks = blocks ?? session.messages.find((message) => message.id === targetMessageId)?.blocks ?? null;
       const chatSessions = {
         ...state.chatSessions,
         [tabId]: {
           ...session,
-          messages: session.messages.map<ChatMessage>((message) =>
-            message.id === targetMessageId
-              ? {
-                  ...message,
-                  rawContent: finalContent ?? message.rawContent ?? message.content,
-                  content: normalizeAssistantContent(
-                    finalContent ?? message.rawContent ?? message.content
-                  ),
-                  contentFormat:
-                    contentFormat ??
-                    detectAssistantContentFormat(finalContent ?? message.rawContent ?? message.content),
-                  transportKind: effectiveTransportKind,
-                  blocks: blocks ?? message.blocks ?? null,
-                  isStreaming: false,
-                  exitCode,
-                  durationMs,
-                }
-              : message
-          ),
-          updatedAt: nowIso(),
+          messages: [
+            ...session.messages.map<ChatMessage>((message) => {
+              if (message.id !== targetMessageId) {
+                return message;
+              }
+
+              const resolvedRawContent = finalContent ?? message.rawContent ?? message.content;
+              const needsInterruptedFallback =
+                Boolean(interruptedByUser) &&
+                !resolvedRawContent.trim() &&
+                (resolvedBlocks?.length ?? 0) === 0;
+
+              return {
+                ...message,
+                rawContent: needsInterruptedFallback ? INTERRUPTED_STREAM_TEXT : resolvedRawContent,
+                content: normalizeAssistantContent(
+                  needsInterruptedFallback ? INTERRUPTED_STREAM_TEXT : resolvedRawContent
+                ),
+                contentFormat:
+                  needsInterruptedFallback
+                    ? "log"
+                    : contentFormat ?? detectAssistantContentFormat(resolvedRawContent),
+                transportKind: effectiveTransportKind,
+                blocks: needsInterruptedFallback
+                  ? [
+                      {
+                        kind: "status",
+                        level: "warning",
+                        text: INTERRUPTED_STREAM_TEXT,
+                      } satisfies ChatMessageBlock,
+                    ]
+                  : resolvedBlocks,
+                isStreaming: false,
+                exitCode,
+                durationMs,
+              };
+            }),
+            ...(systemMessage ? [systemMessage] : []),
+          ],
+          updatedAt: systemMessage?.timestamp ?? nowIso(),
         },
       };
       persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, chatSessions);
@@ -2283,6 +2565,13 @@ export const useStore = create<StoreState>((set, get) => {
             exitCode,
             durationMs,
             updatedAt: session.updatedAt,
+          })
+        );
+      }
+      if (systemMessage) {
+        enqueueMessagePersistence(() =>
+          bridge.appendChatMessages({
+            seeds: [toPersistedSessionSeed(session, tabId, [systemMessage])],
           })
         );
       }
@@ -2319,6 +2608,7 @@ export const useStore = create<StoreState>((set, get) => {
     if (completionNotice) {
       void notifyTerminalCompletion(completionNotice);
     }
+    consumeQueuedChatMessage(tabId);
   },
 
   respondAssistantApproval: async (requestId, decision) => {
@@ -2714,6 +3004,44 @@ export const useStore = create<StoreState>((set, get) => {
       }
       case "diff": {
         pushSystemMessage(formatDiffSummary(get().gitPanelsByWorkspace[workspace.id]));
+        return;
+      }
+      case "recall": {
+        const query = command.args.join(" ").trim();
+        if (!query) {
+          pushSystemMessage("Usage: /recall <search-query>", 1);
+          return;
+        }
+        const session = get().chatSessions[tab.id];
+        if (!session) {
+          pushSystemMessage("No conversation history to search.", 1);
+          return;
+        }
+        // Try semantic FTS5 search first, fall back to keyword search
+        try {
+          const chunks = await bridge.semanticRecall({
+            query,
+            terminalTabId: tab.id,
+            limit: 15,
+          });
+          if (chunks.length > 0) {
+            const lines = [`Semantic recall for "${query}" (${chunks.length} results):`];
+            for (const chunk of chunks) {
+              const cli = chunk.cliId ?? "system";
+              const type = chunk.chunkType;
+              lines.push(`  [${cli}/${type}] ${chunk.content.slice(0, 300)}`);
+            }
+            pushSystemMessage(lines.join("\n"));
+          } else {
+            // Fall back to local keyword search
+            const results = recallSearch(session, query);
+            pushSystemMessage(results);
+          }
+        } catch {
+          // Fall back to local keyword search on bridge error
+          const results = recallSearch(session, query);
+          pushSystemMessage(results);
+        }
         return;
       }
       default: {

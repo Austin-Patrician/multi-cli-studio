@@ -77,7 +77,8 @@ function App() {
           event.contentFormat ?? null,
           event.blocks ?? null,
           event.transportSession ?? null,
-          event.transportKind ?? null
+          event.transportKind ?? null,
+          event.interruptedByUser ?? null
         );
       } else {
         const key = `${event.terminalTabId}:${event.messageId}`;
