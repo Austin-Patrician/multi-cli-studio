@@ -227,6 +227,85 @@ export interface NotificationConfig {
   emailRecipients: string[];
 }
 
+export type ModelProviderServiceType = "openaiCompatible" | "claude" | "gemini";
+
+export interface ModelProviderModel {
+  id: string;
+  name: string;
+  label?: string | null;
+}
+
+export interface ModelProviderConfig {
+  id: string;
+  serviceType: ModelProviderServiceType;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  websiteUrl: string;
+  note: string;
+  enabled: boolean;
+  models: ModelProviderModel[];
+  createdAt: string;
+  updatedAt: string;
+  lastRefreshedAt?: string | null;
+}
+
+export interface ApiChatMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  timestamp: string;
+  error?: boolean;
+  rawContent?: string | null;
+  contentFormat?: AssistantContentFormat | null;
+  blocks?: ChatMessageBlock[] | null;
+  durationMs?: number | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  totalTokens?: number | null;
+}
+
+export interface ApiChatSession {
+  id: string;
+  title: string;
+  serviceType: ModelProviderServiceType;
+  providerId?: string | null;
+  modelId?: string | null;
+  messages: ApiChatMessage[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ApiChatRequest {
+  serviceType: ModelProviderServiceType;
+  providerId: string;
+  modelId: string;
+  messages: ApiChatMessage[];
+  streamId?: string | null;
+}
+
+export interface ApiChatResponse {
+  serviceType: ModelProviderServiceType;
+  providerId: string;
+  modelId: string;
+  message: ApiChatMessage;
+}
+
+export interface ApiChatStreamEvent {
+  streamId: string;
+  messageId: string;
+  chunk: string;
+  done: boolean;
+  rawContent?: string | null;
+  content?: string | null;
+  contentFormat?: AssistantContentFormat | null;
+  blocks?: ChatMessageBlock[] | null;
+  durationMs?: number | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  totalTokens?: number | null;
+}
+
 export interface AppSettings {
   cliPaths: { codex: string; claude: string; gemini: string };
   projectRoot: string;
@@ -235,6 +314,9 @@ export interface AppSettings {
   processTimeoutMs: number;
   notifyOnTerminalCompletion: boolean;
   notificationConfig: NotificationConfig;
+  openaiCompatibleProviders: ModelProviderConfig[];
+  claudeProviders: ModelProviderConfig[];
+  geminiProviders: ModelProviderConfig[];
 }
 
 export type AutomationRunStatus =

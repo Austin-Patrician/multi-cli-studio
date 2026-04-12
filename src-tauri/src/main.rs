@@ -289,6 +289,12 @@ struct AppSettings {
     notify_on_terminal_completion: bool,
     #[serde(default)]
     notification_config: NotificationConfig,
+    #[serde(default)]
+    openai_compatible_providers: Vec<ModelProviderConfig>,
+    #[serde(default)]
+    claude_providers: Vec<ModelProviderConfig>,
+    #[serde(default)]
+    gemini_providers: Vec<ModelProviderConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +328,127 @@ struct NotificationConfig {
     smtp_from: String,
     #[serde(default)]
     email_recipients: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ModelProviderModel {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ModelProviderConfig {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    service_type: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    website_url: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    models: Vec<ModelProviderModel>,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    updated_at: String,
+    #[serde(default)]
+    last_refreshed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiChatMessage {
+    id: String,
+    role: String,
+    content: String,
+    timestamp: String,
+    #[serde(default)]
+    error: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiChatRequest {
+    service_type: String,
+    provider_id: String,
+    model_id: String,
+    messages: Vec<ApiChatMessage>,
+    #[serde(default)]
+    stream_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiChatResponse {
+    service_type: String,
+    provider_id: String,
+    model_id: String,
+    message: ApiChatResponseMessage,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiChatResponseMessage {
+    id: String,
+    role: String,
+    content: String,
+    timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocks: Option<Vec<ChatMessageBlock>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completion_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiChatStreamEvent {
+    stream_id: String,
+    message_id: String,
+    chunk: String,
+    done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocks: Option<Vec<ChatMessageBlock>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completion_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<u64>,
 }
 
 impl Default for NotificationConfig {
@@ -396,6 +523,1255 @@ fn validate_notification_config(config: &NotificationConfig) -> Result<(), Strin
         }
     }
     Ok(())
+}
+
+fn now_rfc3339() -> String {
+    Local::now().to_rfc3339()
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut preview = trimmed.chars().take(max_chars).collect::<String>();
+    preview.push_str("...");
+    preview
+}
+
+fn provider_list<'a>(
+    settings: &'a AppSettings,
+    service_type: &str,
+) -> Result<&'a Vec<ModelProviderConfig>, String> {
+    match service_type {
+        "openaiCompatible" => Ok(&settings.openai_compatible_providers),
+        "claude" => Ok(&settings.claude_providers),
+        "gemini" => Ok(&settings.gemini_providers),
+        _ => Err(format!("Unsupported service type: {}", service_type)),
+    }
+}
+
+fn provider_list_mut<'a>(
+    settings: &'a mut AppSettings,
+    service_type: &str,
+) -> Result<&'a mut Vec<ModelProviderConfig>, String> {
+    match service_type {
+        "openaiCompatible" => Ok(&mut settings.openai_compatible_providers),
+        "claude" => Ok(&mut settings.claude_providers),
+        "gemini" => Ok(&mut settings.gemini_providers),
+        _ => Err(format!("Unsupported service type: {}", service_type)),
+    }
+}
+
+fn provider_find(
+    settings: &AppSettings,
+    service_type: &str,
+    provider_id: &str,
+) -> Result<ModelProviderConfig, String> {
+    provider_list(settings, service_type)?
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .cloned()
+        .ok_or_else(|| "Provider not found.".to_string())
+}
+
+fn normalize_provider_entries(providers: &mut Vec<ModelProviderConfig>, service_type: &str) {
+    let mut enabled_claimed = false;
+    for provider in providers.iter_mut() {
+        if provider.id.trim().is_empty() {
+            provider.id = format!("provider-{}-{}", service_type, Uuid::new_v4());
+        }
+        provider.service_type = service_type.to_string();
+        if provider.enabled {
+            if enabled_claimed {
+                provider.enabled = false;
+            } else {
+                enabled_claimed = true;
+            }
+        }
+        if provider.created_at.trim().is_empty() {
+            provider.created_at = now_rfc3339();
+        }
+        if provider.updated_at.trim().is_empty() {
+            provider.updated_at = provider.created_at.clone();
+        }
+        provider.models = normalize_remote_models(provider.models.clone());
+    }
+}
+
+fn normalize_settings_providers(settings: &mut AppSettings) {
+    normalize_provider_entries(&mut settings.openai_compatible_providers, "openaiCompatible");
+    normalize_provider_entries(&mut settings.claude_providers, "claude");
+    normalize_provider_entries(&mut settings.gemini_providers, "gemini");
+}
+
+fn url_has_path_segment(base_url: &str, segment: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| {
+            url.path_segments().map(|segments| {
+                segments
+                    .map(|item| item.to_string())
+                    .collect::<Vec<String>>()
+            })
+        })
+        .map(|segments| {
+            segments
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(segment.trim_matches('/')))
+        })
+        .unwrap_or(false)
+}
+
+fn join_api_base(base_url: &str, required_segment: &str, path: &str) -> String {
+    let mut base = base_url.trim().trim_end_matches('/').to_string();
+    if !url_has_path_segment(&base, required_segment) {
+        base.push('/');
+        base.push_str(required_segment.trim_matches('/'));
+    }
+    base.push('/');
+    base.push_str(path.trim_start_matches('/'));
+    base
+}
+
+fn openai_endpoint(base_url: &str, path: &str) -> String {
+    join_api_base(base_url, "v1", path)
+}
+
+fn claude_endpoint(base_url: &str, path: &str) -> String {
+    join_api_base(base_url, "v1", path)
+}
+
+fn gemini_endpoint(base_url: &str, path: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/').to_string();
+    if url_has_path_segment(&base, "v1beta") || url_has_path_segment(&base, "v1") {
+        format!("{}/{}", base, path.trim_start_matches('/'))
+    } else {
+        format!("{}/v1beta/{}", base, path.trim_start_matches('/'))
+    }
+}
+
+fn api_http_client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|err| format!("Failed to create HTTP client: {}", err))
+}
+
+fn extract_api_error_message(value: &Value) -> Option<String> {
+    value
+        .get("error")
+        .and_then(|entry| {
+            entry
+                .get("message")
+                .and_then(Value::as_str)
+                .map(|message| message.to_string())
+                .or_else(|| entry.as_str().map(|message| message.to_string()))
+                .or_else(|| json_value_as_text(entry))
+        })
+        .or_else(|| value.get("message").and_then(Value::as_str).map(|value| value.to_string()))
+        .or_else(|| value.get("detail").and_then(Value::as_str).map(|value| value.to_string()))
+}
+
+fn execute_json_request(builder: reqwest::blocking::RequestBuilder) -> Result<Value, String> {
+    let response = builder.send().map_err(|err| err.to_string())?;
+    let status = response.status();
+    let body = response.text().map_err(|err| err.to_string())?;
+    if !status.is_success() {
+        let detail = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|value| extract_api_error_message(&value))
+            .unwrap_or_else(|| {
+                let trimmed = body.trim();
+                if trimmed.is_empty() {
+                    format!("HTTP {}", status.as_u16())
+                } else {
+                    truncate_text(trimmed, 320)
+                }
+            });
+        return Err(format!("{} {}", status.as_u16(), detail));
+    }
+    serde_json::from_str(&body)
+        .map_err(|err| format!("Failed to decode JSON response: {}", err))
+}
+
+fn normalize_remote_models(models: Vec<ModelProviderModel>) -> Vec<ModelProviderModel> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for mut model in models {
+        let id = model.id.trim().to_string();
+        if id.is_empty() {
+            continue;
+        }
+        if !seen.insert(id.to_ascii_lowercase()) {
+            continue;
+        }
+        model.id = id.clone();
+        if model.name.trim().is_empty() {
+            model.name = id.clone();
+        }
+        if let Some(label) = model.label.as_mut() {
+            let trimmed = label.trim().to_string();
+            *label = trimmed;
+        }
+        normalized.push(model);
+    }
+    normalized
+}
+
+fn collect_system_prompt(messages: &[ApiChatMessage]) -> Option<String> {
+    let prompts = messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .map(|message| message.content.trim())
+        .filter(|content| !content.is_empty())
+        .map(|content| content.to_string())
+        .collect::<Vec<_>>();
+    if prompts.is_empty() {
+        None
+    } else {
+        Some(prompts.join("\n\n"))
+    }
+}
+
+fn collapse_chat_messages(
+    messages: &[ApiChatMessage],
+    assistant_role: &str,
+) -> Vec<(String, String)> {
+    let mut collapsed = Vec::<(String, String)>::new();
+    for message in messages {
+        let role = match message.role.as_str() {
+            "user" => "user",
+            "assistant" => assistant_role,
+            _ => continue,
+        };
+        let content = message.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        if let Some((last_role, last_content)) = collapsed.last_mut() {
+            if last_role == role {
+                if !last_content.is_empty() {
+                    last_content.push_str("\n\n");
+                }
+                last_content.push_str(content);
+                continue;
+            }
+        }
+        collapsed.push((role.to_string(), content.to_string()));
+    }
+    collapsed
+}
+
+fn value_text_parts(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![trimmed.to_string()]
+            }
+        }
+        Value::Array(items) => items
+            .iter()
+            .flat_map(value_text_parts)
+            .collect::<Vec<_>>(),
+        Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return vec![trimmed.to_string()];
+                }
+            }
+            if let Some(content) = map.get("content") {
+                return value_text_parts(content);
+            }
+            if let Some(parts) = map.get("parts") {
+                return value_text_parts(parts);
+            }
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn parse_openai_models_response(value: &Value) -> Vec<ModelProviderModel> {
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let id = item.get("id").and_then(Value::as_str)?.trim().to_string();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    Some(ModelProviderModel {
+                        id: id.clone(),
+                        name: id,
+                        label: None,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .map(normalize_remote_models)
+        .unwrap_or_default()
+}
+
+fn parse_claude_models_response(value: &Value) -> Vec<ModelProviderModel> {
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let id = item.get("id").and_then(Value::as_str)?.trim().to_string();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    Some(ModelProviderModel {
+                        id: id.clone(),
+                        name: id,
+                        label: item
+                            .get("display_name")
+                            .and_then(Value::as_str)
+                            .or_else(|| item.get("name").and_then(Value::as_str))
+                            .map(|value| value.trim().to_string()),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .map(normalize_remote_models)
+        .unwrap_or_default()
+}
+
+fn parse_gemini_models_response(value: &Value) -> Vec<ModelProviderModel> {
+    value
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let supports_generation = item
+                        .get("supportedGenerationMethods")
+                        .and_then(Value::as_array)
+                        .map(|methods| {
+                            methods.iter().any(|method| {
+                                method
+                                    .as_str()
+                                    .is_some_and(|value| value == "generateContent")
+                            })
+                        })
+                        .unwrap_or(true);
+                    if !supports_generation {
+                        return None;
+                    }
+                    let raw_name = item.get("name").and_then(Value::as_str)?.trim().to_string();
+                    let id = raw_name
+                        .rsplit('/')
+                        .next()
+                        .map(|value| value.trim().to_string())
+                        .unwrap_or_default();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    Some(ModelProviderModel {
+                        id: id.clone(),
+                        name: id,
+                        label: item
+                            .get("displayName")
+                            .and_then(Value::as_str)
+                            .map(|value| value.trim().to_string()),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .map(normalize_remote_models)
+        .unwrap_or_default()
+}
+
+fn fetch_provider_models(provider: &ModelProviderConfig) -> Result<Vec<ModelProviderModel>, String> {
+    if provider.base_url.trim().is_empty() {
+        return Err("Provider base URL is required.".to_string());
+    }
+    if provider.api_key.trim().is_empty() {
+        return Err("Provider API key is required.".to_string());
+    }
+
+    let client = api_http_client(30)?;
+    let service_type = provider.service_type.as_str();
+    let value = match service_type {
+        "openaiCompatible" => execute_json_request(
+            client
+                .get(openai_endpoint(&provider.base_url, "models"))
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {}", provider.api_key.trim()),
+                ),
+        )?,
+        "claude" => execute_json_request(
+            client
+                .get(claude_endpoint(&provider.base_url, "models"))
+                .header("x-api-key", provider.api_key.trim())
+                .header("anthropic-version", "2023-06-01"),
+        )?,
+        "gemini" => execute_json_request(
+            client
+                .get(gemini_endpoint(&provider.base_url, "models"))
+                .query(&[("key", provider.api_key.trim())]),
+        )?,
+        _ => return Err(format!("Unsupported service type: {}", service_type)),
+    };
+
+    let models = match service_type {
+        "openaiCompatible" => parse_openai_models_response(&value),
+        "claude" => parse_claude_models_response(&value),
+        "gemini" => parse_gemini_models_response(&value),
+        _ => Vec::new(),
+    };
+
+    if models.is_empty() {
+        return Err("No models were returned by the provider.".to_string());
+    }
+    Ok(models)
+}
+
+fn parse_openai_response_text(value: &Value) -> Option<String> {
+    value.get("choices").and_then(Value::as_array).and_then(|choices| {
+        choices.first().and_then(|choice| {
+            choice
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .map(value_text_parts)
+                .or_else(|| {
+                    choice
+                        .get("message")
+                        .and_then(|message| message.get("text"))
+                        .map(value_text_parts)
+                })
+                .map(|parts| parts.join("\n\n"))
+        })
+    })
+}
+
+fn parse_claude_response_text(value: &Value) -> Option<String> {
+    value
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+                .flat_map(value_text_parts)
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn parse_gemini_response_text(value: &Value) -> Option<String> {
+    value
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("content"))
+        .map(value_text_parts)
+        .map(|parts| parts.join("\n\n"))
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn execute_stream_request(
+    builder: reqwest::blocking::RequestBuilder,
+) -> Result<reqwest::blocking::Response, String> {
+    let response = builder.send().map_err(|err| err.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().map_err(|err| err.to_string())?;
+        let detail = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|value| extract_api_error_message(&value))
+            .unwrap_or_else(|| {
+                let trimmed = body.trim();
+                if trimmed.is_empty() {
+                    format!("HTTP {}", status.as_u16())
+                } else {
+                    truncate_text(trimmed, 320)
+                }
+            });
+        return Err(format!("{} {}", status.as_u16(), detail));
+    }
+    Ok(response)
+}
+
+fn read_sse_events<F>(
+    response: reqwest::blocking::Response,
+    mut on_event: F,
+) -> Result<(), String>
+where
+    F: FnMut(Option<String>, String) -> Result<(), String>,
+{
+    let mut reader = BufReader::new(response);
+    let mut event_name: Option<String> = None;
+    let mut data_lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+
+    let mut flush_event = |event_name: &mut Option<String>,
+                           data_lines: &mut Vec<String>|
+     -> Result<(), String> {
+        if data_lines.is_empty() {
+            *event_name = None;
+            return Ok(());
+        }
+        let data = data_lines.join("\n");
+        let next_event = event_name.take();
+        data_lines.clear();
+        on_event(next_event, data)
+    };
+
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line).map_err(|err| err.to_string())?;
+        if bytes == 0 {
+            flush_event(&mut event_name, &mut data_lines)?;
+            break;
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            flush_event(&mut event_name, &mut data_lines)?;
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("event:") {
+            event_name = Some(value.trim().to_string());
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("data:") {
+            data_lines.push(value.trim_start().to_string());
+        }
+    }
+
+    Ok(())
+}
+
+fn value_delta_text(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.to_string(),
+        Value::Array(items) => items
+            .iter()
+            .map(value_delta_text)
+            .collect::<Vec<_>>()
+            .join(""),
+        Value::Object(map) => map
+            .get("text")
+            .map(value_delta_text)
+            .or_else(|| map.get("content").map(value_delta_text))
+            .or_else(|| map.get("parts").map(value_delta_text))
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn append_incremental_text(target: &mut String, candidate: &str) -> String {
+    if candidate.is_empty() {
+        return String::new();
+    }
+    if target.is_empty() {
+        target.push_str(candidate);
+        return candidate.to_string();
+    }
+    if let Some(delta) = candidate.strip_prefix(target.as_str()) {
+        target.push_str(delta);
+        return delta.to_string();
+    }
+    target.push_str(candidate);
+    candidate.to_string()
+}
+
+fn detect_api_content_format(text: &str) -> String {
+    let normalized = text.trim();
+    if normalized.is_empty() {
+        return "plain".to_string();
+    }
+
+    let markdown = normalized.contains("```")
+        || normalized.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with('#')
+                || trimmed.starts_with("> ")
+                || trimmed.starts_with("- ")
+                || trimmed.starts_with("* ")
+                || trimmed.starts_with("|")
+                || trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_digit() && trimmed.contains(". "))
+        });
+    if markdown {
+        return "markdown".to_string();
+    }
+
+    let lines = normalized
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let logish = lines
+        .iter()
+        .filter(|line| {
+            let value = line.trim_start();
+            value.starts_with('$')
+                || value.starts_with('>')
+                || value.starts_with("error:")
+                || value.starts_with("warning:")
+                || value.starts_with("usage:")
+                || value.starts_with("diff --git")
+                || value.starts_with("@@")
+                || value.starts_with("--- ")
+                || value.starts_with("+++ ")
+                || value.starts_with("at ")
+        })
+        .count();
+    let dense = lines
+        .iter()
+        .filter(|line| line.len() > 88 || line.contains("  "))
+        .count();
+
+    if lines.len() >= 5
+        && (logish * 100 >= 28 * lines.len() || dense * 100 >= 55 * lines.len())
+    {
+        "log".to_string()
+    } else {
+        "plain".to_string()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ApiChatRenderResult {
+    raw_content: String,
+    content: String,
+    content_format: String,
+    blocks: Vec<ChatMessageBlock>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ApiUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+}
+
+fn trim_api_segment(text: &str) -> String {
+    text.trim().to_string()
+}
+
+fn render_api_chat_content(raw: &str) -> ApiChatRenderResult {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n").trim_end().to_string();
+    let mut blocks = Vec::new();
+    let mut visible = String::new();
+    let mut cursor = 0usize;
+
+    while cursor < normalized.len() {
+        let Some(relative_open) = normalized[cursor..].find("<think>") else {
+            let text = &normalized[cursor..];
+            visible.push_str(text);
+            let trimmed = trim_api_segment(text);
+            if !trimmed.is_empty() {
+                blocks.push(ChatMessageBlock::Text {
+                    text: trimmed.clone(),
+                    format: detect_api_content_format(&trimmed),
+                });
+            }
+            break;
+        };
+        let open_index = cursor + relative_open;
+        let leading = &normalized[cursor..open_index];
+        visible.push_str(leading);
+        let trimmed = trim_api_segment(leading);
+        if !trimmed.is_empty() {
+            blocks.push(ChatMessageBlock::Text {
+                text: trimmed.clone(),
+                format: detect_api_content_format(&trimmed),
+            });
+        }
+
+        let reasoning_start = open_index + "<think>".len();
+        if let Some(relative_close) = normalized[reasoning_start..].find("</think>") {
+            let close_index = reasoning_start + relative_close;
+            let reasoning = trim_api_segment(&normalized[reasoning_start..close_index]);
+            if !reasoning.is_empty() {
+                blocks.push(ChatMessageBlock::Reasoning { text: reasoning });
+            }
+            cursor = close_index + "</think>".len();
+        } else {
+            let reasoning = trim_api_segment(&normalized[reasoning_start..]);
+            if !reasoning.is_empty() {
+                blocks.push(ChatMessageBlock::Reasoning { text: reasoning });
+            }
+            cursor = normalized.len();
+        }
+    }
+
+    let content = visible.trim().to_string();
+    let content_format = detect_api_content_format(&content);
+    if blocks.is_empty() && !content.is_empty() {
+        blocks.push(ChatMessageBlock::Text {
+            text: content.clone(),
+            format: content_format.clone(),
+        });
+    }
+
+    ApiChatRenderResult {
+        raw_content: normalized,
+        content,
+        content_format,
+        blocks,
+    }
+}
+
+fn compose_api_raw_content(answer_text: &str, reasoning_text: &str) -> String {
+    let answer = answer_text.trim();
+    let reasoning = reasoning_text.trim();
+    match (reasoning.is_empty(), answer.is_empty()) {
+        (true, _) => answer_text.to_string(),
+        (false, true) => format!("<think>\n{}\n</think>", reasoning),
+        (false, false) => format!("<think>\n{}\n</think>\n\n{}", reasoning, answer_text),
+    }
+}
+
+fn api_usage_from_openai_value(value: &Value) -> ApiUsage {
+    let usage = value.get("usage").unwrap_or(value);
+    ApiUsage {
+        prompt_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        completion_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
+        total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+    }
+}
+
+fn api_usage_from_claude_value(value: &Value) -> ApiUsage {
+    let usage = value.get("usage").unwrap_or(value);
+    let prompt_tokens = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(Value::as_u64);
+    let completion_tokens = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(Value::as_u64);
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| match (prompt_tokens, completion_tokens) {
+            (Some(prompt), Some(completion)) => Some(prompt + completion),
+            _ => None,
+        });
+    ApiUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    }
+}
+
+fn api_usage_from_gemini_value(value: &Value) -> ApiUsage {
+    let usage = value.get("usageMetadata").unwrap_or(value);
+    let prompt_tokens = usage
+        .get("promptTokenCount")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(Value::as_u64);
+    let completion_tokens = usage
+        .get("candidatesTokenCount")
+        .or_else(|| usage.get("completionTokenCount"))
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(Value::as_u64);
+    let total_tokens = usage
+        .get("totalTokenCount")
+        .or_else(|| usage.get("total_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| match (prompt_tokens, completion_tokens) {
+            (Some(prompt), Some(completion)) => Some(prompt + completion),
+            _ => None,
+        });
+    ApiUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    }
+}
+
+fn merge_api_usage(target: &mut ApiUsage, next: ApiUsage) {
+    if next.prompt_tokens.is_some() {
+        target.prompt_tokens = next.prompt_tokens;
+    }
+    if next.completion_tokens.is_some() {
+        target.completion_tokens = next.completion_tokens;
+    }
+    if next.total_tokens.is_some() {
+        target.total_tokens = next.total_tokens;
+    }
+}
+
+fn fill_api_usage_estimate(
+    usage: &mut ApiUsage,
+    request: &ApiChatRequest,
+    raw_content: &str,
+) {
+    if usage.prompt_tokens.is_none() {
+        let prompt_chars = request
+            .messages
+            .iter()
+            .map(|message| message.content.chars().count())
+            .sum::<usize>();
+        usage.prompt_tokens = Some(((prompt_chars.max(1) as f64) / 4.0).ceil() as u64);
+    }
+    if usage.completion_tokens.is_none() {
+        let completion_chars = raw_content.chars().count().max(1);
+        usage.completion_tokens = Some(((completion_chars as f64) / 4.0).ceil() as u64);
+    }
+    if usage.total_tokens.is_none() {
+        usage.total_tokens = match (usage.prompt_tokens, usage.completion_tokens) {
+            (Some(prompt), Some(completion)) => Some(prompt + completion),
+            _ => None,
+        };
+    }
+}
+
+fn build_api_chat_response_message(
+    message_id: String,
+    raw_content: String,
+    error: Option<bool>,
+    duration_ms: Option<u64>,
+    usage: &ApiUsage,
+) -> ApiChatResponseMessage {
+    let rendered = render_api_chat_content(&raw_content);
+    ApiChatResponseMessage {
+        id: message_id,
+        role: "assistant".to_string(),
+        content: rendered.content,
+        timestamp: now_rfc3339(),
+        error,
+        raw_content: Some(rendered.raw_content),
+        content_format: Some(rendered.content_format),
+        blocks: if rendered.blocks.is_empty() {
+            None
+        } else {
+            Some(rendered.blocks)
+        },
+        duration_ms,
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+    }
+}
+
+fn emit_api_chat_stream_snapshot(
+    app: &AppHandle,
+    stream_id: Option<&str>,
+    message_id: &str,
+    chunk: &str,
+    done: bool,
+    raw_content: &str,
+    duration_ms: Option<u64>,
+    usage: Option<&ApiUsage>,
+) {
+    let Some(stream_id) = stream_id.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    let rendered = render_api_chat_content(raw_content);
+    let _ = app.emit(
+        "api-chat-stream",
+        ApiChatStreamEvent {
+            stream_id: stream_id.to_string(),
+            message_id: message_id.to_string(),
+            chunk: chunk.to_string(),
+            done,
+            raw_content: Some(rendered.raw_content),
+            content: Some(rendered.content),
+            content_format: Some(rendered.content_format),
+            blocks: if rendered.blocks.is_empty() {
+                None
+            } else {
+                Some(rendered.blocks)
+            },
+            duration_ms,
+            prompt_tokens: usage.and_then(|value| value.prompt_tokens),
+            completion_tokens: usage.and_then(|value| value.completion_tokens),
+            total_tokens: usage.and_then(|value| value.total_tokens),
+        },
+    );
+}
+
+fn stream_openai_provider_chat(
+    app: &AppHandle,
+    provider: &ModelProviderConfig,
+    request: &ApiChatRequest,
+    message_id: &str,
+) -> Result<ApiChatResponseMessage, String> {
+    let started_at = Instant::now();
+    let client = api_http_client(90)?;
+    let mut messages = collapse_chat_messages(&request.messages, "assistant")
+        .into_iter()
+        .map(|(role, content)| json!({ "role": role, "content": content }))
+        .collect::<Vec<_>>();
+    if let Some(system_prompt) = collect_system_prompt(&request.messages) {
+        messages.insert(0, json!({ "role": "system", "content": system_prompt }));
+    }
+
+    let response = execute_stream_request(
+        client
+            .post(openai_endpoint(&provider.base_url, "chat/completions"))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", provider.api_key.trim()),
+            )
+            .json(&json!({
+                "model": request.model_id,
+                "messages": messages,
+                "stream": true,
+            })),
+    )?;
+
+    let mut answer_text = String::new();
+    let mut reasoning_text = String::new();
+    let mut usage = ApiUsage::default();
+    read_sse_events(response, |_, data| {
+        let trimmed = data.trim();
+        if trimmed.is_empty() || trimmed == "[DONE]" {
+            return Ok(());
+        }
+        let value: Value = serde_json::from_str(trimmed)
+            .map_err(|err| format!("Failed to decode OpenAI stream payload: {}", err))?;
+        merge_api_usage(&mut usage, api_usage_from_openai_value(&value));
+        let mut emitted_chunk = String::new();
+        if let Some(delta) = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("delta"))
+        {
+            if let Some(reasoning_value) =
+                delta.get("reasoning_content").or_else(|| delta.get("reasoning"))
+            {
+                let chunk = value_delta_text(reasoning_value);
+                if !chunk.is_empty() {
+                    reasoning_text.push_str(&chunk);
+                    emitted_chunk.push_str(&chunk);
+                }
+            }
+            if let Some(content_value) = delta.get("content").or_else(|| delta.get("text")) {
+                let chunk = value_delta_text(content_value);
+                if !chunk.is_empty() {
+                    answer_text.push_str(&chunk);
+                    emitted_chunk.push_str(&chunk);
+                }
+            }
+        }
+        if !emitted_chunk.is_empty() {
+            let raw_content = compose_api_raw_content(&answer_text, &reasoning_text);
+            emit_api_chat_stream_snapshot(
+                app,
+                request.stream_id.as_deref(),
+                message_id,
+                &emitted_chunk,
+                false,
+                &raw_content,
+                None,
+                Some(&usage),
+            );
+        }
+        Ok(())
+    })?;
+
+    let raw_content = compose_api_raw_content(&answer_text, &reasoning_text);
+    if raw_content.trim().is_empty() {
+        return Err("Provider returned an empty response.".to_string());
+    }
+    fill_api_usage_estimate(&mut usage, request, &raw_content);
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    emit_api_chat_stream_snapshot(
+        app,
+        request.stream_id.as_deref(),
+        message_id,
+        "",
+        true,
+        &raw_content,
+        Some(duration_ms),
+        Some(&usage),
+    );
+    Ok(build_api_chat_response_message(
+        message_id.to_string(),
+        raw_content,
+        None,
+        Some(duration_ms),
+        &usage,
+    ))
+}
+
+fn stream_claude_provider_chat(
+    app: &AppHandle,
+    provider: &ModelProviderConfig,
+    request: &ApiChatRequest,
+    message_id: &str,
+) -> Result<ApiChatResponseMessage, String> {
+    let started_at = Instant::now();
+    let client = api_http_client(90)?;
+    let messages = collapse_chat_messages(&request.messages, "assistant")
+        .into_iter()
+        .map(|(role, content)| json!({ "role": role, "content": content }))
+        .collect::<Vec<_>>();
+    let mut payload = json!({
+        "model": request.model_id,
+        "max_tokens": 4096,
+        "messages": messages,
+        "stream": true,
+    });
+    if let Some(system_prompt) = collect_system_prompt(&request.messages) {
+        payload["system"] = Value::String(system_prompt);
+    }
+
+    let response = execute_stream_request(
+        client
+            .post(claude_endpoint(&provider.base_url, "messages"))
+            .header("x-api-key", provider.api_key.trim())
+            .header("anthropic-version", "2023-06-01")
+            .json(&payload),
+    )?;
+
+    let mut answer_text = String::new();
+    let mut reasoning_text = String::new();
+    let mut usage = ApiUsage::default();
+    read_sse_events(response, |event_name, data| {
+        let trimmed = data.trim();
+        if trimmed.is_empty() || trimmed == "[DONE]" {
+            return Ok(());
+        }
+        let value: Value = serde_json::from_str(trimmed)
+            .map_err(|err| format!("Failed to decode Claude stream payload: {}", err))?;
+        merge_api_usage(&mut usage, api_usage_from_claude_value(&value));
+        let mut emitted_chunk = String::new();
+        match event_name.as_deref() {
+            Some("content_block_start") => {
+                if let Some(block) = value.get("content_block") {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            if let Some(chunk) = block.get("text").and_then(Value::as_str) {
+                                answer_text.push_str(chunk);
+                                emitted_chunk.push_str(chunk);
+                            }
+                        }
+                        Some("thinking") => {
+                            if let Some(chunk) = block.get("thinking").and_then(Value::as_str) {
+                                reasoning_text.push_str(chunk);
+                                emitted_chunk.push_str(chunk);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("content_block_delta") => {
+                if let Some(delta) = value.get("delta") {
+                    match delta.get("type").and_then(Value::as_str) {
+                        Some("text_delta") => {
+                            if let Some(chunk) = delta.get("text").and_then(Value::as_str) {
+                                answer_text.push_str(chunk);
+                                emitted_chunk.push_str(chunk);
+                            }
+                        }
+                        Some("thinking_delta") => {
+                            if let Some(chunk) = delta.get("thinking").and_then(Value::as_str) {
+                                reasoning_text.push_str(chunk);
+                                emitted_chunk.push_str(chunk);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        if !emitted_chunk.is_empty() {
+            let raw_content = compose_api_raw_content(&answer_text, &reasoning_text);
+            emit_api_chat_stream_snapshot(
+                app,
+                request.stream_id.as_deref(),
+                message_id,
+                &emitted_chunk,
+                false,
+                &raw_content,
+                None,
+                Some(&usage),
+            );
+        }
+        Ok(())
+    })?;
+
+    let raw_content = compose_api_raw_content(&answer_text, &reasoning_text);
+    if raw_content.trim().is_empty() {
+        return Err("Provider returned an empty response.".to_string());
+    }
+    fill_api_usage_estimate(&mut usage, request, &raw_content);
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    emit_api_chat_stream_snapshot(
+        app,
+        request.stream_id.as_deref(),
+        message_id,
+        "",
+        true,
+        &raw_content,
+        Some(duration_ms),
+        Some(&usage),
+    );
+    Ok(build_api_chat_response_message(
+        message_id.to_string(),
+        raw_content,
+        None,
+        Some(duration_ms),
+        &usage,
+    ))
+}
+
+fn stream_gemini_provider_chat(
+    app: &AppHandle,
+    provider: &ModelProviderConfig,
+    request: &ApiChatRequest,
+    message_id: &str,
+) -> Result<ApiChatResponseMessage, String> {
+    let started_at = Instant::now();
+    let client = api_http_client(90)?;
+    let contents = collapse_chat_messages(&request.messages, "model")
+        .into_iter()
+        .map(|(role, content)| {
+            json!({
+                "role": role,
+                "parts": [{ "text": content }],
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut payload = json!({
+        "contents": contents,
+    });
+    if let Some(system_prompt) = collect_system_prompt(&request.messages) {
+        payload["systemInstruction"] = json!({
+            "parts": [{ "text": system_prompt }]
+        });
+    }
+
+    let response = execute_stream_request(
+        client
+            .post(gemini_endpoint(
+                &provider.base_url,
+                &format!("models/{}:streamGenerateContent", request.model_id)
+            ))
+            .query(&[("alt", "sse"), ("key", provider.api_key.trim())])
+            .json(&payload),
+    )?;
+
+    let mut answer_text = String::new();
+    let mut reasoning_text = String::new();
+    let mut usage = ApiUsage::default();
+    read_sse_events(response, |_, data| {
+        let trimmed = data.trim();
+        if trimmed.is_empty() || trimmed == "[DONE]" {
+            return Ok(());
+        }
+        let value: Value = serde_json::from_str(trimmed)
+            .map_err(|err| format!("Failed to decode Gemini stream payload: {}", err))?;
+        merge_api_usage(&mut usage, api_usage_from_gemini_value(&value));
+        let mut text_candidate = String::new();
+        let mut reasoning_candidate = String::new();
+        if let Some(parts) = value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("content"))
+            .and_then(|content| content.get("parts"))
+            .and_then(Value::as_array)
+        {
+            for part in parts {
+                let chunk = part.get("text").and_then(Value::as_str).unwrap_or_default();
+                if chunk.is_empty() {
+                    continue;
+                }
+                if part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
+                    reasoning_candidate.push_str(chunk);
+                } else {
+                    text_candidate.push_str(chunk);
+                }
+            }
+        }
+
+        let reasoning_delta = append_incremental_text(&mut reasoning_text, &reasoning_candidate);
+        let text_delta = append_incremental_text(&mut answer_text, &text_candidate);
+        let emitted_chunk = format!("{}{}", reasoning_delta, text_delta);
+        if !emitted_chunk.is_empty() {
+            let raw_content = compose_api_raw_content(&answer_text, &reasoning_text);
+            emit_api_chat_stream_snapshot(
+                app,
+                request.stream_id.as_deref(),
+                message_id,
+                &emitted_chunk,
+                false,
+                &raw_content,
+                None,
+                Some(&usage),
+            );
+        }
+        Ok(())
+    })?;
+
+    let raw_content = compose_api_raw_content(&answer_text, &reasoning_text);
+    if raw_content.trim().is_empty() {
+        return Err("Provider returned an empty response.".to_string());
+    }
+    fill_api_usage_estimate(&mut usage, request, &raw_content);
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    emit_api_chat_stream_snapshot(
+        app,
+        request.stream_id.as_deref(),
+        message_id,
+        "",
+        true,
+        &raw_content,
+        Some(duration_ms),
+        Some(&usage),
+    );
+    Ok(build_api_chat_response_message(
+        message_id.to_string(),
+        raw_content,
+        None,
+        Some(duration_ms),
+        &usage,
+    ))
+}
+
+fn send_provider_chat(
+    app: &AppHandle,
+    provider: &ModelProviderConfig,
+    request: &ApiChatRequest,
+) -> Result<ApiChatResponseMessage, String> {
+    if provider.base_url.trim().is_empty() {
+        return Err("Provider base URL is required.".to_string());
+    }
+    if provider.api_key.trim().is_empty() {
+        return Err("Provider API key is required.".to_string());
+    }
+    if request.model_id.trim().is_empty() {
+        return Err("Model is required.".to_string());
+    }
+
+    let message_id = format!("api-msg-{}", Uuid::new_v4());
+    match request.service_type.as_str() {
+        "openaiCompatible" => stream_openai_provider_chat(app, provider, request, &message_id),
+        "claude" => stream_claude_provider_chat(app, provider, request, &message_id),
+        "gemini" => stream_gemini_provider_chat(app, provider, request, &message_id),
+        _ => Err(format!(
+            "Unsupported service type: {}",
+            request.service_type
+        )),
+    }
 }
 
 // ── Chat types ─────────────────────────────────────────────────────────
@@ -6156,16 +7532,18 @@ fn get_conversation_history(
 
 #[tauri::command]
 fn get_settings(store: State<'_, AppStore>) -> Result<AppSettings, String> {
-    let s = store.settings.lock().map_err(|err| err.to_string())?;
-    Ok(s.clone())
+    let mut settings = store.settings.lock().map_err(|err| err.to_string())?;
+    normalize_settings_providers(&mut settings);
+    Ok(settings.clone())
 }
 
 #[tauri::command]
 fn update_settings(
     store: State<'_, AppStore>,
-    settings: AppSettings,
+    mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
     validate_notification_config(&settings.notification_config)?;
+    normalize_settings_providers(&mut settings);
     {
         let mut s = store.settings.lock().map_err(|err| err.to_string())?;
         *s = settings.clone();
@@ -6178,6 +7556,69 @@ fn update_settings(
     }
     persist_settings(&settings)?;
     Ok(settings)
+}
+
+#[tauri::command]
+fn refresh_provider_models(
+    store: State<'_, AppStore>,
+    service_type: String,
+    provider_id: String,
+) -> Result<ModelProviderConfig, String> {
+    let provider = {
+        let settings = store.settings.lock().map_err(|err| err.to_string())?;
+        provider_find(&settings, &service_type, &provider_id)?
+    };
+
+    let refreshed_models = fetch_provider_models(&provider)?;
+    let refreshed_at = now_rfc3339();
+
+    let updated_provider = {
+        let mut settings = store.settings.lock().map_err(|err| err.to_string())?;
+        let updated = {
+            let providers = provider_list_mut(&mut settings, &service_type)?;
+            let provider = providers
+                .iter_mut()
+                .find(|item| item.id == provider_id)
+                .ok_or_else(|| "Provider not found.".to_string())?;
+            provider.models = refreshed_models;
+            provider.updated_at = refreshed_at.clone();
+            provider.last_refreshed_at = Some(refreshed_at);
+            provider.clone()
+        };
+        persist_settings(&settings)?;
+        updated
+    };
+
+    Ok(updated_provider)
+}
+
+#[tauri::command]
+async fn send_api_chat_message(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    request: ApiChatRequest,
+) -> Result<ApiChatResponse, String> {
+    let provider = {
+        let settings = store.settings.lock().map_err(|err| err.to_string())?;
+        provider_find(&settings, &request.service_type, &request.provider_id)?
+    };
+
+    let service_type = request.service_type.clone();
+    let provider_id = request.provider_id.clone();
+    let model_id = request.model_id.clone();
+    let app_handle = app.clone();
+    let message = tauri::async_runtime::spawn_blocking(move || {
+        send_provider_chat(&app_handle, &provider, &request)
+    })
+    .await
+    .map_err(|err| err.to_string())??;
+
+    Ok(ApiChatResponse {
+        service_type,
+        provider_id,
+        model_id,
+        message,
+    })
 }
 
 #[tauri::command]
@@ -17771,7 +19212,9 @@ fn load_or_seed_settings(project_root: &str) -> Result<AppSettings, String> {
     let path = settings_file()?;
     if path.exists() {
         let raw = fs::read_to_string(&path).map_err(|err| err.to_string())?;
-        serde_json::from_str::<AppSettings>(&raw).map_err(|err| err.to_string())
+        let mut settings = serde_json::from_str::<AppSettings>(&raw).map_err(|err| err.to_string())?;
+        normalize_settings_providers(&mut settings);
+        Ok(settings)
     } else {
         let s = seed_settings(project_root);
         persist_settings(&s)?;
@@ -17836,6 +19279,9 @@ fn seed_settings(project_root: &str) -> AppSettings {
             smtp_from: String::new(),
             email_recipients: Vec::new(),
         },
+        openai_compatible_providers: Vec::new(),
+        claude_providers: Vec::new(),
+        gemini_providers: Vec::new(),
     }
 }
 
@@ -18404,6 +19850,8 @@ pub fn run() {
             search_workspace_files,
             get_settings,
             update_settings,
+            refresh_provider_models,
+            send_api_chat_message,
             send_test_email_notification,
             execute_acp_command,
             get_acp_commands,

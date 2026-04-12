@@ -7,6 +7,9 @@ import { AutomationJobsPage } from "./pages/AutomationJobsPage";
 import { AutomationJobEditorPage } from "./pages/AutomationJobEditorPage";
 import { AutomationWorkflowsPage } from "./pages/AutomationWorkflowsPage";
 import { AutomationWorkflowEditorPage } from "./pages/AutomationWorkflowEditorPage";
+import { ModelChatPage } from "./pages/ModelChatPage";
+import { ModelProviderEditorPage } from "./pages/ModelProviderEditorPage";
+import { ModelProvidersPage } from "./pages/ModelProvidersPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { useStore } from "./lib/store";
 import { bridge } from "./lib/bridge";
@@ -119,6 +122,10 @@ function App() {
       <Route element={<AppLayout />}>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/terminal" element={<TerminalPage />} />
+        <Route path="/model-chat" element={<ModelChatPage />} />
+        <Route path="/model-providers" element={<ModelProvidersPage />} />
+        <Route path="/model-providers/new" element={<ModelProviderEditorPage />} />
+        <Route path="/model-providers/:serviceType/:providerId" element={<ModelProviderEditorPage />} />
         <Route path="/automation" element={<AutomationJobsPage />} />
         <Route path="/automation/workflows" element={<AutomationWorkflowsPage />} />
         <Route path="/automation/workflows/new" element={<AutomationWorkflowEditorPage />} />

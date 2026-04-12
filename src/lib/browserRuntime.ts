@@ -24,6 +24,9 @@ import {
   AutomationRuleProfile,
   AutomationRun,
   AutomationRunStatus,
+  ApiChatRequest,
+  ApiChatResponse,
+  ApiChatStreamEvent,
   AgentTransportKind,
   AgentTransportSession,
   AgentRuntimeResources,
@@ -55,10 +58,13 @@ import {
   StreamEvent,
   GitPanelData,
   GitFileChange,
+  ModelProviderConfig,
+  ModelProviderServiceType,
   PersistedTerminalState,
   SemanticMemoryChunk,
   WorkspacePickResult,
 } from "./models";
+import { parseApiAssistantContent } from "./apiChatFormatting";
 import {
   AcpCliCapabilities,
   AcpCommand,
@@ -68,11 +74,16 @@ import {
   ACP_COMMANDS,
   defaultAcpSession,
 } from "./acp";
+import {
+  defaultModelsForServiceType,
+  normalizeProviderSettings,
+} from "./modelProviders";
 import { createSeedState } from "./seed";
 
 type StateListener = (state: AppState) => void;
 type TerminalListener = (event: TerminalEvent) => void;
 type StreamListener = (event: StreamEvent) => void;
+type ApiChatStreamListener = (event: ApiChatStreamEvent) => void;
 
 const STORAGE_KEY = "multi-cli-studio::state";
 const CONTEXT_KEY = "multi-cli-studio::context";
@@ -113,6 +124,7 @@ automationWorkflowRuns
 const stateListeners = new Set<StateListener>();
 const terminalListeners = new Set<TerminalListener>();
 const streamListeners = new Set<StreamListener>();
+const apiChatStreamListeners = new Set<ApiChatStreamListener>();
 
 function defaultTransportKind(agentId: AgentId): AgentTransportKind {
   switch (agentId) {
@@ -323,7 +335,7 @@ function createSeedContext(): ContextStore {
 }
 
 function defaultSettings(): AppSettings {
-  return {
+  return normalizeProviderSettings({
     cliPaths: { codex: "auto", claude: "auto", gemini: "auto" },
     projectRoot: state?.workspace?.projectRoot ?? "C:\\Users\\admin\\source\\repos\\multi-cli-studio",
     maxTurnsPerAgent: 50,
@@ -342,7 +354,10 @@ function defaultSettings(): AppSettings {
       smtpFrom: "",
       emailRecipients: [],
     },
-  };
+    openaiCompatibleProviders: [],
+    claudeProviders: [],
+    geminiProviders: [],
+  });
 }
 
 function normalizeNotificationConfig(value: unknown, fallback = defaultSettings().notificationConfig) {
@@ -379,7 +394,7 @@ function normalizeSettings(value: unknown): AppSettings {
     cliPaths?: Partial<AppSettings["cliPaths"]>;
   };
 
-  return {
+  return normalizeProviderSettings({
     cliPaths: {
       ...defaults.cliPaths,
       ...(raw.cliPaths ?? {}),
@@ -393,7 +408,10 @@ function normalizeSettings(value: unknown): AppSettings {
     processTimeoutMs: parsePositiveNumber(raw.processTimeoutMs, defaults.processTimeoutMs),
     notifyOnTerminalCompletion: raw.notifyOnTerminalCompletion === true,
     notificationConfig: normalizeNotificationConfig(raw.notificationConfig, defaults.notificationConfig),
-  };
+    openaiCompatibleProviders: raw.openaiCompatibleProviders ?? defaults.openaiCompatibleProviders,
+    claudeProviders: raw.claudeProviders ?? defaults.claudeProviders,
+    geminiProviders: raw.geminiProviders ?? defaults.geminiProviders,
+  });
 }
 
 function loadStoredAutomationRuns(): AutomationRun[] {
@@ -844,6 +862,51 @@ function nowISO() {
 
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+}
+
+function providerSettingsKey(serviceType: ModelProviderServiceType) {
+  switch (serviceType) {
+    case "openaiCompatible":
+      return "openaiCompatibleProviders" as const;
+    case "claude":
+      return "claudeProviders" as const;
+    case "gemini":
+      return "geminiProviders" as const;
+    default:
+      return "openaiCompatibleProviders" as const;
+  }
+}
+
+function getProvidersForServiceType(
+  currentSettings: AppSettings,
+  serviceType: ModelProviderServiceType
+) {
+  return currentSettings[providerSettingsKey(serviceType)];
+}
+
+function setProvidersForServiceType(
+  currentSettings: AppSettings,
+  serviceType: ModelProviderServiceType,
+  providers: ModelProviderConfig[]
+): AppSettings {
+  return normalizeProviderSettings({
+    ...currentSettings,
+    [providerSettingsKey(serviceType)]: providers,
+  });
+}
+
+function defaultBrowserModels(serviceType: ModelProviderServiceType) {
+  return defaultModelsForServiceType(serviceType);
+}
+
+function getProviderById(
+  currentSettings: AppSettings,
+  serviceType: ModelProviderServiceType,
+  providerId: string
+) {
+  return getProvidersForServiceType(currentSettings, serviceType).find(
+    (provider) => provider.id === providerId
+  );
 }
 
 function basename(path: string) {
@@ -1561,6 +1624,10 @@ function emitStream(event: StreamEvent) {
   streamListeners.forEach((listener) => listener(event));
 }
 
+function emitApiChatStream(event: ApiChatStreamEvent) {
+  apiChatStreamListeners.forEach((listener) => listener(event));
+}
+
 function pushLine(agentId: AgentId, speaker: TerminalLine["speaker"], content: string) {
   const line: TerminalLine = {
     id: createId("line"),
@@ -1825,6 +1892,13 @@ export const browserRuntime = {
     };
   },
 
+  async onApiChatStream(listener: ApiChatStreamListener) {
+    apiChatStreamListeners.add(listener);
+    return () => {
+      apiChatStreamListeners.delete(listener);
+    };
+  },
+
   async getContextStore() {
     return structuredClone(contextStore);
   },
@@ -1844,6 +1918,126 @@ export const browserRuntime = {
     persistSettings();
     persistContext();
     return structuredClone(settings);
+  },
+
+  async refreshProviderModels(serviceType: ModelProviderServiceType, providerId: string) {
+    const provider = getProviderById(settings, serviceType, providerId);
+    if (!provider) {
+      throw new Error("Provider not found.");
+    }
+
+    const refreshedProvider: ModelProviderConfig = {
+      ...provider,
+      models: provider.models.length > 0 ? provider.models : defaultBrowserModels(serviceType),
+      updatedAt: nowISO(),
+      lastRefreshedAt: nowISO(),
+    };
+
+    settings = setProvidersForServiceType(
+      settings,
+      serviceType,
+      getProvidersForServiceType(settings, serviceType).map((item) =>
+        item.id === providerId ? refreshedProvider : item
+      )
+    );
+    persistSettings();
+    return structuredClone(refreshedProvider);
+  },
+
+  async sendApiChatMessage(request: ApiChatRequest) {
+    const provider = getProviderById(settings, request.serviceType, request.providerId);
+    if (!provider) {
+      throw new Error("Enabled provider not found.");
+    }
+    const startedAt = Date.now();
+
+    const prompt =
+      [...request.messages]
+        .reverse()
+        .find((message) => message.role === "user")
+        ?.content.trim() ?? "";
+
+    const rawContent = [
+      `<think>The user asked for a browser fallback response for ${request.serviceType}.`,
+      `This environment simulates provider output and streams it locally.</think>`,
+      "",
+      `# Browser fallback`,
+      "",
+      `Provider: **${provider.name}**`,
+      `Model: \`${request.modelId}\``,
+      "",
+      prompt ? `Latest prompt: ${prompt}` : "Latest prompt: (empty)",
+    ].join("\n");
+    const parsed = parseApiAssistantContent(rawContent);
+
+    const messageId = createId("api-msg");
+
+    if (request.streamId) {
+      const chunks = rawContent.match(/.{1,42}(\s+|$)|.+$/g) ?? [rawContent];
+      let streamedRaw = "";
+      for (const chunk of chunks) {
+        streamedRaw += chunk;
+        const snapshot = parseApiAssistantContent(streamedRaw);
+        emitApiChatStream({
+          streamId: request.streamId,
+          messageId,
+          chunk,
+          done: false,
+          rawContent: snapshot.rawContent,
+          content: snapshot.content,
+          contentFormat: snapshot.contentFormat,
+          blocks: snapshot.blocks,
+        });
+        await new Promise((resolve) => window.setTimeout(resolve, 35));
+      }
+      emitApiChatStream({
+        streamId: request.streamId,
+        messageId,
+        chunk: "",
+        done: true,
+        rawContent: parsed.rawContent,
+        content: parsed.content,
+        contentFormat: parsed.contentFormat,
+        blocks: parsed.blocks,
+        durationMs: Date.now() - startedAt,
+        promptTokens: Math.max(
+          1,
+          Math.round(request.messages.reduce((sum, message) => sum + message.content.length, 0) / 4)
+        ),
+        completionTokens: Math.max(1, Math.round(parsed.rawContent.length / 4)),
+        totalTokens:
+          Math.max(
+            1,
+            Math.round(request.messages.reduce((sum, message) => sum + message.content.length, 0) / 4)
+          ) + Math.max(1, Math.round(parsed.rawContent.length / 4)),
+      });
+    }
+
+    const durationMs = Date.now() - startedAt;
+    const promptTokens = Math.max(1, Math.round(request.messages.reduce((sum, message) => sum + message.content.length, 0) / 4));
+    const completionTokens = Math.max(1, Math.round(parsed.rawContent.length / 4));
+    const totalTokens = promptTokens + completionTokens;
+
+    const response: ApiChatResponse = {
+      serviceType: request.serviceType,
+      providerId: request.providerId,
+      modelId: request.modelId,
+      message: {
+        id: messageId,
+        role: "assistant",
+        timestamp: nowISO(),
+        content: parsed.content,
+        rawContent: parsed.rawContent,
+        contentFormat: parsed.contentFormat,
+        blocks: parsed.blocks,
+        durationMs,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+      },
+    };
+
+    return structuredClone(response);
   },
 
   async sendTestEmailNotification(config: NotificationConfig) {

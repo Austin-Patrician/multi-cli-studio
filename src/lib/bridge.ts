@@ -2,6 +2,9 @@ import { browserRuntime } from "./browserRuntime";
 import {
   AgentId,
   AgentPromptRequest,
+  ApiChatRequest,
+  ApiChatResponse,
+  ApiChatStreamEvent,
   AutomationJob,
   AutomationJobDraft,
   AutomationGoalRuleConfig,
@@ -35,6 +38,8 @@ import {
   GitFileDiff,
   GitPanelData,
   NotificationConfig,
+  ModelProviderConfig,
+  ModelProviderServiceType,
   PersistedTerminalState,
   SemanticMemoryChunk,
   SemanticRecallRequest,
@@ -66,6 +71,12 @@ export interface RuntimeBridge {
   getConversationHistory: (agentId: AgentId) => Promise<ConversationTurn[]>;
   getSettings: () => Promise<AppSettings>;
   updateSettings: (settings: AppSettings) => Promise<AppSettings>;
+  refreshProviderModels: (
+    serviceType: ModelProviderServiceType,
+    providerId: string
+  ) => Promise<ModelProviderConfig>;
+  sendApiChatMessage: (request: ApiChatRequest) => Promise<ApiChatResponse>;
+  onApiChatStream: (listener: (event: ApiChatStreamEvent) => void) => Promise<Unlisten>;
   sendTestEmailNotification: (config: NotificationConfig) => Promise<string>;
   loadTerminalState: () => Promise<PersistedTerminalState | null>;
   saveTerminalState: (state: PersistedTerminalState) => Promise<void>;
@@ -199,6 +210,21 @@ const tauriRuntime: RuntimeBridge = {
   async updateSettings(settings) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AppSettings>("update_settings", { settings });
+  },
+  async refreshProviderModels(serviceType, providerId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<ModelProviderConfig>("refresh_provider_models", { serviceType, providerId });
+  },
+  async sendApiChatMessage(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<ApiChatResponse>("send_api_chat_message", { request });
+  },
+  async onApiChatStream(listener) {
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlisten = await listen<ApiChatStreamEvent>("api-chat-stream", (event) => {
+      listener(event.payload);
+    });
+    return unlisten;
   },
   async sendTestEmailNotification(config) {
     const { invoke } = await import("@tauri-apps/api/core");

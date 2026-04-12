@@ -293,6 +293,23 @@ const IconTerminal = () => (
   </svg>
 );
 
+const IconModelChat = () => (
+  <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5">
+    <path d="M7 8h10M7 12h6m7 8-3.4-2.2H6a3 3 0 01-3-3V7a3 3 0 013-3h12a3 3 0 013 3v10a3 3 0 01-1 2.2Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+const IconProviders = () => (
+  <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5">
+    <rect x="3" y="5" width="18" height="4" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
+    <rect x="3" y="10" width="18" height="4" rx="1.5" stroke="currentColor" strokeWidth="1.5" opacity="0.75" />
+    <rect x="3" y="15" width="18" height="4" rx="1.5" stroke="currentColor" strokeWidth="1.5" opacity="0.5" />
+    <circle cx="8" cy="7" r="1" fill="currentColor" />
+    <circle cx="15" cy="12" r="1" fill="currentColor" />
+    <circle cx="11" cy="17" r="1" fill="currentColor" />
+  </svg>
+);
+
 const IconAutomation = () => (
   <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5">
     <path d="M12 2V6M12 18V22M6 12H2M22 12H18" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -348,6 +365,18 @@ const navItems: SidebarNavItem[] = [
     label: "终端交互",
     icon: IconTerminal,
     matchPatterns: [{ path: "/terminal", end: false }],
+  },
+  {
+    to: "/model-chat",
+    label: "模型对话",
+    icon: IconModelChat,
+    matchPatterns: [{ path: "/model-chat", end: false }],
+  },
+  {
+    to: "/model-providers",
+    label: "模型管理",
+    icon: IconProviders,
+    matchPatterns: [{ path: "/model-providers", end: false }],
   },
   {
     to: "/automation",
