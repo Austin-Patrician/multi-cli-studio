@@ -1,7 +1,10 @@
 import {
   AssistantContentFormat,
+  ApiChatGenerationMeta,
   ApiChatMessage,
+  ApiChatSelection,
   ChatMessageBlock,
+  ModelProviderServiceType,
 } from "./models";
 import {
   detectAssistantContentFormat,
@@ -10,6 +13,10 @@ import {
 
 const THINK_OPEN = "<think>";
 const THINK_CLOSE = "</think>";
+
+function isServiceType(value: unknown): value is ModelProviderServiceType {
+  return value === "openaiCompatible" || value === "claude" || value === "gemini";
+}
 
 export interface ParsedApiAssistantContent {
   rawContent: string;
@@ -39,6 +46,38 @@ function pushReasoningBlock(blocks: ChatMessageBlock[], text: string) {
     kind: "reasoning",
     text: normalized,
   });
+}
+
+export function normalizeApiChatSelection(value: unknown): ApiChatSelection | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<ApiChatSelection>;
+  if (!isServiceType(raw.serviceType)) return null;
+  if (typeof raw.providerId !== "string" || !raw.providerId.trim()) return null;
+  if (typeof raw.modelId !== "string" || !raw.modelId.trim()) return null;
+  return {
+    serviceType: raw.serviceType,
+    providerId: raw.providerId.trim(),
+    modelId: raw.modelId.trim(),
+  };
+}
+
+export function normalizeApiChatGenerationMeta(value: unknown): ApiChatGenerationMeta | null {
+  const selection = normalizeApiChatSelection(value);
+  if (!selection) return null;
+  const raw = value as Partial<ApiChatGenerationMeta>;
+  return {
+    ...selection,
+    providerName:
+      typeof raw.providerName === "string" && raw.providerName.trim()
+        ? raw.providerName.trim()
+        : null,
+    modelLabel:
+      typeof raw.modelLabel === "string" && raw.modelLabel.trim() ? raw.modelLabel.trim() : null,
+    requestedAt:
+      typeof raw.requestedAt === "string" && raw.requestedAt.trim() ? raw.requestedAt : null,
+    completedAt:
+      typeof raw.completedAt === "string" && raw.completedAt.trim() ? raw.completedAt : null,
+  };
 }
 
 export function parseApiAssistantContent(raw: string): ParsedApiAssistantContent {
@@ -85,6 +124,7 @@ export function normalizeApiChatMessage(message: ApiChatMessage): ApiChatMessage
   if (message.role !== "assistant") {
     return {
       ...message,
+      generationMeta: normalizeApiChatGenerationMeta(message.generationMeta),
       rawContent: message.rawContent ?? message.content,
       contentFormat: message.contentFormat ?? null,
       blocks: message.blocks ?? null,
@@ -98,6 +138,7 @@ export function normalizeApiChatMessage(message: ApiChatMessage): ApiChatMessage
   const parsed = parseApiAssistantContent(message.rawContent ?? message.content);
   return {
     ...message,
+    generationMeta: normalizeApiChatGenerationMeta(message.generationMeta),
     rawContent: parsed.rawContent,
     content: parsed.content,
     contentFormat: message.contentFormat ?? parsed.contentFormat,

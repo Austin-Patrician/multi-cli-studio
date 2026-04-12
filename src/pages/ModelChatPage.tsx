@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -9,32 +10,32 @@ import {
 import { flushSync } from "react-dom";
 import { Link } from "react-router-dom";
 import { AssistantMessageContent } from "../components/chat/AssistantMessageContent";
+import { SERVICE_ICONS } from "../components/modelProviders/ui";
 import { bridge } from "../lib/bridge";
 import {
-  ApiChatMessage,
-  ApiChatSession,
-  AppSettings,
-  ChatMessageBlock,
-  ModelProviderServiceType,
-} from "../lib/models";
-import { normalizeApiChatMessage } from "../lib/apiChatFormatting";
+  normalizeApiChatGenerationMeta,
+  normalizeApiChatMessage,
+  normalizeApiChatSelection,
+} from "../lib/apiChatFormatting";
 import {
   getEnabledProviderForServiceType,
   MODEL_PROVIDER_META,
   MODEL_PROVIDER_SERVICE_ORDER,
   normalizeProviderSettings,
 } from "../lib/modelProviders";
-import openaiIcon from "../media/svg/openai.svg";
-import claudeIcon from "../media/svg/claude-color.svg";
-import geminiIcon from "../media/svg/gemini-color.svg";
+import type {
+  ApiChatGenerationMeta,
+  ApiChatMessage,
+  ApiChatSelection,
+  ApiChatSession,
+  AppSettings,
+  ChatMessageBlock,
+  ModelProviderConfig,
+  ModelProviderModel,
+  ModelProviderServiceType,
+} from "../lib/models";
 
 const STORAGE_KEY = "multi-cli-studio::api-chat-sessions";
-
-const SERVICE_ICONS: Record<ModelProviderServiceType, string> = {
-  openaiCompatible: openaiIcon,
-  claude: claudeIcon,
-  gemini: geminiIcon,
-};
 
 type PersistedChatState = {
   activeSessionId: string | null;
@@ -44,7 +45,17 @@ type PersistedChatState = {
 type LiveApiStream = {
   sessionId: string;
   streamId: string;
+  origin: ApiChatGenerationMeta;
   message: ApiChatMessage;
+};
+
+type ResolvedModelOption = {
+  key: string;
+  selection: ApiChatSelection;
+  provider: ModelProviderConfig;
+  model: ModelProviderModel;
+  providerName: string;
+  modelLabel: string;
 };
 
 function cx(...values: Array<string | false | null | undefined>) {
@@ -64,16 +75,143 @@ function truncate(value: string, maxChars = 42) {
   return `${trimmed.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
+function isServiceType(value: unknown): value is ModelProviderServiceType {
+  return value === "openaiCompatible" || value === "claude" || value === "gemini";
+}
+
+function selectionKey(selection: ApiChatSelection) {
+  return `${selection.serviceType}::${selection.providerId}::${selection.modelId}`;
+}
+
 function deriveTitleFromMessages(messages: ApiChatMessage[]) {
   const firstUserMessage = messages.find((message) => message.role === "user")?.content ?? "";
   return firstUserMessage.trim() ? truncate(firstUserMessage, 30) : "New Chat";
 }
 
-function isServiceType(value: unknown): value is ModelProviderServiceType {
-  return value === "openaiCompatible" || value === "claude" || value === "gemini";
+function buildFallbackGenerationMeta(
+  selection: ApiChatSelection | null | undefined
+): ApiChatGenerationMeta | null {
+  if (!selection) return null;
+  return {
+    ...selection,
+    providerName: null,
+    modelLabel: null,
+    requestedAt: null,
+    completedAt: null,
+  };
 }
 
-function normalizePersistedMessage(value: unknown): ApiChatMessage | null {
+function listAvailableModelOptions(settings: AppSettings): ResolvedModelOption[] {
+  const options: ResolvedModelOption[] = [];
+  for (const serviceType of MODEL_PROVIDER_SERVICE_ORDER) {
+    const provider = getEnabledProviderForServiceType(settings, serviceType);
+    if (!provider) continue;
+    for (const model of provider.models) {
+      const selection = {
+        serviceType,
+        providerId: provider.id,
+        modelId: model.id,
+      } satisfies ApiChatSelection;
+      options.push({
+        key: selectionKey(selection),
+        selection,
+        provider,
+        model,
+        providerName: provider.name,
+        modelLabel: model.label?.trim() || model.name,
+      });
+    }
+  }
+  return options;
+}
+
+function getFirstAvailableSelection(settings: AppSettings) {
+  return listAvailableModelOptions(settings)[0]?.selection ?? null;
+}
+
+function syncSelectionWithSettings(
+  selection: ApiChatSelection | null | undefined,
+  settings: AppSettings
+): ApiChatSelection | null {
+  if (!selection) {
+    return getFirstAvailableSelection(settings);
+  }
+  const provider = getEnabledProviderForServiceType(settings, selection.serviceType);
+  if (!provider || provider.models.length === 0) {
+    return getFirstAvailableSelection(settings);
+  }
+  const model = provider.models.find((item) => item.id === selection.modelId) ?? provider.models[0];
+  return {
+    serviceType: selection.serviceType,
+    providerId: provider.id,
+    modelId: model.id,
+  };
+}
+
+function resolveModelOption(
+  settings: AppSettings,
+  selection: ApiChatSelection | null | undefined
+): ResolvedModelOption | null {
+  if (!selection) return null;
+  return (
+    listAvailableModelOptions(settings).find((option) => option.key === selectionKey(selection)) ?? null
+  );
+}
+
+function pickSelectionForServiceType(
+  options: ResolvedModelOption[],
+  serviceType: ModelProviderServiceType,
+  preferredSelection?: ApiChatSelection | null
+) {
+  if (preferredSelection?.serviceType === serviceType) {
+    const preferred = options.find(
+      (option) => option.key === selectionKey(preferredSelection)
+    );
+    if (preferred) {
+      return preferred.selection;
+    }
+  }
+  return options.find((option) => option.selection.serviceType === serviceType)?.selection ?? null;
+}
+
+function hydrateGenerationMeta(
+  settings: AppSettings,
+  value: ApiChatGenerationMeta | null | undefined
+): ApiChatGenerationMeta | null {
+  const meta = normalizeApiChatGenerationMeta(value);
+  if (!meta) return null;
+  const option = resolveModelOption(settings, meta);
+  return {
+    ...meta,
+    providerName: meta.providerName ?? option?.providerName ?? null,
+    modelLabel: meta.modelLabel ?? option?.modelLabel ?? meta.modelId,
+  };
+}
+
+function resolveLegacySelection(value: Partial<ApiChatSession>, settings: AppSettings) {
+  const serviceType = isServiceType((value as { serviceType?: unknown }).serviceType)
+    ? (value as { serviceType: ModelProviderServiceType }).serviceType
+    : null;
+  if (!serviceType) return null;
+  const provider = getEnabledProviderForServiceType(settings, serviceType);
+  const providerId =
+    typeof (value as { providerId?: unknown }).providerId === "string" &&
+    (value as { providerId: string }).providerId.trim()
+      ? (value as { providerId: string }).providerId.trim()
+      : provider?.id ?? "";
+  const modelId =
+    typeof (value as { modelId?: unknown }).modelId === "string" &&
+    (value as { modelId: string }).modelId.trim()
+      ? (value as { modelId: string }).modelId.trim()
+      : provider?.models[0]?.id ?? "";
+  if (!providerId || !modelId) return null;
+  return syncSelectionWithSettings({ serviceType, providerId, modelId }, settings);
+}
+
+function normalizePersistedMessage(
+  value: unknown,
+  fallbackSelection: ApiChatSelection | null
+): ApiChatMessage | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Partial<ApiChatMessage>;
   if (raw.role !== "user" && raw.role !== "assistant" && raw.role !== "system") return null;
@@ -87,6 +225,9 @@ function normalizePersistedMessage(value: unknown): ApiChatMessage | null {
         ? raw.timestamp
         : new Date().toISOString(),
     error: raw.error === true,
+    generationMeta:
+      normalizeApiChatGenerationMeta(raw.generationMeta) ??
+      buildFallbackGenerationMeta(fallbackSelection),
     rawContent: typeof raw.rawContent === "string" ? raw.rawContent : null,
     contentFormat:
       raw.contentFormat === "plain" || raw.contentFormat === "markdown" || raw.contentFormat === "log"
@@ -100,74 +241,62 @@ function normalizePersistedMessage(value: unknown): ApiChatMessage | null {
   });
 }
 
+function syncSessionWithSettings(session: ApiChatSession, settings: AppSettings): ApiChatSession {
+  return {
+    ...session,
+    defaultSelection: syncSelectionWithSettings(session.defaultSelection, settings),
+  };
+}
+
 function normalizePersistedSession(
   value: unknown,
   settings: AppSettings
 ): ApiChatSession | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Partial<ApiChatSession>;
-  const serviceType = isServiceType(raw.serviceType) ? raw.serviceType : "openaiCompatible";
-  const messages = Array.isArray(raw.messages)
-    ? raw.messages
-        .map((message) => normalizePersistedMessage(message))
-        .filter(Boolean) as ApiChatMessage[]
-    : [];
-  return syncSessionWithSettings(
-    {
-      id: typeof raw.id === "string" && raw.id.trim() ? raw.id : createId("api-session"),
-      title:
-        typeof raw.title === "string" && raw.title.trim()
-          ? raw.title
-          : deriveTitleFromMessages(messages),
-      serviceType,
-      providerId: typeof raw.providerId === "string" ? raw.providerId : null,
-      modelId: typeof raw.modelId === "string" ? raw.modelId : null,
-      messages,
-      createdAt:
-        typeof raw.createdAt === "string" && raw.createdAt.trim()
-          ? raw.createdAt
-          : new Date().toISOString(),
-      updatedAt:
-        typeof raw.updatedAt === "string" && raw.updatedAt.trim()
-          ? raw.updatedAt
-          : new Date().toISOString(),
-    },
+  const legacySelection = resolveLegacySelection(raw, settings);
+  const defaultSelection = syncSelectionWithSettings(
+    normalizeApiChatSelection((raw as { defaultSelection?: unknown }).defaultSelection) ??
+      legacySelection,
     settings
   );
-}
+  const messages = Array.isArray(raw.messages)
+    ? raw.messages
+        .map((message) => normalizePersistedMessage(message, legacySelection ?? defaultSelection))
+        .filter(Boolean) as ApiChatMessage[]
+    : [];
 
-function syncSessionWithSettings(
-  session: ApiChatSession,
-  settings: AppSettings
-): ApiChatSession {
-  const provider = getEnabledProviderForServiceType(settings, session.serviceType);
-  const modelId = provider?.models.some((model) => model.id === session.modelId)
-    ? session.modelId
-    : provider?.models[0]?.id ?? null;
   return {
-    ...session,
-    providerId: provider?.id ?? null,
-    modelId,
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id : createId("api-session"),
+    title:
+      typeof raw.title === "string" && raw.title.trim()
+        ? raw.title
+        : deriveTitleFromMessages(messages),
+    defaultSelection,
+    messages,
+    createdAt:
+      typeof raw.createdAt === "string" && raw.createdAt.trim()
+        ? raw.createdAt
+        : new Date().toISOString(),
+    updatedAt:
+      typeof raw.updatedAt === "string" && raw.updatedAt.trim()
+        ? raw.updatedAt
+        : new Date().toISOString(),
   };
 }
 
 function createSession(
   settings: AppSettings,
-  serviceType: ModelProviderServiceType = "openaiCompatible"
+  preferredSelection?: ApiChatSelection | null
 ): ApiChatSession {
-  return syncSessionWithSettings(
-    {
-      id: createId("api-session"),
-      title: "New Chat",
-      serviceType,
-      providerId: null,
-      modelId: null,
-      messages: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    },
-    settings
-  );
+  return {
+    id: createId("api-session"),
+    title: "New Chat",
+    defaultSelection: syncSelectionWithSettings(preferredSelection, settings),
+    messages: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function loadPersistedChatState(settings: AppSettings): PersistedChatState {
@@ -219,16 +348,43 @@ function formatSessionTimestamp(timestamp: string) {
   }).format(date);
 }
 
-function getSessionPreview(session: ApiChatSession, providerName: string | null) {
+function getSessionAnchorMeta(session: ApiChatSession) {
+  const lastTaggedMessage = [...session.messages]
+    .reverse()
+    .find((message) => normalizeApiChatGenerationMeta(message.generationMeta));
+  return normalizeApiChatGenerationMeta(lastTaggedMessage?.generationMeta) ??
+    buildFallbackGenerationMeta(session.defaultSelection) ??
+    null;
+}
+
+function getSessionPreview(session: ApiChatSession, settings: AppSettings) {
   const previewMessage = [...session.messages]
     .reverse()
-    .find((message) => message.role !== "system" && message.content.trim());
+    .find((message) => message.role !== "system" && normalizeApiChatMessage(message).content.trim());
   if (previewMessage) {
     return truncate(normalizeApiChatMessage(previewMessage).content.replace(/\s+/g, " "), 58);
   }
-  return providerName
-    ? `${providerName} · ${session.modelId ?? "未选择模型"}`
+  const origin = hydrateGenerationMeta(settings, getSessionAnchorMeta(session));
+  return origin
+    ? `${origin.providerName ?? MODEL_PROVIDER_META[origin.serviceType].shortLabel} · ${origin.modelLabel ?? origin.modelId}`
     : "等待第一条消息";
+}
+
+function buildReplayHistory(messages: ApiChatMessage[]) {
+  return messages
+    .map((message) => {
+      const normalized = normalizeApiChatMessage(message);
+      if (normalized.error) return null;
+      const content = normalized.content.trim();
+      if (!content) return null;
+      return {
+        id: normalized.id,
+        role: normalized.role,
+        content,
+        timestamp: normalized.timestamp,
+      } satisfies ApiChatMessage;
+    })
+    .filter(Boolean) as ApiChatMessage[];
 }
 
 function SidebarPrimaryButton({
@@ -242,7 +398,7 @@ function SidebarPrimaryButton({
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-[#151515] px-4 py-3 text-sm font-medium text-white transition-all hover:-translate-y-[1px] hover:bg-black"
+      className="inline-flex w-full items-center justify-center gap-2 rounded-[12px] bg-[#151515] px-4 py-3 text-sm font-medium text-white transition-all hover:-translate-y-[1px] hover:bg-black"
     >
       {children}
     </button>
@@ -260,7 +416,7 @@ function SidebarGhostButton({
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium text-slate-600 transition-all hover:bg-white hover:text-slate-900"
+      className="inline-flex items-center gap-2 rounded-[12px] px-3 py-2 text-sm font-medium text-slate-600 transition-all hover:bg-white hover:text-slate-900"
     >
       {children}
     </button>
@@ -282,7 +438,7 @@ function HeaderIconButton({
       title={title}
       aria-label={title}
       onClick={onClick}
-      className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
+      className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
     >
       {children}
     </button>
@@ -412,6 +568,38 @@ function TokenIcon() {
   );
 }
 
+function ChevronIcon({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      className={cx("h-4 w-4 transition-transform", expanded && "rotate-180")}
+    >
+      <path
+        d="M7 10l5 5 5-5"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+      <path
+        d="M6.5 12.5l3.3 3.3L17.5 8"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function formatDuration(value?: number | null) {
   if (!value || !Number.isFinite(value) || value <= 0) return null;
   if (value < 1000) return `${Math.round(value)}ms`;
@@ -428,7 +616,11 @@ function formatTokenUsage(message: ApiChatMessage) {
   const prompt = message.promptTokens ?? null;
   const completion = message.completionTokens ?? null;
   if (total == null && prompt == null && completion == null) return null;
-  const display = total ?? [prompt, completion].filter((value) => value != null).reduce((sum, value) => sum + (value ?? 0), 0);
+  const display =
+    total ??
+    [prompt, completion]
+      .filter((value) => value != null)
+      .reduce((sum, value) => sum + (value ?? 0), 0);
   const title =
     prompt != null || completion != null
       ? `Prompt ${prompt ?? 0} · Completion ${completion ?? 0} · Total ${display}`
@@ -451,7 +643,7 @@ function MessageMetaPill({
   return (
     <div
       title={title}
-      className="inline-flex items-center gap-1.5 rounded-full bg-[#f4f4f1] px-2.5 py-1 text-[11px] font-medium text-slate-500"
+      className="inline-flex items-center gap-1.5 rounded-[12px] bg-[#f4f4f1] px-2.5 py-1 text-[11px] font-medium text-slate-500"
     >
       <span className="text-slate-400">{icon}</span>
       <span>{text}</span>
@@ -474,28 +666,10 @@ function MessageActionIconButton({
       title={title}
       aria-label={title}
       onClick={onClick}
-      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400 transition-all hover:border-slate-300 hover:text-slate-700"
+      className="inline-flex h-8 w-8 items-center justify-center rounded-[12px] border border-slate-200 bg-white text-slate-400 transition-all hover:border-slate-300 hover:text-slate-700"
     >
       {children}
     </button>
-  );
-}
-
-function ChevronIcon({ expanded }: { expanded: boolean }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      className={cx("h-4 w-4 transition-transform", expanded && "rotate-180")}
-    >
-      <path
-        d="M7 10l5 5 5-5"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
   );
 }
 
@@ -513,19 +687,20 @@ function ApiReasoningBlock({
   }, [isStreaming, text]);
 
   return (
-    <div className="rounded-[24px] border border-amber-200/80 bg-[linear-gradient(180deg,#fffdf7_0%,#fff9eb_100%)] px-4 py-3.5 shadow-[0_12px_30px_rgba(120,53,15,0.05)]">
+    <div className="rounded-[12px] border border-amber-200/80 bg-[linear-gradient(180deg,#fffdf7_0%,#fff9eb_100%)] px-4 py-3.5 shadow-[0_12px_30px_rgba(120,53,15,0.05)]">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-700">
-          <span className="inline-flex h-2 w-2 rounded-full bg-amber-400" />
+          <span className="inline-flex h-2 w-2 rounded-[12px] bg-amber-400" />
           Reasoning
         </div>
         {showToggle ? (
           <button
             type="button"
             onClick={() => setExpanded((value) => !value)}
-            className="inline-flex h-7 items-center gap-1 rounded-full border border-amber-200 bg-white/80 px-2.5 text-[11px] font-medium text-amber-700 transition-all hover:bg-white"
+            title={expanded ? "收起推理" : "展开推理"}
+            aria-label={expanded ? "收起推理" : "展开推理"}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-[12px] border border-amber-200 bg-white/80 text-amber-700 transition-all hover:bg-white"
           >
-            {expanded ? "收起" : "展开"}
             <ChevronIcon expanded={expanded} />
           </button>
         ) : null}
@@ -538,7 +713,259 @@ function ApiReasoningBlock({
       >
         {text}
         {isStreaming ? (
-          <span className="ml-1 inline-block h-3.5 w-1.5 animate-pulse rounded-full bg-amber-500 align-[-2px]" />
+          <span className="ml-1 inline-block h-3.5 w-1.5 animate-pulse rounded-[12px] bg-amber-500 align-[-2px]" />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function MessageOriginPill({ origin }: { origin: ApiChatGenerationMeta }) {
+  return (
+    <div className="inline-flex items-center gap-2 rounded-[12px] border border-[#e7e1d6] bg-[#f8f5ee] px-3 py-1.5 text-[11px] font-medium text-slate-600">
+      <img
+        src={SERVICE_ICONS[origin.serviceType]}
+        alt=""
+        className="h-3.5 w-3.5 shrink-0 object-contain"
+      />
+      <span>{origin.providerName ?? MODEL_PROVIDER_META[origin.serviceType].shortLabel}</span>
+      <span className="text-slate-300">/</span>
+      <span>{origin.modelLabel ?? origin.modelId}</span>
+    </div>
+  );
+}
+
+function ServiceTypeSwitch({
+  serviceType,
+  active,
+  disabled,
+  onClick,
+}: {
+  serviceType: ModelProviderServiceType;
+  active: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={MODEL_PROVIDER_META[serviceType].label}
+      aria-label={MODEL_PROVIDER_META[serviceType].label}
+      disabled={disabled}
+      onClick={onClick}
+      className={cx(
+        "inline-flex h-8 w-8 items-center justify-center rounded-[12px] border transition-all disabled:cursor-not-allowed disabled:opacity-45",
+        active
+          ? "border-white bg-white text-slate-900 shadow-[0_8px_20px_rgba(15,23,42,0.10)]"
+          : "border-transparent bg-transparent text-slate-500 hover:bg-white/70 hover:text-slate-800"
+      )}
+    >
+      <img
+        src={SERVICE_ICONS[serviceType]}
+        alt=""
+        className="h-4 w-4 shrink-0 object-contain"
+      />
+    </button>
+  );
+}
+
+function ModelSelectionControl({
+  optionGroups,
+  activeSelection,
+  activeSelectionOrigin,
+  onSelectServiceType,
+  onSelectModel,
+  className,
+}: {
+  optionGroups: Array<{
+    serviceType: ModelProviderServiceType;
+    options: ResolvedModelOption[];
+  }>;
+  activeSelection: ApiChatSelection | null;
+  activeSelectionOrigin: ApiChatGenerationMeta | null;
+  onSelectServiceType: (serviceType: ModelProviderServiceType) => void;
+  onSelectModel: (selection: ApiChatSelection) => void;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const activeServiceType = activeSelection?.serviceType ?? optionGroups[0]?.serviceType ?? null;
+  const activeGroup =
+    optionGroups.find((group) => group.serviceType === activeServiceType) ?? optionGroups[0] ?? null;
+  const activeServiceModels = activeGroup?.options ?? [];
+  const activeOption =
+    activeServiceModels.find(
+      (option) => activeSelection && option.key === selectionKey(activeSelection)
+    ) ?? activeServiceModels[0] ?? null;
+
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      if (!containerRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    if (!open) return;
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    setOpen(false);
+  }, [activeSelection?.serviceType, activeSelection?.providerId, activeSelection?.modelId]);
+
+  return (
+    <div
+      ref={containerRef}
+      className={cx(
+        "relative flex items-center gap-2 rounded-[12px] border border-[#e7e1d5] bg-[linear-gradient(180deg,#fffdfa_0%,#f8f4eb_100%)] p-2 shadow-[0_10px_30px_rgba(15,23,42,0.06)]",
+        className
+      )}
+    >
+      <div className="flex shrink-0 items-center gap-1 rounded-[12px] border border-[#ebe5da] bg-white/90 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.92)]">
+        {MODEL_PROVIDER_SERVICE_ORDER.map((serviceType) => (
+          <ServiceTypeSwitch
+            key={serviceType}
+            serviceType={serviceType}
+            active={activeSelection?.serviceType === serviceType}
+            disabled={!optionGroups.some((group) => group.serviceType === serviceType)}
+            onClick={() => onSelectServiceType(serviceType)}
+          />
+        ))}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        disabled={!activeGroup || activeServiceModels.length === 0}
+        className={cx(
+          "group flex min-w-0 flex-1 items-center gap-3 rounded-[12px] border border-[#ebe4d8] bg-white/88 px-3 py-2 text-left transition-all",
+          "hover:border-[#ddd4c5] hover:bg-white",
+          "disabled:cursor-not-allowed disabled:opacity-45"
+        )}
+        title={activeOption ? `${activeOption.providerName} / ${activeOption.modelLabel}` : "No models"}
+        aria-label={activeOption ? `${activeOption.providerName} / ${activeOption.modelLabel}` : "No models"}
+      >
+        {activeSelectionOrigin ? (
+          <img
+            src={SERVICE_ICONS[activeSelectionOrigin.serviceType]}
+            alt=""
+            className="h-4.5 w-4.5 shrink-0 object-contain"
+          />
+        ) : (
+          <div className="h-4.5 w-4.5 shrink-0 rounded-[12px] bg-slate-200" />
+        )}
+
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+            {activeOption?.providerName ?? "No provider"}
+          </div>
+          <div className="truncate text-[13px] font-semibold text-slate-800">
+            {activeOption?.modelLabel ?? "No models"}
+          </div>
+        </div>
+
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[12px] bg-[#f7f4ed] text-slate-500 transition-all group-hover:bg-[#f2eee5] group-hover:text-slate-800">
+          <ChevronIcon expanded={open} />
+        </div>
+      </button>
+
+      {open && activeGroup ? (
+        <div className="absolute left-2 right-2 top-[calc(100%+10px)] z-30 overflow-hidden rounded-[12px] border border-[#e5ddcf] bg-[linear-gradient(180deg,#fffdf9_0%,#faf6ef_100%)] shadow-[0_24px_60px_rgba(15,23,42,0.14)]">
+          <div className="border-b border-[#ece4d7] px-4 py-3">
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              <img
+                src={SERVICE_ICONS[activeGroup.serviceType]}
+                alt=""
+                className="h-4 w-4 object-contain"
+              />
+              <span>{MODEL_PROVIDER_META[activeGroup.serviceType].label}</span>
+            </div>
+          </div>
+          <div className="max-h-[280px] overflow-y-auto p-2">
+            {activeGroup.options.map((option) => {
+              const selected = activeSelection
+                ? option.key === selectionKey(activeSelection)
+                : false;
+              return (
+                <button
+                  key={option.key}
+                  type="button"
+                  onClick={() => {
+                    onSelectModel(option.selection);
+                    setOpen(false);
+                  }}
+                  className={cx(
+                    "flex w-full items-center gap-3 rounded-[12px] px-3 py-3 text-left transition-all",
+                    selected
+                      ? "bg-white text-slate-900 shadow-[0_10px_24px_rgba(15,23,42,0.08)]"
+                      : "text-slate-600 hover:bg-white/82 hover:text-slate-900"
+                  )}
+                >
+                  <div
+                    className={cx(
+                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] border",
+                      selected
+                        ? "border-slate-900 bg-slate-900 text-white"
+                        : "border-[#e6dfd3] bg-[#f6f2ea] text-slate-500"
+                    )}
+                  >
+                    {selected ? <CheckIcon /> : <img src={SERVICE_ICONS[option.selection.serviceType]} alt="" className="h-4 w-4 object-contain" />}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px] font-semibold text-current">
+                      {option.modelLabel}
+                    </div>
+                    <div className="truncate text-[11px] text-slate-400">
+                      {option.providerName}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function UserMessageBubble({
+  message,
+  origin,
+  onCopy,
+  onDelete,
+}: {
+  message: ApiChatMessage;
+  origin: ApiChatGenerationMeta | null;
+  onCopy?: () => void;
+  onDelete?: () => void;
+}) {
+  return (
+    <div className="flex justify-end">
+      <div className="flex max-w-[78%] flex-col items-end">
+        {origin ? (
+          <div className="mb-2 flex justify-end">
+            <MessageOriginPill origin={origin} />
+          </div>
+        ) : null}
+        <div className="inline-block max-w-full rounded-[12px] bg-white px-4 py-2.5 text-[15px] leading-6 text-slate-800 shadow-[0_10px_32px_rgba(15,23,42,0.06)] ring-1 ring-black/5 whitespace-pre-wrap break-words">
+          {message.content}
+        </div>
+        {onCopy || onDelete ? (
+          <div className="flex flex-wrap items-center gap-2 pt-2">
+            {onCopy ? (
+              <MessageActionIconButton title="复制消息" onClick={onCopy}>
+                <CopyIcon />
+              </MessageActionIconButton>
+            ) : null}
+            {onDelete ? (
+              <MessageActionIconButton title="删除消息" onClick={onDelete}>
+                <TrashIcon />
+              </MessageActionIconButton>
+            ) : null}
+          </div>
         ) : null}
       </div>
     </div>
@@ -547,18 +974,16 @@ function ApiReasoningBlock({
 
 function ApiAssistantBlocks({
   message,
-  serviceType,
-  providerName,
-  modelId,
+  origin,
   isStreaming,
+  onRegenerate,
   onCopy,
   onDelete,
 }: {
   message: ApiChatMessage;
-  serviceType: ModelProviderServiceType;
-  providerName: string;
-  modelId: string | null;
+  origin: ApiChatGenerationMeta | null;
   isStreaming: boolean;
+  onRegenerate?: () => void;
   onCopy?: () => void;
   onDelete?: () => void;
 }) {
@@ -580,18 +1005,20 @@ function ApiAssistantBlocks({
 
   return (
     <div className="w-full max-w-[860px]">
-      <div className="mb-4 flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">
-        <img src={SERVICE_ICONS[serviceType]} alt="" className="h-4 w-4 object-contain" />
-        <span>{providerName}</span>
-        <span className="text-slate-300">·</span>
-        <span>{modelId ?? "未选择模型"}</span>
-        {isStreaming ? (
-          <>
-            <span className="text-slate-300">·</span>
-            <span className="text-sky-600">Streaming</span>
-          </>
-        ) : null}
-      </div>
+      {origin ? (
+        <div className="mb-4 flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">
+          <img src={SERVICE_ICONS[origin.serviceType]} alt="" className="h-4 w-4 object-contain" />
+          <span>{origin.providerName ?? MODEL_PROVIDER_META[origin.serviceType].shortLabel}</span>
+          <span className="text-slate-300">·</span>
+          <span>{origin.modelLabel ?? origin.modelId}</span>
+          {isStreaming ? (
+            <>
+              <span className="text-slate-300">·</span>
+              <span className="text-sky-600">Streaming</span>
+            </>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="space-y-4">
         {blocks.map((block, index) => {
@@ -612,7 +1039,7 @@ function ApiAssistantBlocks({
                 className={cx(
                   "text-[15px] leading-8 text-slate-800",
                   message.error &&
-                    "rounded-[28px] border border-rose-200 bg-rose-50 px-5 py-4 text-rose-700"
+                    "rounded-[12px] border border-rose-200 bg-rose-50 px-5 py-4 text-rose-700"
                 )}
               >
                 <AssistantMessageContent
@@ -630,7 +1057,7 @@ function ApiAssistantBlocks({
         })}
 
         {blocks.length === 0 && isStreaming ? (
-          <div className="rounded-[24px] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 shadow-sm ring-1 ring-black/5">
+          <div className="rounded-[12px] border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 shadow-sm ring-1 ring-black/5">
             Thinking…
           </div>
         ) : null}
@@ -646,6 +1073,11 @@ function ApiAssistantBlocks({
                 text={tokenUsage.display}
                 title={tokenUsage.title}
               />
+            ) : null}
+            {onRegenerate ? (
+              <MessageActionIconButton title="重新生成" onClick={onRegenerate}>
+                <RefreshIcon />
+              </MessageActionIconButton>
             ) : null}
             {onCopy ? (
               <MessageActionIconButton title="复制消息" onClick={onCopy}>
@@ -709,31 +1141,33 @@ export function ModelChatPage() {
   useEffect(() => {
     let cancelled = false;
     let unlisten = () => {};
-    bridge.onApiChatStream((event) => {
-      if (cancelled) return;
-      setLiveStream((current) => {
-        if (!current || current.streamId !== event.streamId) {
-          return current;
-        }
-        return {
-          ...current,
-          message: normalizeApiChatMessage({
-            ...current.message,
-            id: event.messageId || current.message.id,
-            content: event.content ?? current.message.content,
-            rawContent: event.rawContent ?? current.message.rawContent ?? current.message.content,
-            contentFormat: event.contentFormat ?? current.message.contentFormat ?? null,
-            blocks: event.blocks ?? current.message.blocks ?? null,
-            durationMs: event.durationMs ?? current.message.durationMs ?? null,
-            promptTokens: event.promptTokens ?? current.message.promptTokens ?? null,
-            completionTokens: event.completionTokens ?? current.message.completionTokens ?? null,
-            totalTokens: event.totalTokens ?? current.message.totalTokens ?? null,
-          }),
-        };
+    bridge
+      .onApiChatStream((event) => {
+        if (cancelled) return;
+        setLiveStream((current) => {
+          if (!current || current.streamId !== event.streamId) {
+            return current;
+          }
+          return {
+            ...current,
+            message: normalizeApiChatMessage({
+              ...current.message,
+              id: event.messageId || current.message.id,
+              content: event.content ?? current.message.content,
+              rawContent: event.rawContent ?? current.message.rawContent ?? current.message.content,
+              contentFormat: event.contentFormat ?? current.message.contentFormat ?? null,
+              blocks: event.blocks ?? current.message.blocks ?? null,
+              durationMs: event.durationMs ?? current.message.durationMs ?? null,
+              promptTokens: event.promptTokens ?? current.message.promptTokens ?? null,
+              completionTokens: event.completionTokens ?? current.message.completionTokens ?? null,
+              totalTokens: event.totalTokens ?? current.message.totalTokens ?? null,
+            }),
+          };
+        });
+      })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
       });
-    }).then((nextUnlisten) => {
-      unlisten = nextUnlisten;
-    });
 
     return () => {
       cancelled = true;
@@ -748,18 +1182,52 @@ export function ModelChatPage() {
     });
   }, [sessions, activeSessionId, loading, liveStream]);
 
+  useEffect(() => {
+    if (!statusText) return;
+    const timer = window.setTimeout(() => {
+      setStatusText((current) => (current === statusText ? null : current));
+    }, 3000);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [statusText]);
+
   const activeSession =
     sessions.find((session) => session.id === activeSessionId) ?? sessions[0] ?? null;
-  const activeProvider =
-    settings && activeSession
-      ? getEnabledProviderForServiceType(settings, activeSession.serviceType)
-      : null;
-  const availableModels = activeProvider?.models ?? [];
+  const availableOptions = useMemo(
+    () => (settings ? listAvailableModelOptions(settings) : []),
+    [settings]
+  );
+  const optionGroups = useMemo(
+    () =>
+      MODEL_PROVIDER_SERVICE_ORDER.map((serviceType) => ({
+        serviceType,
+        options: availableOptions.filter((option) => option.selection.serviceType === serviceType),
+      })).filter((group) => group.options.length > 0),
+    [availableOptions]
+  );
   const activeDraft = activeSession ? composerDrafts[activeSession.id] ?? "" : "";
+  const activeSelection =
+    settings && activeSession
+      ? syncSelectionWithSettings(activeSession.defaultSelection, settings)
+      : null;
+  const activeSelectionOption =
+    settings && activeSelection ? resolveModelOption(settings, activeSelection) : null;
+  const activeSelectionOrigin =
+    settings && activeSelection
+      ? hydrateGenerationMeta(settings, {
+          ...activeSelection,
+          providerName: activeSelectionOption?.providerName ?? null,
+          modelLabel: activeSelectionOption?.modelLabel ?? null,
+          requestedAt: null,
+          completedAt: null,
+        })
+      : null;
   const activeStreamMessage =
     liveStream && activeSession && liveStream.sessionId === activeSession.id
       ? liveStream.message
       : null;
+  const anyProviderEnabled = availableOptions.length > 0;
 
   useEffect(() => {
     const node = composerRef.current;
@@ -777,18 +1245,52 @@ export function ModelChatPage() {
     );
   }
 
-  function selectServiceType(serviceType: ModelProviderServiceType) {
-    if (!activeSession || !settings) return;
-    const provider = getEnabledProviderForServiceType(settings, serviceType);
+  function deleteMessage(sessionId: string, messageId: string) {
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              messages: session.messages.filter((message) => message.id !== messageId),
+              updatedAt: new Date().toISOString(),
+            }
+          : session
+      )
+    );
+    setStatusText("消息已删除。");
+    setErrorText(null);
+  }
+
+  async function copyMessage(message: ApiChatMessage) {
+    try {
+      await navigator.clipboard.writeText(normalizeApiChatMessage(message).content);
+      setStatusText("消息已复制。");
+      setErrorText(null);
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : "复制消息失败。");
+    }
+  }
+
+  function selectModel(selection: ApiChatSelection) {
+    if (!activeSession) return;
     updateSession(activeSession.id, (session) => ({
       ...session,
-      serviceType,
-      providerId: provider?.id ?? null,
-      modelId: provider?.models[0]?.id ?? null,
+      defaultSelection: selection,
       updatedAt: new Date().toISOString(),
     }));
     setStatusText(null);
     setErrorText(null);
+  }
+
+  function selectServiceType(serviceType: ModelProviderServiceType) {
+    const nextSelection = pickSelectionForServiceType(
+      availableOptions,
+      serviceType,
+      activeSelection
+    );
+    if (nextSelection) {
+      selectModel(nextSelection);
+    }
   }
 
   async function refreshSettings() {
@@ -806,12 +1308,9 @@ export function ModelChatPage() {
     }
   }
 
-  function createChatSession(serviceType?: ModelProviderServiceType) {
+  function createChatSession() {
     if (!settings) return;
-    const session = createSession(
-      settings,
-      serviceType ?? activeSession?.serviceType ?? "openaiCompatible"
-    );
+    const session = createSession(settings, activeSession?.defaultSelection ?? activeSelection);
     setSessions((current) => [session, ...current]);
     setActiveSessionId(session.id);
     setComposerDrafts((current) => ({ ...current, [session.id]: "" }));
@@ -823,7 +1322,7 @@ export function ModelChatPage() {
     setSessions((current) => {
       const nextSessions = current.filter((session) => session.id !== sessionId);
       if (nextSessions.length === 0 && settings) {
-        const session = createSession(settings);
+        const session = createSession(settings, activeSelection);
         setActiveSessionId(session.id);
         return [session];
       }
@@ -840,70 +1339,47 @@ export function ModelChatPage() {
     setLiveStream((current) => (current?.sessionId === sessionId ? null : current));
   }
 
-  function deleteAssistantMessage(sessionId: string, messageId: string) {
-    setSessions((current) =>
-      current.map((session) =>
-        session.id === sessionId
-          ? {
-              ...session,
-              messages: session.messages.filter((message) => message.id !== messageId),
-              updatedAt: new Date().toISOString(),
-            }
-          : session
-      )
-    );
-    setStatusText("消息已删除。");
-    setErrorText(null);
-  }
-
-  async function copyAssistantMessage(message: ApiChatMessage) {
-    try {
-      await navigator.clipboard.writeText(normalizeApiChatMessage(message).content);
-      setStatusText("消息已复制。");
-      setErrorText(null);
-    } catch (error) {
-      setErrorText(error instanceof Error ? error.message : "复制消息失败。");
-    }
-  }
-
-  async function sendMessage() {
-    if (!settings || !activeSession || !activeProvider) return;
-    const content = activeDraft.trim();
-    if (!content || !activeSession.modelId) return;
+  async function requestAssistantResponse({
+    session,
+    selection,
+    origin,
+    persistedMessages,
+    requestMessages,
+    title,
+    successStatusText,
+  }: {
+    session: ApiChatSession;
+    selection: ApiChatSelection;
+    origin: ApiChatGenerationMeta;
+    persistedMessages: ApiChatMessage[];
+    requestMessages: ApiChatMessage[];
+    title: string;
+    successStatusText?: string | null;
+  }) {
+    if (loading) return;
     const streamId = createId("api-stream");
-
-    const userMessage: ApiChatMessage = {
-      id: createId("api-user"),
-      role: "user",
-      content,
-      timestamp: new Date().toISOString(),
-    };
-
-    const nextMessages = [...activeSession.messages, userMessage];
-    const nextTitle =
-      activeSession.messages.length === 0 && activeSession.title === "New Chat"
-        ? deriveTitleFromMessages(nextMessages)
-        : activeSession.title;
+    const requestedAt = new Date().toISOString();
 
     flushSync(() => {
-      updateSession(activeSession.id, (session) => ({
-        ...session,
-        title: nextTitle,
-        providerId: activeProvider.id,
-        messages: nextMessages,
+      updateSession(session.id, (currentSession) => ({
+        ...currentSession,
+        title,
+        defaultSelection: selection,
+        messages: persistedMessages,
         updatedAt: new Date().toISOString(),
       }));
-      setComposerDrafts((current) => ({ ...current, [activeSession.id]: "" }));
       setLoading(true);
       setLiveStream({
-        sessionId: activeSession.id,
+        sessionId: session.id,
         streamId,
+        origin,
         message: {
           id: createId("api-msg"),
           role: "assistant",
           content: "",
           rawContent: "",
-          timestamp: new Date().toISOString(),
+          timestamp: requestedAt,
+          generationMeta: origin,
           blocks: [],
           durationMs: null,
           promptTokens: null,
@@ -921,33 +1397,49 @@ export function ModelChatPage() {
 
     try {
       const response = await bridge.sendApiChatMessage({
-        serviceType: activeSession.serviceType,
-        providerId: activeProvider.id,
-        modelId: activeSession.modelId,
-        messages: nextMessages,
+        selection,
+        messages: requestMessages,
         streamId,
       });
-      const normalizedMessage = normalizeApiChatMessage(response.message);
-      updateSession(activeSession.id, (session) => ({
-        ...session,
-        messages: [...nextMessages, normalizedMessage],
+      const normalizedMessage = normalizeApiChatMessage({
+        ...response.message,
+        generationMeta:
+          normalizeApiChatGenerationMeta(response.message.generationMeta) ?? {
+            ...origin,
+            completedAt: new Date().toISOString(),
+          },
+      });
+      updateSession(session.id, (currentSession) => ({
+        ...currentSession,
+        title,
+        defaultSelection: selection,
+        messages: [...persistedMessages, normalizedMessage],
         updatedAt: new Date().toISOString(),
       }));
       setLiveStream((current) => (current?.streamId === streamId ? null : current));
+      if (successStatusText) {
+        setStatusText(successStatusText);
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "模型响应失败，请检查 provider 配置。";
-      const errorMessage: ApiChatMessage = {
+      const errorMessage = normalizeApiChatMessage({
         id: createId("api-error"),
         role: "assistant",
         content: message,
         rawContent: message,
         timestamp: new Date().toISOString(),
         error: true,
-      };
-      updateSession(activeSession.id, (session) => ({
-        ...session,
-        messages: [...nextMessages, normalizeApiChatMessage(errorMessage)],
+        generationMeta: {
+          ...origin,
+          completedAt: new Date().toISOString(),
+        },
+      });
+      updateSession(session.id, (currentSession) => ({
+        ...currentSession,
+        title,
+        defaultSelection: selection,
+        messages: [...persistedMessages, errorMessage],
         updatedAt: new Date().toISOString(),
       }));
       setLiveStream((current) => (current?.streamId === streamId ? null : current));
@@ -955,6 +1447,90 @@ export function ModelChatPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function sendMessage() {
+    if (!settings || !activeSession || !activeSelection || !activeSelectionOption || loading) return;
+    const content = activeDraft.trim();
+    if (!content) return;
+    const requestedAt = new Date().toISOString();
+
+    const origin: ApiChatGenerationMeta = {
+      ...activeSelection,
+      providerName: activeSelectionOption.providerName,
+      modelLabel: activeSelectionOption.modelLabel,
+      requestedAt,
+      completedAt: null,
+    };
+
+    const userMessage: ApiChatMessage = {
+      id: createId("api-user"),
+      role: "user",
+      content,
+      timestamp: requestedAt,
+      generationMeta: origin,
+    };
+
+    const nextMessages = [...activeSession.messages, userMessage];
+    const requestMessages = buildReplayHistory(nextMessages);
+    const nextTitle =
+      activeSession.messages.length === 0 && activeSession.title === "New Chat"
+        ? deriveTitleFromMessages(nextMessages)
+        : activeSession.title;
+
+    setComposerDrafts((current) => ({ ...current, [activeSession.id]: "" }));
+    await requestAssistantResponse({
+      session: activeSession,
+      selection: activeSelection,
+      origin,
+      persistedMessages: nextMessages,
+      requestMessages,
+      title: nextTitle,
+    });
+  }
+
+  function canRegenerateAssistantMessage(session: ApiChatSession, messageId: string) {
+    if (loading || activeStreamMessage) return false;
+    const index = session.messages.findIndex((message) => message.id === messageId);
+    if (index === -1) return false;
+    const target = session.messages[index];
+    if (target.role !== "assistant") return false;
+    return index === session.messages.length - 1;
+  }
+
+  async function regenerateAssistantMessage(session: ApiChatSession, messageId: string) {
+    if (loading) return;
+    const index = session.messages.findIndex((message) => message.id === messageId);
+    if (index === -1) return;
+    const target = session.messages[index];
+    if (target.role !== "assistant" || index !== session.messages.length - 1) return;
+    const selection =
+      normalizeApiChatGenerationMeta(target.generationMeta) ??
+      buildFallbackGenerationMeta(session.defaultSelection);
+    if (!selection) {
+      setErrorText("无法确定这条消息原本使用的模型。");
+      return;
+    }
+    const option = settings ? resolveModelOption(settings, selection) : null;
+    const previousMessages = session.messages.slice(0, index);
+    const requestMessages = buildReplayHistory(previousMessages);
+    const origin: ApiChatGenerationMeta = {
+      ...selection,
+      providerName:
+        option?.providerName ?? target.generationMeta?.providerName ?? MODEL_PROVIDER_META[selection.serviceType].shortLabel,
+      modelLabel: option?.modelLabel ?? target.generationMeta?.modelLabel ?? selection.modelId,
+      requestedAt: new Date().toISOString(),
+      completedAt: null,
+    };
+    await requestAssistantResponse({
+      session,
+      selection,
+      origin,
+      persistedMessages: previousMessages,
+      requestMessages,
+      title: session.title,
+      successStatusText: "已重新生成回复。",
+    });
   }
 
   function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
@@ -967,7 +1543,7 @@ export function ModelChatPage() {
   if (loadingSettings) {
     return (
       <div className="flex h-full items-center justify-center bg-[#f5f4ef]">
-        <div className="rounded-full border border-[#e5e1d7] bg-white px-5 py-2 text-sm text-slate-500 shadow-sm">
+        <div className="rounded-[12px] border border-[#e5e1d7] bg-white px-5 py-2 text-sm text-slate-500 shadow-sm">
           正在加载模型对话...
         </div>
       </div>
@@ -976,75 +1552,45 @@ export function ModelChatPage() {
 
   return (
     <div className="h-full overflow-hidden bg-[#f5f4ef] text-slate-900">
-      <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[280px_minmax(0,1fr)]">
+      <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[296px_minmax(0,1fr)]">
         <aside className="flex min-h-0 flex-col border-r border-[#e7e2d8] bg-[#f7f5ef]">
           <div className="px-4 pb-5 pt-4">
             <div className="flex items-center gap-3 px-2">
-              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-white shadow-sm ring-1 ring-black/5">
+              <div className="flex h-10 w-10 items-center justify-center rounded-[12px] bg-white shadow-sm ring-1 ring-black/5">
                 <img
-                  src={activeSession ? SERVICE_ICONS[activeSession.serviceType] : openaiIcon}
+                  src={activeSelectionOrigin ? SERVICE_ICONS[activeSelectionOrigin.serviceType] : SERVICE_ICONS.openaiCompatible}
                   alt=""
                   className="h-[18px] w-[18px] object-contain"
                 />
               </div>
               <div className="min-w-0">
                 <div className="truncate text-sm font-semibold text-slate-900">Model Chat</div>
-                <div className="text-xs text-slate-500">Provider API only</div>
+                <div className="text-xs text-slate-500">One thread, switch models per turn</div>
               </div>
             </div>
 
             <div className="mt-5">
-              <SidebarPrimaryButton onClick={() => createChatSession()}>
+              <SidebarPrimaryButton onClick={createChatSession}>
                 <PlusIcon />
                 新聊天
               </SidebarPrimaryButton>
-            </div>
-
-            <div className="mt-5 space-y-1">
-              {MODEL_PROVIDER_SERVICE_ORDER.map((serviceType) => {
-                const isActive = activeSession?.serviceType === serviceType;
-                return (
-                  <button
-                    key={serviceType}
-                    type="button"
-                    onClick={() => selectServiceType(serviceType)}
-                    className={cx(
-                      "flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left text-sm transition-all",
-                      isActive
-                        ? "bg-white text-slate-950 shadow-[0_8px_24px_rgba(15,23,42,0.05)]"
-                        : "text-slate-600 hover:bg-white/80 hover:text-slate-900"
-                    )}
-                  >
-                    <img
-                      src={SERVICE_ICONS[serviceType]}
-                      alt=""
-                      className="h-4 w-4 shrink-0 object-contain"
-                    />
-                    <span className="font-medium">
-                      {MODEL_PROVIDER_META[serviceType].shortLabel}
-                    </span>
-                  </button>
-                );
-              })}
             </div>
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col border-t border-[#ece7dc]">
             <div className="flex items-center justify-between px-6 py-4">
               <div className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">
-                最近会话
+                Sessions
               </div>
-              <div className="rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-slate-500 shadow-sm ring-1 ring-black/5">
+              <div className="rounded-[12px] bg-white px-2.5 py-1 text-[11px] font-medium text-slate-500 shadow-sm ring-1 ring-black/5">
                 {sessions.length}
               </div>
             </div>
 
             <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 pb-4">
               {sessions.map((session) => {
-                const provider = settings
-                  ? getEnabledProviderForServiceType(settings, session.serviceType)
-                  : null;
                 const isActive = session.id === activeSessionId;
+                const anchor = settings ? hydrateGenerationMeta(settings, getSessionAnchorMeta(session)) : null;
                 return (
                   <div
                     key={session.id}
@@ -1058,7 +1604,7 @@ export function ModelChatPage() {
                       }
                     }}
                     className={cx(
-                      "group w-full rounded-2xl px-3 py-3 text-left transition-all",
+                      "group w-full rounded-[12px] px-3 py-3 text-left transition-all",
                       isActive
                         ? "bg-white shadow-[0_10px_28px_rgba(15,23,42,0.06)] ring-1 ring-black/5"
                         : "hover:bg-white/80"
@@ -1070,14 +1616,16 @@ export function ModelChatPage() {
                           {session.title}
                         </div>
                         <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">
-                          {getSessionPreview(session, provider?.name ?? null)}
+                          {settings ? getSessionPreview(session, settings) : "等待第一条消息"}
                         </div>
                         <div className="mt-3 flex items-center gap-2 text-[11px] text-slate-400">
-                          <img
-                            src={SERVICE_ICONS[session.serviceType]}
-                            alt=""
-                            className="h-3.5 w-3.5 object-contain"
-                          />
+                          {anchor ? (
+                            <img
+                              src={SERVICE_ICONS[anchor.serviceType]}
+                              alt=""
+                              className="h-3.5 w-3.5 object-contain"
+                            />
+                          ) : null}
                           <span>{formatSessionTimestamp(session.updatedAt)}</span>
                         </div>
                       </div>
@@ -1089,7 +1637,7 @@ export function ModelChatPage() {
                           event.stopPropagation();
                           deleteSession(session.id);
                         }}
-                        className="mt-0.5 inline-flex h-7 w-7 items-center justify-center rounded-full text-slate-300 opacity-0 transition-all hover:bg-[#f5f4ef] hover:text-slate-700 group-hover:opacity-100 group-focus-within:opacity-100"
+                        className="mt-0.5 inline-flex h-7 w-7 items-center justify-center rounded-[12px] text-slate-300 opacity-0 transition-all hover:bg-[#f5f4ef] hover:text-slate-700 group-hover:opacity-100 group-focus-within:opacity-100"
                       >
                         <TrashIcon />
                       </button>
@@ -1108,7 +1656,7 @@ export function ModelChatPage() {
               </SidebarGhostButton>
               <Link
                 to="/model-providers"
-                className="inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-medium text-slate-600 transition-all hover:bg-white hover:text-slate-900"
+                className="inline-flex items-center gap-2 rounded-[12px] px-3 py-2 text-sm font-medium text-slate-600 transition-all hover:bg-white hover:text-slate-900"
               >
                 <SettingsIcon />
                 模型提供商
@@ -1121,66 +1669,47 @@ export function ModelChatPage() {
           {activeSession && settings ? (
             <>
               <header className="sticky top-0 z-20 border-b border-[#ece7dc] bg-[#fbfaf7]/92 backdrop-blur-xl">
-                <div className="mx-auto flex w-full max-w-[920px] items-center justify-between gap-4 px-6 py-4">
+                <div className="mx-auto flex w-full max-w-[960px] items-center justify-between gap-4 px-6 py-4">
                   <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center gap-3">
-                      <img
-                        src={SERVICE_ICONS[activeSession.serviceType]}
-                        alt=""
-                        className="h-5 w-5 shrink-0 object-contain"
-                      />
-                      <input
-                        value={activeSession.title}
-                        onChange={(event) =>
-                          updateSession(activeSession.id, (session) => ({
-                            ...session,
-                            title: event.target.value || "New Chat",
-                            updatedAt: new Date().toISOString(),
-                          }))
-                        }
-                        className="min-w-0 flex-1 bg-transparent text-[28px] font-medium tracking-tight text-slate-950 outline-none placeholder:text-slate-400"
-                        placeholder="New Chat"
-                      />
-                    </div>
-                    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 pl-8 text-xs text-slate-500">
-                      <span>{MODEL_PROVIDER_META[activeSession.serviceType].label}</span>
-                      <span className="text-slate-300">/</span>
-                      <span>{activeProvider?.name ?? "未启用 Provider"}</span>
-                      <span className="text-slate-300">/</span>
-                      <span>{activeSession.modelId ?? "未选择模型"}</span>
+                    <input
+                      value={activeSession.title}
+                      onChange={(event) =>
+                        updateSession(activeSession.id, (session) => ({
+                          ...session,
+                          title: event.target.value || "New Chat",
+                          updatedAt: new Date().toISOString(),
+                        }))
+                      }
+                      className="w-full bg-transparent text-[28px] font-medium tracking-tight text-slate-950 outline-none placeholder:text-slate-400"
+                      placeholder="New Chat"
+                    />
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                      {activeSelectionOrigin ? (
+                        <>
+                          <span>下一条发送到</span>
+                          <MessageOriginPill origin={activeSelectionOrigin} />
+                        </>
+                      ) : (
+                        <span>当前没有可用模型，请先启用 provider。</span>
+                      )}
                     </div>
                   </div>
 
                   <div className="flex shrink-0 items-center gap-2">
-                    <div className="hidden rounded-full border border-[#e6e2d8] bg-white/90 px-4 py-2 shadow-sm sm:flex">
-                      <select
-                        value={activeSession.modelId ?? ""}
-                        onChange={(event) =>
-                          updateSession(activeSession.id, (session) => ({
-                            ...session,
-                            modelId: event.target.value || null,
-                            updatedAt: new Date().toISOString(),
-                          }))
-                        }
-                        className="min-w-[180px] bg-transparent text-sm text-slate-700 outline-none"
-                      >
-                        {availableModels.length === 0 ? (
-                          <option value="">No models</option>
-                        ) : (
-                          availableModels.map((model) => (
-                            <option key={model.id} value={model.id}>
-                              {model.label?.trim() || model.name}
-                            </option>
-                          ))
-                        )}
-                      </select>
-                    </div>
+                    <ModelSelectionControl
+                      optionGroups={optionGroups}
+                      activeSelection={activeSelection}
+                      activeSelectionOrigin={activeSelectionOrigin}
+                      onSelectServiceType={selectServiceType}
+                      onSelectModel={selectModel}
+                      className="hidden min-w-[330px] lg:flex"
+                    />
                     <HeaderIconButton title="刷新配置" onClick={() => void refreshSettings()}>
                       <RefreshIcon />
                     </HeaderIconButton>
                     <Link
                       to="/model-providers"
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
                       title="模型提供商"
                       aria-label="模型提供商"
                     >
@@ -1192,23 +1721,24 @@ export function ModelChatPage() {
 
               <div
                 ref={scrollRef}
-                className="min-h-0 flex-1 overflow-y-auto px-4 pb-40 pt-6 sm:px-6"
+                className="min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-6 sm:px-6"
               >
-                <div className="mx-auto flex w-full max-w-[920px] flex-col">
-                  {!activeProvider ? (
+                <div className="mx-auto flex w-full max-w-[960px] flex-col">
+                  {!anyProviderEnabled ? (
                     <div className="flex min-h-[calc(100vh-300px)] items-center justify-center py-16">
                       <div className="max-w-xl text-center">
                         <div className="text-sm font-medium text-slate-400">Provider Missing</div>
                         <div className="mt-3 text-4xl font-medium tracking-tight text-slate-950">
-                          当前服务还没有可用的 provider
+                          当前还没有可用的模型提供商
                         </div>
                         <div className="mt-4 text-sm leading-7 text-slate-500">
-                          前往模型提供商页面启用一个 provider，然后返回当前会话继续对话。
+                          先在模型提供商页面启用至少一个 OpenAI Compatible、Claude 或 Gemini provider，
+                          然后就可以在同一段对话里自由切换模型。
                         </div>
                         <div className="mt-8">
                           <Link
                             to="/model-providers"
-                            className="inline-flex items-center rounded-full bg-[#151515] px-5 py-3 text-sm font-medium text-white transition-all hover:-translate-y-[1px] hover:bg-black"
+                            className="inline-flex items-center rounded-[12px] bg-[#151515] px-5 py-3 text-sm font-medium text-white transition-all hover:-translate-y-[1px] hover:bg-black"
                           >
                             打开模型提供商
                           </Link>
@@ -1218,54 +1748,70 @@ export function ModelChatPage() {
                   ) : activeSession.messages.length === 0 && !activeStreamMessage ? (
                     <div className="flex min-h-[calc(100vh-300px)] items-center justify-center py-16">
                       <div className="max-w-2xl text-center">
-                        <img
-                          src={SERVICE_ICONS[activeSession.serviceType]}
-                          alt=""
-                          className="mx-auto h-10 w-10 object-contain"
-                        />
+                        {activeSelectionOrigin ? (
+                          <img
+                            src={SERVICE_ICONS[activeSelectionOrigin.serviceType]}
+                            alt=""
+                            className="mx-auto h-10 w-10 object-contain"
+                          />
+                        ) : null}
                         <div className="mt-6 text-4xl font-medium tracking-tight text-slate-950 sm:text-5xl">
-                          开始一段新对话
+                          一个线程，按回合切换模型
                         </div>
                         <div className="mt-4 text-sm leading-7 text-slate-500">
-                          当前连接到 {activeProvider.name}，模型为{" "}
+                          当前下一条会发送到{" "}
                           <span className="font-medium text-slate-700">
-                            {activeSession.modelId ?? "未选择模型"}
+                            {activeSelectionOrigin?.providerName ?? "未启用 Provider"}
                           </span>
-                          。
+                          {" / "}
+                          <span className="font-medium text-slate-700">
+                            {activeSelectionOrigin?.modelLabel ?? "未选择模型"}
+                          </span>
+                          ，后续可以在不切会话的情况下继续改用别的模型。
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="space-y-10 pb-10 pt-4">
-                      {activeSession.messages.map((message) =>
-                        message.role === "user" ? (
-                          <div key={message.id} className="flex justify-end">
-                            <div className="max-w-[78%] rounded-[28px] bg-white px-5 py-3.5 text-[15px] leading-7 text-slate-800 shadow-[0_10px_32px_rgba(15,23,42,0.06)] ring-1 ring-black/5">
-                              {message.content}
-                            </div>
-                          </div>
+                    <div className="space-y-10 pb-2 pt-4">
+                      {activeSession.messages.map((message) => {
+                        const origin = hydrateGenerationMeta(
+                          settings,
+                          normalizeApiChatGenerationMeta(message.generationMeta)
+                        );
+                        const canRegenerate =
+                          message.role === "assistant" &&
+                          canRegenerateAssistantMessage(activeSession, message.id);
+                        return message.role === "user" ? (
+                          <UserMessageBubble
+                            key={message.id}
+                            message={message}
+                            origin={origin}
+                            onCopy={() => void copyMessage(message)}
+                            onDelete={() => deleteMessage(activeSession.id, message.id)}
+                          />
                         ) : (
                           <div key={message.id} className="flex justify-start">
                             <ApiAssistantBlocks
                               message={message}
-                              serviceType={activeSession.serviceType}
-                              providerName={activeProvider.name}
-                              modelId={activeSession.modelId ?? null}
+                              origin={origin}
                               isStreaming={false}
-                              onCopy={() => void copyAssistantMessage(message)}
-                              onDelete={() => deleteAssistantMessage(activeSession.id, message.id)}
+                              onRegenerate={
+                                canRegenerate
+                                  ? () => void regenerateAssistantMessage(activeSession, message.id)
+                                  : undefined
+                              }
+                              onCopy={() => void copyMessage(message)}
+                              onDelete={() => deleteMessage(activeSession.id, message.id)}
                             />
                           </div>
-                        )
-                      )}
+                        );
+                      })}
 
                       {activeStreamMessage ? (
                         <div className="flex justify-start">
                           <ApiAssistantBlocks
                             message={activeStreamMessage}
-                            serviceType={activeSession.serviceType}
-                            providerName={activeProvider.name}
-                            modelId={activeSession.modelId ?? null}
+                            origin={hydrateGenerationMeta(settings, liveStream?.origin)}
                             isStreaming
                           />
                         </div>
@@ -1275,12 +1821,12 @@ export function ModelChatPage() {
                 </div>
               </div>
 
-              <div className="pointer-events-none sticky bottom-0 z-20 bg-[linear-gradient(180deg,rgba(251,250,247,0)_0%,rgba(251,250,247,0.82)_26%,#fbfaf7_58%)] px-4 pb-6 pt-12 sm:px-6">
-                <div className="pointer-events-auto mx-auto w-full max-w-[920px]">
+              <div className="pointer-events-none sticky bottom-0 z-20 bg-[linear-gradient(180deg,rgba(251,250,247,0)_0%,rgba(251,250,247,0.82)_26%,#fbfaf7_58%)] px-4 pb-4 pt-8 sm:px-6">
+                <div className="pointer-events-auto mx-auto w-full max-w-[960px]">
                   {statusText || errorText ? (
                     <div
                       className={cx(
-                        "mb-3 rounded-2xl px-4 py-3 text-sm shadow-sm ring-1",
+                        "mb-3 rounded-[12px] px-4 py-3 text-sm shadow-sm ring-1",
                         errorText
                           ? "bg-rose-50 text-rose-700 ring-rose-200"
                           : "bg-emerald-50 text-emerald-700 ring-emerald-200"
@@ -1290,41 +1836,25 @@ export function ModelChatPage() {
                     </div>
                   ) : null}
 
-                  <div className="rounded-[32px] border border-[#e2ddd2] bg-white/98 p-3 shadow-[0_24px_64px_rgba(15,23,42,0.10)] backdrop-blur">
+                  <div className="rounded-[12px] border border-[#e2ddd2] bg-white/98 p-3 shadow-[0_24px_64px_rgba(15,23,42,0.10)] backdrop-blur">
                     <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-2 rounded-full border border-[#e8e2d7] bg-[#faf8f2] px-3 py-1.5 text-[11px] font-medium text-slate-600">
-                          <img
-                            src={SERVICE_ICONS[activeSession.serviceType]}
-                            alt=""
-                            className="h-3.5 w-3.5 object-contain"
-                          />
-                          {activeProvider?.name ?? "未启用 Provider"}
-                        </span>
-                        <span className="inline-flex items-center rounded-full border border-[#e8e2d7] bg-[#faf8f2] px-3 py-1.5 text-[11px] font-medium text-slate-500">
-                          {activeSession.modelId ?? "未选择模型"}
-                        </span>
-                        {loading ? (
-                          <span className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-[11px] font-medium text-sky-700">
-                            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500" />
-                            正在流式响应
-                          </span>
-                        ) : null}
+                        {activeSelectionOrigin ? <MessageOriginPill origin={activeSelectionOrigin} /> : null}
                       </div>
                       <div className="text-[11px] text-slate-400">Enter 发送 · Shift + Enter 换行</div>
                     </div>
 
-                    <div className="flex items-end gap-3 rounded-[26px] border border-[#ece7dc] bg-[#fcfbf8] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]">
-                      <button
-                        type="button"
-                        onClick={() => createChatSession()}
-                        className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#e6e2d8] bg-white text-slate-500 transition-all hover:-translate-y-[1px] hover:text-slate-900"
-                        title="新聊天"
-                        aria-label="新聊天"
-                      >
-                        <PlusIcon />
-                      </button>
+                    <ModelSelectionControl
+                      optionGroups={optionGroups}
+                      activeSelection={activeSelection}
+                      activeSelectionOrigin={activeSelectionOrigin}
+                      onSelectServiceType={selectServiceType}
+                      onSelectModel={selectModel}
+                      className="mb-3 lg:hidden"
+                    />
 
+                    <div className="flex items-center gap-3 rounded-[12px] border border-[#ece7dc] bg-[#fcfbf8] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]">
+                      <div className="flex min-h-[44px] flex-1 items-center">
                       <textarea
                         ref={composerRef}
                         value={activeDraft}
@@ -1336,20 +1866,16 @@ export function ModelChatPage() {
                         }
                         onKeyDown={handleComposerKeyDown}
                         rows={1}
-                        placeholder="给当前模型发送消息，支持 Markdown。"
-                        className="max-h-[180px] min-h-[30px] flex-1 resize-none overflow-y-auto bg-transparent px-1 py-2 text-[15px] leading-7 text-slate-900 outline-none placeholder:text-slate-400"
+                        placeholder="在同一段会话里连续聊天，切换模型只影响下一条消息。"
+                        className="max-h-[180px] min-h-[30px] w-full resize-none overflow-y-auto bg-transparent px-1 py-2 text-[15px] leading-7 text-slate-900 outline-none placeholder:text-slate-400"
                       />
+                      </div>
 
                       <button
                         type="button"
                         onClick={() => void sendMessage()}
-                        disabled={
-                          loading ||
-                          !activeProvider ||
-                          !activeSession.modelId ||
-                          !activeDraft.trim()
-                        }
-                        className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#111111] text-white transition-all hover:-translate-y-[1px] hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
+                        disabled={loading || !activeSelectionOption || !activeDraft.trim()}
+                        className="inline-flex h-11 w-11 shrink-0 items-center justify-center self-end rounded-[12px] bg-[#111111] text-white transition-all hover:-translate-y-[1px] hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
                         title={loading ? "等待响应" : "发送"}
                         aria-label={loading ? "等待响应" : "发送"}
                       >

@@ -60,7 +60,7 @@ export function Button({
       onClick={onClick}
       disabled={disabled}
       className={cx(
-        "inline-flex items-center justify-center rounded-full border px-4 py-2 text-[13px] font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-45",
+        "inline-flex items-center justify-center rounded-[12px] border px-4 py-2 text-[13px] font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-45",
         tone === "default" &&
           "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50",
         tone === "primary" &&
@@ -95,7 +95,7 @@ export function TopActionButton({
       onClick={onClick}
       disabled={disabled}
       className={cx(
-        "inline-flex h-11 w-11 items-center justify-center rounded-full border transition-all disabled:cursor-not-allowed disabled:opacity-45",
+        "inline-flex h-11 w-11 items-center justify-center rounded-[12px] border transition-all disabled:cursor-not-allowed disabled:opacity-45",
         highlight
           ? "border-orange-200 bg-orange-500 text-white shadow-[0_12px_24px_rgba(249,115,22,0.28)] hover:bg-orange-600"
           : "border-slate-200 bg-[#f5f4f1] text-slate-500 hover:border-slate-300 hover:bg-white hover:text-slate-800"
@@ -124,7 +124,7 @@ export function IconButton({
       title={title}
       aria-label={title}
       disabled={disabled}
-      className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition-all hover:border-slate-300 hover:bg-slate-50 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
+      className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-slate-200 bg-white text-slate-500 transition-all hover:border-slate-300 hover:bg-slate-50 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-45"
     >
       {children}
     </button>
@@ -357,7 +357,7 @@ export function ProviderListCard({
         }
       }}
       className={cx(
-        "group w-full rounded-[28px] border px-5 py-5 text-left transition-all",
+        "group w-full rounded-[12px] border px-5 py-5 text-left transition-all",
         provider.enabled
           ? "border-sky-300 bg-[linear-gradient(180deg,#f8fbff_0%,#eef6ff_100%)] shadow-[0_0_0_3px_rgba(96,165,250,0.10),0_18px_46px_rgba(59,130,246,0.10)]"
           : "border-slate-200 bg-white hover:border-slate-300 hover:bg-[#fcfcfb]"
@@ -366,7 +366,7 @@ export function ProviderListCard({
       <div className="flex items-center gap-4">
         <div
           className={cx(
-            "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl",
+            "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[12px]",
             provider.enabled ? "bg-sky-100 text-sky-500" : "bg-slate-50 text-slate-300"
           )}
         >
@@ -374,7 +374,7 @@ export function ProviderListCard({
         </div>
         <div
           className={cx(
-            "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border text-sm font-semibold",
+            "flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border text-sm font-semibold",
             provider.enabled
               ? "border-sky-200 bg-white text-slate-700"
               : "border-slate-200 bg-slate-50 text-slate-500"
@@ -388,7 +388,7 @@ export function ProviderListCard({
               {provider.name}
             </div>
             {provider.enabled ? (
-              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-700">
+              <span className="rounded-[12px] bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-700">
                 Enabled
               </span>
             ) : null}
@@ -432,7 +432,7 @@ export function ProviderListCard({
               event.stopPropagation();
               onEdit();
             }}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-white text-slate-600 ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] bg-white text-slate-600 ring-1 ring-inset ring-slate-200 transition-colors hover:bg-slate-50"
           >
             <PencilIcon />
           </button>
@@ -445,7 +445,7 @@ export function ProviderListCard({
               onEnable();
             }}
             className={cx(
-              "inline-flex h-9 w-9 items-center justify-center rounded-full transition-colors",
+              "inline-flex h-9 w-9 items-center justify-center rounded-[12px] transition-colors",
               provider.enabled
                 ? "bg-slate-900 text-white"
                 : "bg-slate-100 text-slate-600 hover:bg-slate-200"
@@ -455,7 +455,7 @@ export function ProviderListCard({
           </button>
           <div
             className={cx(
-              "inline-flex h-9 w-9 items-center justify-center rounded-full",
+              "inline-flex h-9 w-9 items-center justify-center rounded-[12px]",
               provider.enabled ? "bg-sky-100 text-sky-600" : "bg-slate-50 text-slate-300"
             )}
           >

@@ -1945,7 +1945,11 @@ export const browserRuntime = {
   },
 
   async sendApiChatMessage(request: ApiChatRequest) {
-    const provider = getProviderById(settings, request.serviceType, request.providerId);
+    const provider = getProviderById(
+      settings,
+      request.selection.serviceType,
+      request.selection.providerId
+    );
     if (!provider) {
       throw new Error("Enabled provider not found.");
     }
@@ -1958,13 +1962,13 @@ export const browserRuntime = {
         ?.content.trim() ?? "";
 
     const rawContent = [
-      `<think>The user asked for a browser fallback response for ${request.serviceType}.`,
+      `<think>The user asked for a browser fallback response for ${request.selection.serviceType}.`,
       `This environment simulates provider output and streams it locally.</think>`,
       "",
       `# Browser fallback`,
       "",
       `Provider: **${provider.name}**`,
-      `Model: \`${request.modelId}\``,
+      `Model: \`${request.selection.modelId}\``,
       "",
       prompt ? `Latest prompt: ${prompt}` : "Latest prompt: (empty)",
     ].join("\n");
@@ -2019,14 +2023,22 @@ export const browserRuntime = {
     const totalTokens = promptTokens + completionTokens;
 
     const response: ApiChatResponse = {
-      serviceType: request.serviceType,
-      providerId: request.providerId,
-      modelId: request.modelId,
+      selection: request.selection,
       message: {
         id: messageId,
         role: "assistant",
         timestamp: nowISO(),
         content: parsed.content,
+        generationMeta: {
+          ...request.selection,
+          providerName: provider.name,
+          modelLabel:
+            provider.models.find((model) => model.id === request.selection.modelId)?.label ??
+            provider.models.find((model) => model.id === request.selection.modelId)?.name ??
+            request.selection.modelId,
+          requestedAt: new Date(startedAt).toISOString(),
+          completedAt: nowISO(),
+        },
         rawContent: parsed.rawContent,
         contentFormat: parsed.contentFormat,
         blocks: parsed.blocks,

@@ -197,7 +197,7 @@ export function ModelProviderEditorPage() {
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center bg-[#f7f7f5]">
-        <div className="rounded-[28px] border border-slate-200 bg-white px-6 py-4 text-sm text-slate-500 shadow-sm">
+        <div className="rounded-[12px] border border-slate-200 bg-white px-6 py-4 text-sm text-slate-500 shadow-sm">
           正在加载 provider 编辑页...
         </div>
       </div>
@@ -207,7 +207,7 @@ export function ModelProviderEditorPage() {
   if (!draft) {
     return (
       <div className="flex h-full items-center justify-center bg-[#f7f7f5]">
-        <div className="rounded-[28px] border border-rose-200 bg-rose-50 px-6 py-4 text-sm text-rose-700 shadow-sm">
+        <div className="rounded-[12px] border border-rose-200 bg-rose-50 px-6 py-4 text-sm text-rose-700 shadow-sm">
           {errorText ?? "Provider 加载失败。"}
         </div>
       </div>
@@ -217,18 +217,18 @@ export function ModelProviderEditorPage() {
   return (
     <div className="min-h-full bg-[#f7f7f5]">
       <div className="mx-auto flex max-w-[1380px] flex-col gap-6 px-8 py-8">
-        <section className="flex flex-wrap items-center gap-4 rounded-[30px] border border-[#eceae4] bg-white/92 px-4 py-4 shadow-[0_10px_26px_rgba(15,23,42,0.05)] backdrop-blur">
+        <section className="flex flex-wrap items-center gap-4 rounded-[12px] border border-[#eceae4] bg-white/92 px-4 py-4 shadow-[0_10px_26px_rgba(15,23,42,0.05)] backdrop-blur">
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <button
               type="button"
               onClick={goBack}
-              className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-[#f5f4f1] text-slate-500 transition-all hover:border-slate-300 hover:bg-white hover:text-slate-800"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-[12px] border border-slate-200 bg-[#f5f4f1] text-slate-500 transition-all hover:border-slate-300 hover:bg-white hover:text-slate-800"
               title="返回列表"
               aria-label="返回列表"
             >
               <BackIcon />
             </button>
-            <div className="flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 bg-[#f5f4f1] text-slate-500">
+            <div className="flex h-11 w-11 items-center justify-center rounded-[12px] border border-slate-200 bg-[#f5f4f1] text-slate-500">
               <PencilIcon />
             </div>
             <div className="min-w-0">
@@ -271,7 +271,7 @@ export function ModelProviderEditorPage() {
           </div>
         </section>
 
-        <section className="rounded-[32px] border border-[#eceae4] bg-white/96 shadow-[0_18px_42px_rgba(15,23,42,0.05)]">
+        <section className="rounded-[12px] border border-[#eceae4] bg-white/96 shadow-[0_18px_42px_rgba(15,23,42,0.05)]">
           <div className="px-6 py-6">
             <div className="space-y-7">
               <div className="grid gap-5 md:grid-cols-2">
@@ -283,7 +283,7 @@ export function ModelProviderEditorPage() {
                         touchProvider({ ...provider, name: event.target.value })
                       )
                     }
-                    className="w-full rounded-[20px] border border-slate-200 bg-[#faf9f7] px-4 py-3 text-sm text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                    className="w-full rounded-[12px] border border-slate-200 bg-[#faf9f7] px-4 py-3 text-sm text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
                     placeholder="Acme AI Gateway"
                   />
                 </Field>
@@ -295,7 +295,7 @@ export function ModelProviderEditorPage() {
                         touchProvider({ ...provider, websiteUrl: event.target.value })
                       )
                     }
-                    className="w-full rounded-[20px] border border-slate-200 bg-[#faf9f7] px-4 py-3 text-sm text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                    className="w-full rounded-[12px] border border-slate-200 bg-[#faf9f7] px-4 py-3 text-sm text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
                     placeholder="https://example.com"
                   />
                 </Field>
@@ -318,7 +318,7 @@ export function ModelProviderEditorPage() {
                       touchProvider({ ...provider, baseUrl: event.target.value })
                     )
                   }
-                  className="w-full rounded-[20px] border border-slate-200 bg-[#faf9f7] px-4 py-3 text-sm text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                  className="w-full rounded-[12px] border border-slate-200 bg-[#faf9f7] px-4 py-3 text-sm text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
                   placeholder={MODEL_PROVIDER_META[serviceType].defaultBaseUrl}
                 />
               </Field>
@@ -333,7 +333,7 @@ export function ModelProviderEditorPage() {
                         touchProvider({ ...provider, apiKey: event.target.value })
                       )
                     }
-                    className="w-full rounded-[20px] border border-slate-200 bg-[#faf9f7] px-4 py-3 pr-14 text-sm text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                    className="w-full rounded-[12px] border border-slate-200 bg-[#faf9f7] px-4 py-3 pr-14 text-sm text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
                     placeholder="sk-..."
                   />
                   <button
@@ -341,7 +341,7 @@ export function ModelProviderEditorPage() {
                     title={showApiKey ? "隐藏 API Key" : "显示 API Key"}
                     aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}
                     onClick={() => setShowApiKey((value) => !value)}
-                    className="absolute right-2 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 transition-all hover:bg-white hover:text-slate-700"
+                    className="absolute right-2 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-[12px] text-slate-400 transition-all hover:bg-white hover:text-slate-700"
                   >
                     {showApiKey ? <EyeOffIcon /> : <EyeIcon />}
                   </button>
@@ -359,7 +359,7 @@ export function ModelProviderEditorPage() {
                     );
                   }}
                   rows={10}
-                  className="w-full resize-y rounded-[24px] border border-slate-200 bg-[#faf9f7] px-4 py-3 text-sm leading-7 text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                  className="w-full resize-y rounded-[12px] border border-slate-200 bg-[#faf9f7] px-4 py-3 text-sm leading-7 text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
                   placeholder={"gpt-4.1 | GPT-4.1\nclaude-sonnet-4-20250514 | Claude Sonnet 4"}
                 />
               </Field>
@@ -373,7 +373,7 @@ export function ModelProviderEditorPage() {
                     )
                   }
                   rows={4}
-                  className="w-full resize-y rounded-[24px] border border-slate-200 bg-[#faf9f7] px-4 py-3 text-sm leading-7 text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
+                  className="w-full resize-y rounded-[12px] border border-slate-200 bg-[#faf9f7] px-4 py-3 text-sm leading-7 text-slate-900 outline-none transition-all focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100"
                   placeholder="例如：公司内网代理，主要给轻量问答使用。"
                 />
               </Field>
@@ -384,7 +384,7 @@ export function ModelProviderEditorPage() {
         {(statusText || errorText) && (
           <div
             className={cx(
-              "rounded-[24px] border px-5 py-4 text-sm shadow-sm",
+              "rounded-[12px] border px-5 py-4 text-sm shadow-sm",
               errorText
                 ? "border-rose-200 bg-rose-50 text-rose-700"
                 : "border-emerald-200 bg-emerald-50 text-emerald-700"

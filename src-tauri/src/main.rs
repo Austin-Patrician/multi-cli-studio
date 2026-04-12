@@ -381,12 +381,34 @@ struct ApiChatMessage {
     error: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ApiChatRequest {
+struct ApiChatSelection {
     service_type: String,
     provider_id: String,
     model_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiChatGenerationMeta {
+    service_type: String,
+    provider_id: String,
+    model_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiChatRequest {
+    selection: ApiChatSelection,
     messages: Vec<ApiChatMessage>,
     #[serde(default)]
     stream_id: Option<String>,
@@ -395,9 +417,7 @@ struct ApiChatRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApiChatResponse {
-    service_type: String,
-    provider_id: String,
-    model_id: String,
+    selection: ApiChatSelection,
     message: ApiChatResponseMessage,
 }
 
@@ -410,6 +430,8 @@ struct ApiChatResponseMessage {
     timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation_meta: Option<ApiChatGenerationMeta>,
     #[serde(skip_serializing_if = "Option::is_none")]
     raw_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1343,6 +1365,7 @@ fn build_api_chat_response_message(
     raw_content: String,
     error: Option<bool>,
     duration_ms: Option<u64>,
+    generation_meta: ApiChatGenerationMeta,
     usage: &ApiUsage,
 ) -> ApiChatResponseMessage {
     let rendered = render_api_chat_content(&raw_content);
@@ -1352,6 +1375,7 @@ fn build_api_chat_response_message(
         content: rendered.content,
         timestamp: now_rfc3339(),
         error,
+        generation_meta: Some(generation_meta),
         raw_content: Some(rendered.raw_content),
         content_format: Some(rendered.content_format),
         blocks: if rendered.blocks.is_empty() {
@@ -1363,6 +1387,37 @@ fn build_api_chat_response_message(
         prompt_tokens: usage.prompt_tokens,
         completion_tokens: usage.completion_tokens,
         total_tokens: usage.total_tokens,
+    }
+}
+
+fn build_api_chat_generation_meta(
+    provider: &ModelProviderConfig,
+    request: &ApiChatRequest,
+    requested_at: Option<String>,
+    completed_at: Option<String>,
+) -> ApiChatGenerationMeta {
+    let model_label = provider
+        .models
+        .iter()
+        .find(|model| model.id == request.selection.model_id)
+        .map(|model| {
+            model
+                .label
+                .clone()
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or_else(|| model.name.clone())
+        })
+        .filter(|label| !label.trim().is_empty())
+        .or_else(|| Some(request.selection.model_id.clone()));
+
+    ApiChatGenerationMeta {
+        service_type: request.selection.service_type.clone(),
+        provider_id: request.selection.provider_id.clone(),
+        model_id: request.selection.model_id.clone(),
+        provider_name: Some(provider.name.clone()),
+        model_label,
+        requested_at,
+        completed_at,
     }
 }
 
@@ -1410,6 +1465,7 @@ fn stream_openai_provider_chat(
     message_id: &str,
 ) -> Result<ApiChatResponseMessage, String> {
     let started_at = Instant::now();
+    let requested_at = now_rfc3339();
     let client = api_http_client(90)?;
     let mut messages = collapse_chat_messages(&request.messages, "assistant")
         .into_iter()
@@ -1427,7 +1483,7 @@ fn stream_openai_provider_chat(
                 format!("Bearer {}", provider.api_key.trim()),
             )
             .json(&json!({
-                "model": request.model_id,
+                "model": request.selection.model_id,
                 "messages": messages,
                 "stream": true,
             })),
@@ -1490,6 +1546,12 @@ fn stream_openai_provider_chat(
     }
     fill_api_usage_estimate(&mut usage, request, &raw_content);
     let duration_ms = started_at.elapsed().as_millis() as u64;
+    let generation_meta = build_api_chat_generation_meta(
+        provider,
+        request,
+        Some(requested_at),
+        Some(now_rfc3339()),
+    );
     emit_api_chat_stream_snapshot(
         app,
         request.stream_id.as_deref(),
@@ -1505,6 +1567,7 @@ fn stream_openai_provider_chat(
         raw_content,
         None,
         Some(duration_ms),
+        generation_meta,
         &usage,
     ))
 }
@@ -1516,13 +1579,14 @@ fn stream_claude_provider_chat(
     message_id: &str,
 ) -> Result<ApiChatResponseMessage, String> {
     let started_at = Instant::now();
+    let requested_at = now_rfc3339();
     let client = api_http_client(90)?;
     let messages = collapse_chat_messages(&request.messages, "assistant")
         .into_iter()
         .map(|(role, content)| json!({ "role": role, "content": content }))
         .collect::<Vec<_>>();
     let mut payload = json!({
-        "model": request.model_id,
+        "model": request.selection.model_id,
         "max_tokens": 4096,
         "messages": messages,
         "stream": true,
@@ -1614,6 +1678,12 @@ fn stream_claude_provider_chat(
     }
     fill_api_usage_estimate(&mut usage, request, &raw_content);
     let duration_ms = started_at.elapsed().as_millis() as u64;
+    let generation_meta = build_api_chat_generation_meta(
+        provider,
+        request,
+        Some(requested_at),
+        Some(now_rfc3339()),
+    );
     emit_api_chat_stream_snapshot(
         app,
         request.stream_id.as_deref(),
@@ -1629,6 +1699,7 @@ fn stream_claude_provider_chat(
         raw_content,
         None,
         Some(duration_ms),
+        generation_meta,
         &usage,
     ))
 }
@@ -1640,6 +1711,7 @@ fn stream_gemini_provider_chat(
     message_id: &str,
 ) -> Result<ApiChatResponseMessage, String> {
     let started_at = Instant::now();
+    let requested_at = now_rfc3339();
     let client = api_http_client(90)?;
     let contents = collapse_chat_messages(&request.messages, "model")
         .into_iter()
@@ -1663,7 +1735,10 @@ fn stream_gemini_provider_chat(
         client
             .post(gemini_endpoint(
                 &provider.base_url,
-                &format!("models/{}:streamGenerateContent", request.model_id)
+                &format!(
+                    "models/{}:streamGenerateContent",
+                    request.selection.model_id
+                )
             ))
             .query(&[("alt", "sse"), ("key", provider.api_key.trim())])
             .json(&payload),
@@ -1728,6 +1803,12 @@ fn stream_gemini_provider_chat(
     }
     fill_api_usage_estimate(&mut usage, request, &raw_content);
     let duration_ms = started_at.elapsed().as_millis() as u64;
+    let generation_meta = build_api_chat_generation_meta(
+        provider,
+        request,
+        Some(requested_at),
+        Some(now_rfc3339()),
+    );
     emit_api_chat_stream_snapshot(
         app,
         request.stream_id.as_deref(),
@@ -1743,6 +1824,7 @@ fn stream_gemini_provider_chat(
         raw_content,
         None,
         Some(duration_ms),
+        generation_meta,
         &usage,
     ))
 }
@@ -1758,18 +1840,18 @@ fn send_provider_chat(
     if provider.api_key.trim().is_empty() {
         return Err("Provider API key is required.".to_string());
     }
-    if request.model_id.trim().is_empty() {
+    if request.selection.model_id.trim().is_empty() {
         return Err("Model is required.".to_string());
     }
 
     let message_id = format!("api-msg-{}", Uuid::new_v4());
-    match request.service_type.as_str() {
+    match request.selection.service_type.as_str() {
         "openaiCompatible" => stream_openai_provider_chat(app, provider, request, &message_id),
         "claude" => stream_claude_provider_chat(app, provider, request, &message_id),
         "gemini" => stream_gemini_provider_chat(app, provider, request, &message_id),
         _ => Err(format!(
             "Unsupported service type: {}",
-            request.service_type
+            request.selection.service_type
         )),
     }
 }
@@ -7600,12 +7682,14 @@ async fn send_api_chat_message(
 ) -> Result<ApiChatResponse, String> {
     let provider = {
         let settings = store.settings.lock().map_err(|err| err.to_string())?;
-        provider_find(&settings, &request.service_type, &request.provider_id)?
+        provider_find(
+            &settings,
+            &request.selection.service_type,
+            &request.selection.provider_id,
+        )?
     };
 
-    let service_type = request.service_type.clone();
-    let provider_id = request.provider_id.clone();
-    let model_id = request.model_id.clone();
+    let selection = request.selection.clone();
     let app_handle = app.clone();
     let message = tauri::async_runtime::spawn_blocking(move || {
         send_provider_chat(&app_handle, &provider, &request)
@@ -7614,9 +7698,7 @@ async fn send_api_chat_message(
     .map_err(|err| err.to_string())??;
 
     Ok(ApiChatResponse {
-        service_type,
-        provider_id,
-        model_id,
+        selection,
         message,
     })
 }

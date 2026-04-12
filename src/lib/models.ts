@@ -250,12 +250,26 @@ export interface ModelProviderConfig {
   lastRefreshedAt?: string | null;
 }
 
+export interface ApiChatSelection {
+  serviceType: ModelProviderServiceType;
+  providerId: string;
+  modelId: string;
+}
+
+export interface ApiChatGenerationMeta extends ApiChatSelection {
+  providerName?: string | null;
+  modelLabel?: string | null;
+  requestedAt?: string | null;
+  completedAt?: string | null;
+}
+
 export interface ApiChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: string;
   error?: boolean;
+  generationMeta?: ApiChatGenerationMeta | null;
   rawContent?: string | null;
   contentFormat?: AssistantContentFormat | null;
   blocks?: ChatMessageBlock[] | null;
@@ -268,26 +282,20 @@ export interface ApiChatMessage {
 export interface ApiChatSession {
   id: string;
   title: string;
-  serviceType: ModelProviderServiceType;
-  providerId?: string | null;
-  modelId?: string | null;
+  defaultSelection?: ApiChatSelection | null;
   messages: ApiChatMessage[];
   createdAt: string;
   updatedAt: string;
 }
 
 export interface ApiChatRequest {
-  serviceType: ModelProviderServiceType;
-  providerId: string;
-  modelId: string;
+  selection: ApiChatSelection;
   messages: ApiChatMessage[];
   streamId?: string | null;
 }
 
 export interface ApiChatResponse {
-  serviceType: ModelProviderServiceType;
-  providerId: string;
-  modelId: string;
+  selection: ApiChatSelection;
   message: ApiChatMessage;
 }
 
