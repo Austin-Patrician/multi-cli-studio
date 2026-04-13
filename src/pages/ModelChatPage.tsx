@@ -600,6 +600,20 @@ function CheckIcon() {
   );
 }
 
+function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+      <path
+        d={collapsed ? "M10 7l5 5-5 5" : "M14 7l-5 5 5 5"}
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function formatDuration(value?: number | null) {
   if (!value || !Number.isFinite(value) || value <= 0) return null;
   if (value < 1000) return `${Math.round(value)}ms`;
@@ -1100,6 +1114,7 @@ export function ModelChatPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [sessions, setSessions] = useState<ApiChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [liveStream, setLiveStream] = useState<LiveApiStream | null>(null);
@@ -1542,7 +1557,7 @@ export function ModelChatPage() {
 
   if (loadingSettings) {
     return (
-      <div className="flex h-full items-center justify-center bg-[#f5f4ef]">
+      <div className="flex h-full items-center justify-center bg-[#f7f7f5]">
         <div className="rounded-[12px] border border-[#e5e1d7] bg-white px-5 py-2 text-sm text-slate-500 shadow-sm">
           正在加载模型对话...
         </div>
@@ -1551,124 +1566,184 @@ export function ModelChatPage() {
   }
 
   return (
-    <div className="h-full overflow-hidden bg-[#f5f4ef] text-slate-900">
-      <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[296px_minmax(0,1fr)]">
-        <aside className="flex min-h-0 flex-col border-r border-[#e7e2d8] bg-[#f7f5ef]">
-          <div className="px-4 pb-5 pt-4">
-            <div className="flex items-center gap-3 px-2">
-              <div className="flex h-10 w-10 items-center justify-center rounded-[12px] bg-white shadow-sm ring-1 ring-black/5">
-                <img
-                  src={activeSelectionOrigin ? SERVICE_ICONS[activeSelectionOrigin.serviceType] : SERVICE_ICONS.openaiCompatible}
-                  alt=""
-                  className="h-[18px] w-[18px] object-contain"
-                />
+    <div className="h-full overflow-hidden bg-[#f7f7f5] text-slate-900">
+      <div
+        className={cx(
+          "grid h-full min-h-0",
+          sidebarCollapsed
+            ? "grid-cols-[84px_minmax(0,1fr)]"
+            : "grid-cols-1 xl:grid-cols-[296px_minmax(0,1fr)]"
+        )}
+      >
+        <aside
+          className={cx(
+            "flex min-h-0 flex-col border-r border-[#e7e4dd] bg-[#f6f5f2]",
+            sidebarCollapsed && "items-center"
+          )}
+        >
+          {sidebarCollapsed ? (
+            <>
+              <div className="px-3 pb-4 pt-4">
+                <button
+                  type="button"
+                  title="展开侧边栏"
+                  aria-label="展开侧边栏"
+                  onClick={() => setSidebarCollapsed(false)}
+                  className="group relative inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-white shadow-sm ring-1 ring-black/5 transition-all hover:-translate-y-[1px] hover:shadow-md"
+                >
+                  <img
+                    src={activeSelectionOrigin ? SERVICE_ICONS[activeSelectionOrigin.serviceType] : SERVICE_ICONS.openaiCompatible}
+                    alt=""
+                    className="h-[18px] w-[18px] object-contain transition-all duration-150 group-hover:scale-90 group-hover:opacity-0 group-focus-visible:scale-90 group-focus-visible:opacity-0"
+                  />
+                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-slate-600 opacity-0 transition-all duration-150 group-hover:opacity-100 group-focus-visible:opacity-100">
+                    <span className="transition-transform duration-150 group-hover:scale-100 group-focus-visible:scale-100 scale-90">
+                      <SidebarToggleIcon collapsed />
+                    </span>
+                  </span>
+                </button>
               </div>
-              <div className="min-w-0">
-                <div className="truncate text-sm font-semibold text-slate-900">Model Chat</div>
-                <div className="text-xs text-slate-500">One thread, switch models per turn</div>
-              </div>
-            </div>
 
-            <div className="mt-5">
-              <SidebarPrimaryButton onClick={createChatSession}>
-                <PlusIcon />
-                新聊天
-              </SidebarPrimaryButton>
-            </div>
-          </div>
+              <div className="flex-1" />
 
-          <div className="flex min-h-0 flex-1 flex-col border-t border-[#ece7dc]">
-            <div className="flex items-center justify-between px-6 py-4">
-              <div className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">
-                Sessions
+              <div className="flex flex-col items-center gap-2 border-t border-[#ece7dc] px-3 py-3">
+                <HeaderIconButton title="新聊天" onClick={createChatSession}>
+                  <PlusIcon />
+                </HeaderIconButton>
+                <HeaderIconButton title="刷新配置" onClick={() => void refreshSettings()}>
+                  <RefreshIcon />
+                </HeaderIconButton>
+                <Link
+                  to="/model-providers"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
+                  title="模型提供商"
+                  aria-label="模型提供商"
+                >
+                  <SettingsIcon />
+                </Link>
               </div>
-              <div className="rounded-[12px] bg-white px-2.5 py-1 text-[11px] font-medium text-slate-500 shadow-sm ring-1 ring-black/5">
-                {sessions.length}
-              </div>
-            </div>
-
-            <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 pb-4">
-              {sessions.map((session) => {
-                const isActive = session.id === activeSessionId;
-                const anchor = settings ? hydrateGenerationMeta(settings, getSessionAnchorMeta(session)) : null;
-                return (
-                  <div
-                    key={session.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setActiveSessionId(session.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        setActiveSessionId(session.id);
-                      }
-                    }}
-                    className={cx(
-                      "group w-full rounded-[12px] px-3 py-3 text-left transition-all",
-                      isActive
-                        ? "bg-white shadow-[0_10px_28px_rgba(15,23,42,0.06)] ring-1 ring-black/5"
-                        : "hover:bg-white/80"
-                    )}
+            </>
+          ) : (
+            <>
+              <div className="px-4 pb-5 pt-4">
+                <div className="flex items-center justify-between gap-3 px-2">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-[12px] bg-white shadow-sm ring-1 ring-black/5">
+                    <img
+                      src={activeSelectionOrigin ? SERVICE_ICONS[activeSelectionOrigin.serviceType] : SERVICE_ICONS.openaiCompatible}
+                      alt=""
+                      className="h-[18px] w-[18px] object-contain"
+                    />
+                  </div>
+                  <HeaderIconButton
+                    title="收起侧边栏"
+                    onClick={() => setSidebarCollapsed(true)}
                   >
-                    <div className="flex items-start gap-3">
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-slate-900">
-                          {session.title}
-                        </div>
-                        <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">
-                          {settings ? getSessionPreview(session, settings) : "等待第一条消息"}
-                        </div>
-                        <div className="mt-3 flex items-center gap-2 text-[11px] text-slate-400">
-                          {anchor ? (
-                            <img
-                              src={SERVICE_ICONS[anchor.serviceType]}
-                              alt=""
-                              className="h-3.5 w-3.5 object-contain"
-                            />
-                          ) : null}
-                          <span>{formatSessionTimestamp(session.updatedAt)}</span>
+                    <SidebarToggleIcon collapsed={false} />
+                  </HeaderIconButton>
+                </div>
+
+                <div className="mt-5">
+                  <SidebarPrimaryButton onClick={createChatSession}>
+                    <PlusIcon />
+                    新聊天
+                  </SidebarPrimaryButton>
+                </div>
+              </div>
+
+              <div className="flex min-h-0 flex-1 flex-col border-t border-[#ece7dc]">
+                <div className="flex items-center justify-between px-6 py-4">
+                  <div className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">
+                    Sessions
+                  </div>
+                  <div className="rounded-[12px] bg-white px-2.5 py-1 text-[11px] font-medium text-slate-500 shadow-sm ring-1 ring-black/5">
+                    {sessions.length}
+                  </div>
+                </div>
+
+                <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 pb-4">
+                  {sessions.map((session) => {
+                    const isActive = session.id === activeSessionId;
+                    const anchor = settings ? hydrateGenerationMeta(settings, getSessionAnchorMeta(session)) : null;
+                    return (
+                      <div
+                        key={session.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setActiveSessionId(session.id)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            setActiveSessionId(session.id);
+                          }
+                        }}
+                        className={cx(
+                          "group w-full rounded-[12px] px-3 py-3 text-left transition-all",
+                          isActive
+                            ? "bg-white shadow-[0_10px_28px_rgba(15,23,42,0.06)] ring-1 ring-black/5"
+                            : "hover:bg-white/80"
+                        )}
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-medium text-slate-900">
+                              {session.title}
+                            </div>
+                            <div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">
+                              {settings ? getSessionPreview(session, settings) : "等待第一条消息"}
+                            </div>
+                            <div className="mt-3 flex items-center gap-2 text-[11px] text-slate-400">
+                              {anchor ? (
+                                <img
+                                  src={SERVICE_ICONS[anchor.serviceType]}
+                                  alt=""
+                                  className="h-3.5 w-3.5 object-contain"
+                                />
+                              ) : null}
+                              <span>{formatSessionTimestamp(session.updatedAt)}</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            title="删除对话"
+                            aria-label="删除对话"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              deleteSession(session.id);
+                            }}
+                            className="mt-0.5 inline-flex h-7 w-7 items-center justify-center rounded-[12px] text-slate-300 opacity-0 transition-all hover:bg-[#f3f2ee] hover:text-slate-700 group-hover:opacity-100 group-focus-within:opacity-100"
+                          >
+                            <TrashIcon />
+                          </button>
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        title="删除对话"
-                        aria-label="删除对话"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          deleteSession(session.id);
-                        }}
-                        className="mt-0.5 inline-flex h-7 w-7 items-center justify-center rounded-[12px] text-slate-300 opacity-0 transition-all hover:bg-[#f5f4ef] hover:text-slate-700 group-hover:opacity-100 group-focus-within:opacity-100"
-                      >
-                        <TrashIcon />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+                    );
+                  })}
+                </div>
+              </div>
 
-          <div className="border-t border-[#ece7dc] px-4 py-3">
-            <div className="flex flex-wrap items-center gap-1">
-              <SidebarGhostButton onClick={() => void refreshSettings()}>
-                <RefreshIcon />
-                刷新配置
-              </SidebarGhostButton>
-              <Link
-                to="/model-providers"
-                className="inline-flex items-center gap-2 rounded-[12px] px-3 py-2 text-sm font-medium text-slate-600 transition-all hover:bg-white hover:text-slate-900"
-              >
-                <SettingsIcon />
-                模型提供商
-              </Link>
-            </div>
-          </div>
+              <div className="border-t border-[#ece7dc] px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <HeaderIconButton title="刷新配置" onClick={() => void refreshSettings()}>
+                    <RefreshIcon />
+                  </HeaderIconButton>
+                  <Link
+                    to="/model-providers"
+                    className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
+                    title="模型提供商"
+                    aria-label="模型提供商"
+                  >
+                    <SettingsIcon />
+                  </Link>
+                </div>
+              </div>
+            </>
+          )}
         </aside>
 
-        <section className="relative flex min-h-0 flex-col bg-[#fbfaf7]">
+        <section className="relative flex min-h-0 flex-col bg-[#fbfbf9]">
           {activeSession && settings ? (
             <>
-              <header className="sticky top-0 z-20 border-b border-[#ece7dc] bg-[#fbfaf7]/92 backdrop-blur-xl">
+              <header className="sticky top-0 z-20 border-b border-[#eceae4] bg-[#fbfbf9]/92 backdrop-blur-xl">
                 <div className="mx-auto flex w-full max-w-[960px] items-center justify-between gap-4 px-6 py-4">
                   <div className="min-w-0 flex-1">
                     <input
@@ -1683,15 +1758,14 @@ export function ModelChatPage() {
                       className="w-full bg-transparent text-[28px] font-medium tracking-tight text-slate-950 outline-none placeholder:text-slate-400"
                       placeholder="New Chat"
                     />
-                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                    <div className="mt-3 h-4">
                       {activeSelectionOrigin ? (
-                        <>
-                          <span>下一条发送到</span>
-                          <MessageOriginPill origin={activeSelectionOrigin} />
-                        </>
-                      ) : (
-                        <span>当前没有可用模型，请先启用 provider。</span>
-                      )}
+                        <img
+                          src={SERVICE_ICONS[activeSelectionOrigin.serviceType]}
+                          alt=""
+                          className="h-4 w-4 object-contain"
+                        />
+                      ) : null}
                     </div>
                   </div>
 
@@ -1747,27 +1821,9 @@ export function ModelChatPage() {
                     </div>
                   ) : activeSession.messages.length === 0 && !activeStreamMessage ? (
                     <div className="flex min-h-[calc(100vh-300px)] items-center justify-center py-16">
-                      <div className="max-w-2xl text-center">
-                        {activeSelectionOrigin ? (
-                          <img
-                            src={SERVICE_ICONS[activeSelectionOrigin.serviceType]}
-                            alt=""
-                            className="mx-auto h-10 w-10 object-contain"
-                          />
-                        ) : null}
-                        <div className="mt-6 text-4xl font-medium tracking-tight text-slate-950 sm:text-5xl">
-                          一个线程，按回合切换模型
-                        </div>
-                        <div className="mt-4 text-sm leading-7 text-slate-500">
-                          当前下一条会发送到{" "}
-                          <span className="font-medium text-slate-700">
-                            {activeSelectionOrigin?.providerName ?? "未启用 Provider"}
-                          </span>
-                          {" / "}
-                          <span className="font-medium text-slate-700">
-                            {activeSelectionOrigin?.modelLabel ?? "未选择模型"}
-                          </span>
-                          ，后续可以在不切会话的情况下继续改用别的模型。
+                      <div className="text-center">
+                        <div className="text-4xl font-medium tracking-tight text-slate-950 sm:text-5xl">
+                          今天有什么计划？
                         </div>
                       </div>
                     </div>
@@ -1866,7 +1922,7 @@ export function ModelChatPage() {
                         }
                         onKeyDown={handleComposerKeyDown}
                         rows={1}
-                        placeholder="在同一段会话里连续聊天，切换模型只影响下一条消息。"
+                        placeholder="有问题，尽管问"
                         className="max-h-[180px] min-h-[30px] w-full resize-none overflow-y-auto bg-transparent px-1 py-2 text-[15px] leading-7 text-slate-900 outline-none placeholder:text-slate-400"
                       />
                       </div>
