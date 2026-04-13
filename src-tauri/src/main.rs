@@ -129,6 +129,16 @@ struct AgentRuntime {
     version: Option<String>,
     last_error: Option<String>,
     #[serde(default)]
+    runner_mode: Option<String>,
+    #[serde(default)]
+    runner_label: Option<String>,
+    #[serde(default)]
+    workspace_path: Option<String>,
+    #[serde(default)]
+    connection_state: Option<String>,
+    #[serde(default)]
+    warnings: Vec<String>,
+    #[serde(default)]
     resources: AgentRuntimeResources,
 }
 
@@ -281,6 +291,8 @@ struct ContextStore {
 #[serde(rename_all = "camelCase")]
 struct AppSettings {
     cli_paths: CliPaths,
+    #[serde(default)]
+    cli_runner_profiles: CliRunnerProfiles,
     project_root: String,
     max_turns_per_agent: usize,
     max_output_chars_per_turn: usize,
@@ -303,6 +315,108 @@ struct CliPaths {
     codex: String,
     claude: String,
     gemini: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CliRunnerProfiles {
+    codex: CliRunnerProfile,
+    claude: CliRunnerProfile,
+    gemini: CliRunnerProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CliRunnerProfile {
+    #[serde(default)]
+    cli_id: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_runner_mode")]
+    mode: String,
+    #[serde(default = "default_auto_value")]
+    command_path: String,
+    #[serde(default)]
+    shell: String,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default = "default_workspace_mapping_mode")]
+    workspace_mapping_mode: String,
+    #[serde(default)]
+    manual_workspace_path: String,
+    #[serde(default)]
+    resolved_workspace_path: Option<String>,
+    #[serde(default)]
+    last_detection: Option<String>,
+    #[serde(default)]
+    last_connection_test: Option<String>,
+    #[serde(default)]
+    capability_flags: Vec<String>,
+    #[serde(default)]
+    wsl: WslRunnerConfig,
+    #[serde(default)]
+    ssh: SshRunnerConfig,
+}
+
+impl Default for CliRunnerProfile {
+    fn default() -> Self {
+        Self {
+            cli_id: String::new(),
+            enabled: true,
+            mode: default_runner_mode(),
+            command_path: default_auto_value(),
+            shell: String::new(),
+            env: BTreeMap::new(),
+            workspace_mapping_mode: default_workspace_mapping_mode(),
+            manual_workspace_path: String::new(),
+            resolved_workspace_path: None,
+            last_detection: None,
+            last_connection_test: None,
+            capability_flags: Vec::new(),
+            wsl: WslRunnerConfig::default(),
+            ssh: SshRunnerConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WslRunnerConfig {
+    #[serde(default)]
+    distro: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SshRunnerConfig {
+    #[serde(default)]
+    host: String,
+    #[serde(default = "default_ssh_port")]
+    port: u16,
+    #[serde(default)]
+    user: String,
+    #[serde(default = "default_ssh_auth_kind")]
+    auth_kind: String,
+    #[serde(default)]
+    ssh_config_host: String,
+    #[serde(default)]
+    remote_command_path: String,
+    #[serde(default = "default_true")]
+    strict_host_key_checking: bool,
+}
+
+impl Default for SshRunnerConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: default_ssh_port(),
+            user: String::new(),
+            auth_kind: default_ssh_auth_kind(),
+            ssh_config_host: String::new(),
+            remote_command_path: String::new(),
+            strict_host_key_checking: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -494,6 +608,30 @@ fn default_smtp_port() -> u16 {
     587
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_runner_mode() -> String {
+    "local".to_string()
+}
+
+fn default_workspace_mapping_mode() -> String {
+    "auto-with-override".to_string()
+}
+
+fn default_auto_value() -> String {
+    "auto".to_string()
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+fn default_ssh_auth_kind() -> String {
+    "agent".to_string()
+}
+
 fn is_likely_email(value: &str) -> bool {
     let trimmed = value.trim();
     let parts = trimmed.split('@').collect::<Vec<_>>();
@@ -625,6 +763,145 @@ fn normalize_settings_providers(settings: &mut AppSettings) {
     normalize_provider_entries(&mut settings.openai_compatible_providers, "openaiCompatible");
     normalize_provider_entries(&mut settings.claude_providers, "claude");
     normalize_provider_entries(&mut settings.gemini_providers, "gemini");
+}
+
+fn cli_default_command_name(cli_id: &str) -> &'static str {
+    match cli_id {
+        "codex" => "codex",
+        "claude" => "claude",
+        "gemini" => "gemini",
+        _ => "auto",
+    }
+}
+
+fn default_cli_runner_profile(cli_id: &str, legacy_command_path: &str) -> CliRunnerProfile {
+    CliRunnerProfile {
+        cli_id: cli_id.to_string(),
+        command_path: if legacy_command_path.trim().is_empty() {
+            default_auto_value()
+        } else {
+            legacy_command_path.trim().to_string()
+        },
+        ..CliRunnerProfile::default()
+    }
+}
+
+fn normalize_cli_runner_profile(
+    cli_id: &str,
+    current: &CliRunnerProfile,
+    legacy_command_path: &str,
+) -> CliRunnerProfile {
+    let fallback = default_cli_runner_profile(cli_id, legacy_command_path);
+    let mode = match current.mode.trim() {
+        "wsl" => "wsl",
+        "ssh" => "ssh",
+        _ => "local",
+    };
+    let workspace_mapping_mode = match current.workspace_mapping_mode.trim() {
+        "auto" => "auto",
+        "manual" => "manual",
+        _ => "auto-with-override",
+    };
+
+    CliRunnerProfile {
+        cli_id: cli_id.to_string(),
+        enabled: current.enabled,
+        mode: mode.to_string(),
+        command_path: if current.command_path.trim().is_empty() {
+            fallback.command_path
+        } else {
+            current.command_path.trim().to_string()
+        },
+        shell: current.shell.trim().to_string(),
+        env: current
+            .env
+            .iter()
+            .filter_map(|(key, value)| {
+                let normalized_key = key.trim();
+                let normalized_value = value.trim();
+                if normalized_key.is_empty() || normalized_value.is_empty() {
+                    None
+                } else {
+                    Some((normalized_key.to_string(), normalized_value.to_string()))
+                }
+            })
+            .collect(),
+        workspace_mapping_mode: workspace_mapping_mode.to_string(),
+        manual_workspace_path: current.manual_workspace_path.trim().to_string(),
+        resolved_workspace_path: current
+            .resolved_workspace_path
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        last_detection: current
+            .last_detection
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        last_connection_test: current
+            .last_connection_test
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        capability_flags: current
+            .capability_flags
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect(),
+        wsl: WslRunnerConfig {
+            distro: current.wsl.distro.trim().to_string(),
+        },
+        ssh: SshRunnerConfig {
+            host: current.ssh.host.trim().to_string(),
+            port: if current.ssh.port == 0 {
+                default_ssh_port()
+            } else {
+                current.ssh.port
+            },
+            user: current.ssh.user.trim().to_string(),
+            auth_kind: match current.ssh.auth_kind.trim() {
+                "config" => "config".to_string(),
+                _ => default_ssh_auth_kind(),
+            },
+            ssh_config_host: current.ssh.ssh_config_host.trim().to_string(),
+            remote_command_path: current.ssh.remote_command_path.trim().to_string(),
+            strict_host_key_checking: current.ssh.strict_host_key_checking,
+        },
+    }
+}
+
+fn normalize_cli_runner_profiles(settings: &mut AppSettings) {
+    let codex_legacy = settings.cli_paths.codex.clone();
+    let claude_legacy = settings.cli_paths.claude.clone();
+    let gemini_legacy = settings.cli_paths.gemini.clone();
+
+    settings.cli_runner_profiles.codex = normalize_cli_runner_profile(
+        "codex",
+        &settings.cli_runner_profiles.codex,
+        &codex_legacy,
+    );
+    settings.cli_runner_profiles.claude = normalize_cli_runner_profile(
+        "claude",
+        &settings.cli_runner_profiles.claude,
+        &claude_legacy,
+    );
+    settings.cli_runner_profiles.gemini = normalize_cli_runner_profile(
+        "gemini",
+        &settings.cli_runner_profiles.gemini,
+        &gemini_legacy,
+    );
+
+    settings.cli_paths = CliPaths {
+        codex: settings.cli_runner_profiles.codex.command_path.clone(),
+        claude: settings.cli_runner_profiles.claude.command_path.clone(),
+        gemini: settings.cli_runner_profiles.gemini.command_path.clone(),
+    };
+}
+
+fn normalize_all_settings(settings: &mut AppSettings) {
+    normalize_settings_providers(settings);
+    normalize_cli_runner_profiles(settings);
 }
 
 fn url_has_path_segment(base_url: &str, segment: &str) -> bool {
@@ -2082,6 +2359,16 @@ struct AgentTransportSession {
     turn_id: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
+    #[serde(default)]
+    runner_mode: Option<String>,
+    #[serde(default)]
+    runner_identity: Option<String>,
+    #[serde(default)]
+    workspace_path: Option<String>,
+    #[serde(default)]
+    command_path: Option<String>,
+    #[serde(default)]
+    host_label: Option<String>,
     last_sync_at: Option<String>,
 }
 
@@ -2497,6 +2784,11 @@ fn build_transport_session(
         turn_id: None,
         model: None,
         permission_mode: None,
+        runner_mode: None,
+        runner_identity: None,
+        workspace_path: None,
+        command_path: None,
+        host_label: None,
         last_sync_at: None,
     });
 
@@ -2513,6 +2805,11 @@ fn build_transport_session(
         turn_id: turn_id.or(previous.turn_id),
         model: model.or(previous.model),
         permission_mode: permission_mode.or(previous.permission_mode),
+        runner_mode: previous.runner_mode,
+        runner_identity: previous.runner_identity,
+        workspace_path: previous.workspace_path,
+        command_path: previous.command_path,
+        host_label: previous.host_label,
         last_sync_at: Some(Local::now().to_rfc3339()),
     }
 }
@@ -5230,8 +5527,7 @@ fn handle_codex_notification(
 
 fn run_codex_app_server_turn(
     app: &AppHandle,
-    command_path: &str,
-    project_root: &str,
+    runtime: &ResolvedCliRuntime,
     prompt: &str,
     selected_skills: &[CliSkillItem],
     session: &acp::AcpSession,
@@ -5243,16 +5539,12 @@ fn run_codex_app_server_turn(
     block_prefix: Vec<ChatMessageBlock>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<CodexTurnOutcome, String> {
-    let resolved_command = resolve_direct_command_path(command_path);
-    let mut cmd = batch_aware_command(&resolved_command, &["app-server", "--listen", "stdio://"]);
+    let project_root = runtime.workspace_path.as_str();
+    let mut cmd = build_runner_direct_command(runtime, &["app-server", "--listen", "stdio://"])?;
 
-    cmd.current_dir(project_root)
-        .stdin(Stdio::piped())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd
         .spawn()
@@ -6365,8 +6657,7 @@ fn codex_build_approval_response(
 
 fn run_claude_headless_turn_once(
     app: &AppHandle,
-    command_path: &str,
-    project_root: &str,
+    runtime: &ResolvedCliRuntime,
     prompt: &str,
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
@@ -6379,7 +6670,7 @@ fn run_claude_headless_turn_once(
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<ClaudeTurnOutcome, String> {
-    let resolved_command = resolve_direct_command_path(command_path);
+    let project_root = runtime.workspace_path.as_str();
     let requested_model = claude_requested_model(session, previous_transport_session.as_ref());
     let requested_effort = claude_reasoning_effort(session);
     let requested_permission =
@@ -6415,30 +6706,12 @@ fn run_claude_headless_turn_once(
         args.push(session_id);
     }
 
-    let mut cmd = if resolved_command.to_ascii_lowercase().ends_with(".cmd")
-        || resolved_command.to_ascii_lowercase().ends_with(".bat")
-    {
-        let mut command = Command::new("cmd.exe");
-        command
-            .arg("/C")
-            .arg("call")
-            .arg(&resolved_command)
-            .args(&args);
-        command
-    } else {
-        let mut command = Command::new(&resolved_command);
-        command.args(&args);
-        command
-    };
-    apply_runtime_environment(&mut cmd);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut cmd = build_runner_direct_command(runtime, &arg_refs)?;
 
-    cmd.current_dir(project_root)
-        .stdin(Stdio::piped())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd
         .spawn()
@@ -6653,8 +6926,7 @@ fn run_claude_headless_turn_once(
 
 fn run_claude_headless_turn(
     app: &AppHandle,
-    command_path: &str,
-    project_root: &str,
+    runtime: &ResolvedCliRuntime,
     prompt: &str,
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
@@ -6672,8 +6944,7 @@ fn run_claude_headless_turn(
 
     match run_claude_headless_turn_once(
         app,
-        command_path,
-        project_root,
+        runtime,
         prompt,
         session,
         previous_transport_session.clone(),
@@ -6694,8 +6965,7 @@ fn run_claude_headless_turn(
             });
             run_claude_headless_turn_once(
                 app,
-                command_path,
-                project_root,
+                runtime,
                 prompt,
                 session,
                 fallback_transport_session,
@@ -6715,8 +6985,7 @@ fn run_claude_headless_turn(
 
 fn run_gemini_acp_turn(
     app: &AppHandle,
-    command_path: &str,
-    project_root: &str,
+    runtime: &ResolvedCliRuntime,
     prompt: &str,
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
@@ -6727,16 +6996,12 @@ fn run_gemini_acp_turn(
     block_prefix: Vec<ChatMessageBlock>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<GeminiTurnOutcome, String> {
-    let resolved_command = resolve_direct_command_path(command_path);
-    let mut cmd = batch_aware_command(&resolved_command, &["--acp"]);
+    let project_root = runtime.workspace_path.as_str();
+    let mut cmd = build_runner_direct_command(runtime, &["--acp"])?;
 
-    cmd.current_dir(project_root)
-        .stdin(Stdio::piped())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd
         .spawn()
@@ -7211,6 +7476,7 @@ fn load_app_state(
     refresh_runtime: Option<bool>,
 ) -> Result<AppStateDto, String> {
     let project_root = project_root.unwrap_or_else(default_project_root);
+    let settings = load_or_seed_settings(&project_root)?;
     let mut state = load_or_seed_state(&project_root)?;
     state.environment.backend = "tauri".to_string();
     state.environment.tauri_ready = true;
@@ -7218,7 +7484,7 @@ fn load_app_state(
     state.environment.notes = environment_notes();
     sync_workspace_metrics(&mut state);
     if refresh_runtime == Some(true) {
-        sync_agent_runtime(&mut state);
+        sync_agent_runtime(&mut state, &settings);
     }
     persist_state(&state)?;
 
@@ -7236,9 +7502,8 @@ fn load_app_state(
 
     // Load settings
     {
-        let s = load_or_seed_settings(&project_root)?;
         let mut guard = store.settings.lock().map_err(|err| err.to_string())?;
-        *guard = s;
+        *guard = settings;
     }
 
     emit_state(&app, &state);
@@ -7443,16 +7708,11 @@ fn run_checks(
     let state_arc = store.state.clone();
 
     let state = state_arc.lock().map_err(|err| err.to_string())?.clone();
+    let settings_snapshot = store.settings.lock().map_err(|err| err.to_string())?.clone();
     let agent_id = cli_id.unwrap_or_else(|| state.workspace.current_writer.clone());
     let project_root = project_root.unwrap_or_else(|| state.workspace.project_root.clone());
-    let shell = shell_path();
-    let timeout = {
-        store
-            .settings
-            .lock()
-            .map(|s| s.process_timeout_ms)
-            .unwrap_or(DEFAULT_TIMEOUT_MS)
-    };
+    let runtime = resolve_cli_runtime(&settings_snapshot, &agent_id, &project_root)?;
+    let timeout = settings_snapshot.process_timeout_ms;
     let command = if Path::new(&project_root).join("package.json").exists() {
         "npm run build".to_string()
     } else {
@@ -7475,16 +7735,18 @@ fn run_checks(
     })?;
 
     thread::spawn(move || {
-        let output = spawn_shell_command(
-            &shell,
-            &project_root,
-            &command,
-            app_handle.clone(),
-            state_arc.clone(),
-            &agent_id,
-            "system",
-            timeout,
-        );
+        let output = build_runner_shell_command(&runtime, &command)
+            .and_then(|mut cmd| {
+                cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+                spawn_streaming_command(
+                    cmd,
+                    app_handle.clone(),
+                    state_arc.clone(),
+                    &agent_id,
+                    "system",
+                    timeout,
+                )
+            });
 
         match output {
             Ok(full_output) => {
@@ -7615,7 +7877,7 @@ fn get_conversation_history(
 #[tauri::command]
 fn get_settings(store: State<'_, AppStore>) -> Result<AppSettings, String> {
     let mut settings = store.settings.lock().map_err(|err| err.to_string())?;
-    normalize_settings_providers(&mut settings);
+    normalize_all_settings(&mut settings);
     Ok(settings.clone())
 }
 
@@ -7625,7 +7887,7 @@ fn update_settings(
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
     validate_notification_config(&settings.notification_config)?;
-    normalize_settings_providers(&mut settings);
+    normalize_all_settings(&mut settings);
     {
         let mut s = store.settings.lock().map_err(|err| err.to_string())?;
         *s = settings.clone();
@@ -7956,6 +8218,11 @@ fn agent_transport_session_from_kernel_ref(
         turn_id: session.native_turn_id.clone(),
         model: session.model.clone(),
         permission_mode: session.permission_mode.clone(),
+        runner_mode: None,
+        runner_identity: None,
+        workspace_path: None,
+        command_path: None,
+        host_label: None,
         last_sync_at: Some(session.last_sync_at.clone()),
     })
 }
@@ -9666,18 +9933,13 @@ fn start_agent_job(
         .cloned()
         .ok_or_else(|| "Unknown agent".to_string())?;
 
-    let wrapper = agent
-        .runtime
-        .command_path
-        .clone()
-        .ok_or_else(|| format!("{} is not available on this machine", agent.label))?;
-    let shell = shell_path();
+    let runtime = resolve_cli_runtime(&settings_snapshot, &agent_id, &snapshot.workspace.project_root)
+        .map_err(|_| format!("{} is not available on the configured runner", agent.label))?;
     let write_mode = snapshot.workspace.current_writer == agent_id && !review_only;
     let composed_prompt = compose_context_prompt(&snapshot, &ctx_snapshot, &agent_id, &prompt);
     let acp_snap = store.acp_session.lock().map_err(|e| e.to_string())?.clone();
-    let script = build_agent_script(&agent_id, &wrapper, &composed_prompt, write_mode, &acp_snap)?;
+    let args = build_agent_args(&agent_id, &composed_prompt, write_mode, &acp_snap)?;
     let job_id = create_id("job");
-    let project_root = snapshot.workspace.project_root.clone();
     let timeout = settings_snapshot.process_timeout_ms;
 
     mutate_store_arc(&state_arc, |state| {
@@ -9716,20 +9978,28 @@ fn start_agent_job(
     })?;
 
     let user_prompt = prompt.clone();
+    let runtime_for_thread = runtime.clone();
+    let args_for_thread = args.clone();
 
     thread::spawn(move || {
         let start_time = Instant::now();
 
-        let result = spawn_shell_command(
-            &shell,
-            &project_root,
-            &script,
-            app_handle.clone(),
-            state_arc.clone(),
-            &agent_id,
-            &agent_id,
-            timeout,
-        );
+        let result = args_for_thread
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let result = build_runner_direct_command(&runtime_for_thread, &result)
+            .and_then(|mut cmd| {
+                cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+                spawn_streaming_command(
+                    cmd,
+                    app_handle.clone(),
+                    state_arc.clone(),
+                    &agent_id,
+                    &agent_id,
+                    timeout,
+                )
+            });
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
@@ -9903,16 +10173,21 @@ fn send_chat_message(
     let write_mode = request.write_mode && !request.plan_mode;
     let requested_transport_session = request.transport_session.clone();
     let transport_kind = default_transport_kind(&cli_id);
+    let settings_snapshot = store.settings.lock().map_err(|e| e.to_string())?.clone();
+    let resolved_runtime = resolve_cli_runtime(&settings_snapshot, &cli_id, &project_root)?;
     let terminal_storage = store.terminal_storage.clone();
     let pending_handoff = terminal_storage
         .load_pending_handoff_for_terminal_tab(&terminal_tab_id, &cli_id)
         .ok()
         .flatten();
     let force_fresh_session = pending_handoff.is_some();
+    let compatible_previous_transport_session = requested_transport_session
+        .clone()
+        .filter(|session| transport_session_matches_runtime(session, &resolved_runtime));
     let effective_previous_transport_session = if force_fresh_session {
         None
     } else {
-        requested_transport_session.clone()
+        compatible_previous_transport_session
     };
 
     let mut request_session = acp::AcpSession::default();
@@ -9928,26 +10203,15 @@ fn send_chat_message(
             .insert(cli_id.clone(), permission);
     }
 
-    // Look up CLI runtime
-    let (wrapper_path, shell, timeout_ms) = {
-        let state = store.state.lock().map_err(|e| e.to_string())?;
-        let settings = store.settings.lock().map_err(|e| e.to_string())?;
-
-        let agent = state.agents.iter().find(|a| a.id == cli_id);
-        let wrapper = agent
-            .and_then(|a| a.runtime.command_path.clone())
-            .ok_or_else(|| format!("{} CLI not found", cli_id))?;
-
-        (wrapper, shell_path(), settings.process_timeout_ms)
-    };
+    let timeout_ms = settings_snapshot.process_timeout_ms;
 
     let (prompt_for_context, selected_codex_skills, selected_claude_skill) = match cli_id.as_str() {
-        "codex" => {
+        "codex" if resolved_runtime.profile.mode == "local" => {
             let (runtime_prompt, selected_skills) =
-                resolve_codex_prompt_and_skills(&app, &wrapper_path, &project_root, &prompt);
+                resolve_codex_prompt_and_skills(&app, &resolved_runtime.command_path, &project_root, &prompt);
             (runtime_prompt, selected_skills, None)
         }
-        "claude" => {
+        "claude" if resolved_runtime.profile.mode == "local" => {
             let (runtime_prompt, selected_skill) =
                 resolve_claude_prompt_and_skill(&project_root, &prompt);
             (runtime_prompt, Vec::new(), selected_skill)
@@ -10029,8 +10293,7 @@ fn send_chat_message(
     let live_chat_turns = store.live_chat_turns.clone();
 
     if cli_id == "codex" {
-        let codex_wrapper_path = wrapper_path.clone();
-        let codex_project_root = project_root.clone();
+        let codex_runtime = resolved_runtime.clone();
         let codex_requested_transport_session = effective_previous_transport_session.clone();
         let codex_transport_kind = transport_kind.clone();
         let codex_pending_approvals = store.codex_pending_approvals.clone();
@@ -10045,8 +10308,7 @@ fn send_chat_message(
             let start = Instant::now();
             let outcome = run_codex_app_server_turn(
                 &app_handle,
-                &codex_wrapper_path,
-                &codex_project_root,
+                &codex_runtime,
                 &composed_prompt,
                 &selected_codex_skills_for_thread,
                 &request_session_for_thread,
@@ -10069,18 +10331,21 @@ fn send_chat_message(
                         outcome.final_content,
                         outcome.content_format,
                         outcome.blocks,
-                        outcome.transport_session,
+                        stamp_transport_session(outcome.transport_session, &codex_runtime),
                     ),
                     Err(error) => {
                         let permission_mode =
                             codex_permission_mode(&request_session_for_thread, turn_write_mode);
-                        let transport_session = build_transport_session(
-                            "codex",
-                            codex_requested_transport_session,
-                            None,
-                            None,
-                            request_session_for_thread.model.get("codex").cloned(),
-                            Some(permission_mode),
+                        let transport_session = stamp_transport_session(
+                            build_transport_session(
+                                "codex",
+                                codex_requested_transport_session,
+                                None,
+                                None,
+                                request_session_for_thread.model.get("codex").cloned(),
+                                Some(permission_mode),
+                            ),
+                            &codex_runtime,
                         );
                         let final_content = if interrupted_by_user {
                             String::new()
@@ -10139,7 +10404,7 @@ fn send_chat_message(
             let _ = codex_terminal_storage.record_turn_progress(&storage::TaskTurnUpdate {
                 terminal_tab_id: done_tab_id.clone(),
                 workspace_id: codex_workspace_id.clone(),
-                project_root: codex_project_root.clone(),
+                project_root: codex_runtime.workspace_path.clone(),
                 project_name: codex_project_name.clone(),
                 cli_id: agent_id.clone(),
                 user_prompt: user_prompt.clone(),
@@ -10180,8 +10445,7 @@ fn send_chat_message(
     }
 
     if cli_id == "gemini" {
-        let gemini_wrapper_path = wrapper_path.clone();
-        let gemini_project_root = project_root.clone();
+        let gemini_runtime = resolved_runtime.clone();
         let gemini_requested_transport_session = effective_previous_transport_session.clone();
         let gemini_transport_kind = transport_kind.clone();
         let gemini_terminal_storage = terminal_storage.clone();
@@ -10195,8 +10459,7 @@ fn send_chat_message(
             let start = Instant::now();
             let outcome = run_gemini_acp_turn(
                 &app_handle,
-                &gemini_wrapper_path,
-                &gemini_project_root,
+                &gemini_runtime,
                 &composed_prompt,
                 &request_session_for_thread,
                 gemini_requested_transport_session.clone(),
@@ -10218,7 +10481,7 @@ fn send_chat_message(
                         outcome.final_content,
                         outcome.content_format,
                         outcome.blocks,
-                        outcome.transport_session,
+                        stamp_transport_session(outcome.transport_session, &gemini_runtime),
                     ),
                     Err(error) => {
                         let permission_mode = gemini_local_permission_mode(
@@ -10226,13 +10489,16 @@ fn send_chat_message(
                             turn_write_mode,
                             gemini_requested_transport_session.as_ref(),
                         );
-                        let transport_session = build_transport_session(
-                            "gemini",
-                            gemini_requested_transport_session,
-                            None,
-                            None,
-                            request_session_for_thread.model.get("gemini").cloned(),
-                            Some(permission_mode),
+                        let transport_session = stamp_transport_session(
+                            build_transport_session(
+                                "gemini",
+                                gemini_requested_transport_session,
+                                None,
+                                None,
+                                request_session_for_thread.model.get("gemini").cloned(),
+                                Some(permission_mode),
+                            ),
+                            &gemini_runtime,
                         );
                         let final_content = if interrupted_by_user {
                             String::new()
@@ -10291,7 +10557,7 @@ fn send_chat_message(
             let _ = gemini_terminal_storage.record_turn_progress(&storage::TaskTurnUpdate {
                 terminal_tab_id: done_tab_id.clone(),
                 workspace_id: gemini_workspace_id.clone(),
-                project_root: gemini_project_root.clone(),
+                project_root: gemini_runtime.workspace_path.clone(),
                 project_name: gemini_project_name.clone(),
                 cli_id: agent_id.clone(),
                 user_prompt: user_prompt.clone(),
@@ -10332,8 +10598,7 @@ fn send_chat_message(
     }
 
     if cli_id == "claude" {
-        let claude_wrapper_path = wrapper_path.clone();
-        let claude_project_root = project_root.clone();
+        let claude_runtime = resolved_runtime.clone();
         let claude_requested_transport_session = effective_previous_transport_session.clone();
         let claude_transport_kind = transport_kind.clone();
         let claude_approval_rules = store.claude_approval_rules.clone();
@@ -10349,8 +10614,7 @@ fn send_chat_message(
             let start = Instant::now();
             let outcome = run_claude_headless_turn(
                 &app_handle,
-                &claude_wrapper_path,
-                &claude_project_root,
+                &claude_runtime,
                 &composed_prompt,
                 &request_session_for_thread,
                 claude_requested_transport_session.clone(),
@@ -10373,7 +10637,7 @@ fn send_chat_message(
                         outcome.final_content,
                         outcome.content_format,
                         outcome.blocks,
-                        outcome.transport_session,
+                        stamp_transport_session(outcome.transport_session, &claude_runtime),
                     ),
                     Err(error) => {
                         let permission_mode = claude_permission_mode(
@@ -10381,13 +10645,16 @@ fn send_chat_message(
                             turn_write_mode,
                             claude_requested_transport_session.as_ref(),
                         );
-                        let transport_session = build_transport_session(
-                            "claude",
-                            claude_requested_transport_session,
-                            None,
-                            None,
-                            request_session_for_thread.model.get("claude").cloned(),
-                            Some(permission_mode),
+                        let transport_session = stamp_transport_session(
+                            build_transport_session(
+                                "claude",
+                                claude_requested_transport_session,
+                                None,
+                                None,
+                                request_session_for_thread.model.get("claude").cloned(),
+                                Some(permission_mode),
+                            ),
+                            &claude_runtime,
                         );
                         let final_content = if interrupted_by_user {
                             String::new()
@@ -10446,7 +10713,7 @@ fn send_chat_message(
             let _ = claude_terminal_storage.record_turn_progress(&storage::TaskTurnUpdate {
                 terminal_tab_id: done_tab_id.clone(),
                 workspace_id: claude_workspace_id.clone(),
-                project_root: claude_project_root.clone(),
+                project_root: claude_runtime.workspace_path.clone(),
                 project_name: claude_project_name.clone(),
                 cli_id: agent_id.clone(),
                 user_prompt: user_prompt.clone(),
@@ -10486,52 +10753,44 @@ fn send_chat_message(
         return Ok(message_id);
     }
 
-    let script = build_agent_script(
-        &cli_id,
-        &wrapper_path,
-        &composed_prompt,
-        write_mode,
-        &request_session,
-    )?;
-    let shell_terminal_storage = terminal_storage.clone();
-    let shell_workspace_id = workspace_id_for_thread.clone();
-    let shell_project_name = project_name_for_thread.clone();
-    let shell_recent_turns = recent_turns_for_thread.clone();
-    let shell_live_turn = live_turn.clone();
-    let shell_live_chat_turns = live_chat_turns.clone();
+    let fallback_runtime = resolved_runtime.clone();
+    let fallback_requested_transport_session = effective_previous_transport_session.clone();
+    let fallback_terminal_storage = terminal_storage.clone();
+    let fallback_workspace_id = workspace_id_for_thread.clone();
+    let fallback_project_name = project_name_for_thread.clone();
+    let fallback_recent_turns = recent_turns_for_thread.clone();
+    let fallback_live_turn = live_turn.clone();
+    let fallback_live_chat_turns = live_chat_turns.clone();
 
     thread::spawn(move || {
         let start = Instant::now();
+        let outcome = run_silent_agent_turn_once(
+            &fallback_runtime,
+            &composed_prompt,
+            turn_write_mode,
+            &request_session_for_thread,
+            timeout_ms,
+            Some(fallback_live_turn.clone()),
+        );
 
-        let mut cmd = Command::new(&shell);
-        cmd.args(["-NoLogo", "-NoProfile", "-Command", &script])
-            .current_dir(&project_root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-
-        let child = cmd.spawn();
-        let mut child = match child {
-            Ok(c) => c,
-            Err(e) => {
-                unregister_live_chat_turn(&shell_live_chat_turns, &stream_tab_id, &msg_id);
-                let _ = app_handle.emit(
-                    "stream-chunk",
-                    StreamEvent {
-                        terminal_tab_id: stream_tab_id.clone(),
-                        message_id: msg_id.clone(),
-                        chunk: format!("Error: {}", e),
-                        done: true,
-                        exit_code: Some(1),
-                        duration_ms: Some(start.elapsed().as_millis() as u64),
-                        final_content: Some(format!("Error: {}", e)),
-                        content_format: Some("log".to_string()),
-                        transport_kind: Some(transport_kind.clone()),
-                        transport_session: Some(build_transport_session(
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let interrupted_by_user = was_live_chat_turn_interrupted(Some(&fallback_live_turn));
+        let (raw_output, exit_code, final_content, blocks, transport_session) = match outcome {
+            Ok(outcome) => {
+                let final_content = if outcome.final_content.trim().is_empty() {
+                    outcome.raw_output.clone()
+                } else {
+                    outcome.final_content
+                };
+                (
+                    outcome.raw_output,
+                    Some(0),
+                    final_content,
+                    Vec::new(),
+                    stamp_transport_session(
+                        build_transport_session(
                             &agent_id,
-                            effective_previous_transport_session.clone(),
+                            fallback_requested_transport_session.clone(),
                             None,
                             None,
                             request_session_for_thread.model.get(&agent_id).cloned(),
@@ -10539,119 +10798,48 @@ fn send_chat_message(
                                 .permission_mode
                                 .get(&agent_id)
                                 .cloned(),
-                        )),
-                        blocks: Some(vec![ChatMessageBlock::Status {
-                            level: "error".to_string(),
-                            text: format!("Error: {}", e),
-                        }]),
-                        interrupted_by_user: Some(false),
-                    },
-                );
-                return;
+                        ),
+                        &fallback_runtime,
+                    ),
+                )
+            }
+            Err(error) => {
+                let final_content = if interrupted_by_user {
+                    String::new()
+                } else {
+                    error.clone()
+                };
+                let blocks = if interrupted_by_user {
+                    vec![interrupted_fallback_status_block()]
+                } else {
+                    vec![ChatMessageBlock::Status {
+                        level: "error".to_string(),
+                        text: error.clone(),
+                    }]
+                };
+                (
+                    error,
+                    Some(if interrupted_by_user { 130 } else { 1 }),
+                    final_content,
+                    blocks,
+                    stamp_transport_session(
+                        build_transport_session(
+                            &agent_id,
+                            fallback_requested_transport_session.clone(),
+                            None,
+                            None,
+                            request_session_for_thread.model.get(&agent_id).cloned(),
+                            request_session_for_thread
+                                .permission_mode
+                                .get(&agent_id)
+                                .cloned(),
+                        ),
+                        &fallback_runtime,
+                    ),
+                )
             }
         };
 
-        set_live_chat_turn_target(
-            &shell_live_turn,
-            LiveChatTurnTarget::Process(LiveProcessTurnTarget {
-                cli_id: agent_id.clone(),
-                child_pid: child.id(),
-                interrupt_sent: false,
-            }),
-        );
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let output_buffer = Arc::new(Mutex::new(String::new()));
-
-        let stdout_buf = output_buffer.clone();
-        let stdout_app = app_handle.clone();
-        let stdout_msg = msg_id.clone();
-        let stdout_tab_id = terminal_tab_id.clone();
-        let stdout_handle = thread::spawn(move || {
-            if let Some(out) = stdout {
-                let reader = BufReader::new(out);
-                for line in reader.lines().flatten() {
-                    if let Ok(mut buf) = stdout_buf.lock() {
-                        buf.push_str(&line);
-                        buf.push('\n');
-                    }
-                    let _ = stdout_app.emit(
-                        "stream-chunk",
-                        StreamEvent {
-                            terminal_tab_id: stdout_tab_id.clone(),
-                            message_id: stdout_msg.clone(),
-                            chunk: format!("{}\n", line),
-                            done: false,
-                            exit_code: None,
-                            duration_ms: None,
-                            final_content: None,
-                            content_format: None,
-                            transport_kind: None,
-                            transport_session: None,
-                            blocks: None,
-                            interrupted_by_user: None,
-                        },
-                    );
-                }
-            }
-        });
-
-        let stderr_buf = output_buffer.clone();
-        let stderr_app = app_handle.clone();
-        let stderr_msg = msg_id.clone();
-        let stderr_tab_id = terminal_tab_id.clone();
-        let stderr_handle = thread::spawn(move || {
-            if let Some(err) = stderr {
-                let reader = BufReader::new(err);
-                for line in reader.lines().flatten() {
-                    if let Ok(mut buf) = stderr_buf.lock() {
-                        buf.push_str(&line);
-                        buf.push('\n');
-                    }
-                    let _ = stderr_app.emit(
-                        "stream-chunk",
-                        StreamEvent {
-                            terminal_tab_id: stderr_tab_id.clone(),
-                            message_id: stderr_msg.clone(),
-                            chunk: format!("{}\n", line),
-                            done: false,
-                            exit_code: None,
-                            duration_ms: None,
-                            final_content: None,
-                            content_format: None,
-                            transport_kind: None,
-                            transport_session: None,
-                            blocks: None,
-                            interrupted_by_user: None,
-                        },
-                    );
-                }
-            }
-        });
-
-        let status = child.wait().ok();
-        let _ = stdout_handle.join();
-        let _ = stderr_handle.join();
-
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let exit_code = status.and_then(|s| s.code());
-        let raw_output = output_buffer.lock().map(|b| b.clone()).unwrap_or_default();
-        let interrupted_by_user = was_live_chat_turn_interrupted(Some(&shell_live_turn));
-        clear_live_chat_turn_target(&shell_live_turn);
-        let transport_session = build_transport_session(
-            &agent_id,
-            effective_previous_transport_session,
-            None,
-            None,
-            request_session_for_thread.model.get(&agent_id).cloned(),
-            request_session_for_thread
-                .permission_mode
-                .get(&agent_id)
-                .cloned(),
-        );
-
-        // Store conversation turn in unified history
         if let Ok(mut ctx) = ctx_arc.lock() {
             let turn = ConversationTurn {
                 id: create_id("turn"),
@@ -10661,11 +10849,10 @@ fn send_chat_message(
                 composed_prompt: composed_prompt_for_history.clone(),
                 raw_output: raw_output.clone(),
                 output_summary: display_summary(&raw_output),
-                duration_ms: duration_ms,
+                duration_ms,
                 exit_code,
                 write_mode: turn_write_mode,
             };
-            // Per-agent
             let max = ctx.max_turns_per_agent;
             if let Some(agent_ctx) = ctx.agents.get_mut(&agent_id) {
                 agent_ctx.conversation_history.push(turn.clone());
@@ -10675,7 +10862,6 @@ fn send_chat_message(
                 }
                 agent_ctx.total_token_estimate += raw_output.len() / 4;
             }
-            // Unified
             ctx.conversation_history.push(turn);
             if ctx.conversation_history.len() > max {
                 let drain = ctx.conversation_history.len() - max;
@@ -10684,40 +10870,34 @@ fn send_chat_message(
             let _ = persist_context(&ctx);
         }
 
-        let _ = shell_terminal_storage.record_turn_progress(&storage::TaskTurnUpdate {
+        let _ = fallback_terminal_storage.record_turn_progress(&storage::TaskTurnUpdate {
             terminal_tab_id: done_tab_id.clone(),
-            workspace_id: shell_workspace_id.clone(),
-            project_root: project_root.clone(),
-            project_name: shell_project_name.clone(),
+            workspace_id: fallback_workspace_id.clone(),
+            project_root: fallback_runtime.workspace_path.clone(),
+            project_name: fallback_project_name.clone(),
             cli_id: agent_id.clone(),
             user_prompt: user_prompt.clone(),
             assistant_summary: display_summary(&raw_output),
-            relevant_files: Vec::new(),
-            recent_turns: shell_recent_turns.clone(),
+            relevant_files: collect_relevant_files_from_blocks(&blocks),
+            recent_turns: fallback_recent_turns.clone(),
             exit_code,
         });
 
-        // Emit done
-        let _ = app_handle.emit(
-            "stream-chunk",
-            StreamEvent {
-                terminal_tab_id: done_tab_id,
-                message_id: msg_id.clone(),
-                chunk: String::new(),
-                done: true,
-                exit_code,
-                duration_ms: Some(duration_ms),
-                final_content: Some(raw_output.clone()),
-                content_format: None,
-                transport_kind: Some(transport_kind),
-                transport_session: Some(transport_session),
-                blocks: None,
-                interrupted_by_user: Some(interrupted_by_user),
-            },
+        emit_chat_done_event(
+            &app_handle,
+            &done_tab_id,
+            &msg_id,
+            exit_code,
+            duration_ms,
+            final_content,
+            Some("log".to_string()),
+            Some(transport_kind),
+            Some(transport_session),
+            Some(blocks),
+            interrupted_by_user,
         );
-        unregister_live_chat_turn(&shell_live_chat_turns, &stream_tab_id, &msg_id);
+        unregister_live_chat_turn(&fallback_live_chat_turns, &stream_tab_id, &msg_id);
 
-        // Update workspace metrics
         if let Ok(mut state) = state_arc.lock() {
             sync_workspace_metrics(&mut state);
             let _ = persist_state(&state);
@@ -10788,10 +10968,8 @@ fn run_auto_orchestration(
     let message_id = request.assistant_message_id.clone();
     let live_turn = register_live_chat_turn(&store, &request.terminal_tab_id, &message_id)?;
     let live_chat_turns = store.live_chat_turns.clone();
-    let timeout_ms = {
-        let settings = store.settings.lock().map_err(|err| err.to_string())?;
-        settings.process_timeout_ms
-    };
+    let settings_snapshot = store.settings.lock().map_err(|err| err.to_string())?.clone();
+    let timeout_ms = settings_snapshot.process_timeout_ms;
 
     let mut state_snapshot = store.state.lock().map_err(|err| err.to_string())?.clone();
     state_snapshot.workspace.project_root = request.project_root.clone();
@@ -10800,7 +10978,7 @@ fn run_auto_orchestration(
         git_output(&request.project_root, &["branch", "--show-current"])
             .unwrap_or_else(|| "workspace".to_string());
 
-    let claude_wrapper_path = resolve_runtime_command(&state_snapshot, "claude")?;
+    let claude_runtime = resolve_cli_runtime(&settings_snapshot, "claude", &request.project_root)?;
 
     let state_arc = store.state.clone();
     let ctx_arc = store.context.clone();
@@ -10809,6 +10987,7 @@ fn run_auto_orchestration(
     let terminal_tab_id = request.terminal_tab_id.clone();
     let request_for_thread = request.clone();
     let composed_state = state_snapshot.clone();
+    let settings_for_thread = settings_snapshot.clone();
     let msg_id = message_id.clone();
     let terminal_storage = store.terminal_storage.clone();
     let auto_live_turn = live_turn.clone();
@@ -10872,9 +11051,7 @@ fn run_auto_orchestration(
         let planner_prompt =
             build_auto_plan_prompt(&composed_state, &terminal_storage, &request_for_thread);
         let planner_result = run_silent_agent_turn_once(
-            &request_for_thread.project_root,
-            "claude",
-            &claude_wrapper_path,
+            &claude_runtime,
             &planner_prompt,
             false,
             &planner_session,
@@ -11002,8 +11179,12 @@ fn run_auto_orchestration(
             });
 
             let step = step_states[index].step.clone();
-            let wrapper_path = match resolve_runtime_command(&composed_state, &step.owner) {
-                Ok(path) => path,
+            let worker_runtime = match resolve_cli_runtime(
+                &settings_for_thread,
+                &step.owner,
+                &request_for_thread.project_root,
+            ) {
+                Ok(runtime) => runtime,
                 Err(error) => {
                     step_states[index].status = "failed".to_string();
                     step_states[index].summary = Some("CLI runtime is unavailable.".to_string());
@@ -11060,8 +11241,7 @@ fn run_auto_orchestration(
             if step.owner == "codex" {
                 match run_codex_app_server_turn(
                     &app_handle,
-                    &wrapper_path,
-                    &request_for_thread.project_root,
+                    &worker_runtime,
                     &worker_prompt,
                     &[],
                     &worker_session,
@@ -11098,8 +11278,7 @@ fn run_auto_orchestration(
             } else if step.owner == "gemini" {
                 match run_gemini_acp_turn(
                     &app_handle,
-                    &wrapper_path,
-                    &request_for_thread.project_root,
+                    &worker_runtime,
                     &worker_prompt,
                     &worker_session,
                     None,
@@ -11134,9 +11313,7 @@ fn run_auto_orchestration(
                 }
             } else {
                 match run_silent_agent_turn_once(
-                    &request_for_thread.project_root,
-                    &step.owner,
-                    &wrapper_path,
+                    &worker_runtime,
                     &worker_prompt,
                     step.write,
                     &worker_session,
@@ -11223,9 +11400,7 @@ fn run_auto_orchestration(
         let synthesis_prompt =
             build_auto_synthesis_prompt(&request_for_thread.prompt, &plan, &step_states);
         let synthesized = run_silent_agent_turn_once(
-            &request_for_thread.project_root,
-            "claude",
-            &claude_wrapper_path,
+            &claude_runtime,
             &synthesis_prompt,
             false,
             &synthesis_session,
@@ -11612,7 +11787,15 @@ fn execute_acp_command(
         "diff" => {
             let state = store.state.lock().map_err(|e| e.to_string())?;
             let project_root = &state.workspace.project_root;
-            let diff = git_output(project_root, &["diff", "--stat"])
+            let settings = store.settings.lock().map_err(|e| e.to_string())?.clone();
+            let diff = resolve_cli_runtime(&settings, &cli_id, project_root)
+                .ok()
+                .and_then(|runtime| {
+                    build_runner_shell_command(&runtime, "git diff --stat")
+                        .ok()
+                        .and_then(|mut command| capture_command_output(&mut command))
+                        .and_then(|output| successful_cli_output(&output))
+                })
                 .unwrap_or_else(|| "No uncommitted changes (or not a git repo).".to_string());
             Ok(acp::AcpCommandResult {
                 success: true,
@@ -11638,16 +11821,32 @@ fn execute_acp_command(
                 .get(&cli_id)
                 .cloned()
                 .unwrap_or_else(|| "default".into());
+            let runner = agent
+                .and_then(|a| a.runtime.runner_label.clone())
+                .unwrap_or_else(|| "Local".into());
+            let workspace_path = agent
+                .and_then(|a| a.runtime.workspace_path.clone())
+                .unwrap_or_else(|| state.workspace.project_root.clone());
+            let warnings = agent
+                .map(|a| a.runtime.warnings.clone())
+                .unwrap_or_default();
             let output = format!(
-                "CLI: {}\nInstalled: {}\nVersion: {}\nModel: {}\nPermission mode: {}\nPlan mode: {}\nFast mode: {}\nEffort: {}",
+                "CLI: {}\nInstalled: {}\nVersion: {}\nRunner: {}\nWorkspace: {}\nModel: {}\nPermission mode: {}\nPlan mode: {}\nFast mode: {}\nEffort: {}{}",
                 cli_id,
                 if installed { "yes" } else { "no" },
                 version,
+                runner,
+                workspace_path,
                 model,
                 perm,
                 if session.plan_mode { "ON" } else { "OFF" },
                 if session.fast_mode { "ON" } else { "OFF" },
                 session.effort_level.as_deref().unwrap_or("default"),
+                if warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nWarnings: {}", warnings.join(" | "))
+                },
             );
             Ok(acp::AcpCommandResult {
                 success: true,
@@ -12546,22 +12745,43 @@ fn get_cli_skills(
 ) -> Result<Vec<CliSkillItem>, String> {
     match cli_id.as_str() {
         "codex" => {
-            let wrapper_path = {
+            let (runner_mode, wrapper_path) = {
                 let state = store.state.lock().map_err(|err| err.to_string())?;
-                state
+                let agent = state
                     .agents
                     .iter()
                     .find(|agent| agent.id == cli_id)
-                    .and_then(|agent| agent.runtime.command_path.clone())
-                    .ok_or_else(|| "codex CLI not found".to_string())?
+                    .ok_or_else(|| "codex CLI not found".to_string())?;
+                (
+                    agent.runtime.runner_mode.clone().unwrap_or_else(|| "local".to_string()),
+                    agent.runtime.command_path.clone().ok_or_else(|| "codex CLI not found".to_string())?,
+                )
             };
+            if runner_mode != "local" {
+                return Ok(Vec::new());
+            }
 
             Ok(
                 list_codex_skills_for_workspace(&app, &wrapper_path, &project_root)
                     .unwrap_or_else(|_| list_codex_fallback_skills(&project_root)),
             )
         }
-        "claude" => Ok(list_claude_skills_for_workspace(&project_root)),
+        "claude" => {
+            let runner_mode = {
+                let state = store.state.lock().map_err(|err| err.to_string())?;
+                state
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == cli_id)
+                    .and_then(|agent| agent.runtime.runner_mode.clone())
+                    .unwrap_or_else(|| "local".to_string())
+            };
+            if runner_mode != "local" {
+                Ok(Vec::new())
+            } else {
+                Ok(list_claude_skills_for_workspace(&project_root))
+            }
+        }
         _ => Ok(Vec::new()),
     }
 }
@@ -13015,102 +13235,7 @@ fn collect_relevant_files_from_blocks(blocks: &[ChatMessageBlock]) -> Vec<String
     files
 }
 
-// ── Script building ────────────────────────────────────────────────────
-
-fn build_agent_script(
-    agent_id: &str,
-    wrapper_path: &str,
-    prompt: &str,
-    write_mode: bool,
-    session: &acp::AcpSession,
-) -> Result<String, String> {
-    let script = match agent_id {
-        "codex" => {
-            let sandbox = if write_mode {
-                session
-                    .permission_mode
-                    .get("codex")
-                    .cloned()
-                    .unwrap_or_else(|| "workspace-write".to_string())
-            } else {
-                "read-only".to_string()
-            };
-            let model_flag = session.model.get("codex");
-            let mut args = vec![
-                "--ask-for-approval".to_string(),
-                "never".to_string(),
-                "exec".to_string(),
-                "--skip-git-repo-check".to_string(),
-                "--sandbox".to_string(),
-                sandbox,
-                "--color".to_string(),
-                "never".to_string(),
-            ];
-            if let Some(model) = model_flag {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
-            args.push(prompt.to_string());
-            shell_command(wrapper_path, &args)
-        }
-        "claude" => {
-            let perm = session
-                .permission_mode
-                .get("claude")
-                .cloned()
-                .unwrap_or_else(|| "acceptEdits".to_string());
-            let permission_mode = if session.plan_mode || !write_mode {
-                "plan".to_string()
-            } else {
-                perm
-            };
-            let mut args = vec![
-                "-p".to_string(),
-                prompt.to_string(),
-                "--output-format".to_string(),
-                "text".to_string(),
-                "--permission-mode".to_string(),
-                permission_mode,
-            ];
-            if let Some(model) = session.model.get("claude") {
-                args.push("--model".to_string());
-                args.push(model.clone());
-            }
-            if let Some(effort) = session.effort_level.as_ref() {
-                args.push("--effort".to_string());
-                args.push(effort.clone());
-            }
-            shell_command(wrapper_path, &args)
-        }
-        "gemini" => {
-            let approval = if session.plan_mode || !write_mode {
-                "plan".to_string()
-            } else {
-                session
-                    .permission_mode
-                    .get("gemini")
-                    .cloned()
-                    .unwrap_or_else(|| "auto_edit".to_string())
-            };
-            let mut args = vec![
-                "-p".to_string(),
-                prompt.to_string(),
-                "--output-format".to_string(),
-                "text".to_string(),
-                "--approval-mode".to_string(),
-                approval,
-            ];
-            if let Some(model) = session.model.get("gemini") {
-                args.push("-m".to_string());
-                args.push(model.clone());
-            }
-            shell_command(wrapper_path, &args)
-        }
-        _ => return Err("Unknown agent".to_string()),
-    };
-
-    Ok(script)
-}
+// ── CLI arg building ───────────────────────────────────────────────────
 
 fn build_agent_args(
     agent_id: &str,
@@ -13608,26 +13733,18 @@ fn resolve_runtime_command(state: &AppStateDto, cli_id: &str) -> Result<String, 
 }
 
 fn run_silent_agent_turn_once(
-    project_root: &str,
-    agent_id: &str,
-    command_path: &str,
+    runtime: &ResolvedCliRuntime,
     prompt: &str,
     write_mode: bool,
     session: &acp::AcpSession,
     timeout_ms: u64,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<SilentAgentTurnOutcome, String> {
-    let resolved_command = resolve_direct_command_path(command_path);
+    let agent_id = runtime.cli_id.as_str();
     let args = build_agent_args(agent_id, prompt, write_mode, session)?;
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut cmd = batch_aware_command(&resolved_command, &arg_refs);
-    cmd.stdin(Stdio::null())
-        .current_dir(project_root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    let mut cmd = build_runner_direct_command(runtime, &arg_refs)?;
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let child = cmd.spawn().map_err(|err| err.to_string())?;
     if let Some(handle) = live_turn.as_ref() {
@@ -14543,8 +14660,12 @@ fn evaluate_automation_round(
     raw_output: &str,
     exit_code: Option<i32>,
 ) -> AutomationRoundValidationOutcome {
-    let wrapper_path = match resolve_runtime_command(state_snapshot, owner_cli) {
-        Ok(path) => path,
+    let settings_snapshot = settings_arc
+        .lock()
+        .map(|settings| settings.clone())
+        .unwrap_or_else(|_| seed_settings(&run.project_root));
+    let runtime = match resolve_cli_runtime(&settings_snapshot, owner_cli, &run.project_root) {
+        Ok(runtime) => runtime,
         Err(_) => {
             return AutomationRoundValidationOutcome {
                 response: fallback_automation_validation_response(goal, raw_output, exit_code),
@@ -14604,9 +14725,7 @@ fn evaluate_automation_round(
         None,
     );
     let result = run_silent_agent_turn_once(
-        &run.project_root,
-        owner_cli,
-        &wrapper_path,
+        &runtime,
         &composed_prompt,
         false,
         &validation_session,
@@ -14882,7 +15001,7 @@ fn append_automation_validation_message(
 fn execute_auto_mode_goal(
     app: &AppHandle,
     state_snapshot: &AppStateDto,
-    _settings_arc: &Arc<Mutex<AppSettings>>,
+    settings_arc: &Arc<Mutex<AppSettings>>,
     terminal_storage: &TerminalStorage,
     claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
@@ -14892,8 +15011,12 @@ fn execute_auto_mode_goal(
     automation_prompt: &str,
     timeout_ms: u64,
 ) -> AutomationExecutionOutcome {
-    let claude_wrapper_path = match resolve_runtime_command(state_snapshot, "claude") {
-        Ok(path) => path,
+    let settings_snapshot = settings_arc
+        .lock()
+        .map(|settings| settings.clone())
+        .unwrap_or_else(|_| seed_settings(&run.project_root));
+    let claude_runtime = match resolve_cli_runtime(&settings_snapshot, "claude", &run.project_root) {
+        Ok(runtime) => runtime,
         Err(error) => {
             return AutomationExecutionOutcome {
                 owner_cli: "claude".to_string(),
@@ -14943,9 +15066,7 @@ fn execute_auto_mode_goal(
     planner_session.plan_mode = true;
     let planner_prompt = build_auto_plan_prompt(state_snapshot, terminal_storage, &request);
     let planner_result = run_silent_agent_turn_once(
-        &request.project_root,
-        "claude",
-        &claude_wrapper_path,
+        &claude_runtime,
         &planner_prompt,
         false,
         &planner_session,
@@ -14989,8 +15110,8 @@ fn execute_auto_mode_goal(
         }
 
         let step = step_states[index].step.clone();
-        let wrapper_path = match resolve_runtime_command(state_snapshot, &step.owner) {
-            Ok(path) => path,
+        let worker_runtime = match resolve_cli_runtime(&settings_snapshot, &step.owner, &run.project_root) {
+            Ok(runtime) => runtime,
             Err(error) => {
                 step_states[index].status = "failed".to_string();
                 step_states[index].summary = Some("CLI runtime is unavailable.".to_string());
@@ -15029,8 +15150,7 @@ fn execute_auto_mode_goal(
         let worker_result = if step.owner == "codex" {
             run_codex_app_server_turn(
                 app,
-                &wrapper_path,
-                &request.project_root,
+                &worker_runtime,
                 &worker_prompt,
                 &[],
                 &worker_session,
@@ -15053,8 +15173,7 @@ fn execute_auto_mode_goal(
         } else if step.owner == "gemini" {
             run_gemini_acp_turn(
                 app,
-                &wrapper_path,
-                &request.project_root,
+                &worker_runtime,
                 &worker_prompt,
                 &worker_session,
                 None,
@@ -15076,8 +15195,7 @@ fn execute_auto_mode_goal(
         } else {
             run_claude_headless_turn(
                 app,
-                &wrapper_path,
-                &request.project_root,
+                &worker_runtime,
                 &worker_prompt,
                 &worker_session,
                 None,
@@ -15126,9 +15244,7 @@ fn execute_auto_mode_goal(
     synthesis_session.plan_mode = true;
     let synthesis_prompt = build_auto_synthesis_prompt(&request.prompt, &plan, &step_states);
     let synthesized = run_silent_agent_turn_once(
-        &request.project_root,
-        "claude",
-        &claude_wrapper_path,
+        &claude_runtime,
         &synthesis_prompt,
         false,
         &synthesis_session,
@@ -16182,14 +16298,18 @@ fn execute_automation_goal(
         .lock()
         .map(|guard| guard.clone())
         .unwrap_or_else(|_| seed_state(&run.project_root));
+    let settings_snapshot = settings_arc
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_else(|_| seed_settings(&run.project_root));
     state_snapshot.workspace.project_root = run.project_root.clone();
     state_snapshot.workspace.project_name = run.project_name.clone();
     state_snapshot.workspace.branch = git_output(&run.project_root, &["branch", "--show-current"])
         .unwrap_or_else(|| "workspace".to_string());
-    sync_agent_runtime(&mut state_snapshot);
+    sync_agent_runtime(&mut state_snapshot, &settings_snapshot);
 
-    let wrapper_path = match resolve_runtime_command(&state_snapshot, &owner_cli) {
-        Ok(path) => path,
+    let runtime = match resolve_cli_runtime(&settings_snapshot, &owner_cli, &run.project_root) {
+        Ok(runtime) => runtime,
         Err(error) => {
             return AutomationExecutionOutcome {
                 owner_cli: owner_cli.to_string(),
@@ -16270,16 +16390,16 @@ fn execute_automation_goal(
     }
 
     let (prompt_for_context, selected_codex_skills, selected_claude_skill) = match owner_cli {
-        "codex" => {
+        "codex" if runtime.profile.mode == "local" => {
             let (runtime_prompt, selected_skills) = resolve_codex_prompt_and_skills(
                 app,
-                &wrapper_path,
+                &runtime.command_path,
                 &run.project_root,
                 &automation_prompt,
             );
             (runtime_prompt, selected_skills, None)
         }
-        "claude" => {
+        "claude" if runtime.profile.mode == "local" => {
             let (runtime_prompt, selected_skill) =
                 resolve_claude_prompt_and_skill(&run.project_root, &automation_prompt);
             (runtime_prompt, Vec::new(), selected_skill)
@@ -16327,8 +16447,7 @@ fn execute_automation_goal(
     let execution = match owner_cli {
         "codex" => run_codex_app_server_turn(
             app,
-            &wrapper_path,
-            &run.project_root,
+            &runtime,
             &composed_prompt,
             &selected_codex_skills,
             &session,
@@ -16352,8 +16471,7 @@ fn execute_automation_goal(
         }),
         "claude" => run_claude_headless_turn(
             app,
-            &wrapper_path,
-            &run.project_root,
+            &runtime,
             &composed_prompt,
             &session,
             previous_transport_session.clone(),
@@ -16377,8 +16495,7 @@ fn execute_automation_goal(
         }),
         "gemini" => run_gemini_acp_turn(
             app,
-            &wrapper_path,
-            &run.project_root,
+            &runtime,
             &composed_prompt,
             &session,
             previous_transport_session,
@@ -16400,9 +16517,7 @@ fn execute_automation_goal(
             )
         }),
         _ => run_silent_agent_turn_once(
-            &run.project_root,
-            &owner_cli,
-            &wrapper_path,
+            &runtime,
             &composed_prompt,
             true,
             &session,
@@ -16914,12 +17029,16 @@ fn execute_automation_run_loop(
                     .lock()
                     .map(|guard| guard.clone())
                     .unwrap_or_else(|_| seed_state(&run_snapshot.project_root));
+                let settings_snapshot = settings_arc
+                    .lock()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_else(|_| seed_settings(&run_snapshot.project_root));
                 state_snapshot.workspace.project_root = run_snapshot.project_root.clone();
                 state_snapshot.workspace.project_name = run_snapshot.project_name.clone();
                 state_snapshot.workspace.branch =
                     git_output(&run_snapshot.project_root, &["branch", "--show-current"])
                         .unwrap_or_else(|| "workspace".to_string());
-                sync_agent_runtime(&mut state_snapshot);
+                sync_agent_runtime(&mut state_snapshot, &settings_snapshot);
                 evaluate_automation_round(
                     &state_snapshot,
                     settings_arc,
@@ -17248,26 +17367,14 @@ fn execute_automation_run_loop(
 
 // ── Shell execution ────────────────────────────────────────────────────
 
-fn spawn_shell_command(
-    shell_path: &str,
-    project_root: &str,
-    command_text: &str,
+fn spawn_streaming_command(
+    mut cmd: Command,
     app: AppHandle,
     store: Arc<Mutex<AppStateDto>>,
     agent_id: &str,
     speaker: &str,
     timeout_ms: u64,
 ) -> Result<String, String> {
-    let mut cmd = Command::new(shell_path);
-    cmd.args(shell_command_args(shell_path, command_text))
-        .current_dir(project_root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    apply_runtime_environment(&mut cmd);
-
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
     let mut child = cmd.spawn().map_err(|err| err.to_string())?;
 
     let stdout = child
@@ -17330,7 +17437,6 @@ fn spawn_shell_command(
         }
     });
 
-    // Timeout: wait on a separate thread, kill child if it exceeds the limit
     let child_id = child.id();
     let timeout_duration = Duration::from_millis(timeout_ms);
     let timed_out = Arc::new(Mutex::new(false));
@@ -17341,7 +17447,6 @@ fn spawn_shell_command(
         if let Ok(mut flag) = timed_out_clone.lock() {
             *flag = true;
         }
-        // Best-effort kill
         #[cfg(target_os = "windows")]
         {
             let _ = Command::new("taskkill")
@@ -17360,7 +17465,6 @@ fn spawn_shell_command(
     let status = child.wait().map_err(|err| err.to_string())?;
     let _ = stdout_handle.join();
     let _ = stderr_handle.join();
-    // Drop timeout thread (it will finish on its own or already triggered)
     drop(timeout_handle);
 
     let was_timed_out = timed_out.lock().map(|f| *f).unwrap_or(false);
@@ -17382,6 +17486,29 @@ fn spawn_shell_command(
             output
         })
     }
+}
+
+fn spawn_shell_command(
+    shell_path: &str,
+    project_root: &str,
+    command_text: &str,
+    app: AppHandle,
+    store: Arc<Mutex<AppStateDto>>,
+    agent_id: &str,
+    speaker: &str,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let mut cmd = Command::new(shell_path);
+    cmd.args(shell_command_args(shell_path, command_text))
+        .current_dir(project_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    apply_runtime_environment(&mut cmd);
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    spawn_streaming_command(cmd, app, store, agent_id, speaker, timeout_ms)
 }
 
 fn artifact_kind(agent_id: &str, review_only: bool) -> String {
@@ -17421,10 +17548,478 @@ fn safe_truncate_chars(value: &str, max_chars: usize) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedCliRuntime {
+    cli_id: String,
+    profile: CliRunnerProfile,
+    command_path: String,
+    workspace_path: String,
+    runner_identity: String,
+    runner_label: String,
+    host_label: Option<String>,
+}
+
+fn runner_profile_for_cli(settings: &AppSettings, cli_id: &str) -> CliRunnerProfile {
+    match cli_id {
+        "codex" => settings.cli_runner_profiles.codex.clone(),
+        "claude" => settings.cli_runner_profiles.claude.clone(),
+        "gemini" => settings.cli_runner_profiles.gemini.clone(),
+        _ => default_cli_runner_profile(cli_id, cli_default_command_name(cli_id)),
+    }
+}
+
+fn runner_command_path(profile: &CliRunnerProfile, cli_id: &str) -> String {
+    if profile.mode == "ssh" && !profile.ssh.remote_command_path.trim().is_empty() {
+        profile.ssh.remote_command_path.trim().to_string()
+    } else if !profile.command_path.trim().is_empty()
+        && !profile.command_path.trim().eq_ignore_ascii_case("auto")
+    {
+        profile.command_path.trim().to_string()
+    } else {
+        cli_default_command_name(cli_id).to_string()
+    }
+}
+
+fn runner_shell_path(profile: &CliRunnerProfile) -> String {
+    if !profile.shell.trim().is_empty() {
+        profile.shell.trim().to_string()
+    } else if profile.mode == "local" {
+        shell_path()
+    } else {
+        "/bin/bash".to_string()
+    }
+}
+
+fn auto_map_path_to_wsl(local_path: &str) -> Option<String> {
+    let normalized = local_path.trim().replace('\\', "/");
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.starts_with("/mnt/") || normalized.starts_with('/') {
+        return Some(normalized);
+    }
+    let bytes = normalized.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/' && bytes[0].is_ascii_alphabetic() {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = normalized[3..].trim_start_matches('/');
+        if rest.is_empty() {
+            Some(format!("/mnt/{}", drive))
+        } else {
+            Some(format!("/mnt/{}/{}", drive, rest))
+        }
+    } else {
+        None
+    }
+}
+
+fn resolve_runner_workspace_path(
+    profile: &CliRunnerProfile,
+    local_project_root: &str,
+) -> Result<String, String> {
+    if !profile.manual_workspace_path.trim().is_empty() {
+        return Ok(profile.manual_workspace_path.trim().to_string());
+    }
+
+    match profile.mode.as_str() {
+        "local" => Ok(local_project_root.to_string()),
+        "wsl" => auto_map_path_to_wsl(local_project_root).ok_or_else(|| {
+            "WSL workspace path could not be derived from the local project root. Configure a manual workspace path.".to_string()
+        }),
+        "ssh" => Err(
+            "SSH runner requires a manual workspace path. Configure it in Settings.".to_string(),
+        ),
+        _ => Ok(local_project_root.to_string()),
+    }
+}
+
+fn runner_identity(profile: &CliRunnerProfile) -> String {
+    match profile.mode.as_str() {
+        "wsl" => format!(
+            "wsl:{}",
+            if profile.wsl.distro.trim().is_empty() {
+                "default"
+            } else {
+                profile.wsl.distro.trim()
+            }
+        ),
+        "ssh" => format!("ssh:{}", runner_host_label(profile).unwrap_or_else(|| "remote".to_string())),
+        _ => "local".to_string(),
+    }
+}
+
+fn runner_host_label(profile: &CliRunnerProfile) -> Option<String> {
+    match profile.mode.as_str() {
+        "wsl" => Some(if profile.wsl.distro.trim().is_empty() {
+            "default distro".to_string()
+        } else {
+            profile.wsl.distro.trim().to_string()
+        }),
+        "ssh" => {
+            if !profile.ssh.ssh_config_host.trim().is_empty() {
+                Some(profile.ssh.ssh_config_host.trim().to_string())
+            } else if !profile.ssh.host.trim().is_empty() {
+                Some(profile.ssh.host.trim().to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn runner_label(profile: &CliRunnerProfile) -> String {
+    match profile.mode.as_str() {
+        "wsl" => format!(
+            "WSL: {}",
+            runner_host_label(profile).unwrap_or_else(|| "default distro".to_string())
+        ),
+        "ssh" => format!(
+            "SSH: {}",
+            runner_host_label(profile).unwrap_or_else(|| "remote".to_string())
+        ),
+        _ => "Local".to_string(),
+    }
+}
+
+fn remote_posix_shell_args(shell_path: &str, command_text: &str) -> Vec<String> {
+    let shell_name = Path::new(shell_path)
+        .file_name()
+        .and_then(|entry| entry.to_str())
+        .unwrap_or(shell_path);
+    let command_flag = match shell_name {
+        "bash" | "zsh" => "-lc",
+        _ => "-c",
+    };
+    vec![command_flag.to_string(), command_text.to_string()]
+}
+
+fn build_ssh_target(profile: &CliRunnerProfile) -> Result<String, String> {
+    if !profile.ssh.ssh_config_host.trim().is_empty() {
+        return Ok(profile.ssh.ssh_config_host.trim().to_string());
+    }
+    let host = profile.ssh.host.trim();
+    if host.is_empty() {
+        return Err("SSH host is required for the SSH runner.".to_string());
+    }
+    if profile.ssh.user.trim().is_empty() {
+        Ok(host.to_string())
+    } else {
+        Ok(format!("{}@{}", profile.ssh.user.trim(), host))
+    }
+}
+
+fn build_posix_exec_command(
+    command_path: &str,
+    args: &[&str],
+    workspace_path: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> String {
+    let mut steps = Vec::new();
+    if let Some(workspace) = workspace_path.map(str::trim).filter(|value| !value.is_empty()) {
+        steps.push(format!("cd {}", sh_quote(workspace)));
+    }
+
+    let mut command_parts = Vec::new();
+    if !env.is_empty() {
+        command_parts.push("env".to_string());
+        for (key, value) in env {
+            command_parts.push(format!("{}={}", key, sh_quote(value)));
+        }
+    }
+    command_parts.push(sh_quote(command_path));
+    command_parts.extend(args.iter().map(|arg| sh_quote(arg)));
+    steps.push(format!("exec {}", command_parts.join(" ")));
+    steps.join(" && ")
+}
+
+fn build_posix_shell_command(
+    shell_path: &str,
+    command_text: &str,
+    workspace_path: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> String {
+    let mut steps = Vec::new();
+    if let Some(workspace) = workspace_path.map(str::trim).filter(|value| !value.is_empty()) {
+        steps.push(format!("cd {}", sh_quote(workspace)));
+    }
+
+    let mut command_parts = Vec::new();
+    if !env.is_empty() {
+        command_parts.push("env".to_string());
+        for (key, value) in env {
+            command_parts.push(format!("{}={}", key, sh_quote(value)));
+        }
+    }
+    command_parts.push(sh_quote(shell_path));
+    command_parts.extend(
+        remote_posix_shell_args(shell_path, command_text)
+            .into_iter()
+            .map(|entry| sh_quote(&entry)),
+    );
+    steps.push(command_parts.join(" "));
+    steps.join(" && ")
+}
+
+fn configure_ssh_command_base(profile: &CliRunnerProfile) -> Result<Command, String> {
+    let target = build_ssh_target(profile)?;
+    let mut command = Command::new("ssh");
+    command.arg("-T");
+    if profile.ssh.port != default_ssh_port() {
+        command.arg("-p").arg(profile.ssh.port.to_string());
+    }
+    if !profile.ssh.strict_host_key_checking {
+        command
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg("UserKnownHostsFile=/dev/null");
+    }
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.arg(target);
+    Ok(command)
+}
+
+fn build_runner_direct_command(
+    runtime: &ResolvedCliRuntime,
+    args: &[&str],
+) -> Result<Command, String> {
+    match runtime.profile.mode.as_str() {
+        "wsl" => {
+            #[cfg(target_os = "windows")]
+            {
+                let distro = runtime.profile.wsl.distro.trim();
+                if distro.is_empty() {
+                    return Err("WSL runner requires a distro name.".to_string());
+                }
+                let mut command = Command::new("wsl.exe");
+                command.arg("-d").arg(distro).arg("--cd").arg(&runtime.workspace_path).arg("--");
+                if !runtime.profile.env.is_empty() {
+                    command.arg("env");
+                    for (key, value) in &runtime.profile.env {
+                        command.arg(format!("{}={}", key, value));
+                    }
+                }
+                command.arg(&runtime.command_path).args(args);
+                command.creation_flags(CREATE_NO_WINDOW);
+                Ok(command)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = args;
+                Err("WSL runner is only available on Windows hosts.".to_string())
+            }
+        }
+        "ssh" => {
+            let mut command = configure_ssh_command_base(&runtime.profile)?;
+            let remote_command = build_posix_exec_command(
+                &runtime.command_path,
+                args,
+                Some(&runtime.workspace_path),
+                &runtime.profile.env,
+            );
+            command.arg(remote_command);
+            Ok(command)
+        }
+        _ => {
+            let resolved_command = resolve_direct_command_path(&runtime.command_path);
+            let mut command = batch_aware_command(&resolved_command, args);
+            command.current_dir(&runtime.workspace_path);
+            for (key, value) in &runtime.profile.env {
+                command.env(key, value);
+            }
+            Ok(command)
+        }
+    }
+}
+
+fn build_runner_shell_command(
+    runtime: &ResolvedCliRuntime,
+    command_text: &str,
+) -> Result<Command, String> {
+    match runtime.profile.mode.as_str() {
+        "wsl" => {
+            #[cfg(target_os = "windows")]
+            {
+                let distro = runtime.profile.wsl.distro.trim();
+                if distro.is_empty() {
+                    return Err("WSL runner requires a distro name.".to_string());
+                }
+                let shell_path = runner_shell_path(&runtime.profile);
+                let mut command = Command::new("wsl.exe");
+                command.arg("-d").arg(distro).arg("--cd").arg(&runtime.workspace_path).arg("--");
+                if !runtime.profile.env.is_empty() {
+                    command.arg("env");
+                    for (key, value) in &runtime.profile.env {
+                        command.arg(format!("{}={}", key, value));
+                    }
+                }
+                command.arg(&shell_path).args(remote_posix_shell_args(&shell_path, command_text));
+                command.creation_flags(CREATE_NO_WINDOW);
+                Ok(command)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = command_text;
+                Err("WSL runner is only available on Windows hosts.".to_string())
+            }
+        }
+        "ssh" => {
+            let shell_path = runner_shell_path(&runtime.profile);
+            let mut command = configure_ssh_command_base(&runtime.profile)?;
+            command.arg(build_posix_shell_command(
+                &shell_path,
+                command_text,
+                Some(&runtime.workspace_path),
+                &runtime.profile.env,
+            ));
+            Ok(command)
+        }
+        _ => {
+            let shell = runner_shell_path(&runtime.profile);
+            let mut command = Command::new(&shell);
+            command
+                .args(shell_command_args(&shell, command_text))
+                .current_dir(&runtime.workspace_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            apply_runtime_environment(&mut command);
+            for (key, value) in &runtime.profile.env {
+                command.env(key, value);
+            }
+            #[cfg(target_os = "windows")]
+            command.creation_flags(CREATE_NO_WINDOW);
+            Ok(command)
+        }
+    }
+}
+
+fn capture_command_output(command: &mut Command) -> Option<CliCommandOutput> {
+    let output = command.output().ok()?;
+    Some(CliCommandOutput {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+fn probe_runner_command(
+    profile: &CliRunnerProfile,
+    cli_id: &str,
+    version_flag: &str,
+) -> Option<CliCommandOutput> {
+    let command_path = runner_command_path(profile, cli_id);
+    match profile.mode.as_str() {
+        "wsl" => {
+            #[cfg(target_os = "windows")]
+            {
+                let distro = profile.wsl.distro.trim();
+                if distro.is_empty() {
+                    return None;
+                }
+                let mut command = Command::new("wsl.exe");
+                command.arg("-d").arg(distro).arg("--");
+                if !profile.env.is_empty() {
+                    command.arg("env");
+                    for (key, value) in &profile.env {
+                        command.arg(format!("{}={}", key, value));
+                    }
+                }
+                command.arg(&command_path).arg(version_flag);
+                command.creation_flags(CREATE_NO_WINDOW);
+                capture_command_output(&mut command)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = version_flag;
+                None
+            }
+        }
+        "ssh" => {
+            let mut command = configure_ssh_command_base(profile).ok()?;
+            command.arg(build_posix_exec_command(
+                &command_path,
+                &[version_flag],
+                None,
+                &profile.env,
+            ));
+            capture_command_output(&mut command)
+        }
+        _ => {
+            let local_command_path = if profile.command_path.trim().is_empty()
+                || profile.command_path.trim().eq_ignore_ascii_case("auto")
+            {
+                resolve_command_path(&command_path)?
+            } else {
+                let configured = Path::new(&profile.command_path);
+                if configured.components().count() > 1 || configured.is_absolute() {
+                    configured.exists().then(|| configured.to_string_lossy().to_string())?
+                } else {
+                    resolve_command_path(&command_path)?
+                }
+            };
+            run_cli_command(&local_command_path, &[version_flag])
+        }
+    }
+}
+
+fn resolve_cli_runtime(
+    settings: &AppSettings,
+    cli_id: &str,
+    local_project_root: &str,
+) -> Result<ResolvedCliRuntime, String> {
+    let profile = runner_profile_for_cli(settings, cli_id);
+    if !profile.enabled {
+        return Err(format!("{} runner is disabled in Settings.", cli_id));
+    }
+    let workspace_path = resolve_runner_workspace_path(&profile, local_project_root)?;
+    let command_path = runner_command_path(&profile, cli_id);
+
+    let command_path = if profile.mode == "local"
+        && (profile.command_path.trim().is_empty() || profile.command_path.trim().eq_ignore_ascii_case("auto"))
+    {
+        resolve_command_path(&command_path)
+            .ok_or_else(|| format!("{} CLI not found for the local runner.", cli_id))?
+    } else {
+        command_path
+    };
+
+    Ok(ResolvedCliRuntime {
+        cli_id: cli_id.to_string(),
+        profile: profile.clone(),
+        command_path,
+        workspace_path,
+        runner_identity: runner_identity(&profile),
+        runner_label: runner_label(&profile),
+        host_label: runner_host_label(&profile),
+    })
+}
+
+fn stamp_transport_session(
+    mut session: AgentTransportSession,
+    runtime: &ResolvedCliRuntime,
+) -> AgentTransportSession {
+    session.runner_mode = Some(runtime.profile.mode.clone());
+    session.runner_identity = Some(runtime.runner_identity.clone());
+    session.workspace_path = Some(runtime.workspace_path.clone());
+    session.command_path = Some(runtime.command_path.clone());
+    session.host_label = runtime.host_label.clone();
+    session
+}
+
+fn transport_session_matches_runtime(
+    session: &AgentTransportSession,
+    runtime: &ResolvedCliRuntime,
+) -> bool {
+    session.runner_mode.as_deref() == Some(runtime.profile.mode.as_str())
+        && session.runner_identity.as_deref() == Some(runtime.runner_identity.as_str())
+        && session.workspace_path.as_deref() == Some(runtime.workspace_path.as_str())
+}
+
 // ── Runtime detection ──────────────────────────────────────────────────
 
-fn sync_agent_runtime(state: &mut AppStateDto) {
-    let runtimes = detect_runtimes();
+fn sync_agent_runtime(state: &mut AppStateDto, settings: &AppSettings) {
+    let runtimes = detect_runtimes(settings, &state.workspace.project_root);
     for agent in &mut state.agents {
         if let Some(runtime) = runtimes.get(&agent.id) {
             agent.runtime = runtime.clone();
@@ -17432,42 +18027,102 @@ fn sync_agent_runtime(state: &mut AppStateDto) {
     }
 }
 
-fn detect_runtimes() -> BTreeMap<String, AgentRuntime> {
+fn detect_runtimes(settings: &AppSettings, project_root: &str) -> BTreeMap<String, AgentRuntime> {
     let mut runtimes = BTreeMap::new();
     for (agent_id, version_flag) in [
         ("codex", "-V"),
         ("claude", "--version"),
         ("gemini", "--version"),
     ] {
-        let command_path = resolve_agent_command_path(agent_id);
-
-        let version_probe = command_path
-            .as_ref()
-            .and_then(|path| run_cli_command(path, &[version_flag]));
-        let version = version_probe
-            .as_ref()
-            .and_then(|output| successful_cli_output(output));
-        let last_error = match (command_path.as_ref(), version_probe.as_ref()) {
-            (Some(_), Some(output)) => runtime_error_from_cli_output(output),
-            (Some(_), None) => {
-                Some("CLI wrapper was found, but the process could not be started.".to_string())
-            }
-            (None, _) => Some("CLI wrapper was not found in the current app PATH.".to_string()),
-        };
-
         runtimes.insert(
             agent_id.to_string(),
-            AgentRuntime {
-                installed: command_path.is_some(),
-                command_path,
-                version,
-                last_error,
-                resources: detect_agent_resources(agent_id),
-            },
+            detect_runtime_for_agent(settings, project_root, agent_id, version_flag),
         );
     }
 
     runtimes
+}
+
+fn detect_runtime_for_agent(
+    settings: &AppSettings,
+    project_root: &str,
+    agent_id: &str,
+    version_flag: &str,
+) -> AgentRuntime {
+    let profile = runner_profile_for_cli(settings, agent_id);
+    let command_candidate = runner_command_path(&profile, agent_id);
+    let version_probe = if profile.enabled {
+        probe_runner_command(&profile, agent_id, version_flag)
+    } else {
+        None
+    };
+    let version = version_probe
+        .as_ref()
+        .and_then(|output| successful_cli_output(output));
+    let workspace_path = resolve_runner_workspace_path(&profile, project_root).ok();
+    let mut warnings = Vec::new();
+    if profile.mode == "wsl" && agent_id == "codex" {
+        warnings.push("Codex on WSL is marked experimental.".to_string());
+    }
+    if profile.mode != "local" {
+        warnings.push("Remote resource discovery falls back to capability placeholders.".to_string());
+    }
+    if workspace_path.is_none() && profile.mode == "ssh" {
+        warnings.push("Configure a manual remote workspace path for SSH execution.".to_string());
+    }
+
+    let command_path = match profile.mode.as_str() {
+        "local" => {
+            if profile.command_path.trim().is_empty()
+                || profile.command_path.trim().eq_ignore_ascii_case("auto")
+            {
+                resolve_command_path(&command_candidate)
+            } else {
+                Some(profile.command_path.trim().to_string())
+            }
+        }
+        _ => Some(command_candidate),
+    };
+
+    let last_error = if !profile.enabled {
+        Some("Runner is disabled in Settings.".to_string())
+    } else if let Some(output) = version_probe.as_ref() {
+        runtime_error_from_cli_output(output)
+    } else if profile.mode == "wsl" && profile.wsl.distro.trim().is_empty() {
+        Some("WSL runner requires a distro name.".to_string())
+    } else if profile.mode == "ssh"
+        && profile.ssh.ssh_config_host.trim().is_empty()
+        && profile.ssh.host.trim().is_empty()
+    {
+        Some("SSH runner requires a host or SSH config host alias.".to_string())
+    } else {
+        Some("CLI wrapper was not found or could not be started for the configured runner.".to_string())
+    };
+
+    let connection_state = if last_error.is_some() {
+        Some("error".to_string())
+    } else if warnings.is_empty() {
+        Some("ready".to_string())
+    } else {
+        Some("warning".to_string())
+    };
+
+    AgentRuntime {
+        installed: version.is_some(),
+        command_path,
+        version,
+        last_error,
+        runner_mode: Some(profile.mode.clone()),
+        runner_label: Some(runner_label(&profile)),
+        workspace_path,
+        connection_state,
+        warnings,
+        resources: if profile.mode == "local" {
+            detect_agent_resources(agent_id)
+        } else {
+            fallback_remote_resources(agent_id)
+        },
+    }
 }
 
 fn resolve_agent_command_path(agent_id: &str) -> Option<String> {
@@ -17488,6 +18143,30 @@ fn resource_group(supported: bool) -> AgentResourceGroup {
         supported,
         items: Vec::new(),
         error: None,
+    }
+}
+
+fn fallback_remote_resources(agent_id: &str) -> AgentRuntimeResources {
+    match agent_id {
+        "codex" => AgentRuntimeResources {
+            mcp: resource_group(true),
+            plugin: resource_group(false),
+            extension: resource_group(false),
+            skill: resource_group(true),
+        },
+        "claude" => AgentRuntimeResources {
+            mcp: resource_group(true),
+            plugin: resource_group(true),
+            extension: resource_group(false),
+            skill: resource_group(true),
+        },
+        "gemini" => AgentRuntimeResources {
+            mcp: resource_group(true),
+            plugin: resource_group(false),
+            extension: resource_group(true),
+            skill: resource_group(true),
+        },
+        _ => AgentRuntimeResources::default(),
     }
 }
 
@@ -18272,29 +18951,6 @@ fn ps_quote(value: &str) -> String {
 
 fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn shell_quote(value: &str) -> String {
-    #[cfg(target_os = "windows")]
-    {
-        ps_quote(value)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        sh_quote(value)
-    }
-}
-
-fn shell_command(command_path: &str, args: &[String]) -> String {
-    let mut parts = Vec::with_capacity(args.len() + 2);
-
-    #[cfg(target_os = "windows")]
-    parts.push("&".to_string());
-
-    parts.push(shell_quote(command_path));
-    parts.extend(args.iter().map(|arg| shell_quote(arg)));
-    parts.join(" ")
 }
 
 fn command_lookup_names(command_name: &str) -> Vec<String> {
@@ -19295,7 +19951,7 @@ fn load_or_seed_settings(project_root: &str) -> Result<AppSettings, String> {
     if path.exists() {
         let raw = fs::read_to_string(&path).map_err(|err| err.to_string())?;
         let mut settings = serde_json::from_str::<AppSettings>(&raw).map_err(|err| err.to_string())?;
-        normalize_settings_providers(&mut settings);
+        normalize_all_settings(&mut settings);
         Ok(settings)
     } else {
         let s = seed_settings(project_root);
@@ -19338,11 +19994,17 @@ fn seed_context() -> ContextStore {
 }
 
 fn seed_settings(project_root: &str) -> AppSettings {
+    let cli_paths = CliPaths {
+        codex: "auto".to_string(),
+        claude: "auto".to_string(),
+        gemini: "auto".to_string(),
+    };
     AppSettings {
-        cli_paths: CliPaths {
-            codex: "auto".to_string(),
-            claude: "auto".to_string(),
-            gemini: "auto".to_string(),
+        cli_paths: cli_paths.clone(),
+        cli_runner_profiles: CliRunnerProfiles {
+            codex: default_cli_runner_profile("codex", &cli_paths.codex),
+            claude: default_cli_runner_profile("claude", &cli_paths.claude),
+            gemini: default_cli_runner_profile("gemini", &cli_paths.gemini),
         },
         project_root: project_root.to_string(),
         max_turns_per_agent: DEFAULT_MAX_TURNS,
@@ -19538,6 +20200,11 @@ fn unavailable_runtime() -> AgentRuntime {
         command_path: None,
         version: None,
         last_error: Some("CLI wrapper was not found.".to_string()),
+        runner_mode: Some("local".to_string()),
+        runner_label: Some("Local".to_string()),
+        workspace_path: None,
+        connection_state: Some("error".to_string()),
+        warnings: Vec::new(),
         resources: AgentRuntimeResources::default(),
     }
 }
@@ -19754,17 +20421,17 @@ pub fn run() {
     let automation_rule_profile = Arc::new(Mutex::new(
         load_rule_profile().unwrap_or_else(|_| default_rule_profile()),
     ));
+    let initial_settings =
+        load_or_seed_settings(&project_root).unwrap_or_else(|_| seed_settings(&project_root));
     let mut initial_state =
         load_or_seed_state(&project_root).unwrap_or_else(|_| seed_state(&project_root));
     sync_workspace_metrics(&mut initial_state);
-    sync_agent_runtime(&mut initial_state);
+    sync_agent_runtime(&mut initial_state, &initial_settings);
     let startup_state = Arc::new(Mutex::new(initial_state));
     let startup_context = Arc::new(Mutex::new(
         load_or_seed_context(&project_root).unwrap_or_else(|_| seed_context()),
     ));
-    let startup_settings = Arc::new(Mutex::new(
-        load_or_seed_settings(&project_root).unwrap_or_else(|_| seed_settings(&project_root)),
-    ));
+    let startup_settings = Arc::new(Mutex::new(initial_settings));
     let scheduler_state = startup_state.clone();
     let scheduler_context = startup_context.clone();
     let scheduler_settings = startup_settings.clone();

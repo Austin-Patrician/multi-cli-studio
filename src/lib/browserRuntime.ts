@@ -334,9 +334,51 @@ function createSeedContext(): ContextStore {
   };
 }
 
+function defaultRunnerProfile(
+  cliId: AgentId,
+  commandPath = "auto"
+): AppSettings["cliRunnerProfiles"][AgentId] {
+  return {
+    cliId,
+    enabled: true,
+    mode: "local",
+    commandPath,
+    shell: "",
+    env: {},
+    workspaceMappingMode: "auto-with-override",
+    manualWorkspacePath: "",
+    resolvedWorkspacePath: null,
+    lastDetection: null,
+    lastConnectionTest: null,
+    capabilityFlags: [],
+    wsl: {
+      distro: "",
+    },
+    ssh: {
+      host: "",
+      port: 22,
+      user: "",
+      authKind: "agent",
+      sshConfigHost: "",
+      remoteCommandPath: "",
+      strictHostKeyChecking: true,
+    },
+  };
+}
+
+function defaultRunnerProfiles(cliPaths?: Partial<AppSettings["cliPaths"]>) {
+  return {
+    codex: defaultRunnerProfile("codex", cliPaths?.codex ?? "auto"),
+    claude: defaultRunnerProfile("claude", cliPaths?.claude ?? "auto"),
+    gemini: defaultRunnerProfile("gemini", cliPaths?.gemini ?? "auto"),
+  } satisfies AppSettings["cliRunnerProfiles"];
+}
+
 function defaultSettings(): AppSettings {
+  const cliPaths = { codex: "auto", claude: "auto", gemini: "auto" };
   return normalizeProviderSettings({
-    cliPaths: { codex: "auto", claude: "auto", gemini: "auto" },
+    cliPaths,
+    cliRunnerProfiles: defaultRunnerProfiles(cliPaths),
     projectRoot: state?.workspace?.projectRoot ?? "C:\\Users\\admin\\source\\repos\\multi-cli-studio",
     maxTurnsPerAgent: 50,
     maxOutputCharsPerTurn: 100000,
@@ -358,6 +400,89 @@ function defaultSettings(): AppSettings {
     claudeProviders: [],
     geminiProviders: [],
   });
+}
+
+function normalizeRunnerProfile(
+  cliId: AgentId,
+  value: unknown,
+  legacyCommandPath: string | undefined,
+  fallback = defaultRunnerProfile(cliId, legacyCommandPath ?? "auto")
+): AppSettings["cliRunnerProfiles"][AgentId] {
+  if (!value || typeof value !== "object") {
+    return fallback;
+  }
+  const raw = value as Partial<AppSettings["cliRunnerProfiles"][AgentId]>;
+  const envEntries =
+    raw.env && typeof raw.env === "object"
+      ? Object.entries(raw.env)
+          .map(([key, item]) => [key, typeof item === "string" ? item : ""])
+          .filter(([key, item]) => key.trim() && item.trim())
+      : [];
+  const mode = raw.mode === "wsl" || raw.mode === "ssh" ? raw.mode : "local";
+  const workspaceMappingMode =
+    raw.workspaceMappingMode === "auto" || raw.workspaceMappingMode === "manual"
+      ? raw.workspaceMappingMode
+      : "auto-with-override";
+  return {
+    cliId,
+    enabled: raw.enabled !== false,
+    mode,
+    commandPath:
+      typeof raw.commandPath === "string" && raw.commandPath.trim()
+        ? raw.commandPath
+        : legacyCommandPath ?? fallback.commandPath,
+    shell: typeof raw.shell === "string" ? raw.shell : fallback.shell,
+    env: Object.fromEntries(envEntries),
+    workspaceMappingMode,
+    manualWorkspacePath:
+      typeof raw.manualWorkspacePath === "string"
+        ? raw.manualWorkspacePath
+        : fallback.manualWorkspacePath,
+    resolvedWorkspacePath:
+      typeof raw.resolvedWorkspacePath === "string" ? raw.resolvedWorkspacePath : null,
+    lastDetection: typeof raw.lastDetection === "string" ? raw.lastDetection : null,
+    lastConnectionTest:
+      typeof raw.lastConnectionTest === "string" ? raw.lastConnectionTest : null,
+    capabilityFlags: Array.isArray(raw.capabilityFlags)
+      ? raw.capabilityFlags.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      : fallback.capabilityFlags,
+    wsl: {
+      distro:
+        raw.wsl && typeof raw.wsl === "object" && typeof raw.wsl.distro === "string"
+          ? raw.wsl.distro
+          : fallback.wsl.distro,
+    },
+    ssh: {
+      host:
+        raw.ssh && typeof raw.ssh === "object" && typeof raw.ssh.host === "string"
+          ? raw.ssh.host
+          : fallback.ssh.host,
+      port:
+        raw.ssh && typeof raw.ssh === "object" && typeof raw.ssh.port === "number" && Number.isFinite(raw.ssh.port)
+          ? raw.ssh.port
+          : fallback.ssh.port,
+      user:
+        raw.ssh && typeof raw.ssh === "object" && typeof raw.ssh.user === "string"
+          ? raw.ssh.user
+          : fallback.ssh.user,
+      authKind:
+        raw.ssh && typeof raw.ssh === "object" && (raw.ssh.authKind === "agent" || raw.ssh.authKind === "config")
+          ? raw.ssh.authKind
+          : fallback.ssh.authKind,
+      sshConfigHost:
+        raw.ssh && typeof raw.ssh === "object" && typeof raw.ssh.sshConfigHost === "string"
+          ? raw.ssh.sshConfigHost
+          : fallback.ssh.sshConfigHost,
+      remoteCommandPath:
+        raw.ssh && typeof raw.ssh === "object" && typeof raw.ssh.remoteCommandPath === "string"
+          ? raw.ssh.remoteCommandPath
+          : fallback.ssh.remoteCommandPath,
+      strictHostKeyChecking:
+        raw.ssh && typeof raw.ssh === "object" && typeof raw.ssh.strictHostKeyChecking === "boolean"
+          ? raw.ssh.strictHostKeyChecking
+          : fallback.ssh.strictHostKeyChecking,
+    },
+  };
 }
 
 function normalizeNotificationConfig(value: unknown, fallback = defaultSettings().notificationConfig) {
@@ -392,12 +517,19 @@ function normalizeSettings(value: unknown): AppSettings {
 
   const raw = value as Partial<AppSettings> & {
     cliPaths?: Partial<AppSettings["cliPaths"]>;
+    cliRunnerProfiles?: Partial<Record<AgentId, Partial<AppSettings["cliRunnerProfiles"][AgentId]>>>;
+  };
+  const mergedCliPaths = {
+    ...defaults.cliPaths,
+    ...(raw.cliPaths ?? {}),
   };
 
   return normalizeProviderSettings({
-    cliPaths: {
-      ...defaults.cliPaths,
-      ...(raw.cliPaths ?? {}),
+    cliPaths: mergedCliPaths,
+    cliRunnerProfiles: {
+      codex: normalizeRunnerProfile("codex", raw.cliRunnerProfiles?.codex, mergedCliPaths.codex),
+      claude: normalizeRunnerProfile("claude", raw.cliRunnerProfiles?.claude, mergedCliPaths.claude),
+      gemini: normalizeRunnerProfile("gemini", raw.cliRunnerProfiles?.gemini, mergedCliPaths.gemini),
     },
     projectRoot:
       typeof raw.projectRoot === "string" && raw.projectRoot.trim()
@@ -3137,7 +3269,10 @@ rename to src/components/chat/GitPanel.tsx`,
         const installed = agent?.runtime?.installed ? "yes" : "no";
         const model = acpSession.model[cliId] || "default";
         const perm = acpSession.permissionMode[cliId] || "default";
-        const output = `CLI: ${cliId}\nInstalled: ${installed}\nVersion: ${version}\nModel: ${model}\nPermission mode: ${perm}\nPlan mode: ${acpSession.planMode ? "ON" : "OFF"}\nFast mode: ${acpSession.fastMode ? "ON" : "OFF"}\nEffort: ${acpSession.effortLevel || "default"}`;
+        const runner = agent?.runtime?.runnerLabel || "Local";
+        const workspace = agent?.runtime?.workspacePath || state.workspace.projectRoot;
+        const warnings = agent?.runtime?.warnings?.length ? `\nWarnings: ${agent.runtime.warnings.join(" | ")}` : "";
+        const output = `CLI: ${cliId}\nInstalled: ${installed}\nVersion: ${version}\nRunner: ${runner}\nWorkspace: ${workspace}\nModel: ${model}\nPermission mode: ${perm}\nPlan mode: ${acpSession.planMode ? "ON" : "OFF"}\nFast mode: ${acpSession.fastMode ? "ON" : "OFF"}\nEffort: ${acpSession.effortLevel || "default"}${warnings}`;
         return { success: true, output, sideEffects: [] };
       }
       case "help": {

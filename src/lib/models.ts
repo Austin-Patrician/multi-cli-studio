@@ -12,6 +12,41 @@ export type AgentStatus = "active" | "ready" | "busy" | "offline";
 export type ActivityTone = "info" | "success" | "warning" | "danger";
 
 export type AgentResourceKind = "mcp" | "plugin" | "extension" | "skill";
+export type CliRunnerMode = "local" | "wsl" | "ssh";
+export type CliWorkspaceMappingMode = "auto" | "manual" | "auto-with-override";
+export type CliRunnerConnectionState = "unknown" | "ready" | "warning" | "error";
+export type SshAuthKind = "agent" | "config";
+
+export interface WslRunnerConfig {
+  distro: string;
+}
+
+export interface SshRunnerConfig {
+  host: string;
+  port: number;
+  user: string;
+  authKind: SshAuthKind;
+  sshConfigHost: string;
+  remoteCommandPath: string;
+  strictHostKeyChecking: boolean;
+}
+
+export interface CliRunnerProfile {
+  cliId: AgentId;
+  enabled: boolean;
+  mode: CliRunnerMode;
+  commandPath: string;
+  shell: string;
+  env: Record<string, string>;
+  workspaceMappingMode: CliWorkspaceMappingMode;
+  manualWorkspacePath: string;
+  resolvedWorkspacePath?: string | null;
+  lastDetection?: string | null;
+  lastConnectionTest?: string | null;
+  capabilityFlags?: string[];
+  wsl: WslRunnerConfig;
+  ssh: SshRunnerConfig;
+}
 
 export interface AgentResourceItem {
   name: string;
@@ -39,6 +74,11 @@ export interface AgentRuntime {
   commandPath?: string | null;
   version?: string | null;
   lastError?: string | null;
+  runnerMode?: CliRunnerMode | null;
+  runnerLabel?: string | null;
+  workspacePath?: string | null;
+  connectionState?: CliRunnerConnectionState | null;
+  warnings?: string[] | null;
   resources: AgentRuntimeResources;
 }
 
@@ -316,6 +356,7 @@ export interface ApiChatStreamEvent {
 
 export interface AppSettings {
   cliPaths: { codex: string; claude: string; gemini: string };
+  cliRunnerProfiles: Record<AgentId, CliRunnerProfile>;
   projectRoot: string;
   maxTurnsPerAgent: number;
   maxOutputCharsPerTurn: number;
@@ -1225,6 +1266,11 @@ export interface AgentTransportSession {
   turnId?: string | null;
   model?: string | null;
   permissionMode?: string | null;
+  runnerMode?: CliRunnerMode | null;
+  runnerIdentity?: string | null;
+  workspacePath?: string | null;
+  commandPath?: string | null;
+  hostLabel?: string | null;
   lastSyncAt?: string | null;
 }
 

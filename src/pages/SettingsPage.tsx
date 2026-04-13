@@ -1,6 +1,14 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { bridge } from "../lib/bridge";
-import { AgentId, AgentResourceGroup, AgentResourceKind, AgentRuntimeResources, AppSettings } from "../lib/models";
+import {
+  AgentId,
+  AgentResourceGroup,
+  AgentResourceKind,
+  AgentRuntimeResources,
+  AppSettings,
+  CliRunnerMode,
+  CliRunnerProfile,
+} from "../lib/models";
 import refreshIcon from "../media/svg/refresh.svg";
 import { useStore } from "../lib/store";
 import { requestDesktopNotificationPermission } from "../lib/desktopNotifications";
@@ -22,6 +30,11 @@ type SettingsAgent = {
     version?: string | null;
     commandPath?: string | null;
     lastError?: string | null;
+    runnerMode?: CliRunnerMode | null;
+    runnerLabel?: string | null;
+    workspacePath?: string | null;
+    connectionState?: "unknown" | "ready" | "warning" | "error" | null;
+    warnings?: string[] | null;
     resources: AgentRuntimeResources;
   };
 };
@@ -43,6 +56,12 @@ const RESOURCE_LABEL: Record<AgentResourceKind, string> = {
   skill: "技能",
   plugin: "插件",
   extension: "扩展",
+};
+
+const RUNNER_MODE_LABEL: Record<CliRunnerMode, string> = {
+  local: "Local",
+  wsl: "WSL",
+  ssh: "SSH",
 };
 
 const GUIDES: Record<AgentId, { docs: string; install: Record<Platform, string> }> = {
@@ -130,7 +149,21 @@ function fallbackResources(agentId: AgentId): AgentRuntimeResources {
 }
 
 function fallbackAgent(cli: AgentId): SettingsAgent {
-  return { id: cli, runtime: { installed: false, version: null, commandPath: null, lastError: null, resources: fallbackResources(cli) } };
+  return {
+    id: cli,
+    runtime: {
+      installed: false,
+      version: null,
+      commandPath: null,
+      lastError: null,
+      runnerMode: "local",
+      runnerLabel: "Local",
+      workspacePath: null,
+      connectionState: "unknown",
+      warnings: [],
+      resources: fallbackResources(cli),
+    },
+  };
 }
 
 function runtimeResources(agent: SettingsAgent): AgentRuntimeResources {
@@ -142,6 +175,46 @@ function runtimeResources(agent: SettingsAgent): AgentRuntimeResources {
     plugin: current?.plugin ?? fallback.plugin,
     extension: current?.extension ?? fallback.extension,
   };
+}
+
+function cloneSettings(settings: AppSettings): AppSettings {
+  return structuredClone(settings);
+}
+
+function modeBadgeTone(
+  connectionState: SettingsAgent["runtime"]["connectionState"]
+): "default" | "ready" | "warn" {
+  if (connectionState === "ready") return "ready";
+  if (connectionState === "error" || connectionState === "warning") return "warn";
+  return "default";
+}
+
+function profileCommandPath(profile: CliRunnerProfile, cliId: AgentId) {
+  if (profile.mode === "ssh" && profile.ssh.remoteCommandPath.trim()) {
+    return profile.ssh.remoteCommandPath;
+  }
+  if (profile.commandPath.trim()) return profile.commandPath;
+  return cliId;
+}
+
+function runnerEnvText(profile: CliRunnerProfile) {
+  return Object.entries(profile.env)
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+}
+
+function parseRunnerEnvInput(value: string) {
+  return Object.fromEntries(
+    value
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [key, ...rest] = line.split("=");
+        return [key?.trim() ?? "", rest.join("=").trim()];
+      })
+      .filter(([key, item]) => key && item)
+  );
 }
 
 function resourceNamesRow(group: AgentResourceGroup) {
@@ -332,7 +405,7 @@ export function SettingsPage() {
 
   useEffect(() => {
     if (storedSettings) {
-      setLocal({ ...storedSettings, cliPaths: { ...storedSettings.cliPaths } });
+      setLocal(cloneSettings(storedSettings));
       setEmailRecipientsInput((storedSettings.notificationConfig.emailRecipients ?? []).join(", "));
     }
   }, [storedSettings]);
@@ -360,6 +433,23 @@ export function SettingsPage() {
   const dirty = !!storedSettings && !!local && JSON.stringify(storedSettings) !== JSON.stringify(local);
   const runtimeSummary = `${installedCount}/${CLI_ORDER.length} 个运行时已在 ${PLATFORM_LABEL[platform]} 上就绪。`;
   const branch = appState?.workspace.branch ?? "main";
+
+  function updateRunnerProfile(cliId: AgentId, updater: (profile: CliRunnerProfile) => CliRunnerProfile) {
+    if (!local) return;
+    const current = local.cliRunnerProfiles[cliId];
+    const nextProfile = updater(current);
+    setLocal({
+      ...local,
+      cliPaths: {
+        ...local.cliPaths,
+        [cliId]: nextProfile.commandPath,
+      },
+      cliRunnerProfiles: {
+        ...local.cliRunnerProfiles,
+        [cliId]: nextProfile,
+      },
+    });
+  }
 
   async function copyText(value: string, key: string, label: string) {
     try {
@@ -435,6 +525,8 @@ export function SettingsPage() {
     try {
       setLocal(nextSettings);
       await updateSettings(nextSettings);
+      const state = await bridge.loadAppState(nextSettings.projectRoot, true);
+      setAppState(state);
       setBanner("设置已保存");
     } catch (error) {
       setBanner(error instanceof Error ? error.message : "保存失败");
@@ -569,7 +661,7 @@ export function SettingsPage() {
           <div style={stageStyle(mounted, 50)}>
             <Panel
               title="CLI 运行时"
-              description="扫描并展示当前可用的 CLI 工具链与资源清单。"
+              description="为每个 CLI 独立选择 Local / WSL / SSH 运行方式，并保存其工作目录映射。"
               icon={<TerminalIcon />}
             >
               <div className="divide-y divide-slate-100">
@@ -578,69 +670,318 @@ export function SettingsPage() {
                   const guide = GUIDES[cli];
                   const missing = !agent.runtime.installed;
                   const resources = runtimeResources(agent);
+                  const profile = local.cliRunnerProfiles[cli];
+                  const envText = runnerEnvText(profile);
+                  const resolvedWorkspace = agent.runtime.workspacePath ?? profile.resolvedWorkspacePath ?? null;
+                  const warnings = agent.runtime.warnings ?? [];
 
                   return (
                     <div key={cli} className={cx("p-8 transition-colors", missing ? "bg-rose-50/10" : "hover:bg-slate-50/30")}>
-                      <div className="flex flex-col gap-8 lg:flex-row lg:items-center lg:justify-between">
-                        <div className="flex-1 min-w-0">
+                      <div className="flex flex-col gap-8">
+                        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                           <div className="flex items-center gap-4">
                             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white font-bold text-lg shadow-sm">
                               {CLI_META[cli].label.charAt(0)}
                             </div>
                             <div className="min-w-0">
-                              <div className="flex items-center gap-3">
+                              <div className="flex flex-wrap items-center gap-3">
                                 <h3 className="text-[16px] font-bold text-slate-900 tracking-tight">{CLI_META[cli].label}</h3>
-                                <MetaChip tone={missing ? "warn" : "ready"}>{missing ? "未安装" : "已安装"}</MetaChip>
+                                <MetaChip tone={missing ? "warn" : "ready"}>{missing ? "未就绪" : "可执行"}</MetaChip>
+                                <MetaChip tone={modeBadgeTone(agent.runtime.connectionState)}>{agent.runtime.runnerLabel ?? RUNNER_MODE_LABEL[profile.mode]}</MetaChip>
+                                <MetaChip tone={profile.enabled ? "ready" : "default"}>{profile.enabled ? "已启用" : "已禁用"}</MetaChip>
                                 {!missing && (
                                   <span className="px-2 py-0.5 rounded-lg bg-indigo-50 text-indigo-600 font-mono text-xs font-bold ring-1 ring-indigo-500/10">
                                     v{agent.runtime.version ?? "?.?.?"}
                                   </span>
                                 )}
                               </div>
+                              <p className="mt-2 text-sm text-slate-500 font-medium">
+                                {agent.runtime.lastError
+                                  ? agent.runtime.lastError
+                                  : agent.runtime.runnerLabel
+                                    ? `${agent.runtime.runnerLabel} 已连接，命令将从该环境启动。`
+                                    : "保存后运行扫描，可验证当前 runner 是否可用。"}
+                              </p>
+                            </div>
+                          </div>
+                          <a href={guide.docs} target="_blank" rel="noreferrer" className="text-[11px] font-bold uppercase tracking-widest text-slate-400 hover:text-slate-900 transition-colors inline-flex items-center gap-1">查看文档 <ChevronRightIcon className="w-3 h-3" /></a>
+                        </div>
+
+                        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+                          <div className="grid gap-6 md:grid-cols-2">
+                            <div className="space-y-2">
+                              <FieldLabel>启用</FieldLabel>
+                              <div className="flex h-[46px] items-center justify-between rounded-xl bg-white px-4 ring-1 ring-slate-200 shadow-sm">
+                                <span className="text-sm font-semibold text-slate-700">允许该 CLI 被调度和启动</span>
+                                <ToggleSwitch
+                                  enabled={profile.enabled}
+                                  onClick={() => updateRunnerProfile(cli, (current) => ({ ...current, enabled: !current.enabled }))}
+                                />
+                              </div>
+                            </div>
+                            <div className="space-y-2">
+                              <FieldLabel>运行模式</FieldLabel>
+                              <select
+                                className={INPUT_CLASS}
+                                value={profile.mode}
+                                onChange={(e) =>
+                                  updateRunnerProfile(cli, (current) => ({
+                                    ...current,
+                                    mode: e.target.value as CliRunnerMode,
+                                  }))
+                                }
+                              >
+                                <option value="local">Local</option>
+                                <option value="wsl">WSL</option>
+                                <option value="ssh">SSH</option>
+                              </select>
+                            </div>
+                            <div className="space-y-2 md:col-span-2">
+                              <FieldLabel>命令路径 / 命令名</FieldLabel>
+                              <input
+                                className={cx(INPUT_CLASS, "font-mono text-[13px]")}
+                                placeholder={profile.mode === "ssh" ? "codex / claude / gemini 或远程绝对路径" : "auto"}
+                                value={profile.commandPath}
+                                onChange={(e) =>
+                                  updateRunnerProfile(cli, (current) => ({
+                                    ...current,
+                                    commandPath: e.target.value,
+                                  }))
+                                }
+                              />
+                            </div>
+                            <div className="space-y-2 md:col-span-2">
+                              <FieldLabel>Shell 覆盖</FieldLabel>
+                              <input
+                                className={INPUT_CLASS}
+                                placeholder={profile.mode === "local" ? "留空时使用当前系统 shell" : "如 /bin/bash"}
+                                value={profile.shell}
+                                onChange={(e) =>
+                                  updateRunnerProfile(cli, (current) => ({
+                                    ...current,
+                                    shell: e.target.value,
+                                  }))
+                                }
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <FieldLabel>工作目录映射</FieldLabel>
+                              <select
+                                className={INPUT_CLASS}
+                                value={profile.workspaceMappingMode}
+                                onChange={(e) =>
+                                  updateRunnerProfile(cli, (current) => ({
+                                    ...current,
+                                    workspaceMappingMode: e.target.value as CliRunnerProfile["workspaceMappingMode"],
+                                  }))
+                                }
+                              >
+                                <option value="auto-with-override">自动映射 + 手工覆盖</option>
+                                <option value="auto">仅自动映射</option>
+                                <option value="manual">仅手工指定</option>
+                              </select>
+                            </div>
+                            <div className="space-y-2">
+                              <FieldLabel>手工工作目录</FieldLabel>
+                              <input
+                                className={cx(INPUT_CLASS, "font-mono text-[13px]")}
+                                placeholder={profile.mode === "ssh" ? "/srv/workspace/project" : "留空时优先走自动映射"}
+                                value={profile.manualWorkspacePath}
+                                onChange={(e) =>
+                                  updateRunnerProfile(cli, (current) => ({
+                                    ...current,
+                                    manualWorkspacePath: e.target.value,
+                                  }))
+                                }
+                              />
+                            </div>
+
+                            {profile.mode === "wsl" ? (
+                              <div className="space-y-2 md:col-span-2">
+                                <FieldLabel required>WSL Distro</FieldLabel>
+                                <input
+                                  className={INPUT_CLASS}
+                                  placeholder="例如 Ubuntu-24.04"
+                                  value={profile.wsl.distro}
+                                  onChange={(e) =>
+                                    updateRunnerProfile(cli, (current) => ({
+                                      ...current,
+                                      wsl: { ...current.wsl, distro: e.target.value },
+                                    }))
+                                  }
+                                />
+                              </div>
+                            ) : null}
+
+                            {profile.mode === "ssh" ? (
+                              <>
+                                <div className="space-y-2">
+                                  <FieldLabel>SSH Host Alias</FieldLabel>
+                                  <input
+                                    className={INPUT_CLASS}
+                                    placeholder="~/.ssh/config 中的 Host"
+                                    value={profile.ssh.sshConfigHost}
+                                    onChange={(e) =>
+                                      updateRunnerProfile(cli, (current) => ({
+                                        ...current,
+                                        ssh: { ...current.ssh, sshConfigHost: e.target.value },
+                                      }))
+                                    }
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <FieldLabel>Host</FieldLabel>
+                                  <input
+                                    className={INPUT_CLASS}
+                                    placeholder="devbox.example.com"
+                                    value={profile.ssh.host}
+                                    onChange={(e) =>
+                                      updateRunnerProfile(cli, (current) => ({
+                                        ...current,
+                                        ssh: { ...current.ssh, host: e.target.value },
+                                      }))
+                                    }
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <FieldLabel>User</FieldLabel>
+                                  <input
+                                    className={INPUT_CLASS}
+                                    placeholder="deploy"
+                                    value={profile.ssh.user}
+                                    onChange={(e) =>
+                                      updateRunnerProfile(cli, (current) => ({
+                                        ...current,
+                                        ssh: { ...current.ssh, user: e.target.value },
+                                      }))
+                                    }
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <FieldLabel>Port</FieldLabel>
+                                  <input
+                                    type="number"
+                                    className={INPUT_CLASS}
+                                    value={profile.ssh.port}
+                                    onChange={(e) =>
+                                      updateRunnerProfile(cli, (current) => ({
+                                        ...current,
+                                        ssh: {
+                                          ...current.ssh,
+                                          port: parseInt(e.target.value, 10) || 22,
+                                        },
+                                      }))
+                                    }
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <FieldLabel>远程命令路径</FieldLabel>
+                                  <input
+                                    className={cx(INPUT_CLASS, "font-mono text-[13px]")}
+                                    placeholder="例如 /usr/local/bin/claude"
+                                    value={profile.ssh.remoteCommandPath}
+                                    onChange={(e) =>
+                                      updateRunnerProfile(cli, (current) => ({
+                                        ...current,
+                                        ssh: { ...current.ssh, remoteCommandPath: e.target.value },
+                                      }))
+                                    }
+                                  />
+                                </div>
+                                <div className="space-y-2">
+                                  <FieldLabel>Host Key</FieldLabel>
+                                  <div className="flex h-[46px] items-center justify-between rounded-xl bg-white px-4 ring-1 ring-slate-200 shadow-sm">
+                                    <span className="text-sm font-semibold text-slate-700">
+                                      {profile.ssh.strictHostKeyChecking ? "严格校验" : "放宽校验"}
+                                    </span>
+                                    <ToggleSwitch
+                                      enabled={profile.ssh.strictHostKeyChecking}
+                                      onClick={() =>
+                                        updateRunnerProfile(cli, (current) => ({
+                                          ...current,
+                                          ssh: {
+                                            ...current.ssh,
+                                            strictHostKeyChecking: !current.ssh.strictHostKeyChecking,
+                                          },
+                                        }))
+                                      }
+                                    />
+                                  </div>
+                                </div>
+                              </>
+                            ) : null}
+
+                            <div className="space-y-2 md:col-span-2">
+                              <FieldLabel>环境变量</FieldLabel>
+                              <textarea
+                                className={cx(INPUT_CLASS, "min-h-[110px] font-mono text-[12px] leading-6")}
+                                placeholder={"KEY=value\nANOTHER_KEY=value"}
+                                value={envText}
+                                onChange={(e) =>
+                                  updateRunnerProfile(cli, (current) => ({
+                                    ...current,
+                                    env: parseRunnerEnvInput(e.target.value),
+                                  }))
+                                }
+                              />
                             </div>
                           </div>
 
-                          {missing && (
-                            <div className="mt-6 pl-14 max-w-2xl">
-                              <div className="bg-white border border-rose-100 rounded-[10px] p-5 shadow-sm">
+                          <div className="space-y-5 rounded-[10px] bg-slate-50/80 p-5 ring-1 ring-slate-200/80">
+                            <div className="grid gap-4 sm:grid-cols-2">
+                              <div>
+                                <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">当前 Runner</div>
+                                <div className="mt-1 text-sm font-semibold text-slate-900">{agent.runtime.runnerLabel ?? RUNNER_MODE_LABEL[profile.mode]}</div>
+                              </div>
+                              <div>
+                                <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">生效命令</div>
+                                <div className="mt-1 break-all font-mono text-[12px] text-slate-700">{agent.runtime.commandPath ?? profileCommandPath(profile, cli)}</div>
+                              </div>
+                              <div className="sm:col-span-2">
+                                <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">生效工作目录</div>
+                                <div className="mt-1 break-all font-mono text-[12px] text-slate-700">{resolvedWorkspace ?? "等待扫描 / 需手工配置"}</div>
+                              </div>
+                            </div>
+
+                            {warnings.length > 0 ? (
+                              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[12px] text-amber-800">
+                                {warnings.join(" ")}
+                              </div>
+                            ) : null}
+
+                            {missing ? (
+                              <div className="rounded-[10px] border border-rose-100 bg-white p-5 shadow-sm">
                                 <FieldLabel>请运行以下命令进行安装：</FieldLabel>
                                 <div className="bg-rose-50/30 border border-rose-100 rounded-xl px-4 py-3 font-mono text-[13px] font-bold text-rose-900 mb-4 break-all">
                                   {guide.install[platform]}
                                 </div>
-                                <div className="flex items-center gap-6">
-                                  <button onClick={() => copyText(guide.install[platform], `${cli}-i`, '安装命令')} className="text-[11px] font-bold uppercase tracking-widest text-indigo-600 hover:text-indigo-700 underline underline-offset-4 transition-colors">复制命令</button>
-                                  <a href={guide.docs} target="_blank" rel="noreferrer" className="text-[11px] font-bold uppercase tracking-widest text-slate-400 hover:text-slate-900 transition-colors inline-flex items-center gap-1">查看文档 <ChevronRightIcon className="w-3 h-3" /></a>
-                                </div>
+                                <button onClick={() => copyText(guide.install[platform], `${cli}-i`, "安装命令")} className="text-[11px] font-bold uppercase tracking-widest text-indigo-600 hover:text-indigo-700 underline underline-offset-4 transition-colors">
+                                  复制命令
+                                </button>
+                              </div>
+                            ) : null}
+
+                            <div className="space-y-3">
+                              <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">资源概览</div>
+                              <div className="grid gap-3">
+                                {RESOURCE_ORDER.map((kind) => {
+                                  const group = resources[kind];
+                                  if (!group.supported) return null;
+                                  return (
+                                    <div key={`${cli}-${kind}`} className="rounded-xl bg-white px-4 py-3 ring-1 ring-slate-200 shadow-sm">
+                                      <div className="mb-2 flex items-center gap-2">
+                                        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{RESOURCE_LABEL[kind]}</span>
+                                        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-900 ring-1 ring-slate-200">{group.items.length}</span>
+                                      </div>
+                                      {resourceNamesRow(group)}
+                                    </div>
+                                  );
+                                })}
                               </div>
                             </div>
-                          )}
-
-                          {!missing && (
-                            <div className="mt-6 pl-14 flex flex-wrap gap-x-10 gap-y-4">
-                              {RESOURCE_ORDER.map((kind) => {
-                                const group = resources[kind];
-                                if (!group.supported) return null;
-                                return (
-                                  <div key={`${cli}-${kind}`} className="flex flex-col gap-1.5">
-                                    <div className="flex items-center gap-2 border-b border-slate-50 pb-1">
-                                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{RESOURCE_LABEL[kind]}</span>
-                                      <span className="text-[10px] font-bold text-slate-900 px-1.5 py-0.5 rounded bg-slate-100 ring-1 ring-slate-200">{group.items.length}</span>
-                                    </div>
-                                    {resourceNamesRow(group)}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
+                          </div>
                         </div>
                       </div>
-                      
-                      {agent.runtime.lastError && (
-                        <div className="mt-6 ml-14 rounded-[10px] border border-rose-200 bg-rose-50 p-4 font-mono text-[12px] text-rose-700 shadow-inner break-all">
-                          <span className="font-bold uppercase tracking-wider block mb-1 text-[10px]">严重错误</span>
-                          {agent.runtime.lastError}
-                        </div>
-                      )}
                     </div>
                   );
                 })}
@@ -650,7 +991,7 @@ export function SettingsPage() {
 
           {/* Workspace */}
           <div style={stageStyle(mounted, 100)}>
-            <Panel title="工作区上下文" description="用于执行与上下文提取的根目录映射配置。" icon={<FolderIcon />}>
+            <Panel title="工作区上下文" description="本地项目根目录仍然是 UI 的基准路径，远端 CLI 会在各自 runner 内映射到目标工作目录。" icon={<FolderIcon />}>
               <div className="p-8 space-y-8">
                 <div>
                   <FieldLabel required>系统项目根目录</FieldLabel>
