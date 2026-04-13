@@ -1,43 +1,135 @@
 # Multi CLI Studio
 
-Desktop orchestration shell for Codex CLI, Claude Code, and Gemini CLI, with one primary terminal surface and a secondary collaboration rail.
+[简体中文](./README.zh-CN.md)
 
-## Table of Contents
+Multi CLI Studio is a Tauri desktop workspace for people who do not want to be locked into a single AI coding CLI or a single model vendor.
 
-- [Overview](#overview)
-- [Features](#features)
-- [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
-- [Scripts](#scripts)
-- [Platform Notes](#platform-notes)
-- [Data Storage](#data-storage)
-- [Roadmap Ideas](#roadmap-ideas)
-- [Contributing](#contributing)
-- [License](#license)
-- [Star History](#star-history)
+Instead of forcing one tool to do everything, it gives you one local desktop surface for:
 
-## Overview
+- `Codex`, `Claude`, and `Gemini` CLI workflows
+- provider-based model chat for `OpenAI-compatible`, `Claude`, and `Gemini`
+- local automation jobs and workflows
+- shared local state across terminal, chat, and automation
 
-**Multi CLI Studio** is a Tauri desktop app that unifies multiple AI coding CLIs into one workspace.  
-It focuses on:
+## Why This Exists
 
-- Multi-agent orchestration (Codex / Claude / Gemini)
-- Persistent session state and context
-- Automation workflows and scheduled jobs
-- Real-time streaming output from backend to UI
+Most AI coding tools assume one model, one CLI, one workflow.
 
-## Features
+That is not how real work behaves:
 
-- **Unified terminal experience** for multiple agent sessions
-- **Workspace-aware flow** with project and activity context
-- **Automation center** for jobs/workflows and execution tracking
-- **Persistent storage** through SQLite and JSON-backed runtime data
-- **Cross-platform launcher support** for local development
+- one CLI may be better at edits, another at planning, another at UI or long-context work
+- comparing outputs across agents is often safer than trusting a single tool path
+- context gets fragmented when terminal, chat, and automation live in different apps
+- local project state matters, but most tools do not coordinate around it
+
+Multi CLI Studio is built around a different assumption:
+
+**cross-CLI orchestration is the product, not an add-on**
+
+## Core Value
+
+- Keep project context in one place while switching between different AI execution styles
+- Use CLI-native agent workflows and provider-based chat side by side
+- Turn repeated tasks into local automation instead of re-prompting from scratch
+- Keep runtime state local with desktop-native storage and tooling
+
+## Platform Support
+
+- Windows desktop: primary packaged target with release workflow for installer output
+- macOS desktop: supported through the Tauri desktop stack and local build flow
+
+## Screenshots
+
+### Dashboard
+
+<img src="./docs/screenshots/index.png" alt="Dashboard" width="100%" />
+
+### Terminal Workspace
+
+<img src="./docs/screenshots/terminal.png" alt="Terminal Workspace" width="100%" />
+
+### Model Chat
+
+<img src="./docs/screenshots/chat.png" alt="Model Chat" width="100%" />
+
+### Model Providers
+
+<img src="./docs/screenshots/provider.png" alt="Model Providers" width="100%" />
+
+### Automation Jobs
+
+<img src="./docs/screenshots/automationJob_Index.png" alt="Automation Jobs" width="100%" />
+
+### Automation Workflows
+
+<img src="./docs/screenshots/automation_workflow.png" alt="Automation Workflows" width="100%" />
+
+### Settings
+
+<img src="./docs/screenshots/settings.png" alt="Settings" width="100%" />
+
+## Current Capabilities
+
+### Terminal and CLI Workspace
+
+- unified desktop surface for `Codex`, `Claude`, and `Gemini`
+- persistent sessions and chat-like execution history
+- streaming output rendered directly into the UI
+- slash commands for model, permissions, effort, plan mode, context, and session controls
+- integrated git side panel to keep working-tree changes visible during execution
+
+### Model Chat and Provider Layer
+
+- provider-backed chat for `OpenAI-compatible`, `Claude`, and `Gemini`
+- per-turn model switching inside the same conversation thread
+- local provider management with editable API key, base URL, enable state, and model catalog
+- useful for side-by-side comparison, quick iteration, and non-CLI model usage
+
+### Automation and Workflow Layer
+
+- automation jobs with execution summaries, state, and logs
+- workflow editor and workflow run canvas for multi-step flows
+- repeatable local orchestration for AI-assisted tasks
+
+### Local Runtime and Persistence
+
+- local-first storage with SQLite and JSON
+- Tauri 2 desktop runtime with Rust backend and React frontend
+- CLI and local resource detection in Settings
+- release workflow and version sync tooling already wired into the repo
+
+## Main Pages
+
+### Dashboard
+
+- workspace snapshot with project root, dirty files, checks, events, and traffic
+
+### Terminal
+
+- primary multi-CLI execution page
+- combines conversation history, prompt bar, streaming output, slash commands, and git changes
+
+### Model Chat
+
+- dedicated provider-based conversation page
+- keeps one thread while letting users switch model/provider selection turn by turn
+
+### Model Providers
+
+- manage OpenAI-compatible, Claude, and Gemini providers
+- edit base URL, API key, enabled state, and refresh model lists
+
+### Automation
+
+- jobs, workflow lists, workflow editor, run details, and execution logs
+
+### Settings
+
+- inspect installed CLIs, local runtime resources, and environment-related state
 
 ## Tech Stack
 
-### Frontend (`src`)
+### Frontend
 
 - React 19
 - TypeScript
@@ -49,35 +141,39 @@ It focuses on:
 - ECharts
 - react-markdown + remark-gfm
 
-### Backend (`src-tauri`)
+### Backend
 
-- Rust (edition 2021, `rust-version = 1.88`)
+- Rust 1.88
 - Tauri 2
-- rusqlite (bundled SQLite)
+- rusqlite
 - serde / serde_json
 - chrono / uuid
-- reqwest / lettre
+- reqwest
+- lettre
 - cron
 
 ## Project Structure
 
 ```text
 multi-cli-studio/
-├─ src/                        # React frontend
-│  ├─ components/              # Reusable UI modules
-│  │  ├─ chat/                 # Chat-specific components
-│  │  ├─ Sidebar.tsx
-│  │  ├─ TerminalOutput.tsx
-│  │  └─ ...
-│  ├─ pages/                   # Route-level pages
-│  │  ├─ TerminalPage.tsx
-│  │  ├─ DashboardPage.tsx
-│  │  ├─ Automation*.tsx
-│  │  └─ SettingsPage.tsx
+├─ src/
+│  ├─ components/
+│  │  ├─ chat/
+│  │  └─ modelProviders/
 │  ├─ layouts/
 │  ├─ lib/
-│  └─ styles/
-├─ src-tauri/                  # Rust + Tauri backend
+│  └─ pages/
+│     ├─ DashboardPage.tsx
+│     ├─ TerminalPage.tsx
+│     ├─ ModelChatPage.tsx
+│     ├─ ModelProvidersPage.tsx
+│     ├─ ModelProviderEditorPage.tsx
+│     ├─ AutomationJobsPage.tsx
+│     ├─ AutomationWorkflowsPage.tsx
+│     ├─ AutomationWorkflowEditorPage.tsx
+│     ├─ AutomationJobEditorPage.tsx
+│     └─ SettingsPage.tsx
+├─ src-tauri/
 │  ├─ src/
 │  │  ├─ main.rs
 │  │  ├─ automation.rs
@@ -85,10 +181,16 @@ multi-cli-studio/
 │  │  └─ acp.rs
 │  ├─ tauri.conf.json
 │  └─ Cargo.toml
+├─ docs/
+│  └─ screenshots/
 ├─ scripts/
 │  ├─ run-tauri.mjs
-│  └─ run-tauri.ps1
-├─ dist/                       # Frontend build output
+│  └─ sync-version.mjs
+├─ .github/
+│  └─ workflows/
+│     └─ release-desktop.yml
+├─ README.md
+├─ README.zh-CN.md
 └─ package.json
 ```
 
@@ -96,11 +198,11 @@ multi-cli-studio/
 
 ### Prerequisites
 
-- Node.js (LTS recommended)
-- Rust 1.88.0+
-- Tauri CLI v2
-- Windows users: Microsoft C++ Build Tools (MSVC toolchain)
-- macOS users: Xcode Command Line Tools
+- Node.js 20+
+- Rust 1.88+
+- Tauri CLI 2
+- Windows: MSVC build tools
+- macOS: Xcode Command Line Tools
 
 ### Install
 
@@ -108,13 +210,13 @@ multi-cli-studio/
 npm install
 ```
 
-### Run (frontend only)
+### Run Frontend Only
 
 ```bash
 npm run dev
 ```
 
-### Run (desktop app)
+### Run Desktop App
 
 ```bash
 npm run tauri:dev
@@ -129,31 +231,36 @@ npm run tauri:build
 
 ## Scripts
 
-From `package.json`:
+- `npm run dev`: start Vite dev server
+- `npm run build`: type-check and build frontend
+- `npm run preview`: preview the built frontend
+- `npm run tauri:dev`: run the Tauri desktop app in development
+- `npm run tauri:build`: build desktop bundles
+- `npm run tauri:android`: run Android flow through the wrapper script
+- `npm run version:sync -- <version>`: sync `package.json`, `Cargo.toml`, and `tauri.conf.json`
+- `npm run version:check -- <version>`: verify version metadata alignment
 
-- `npm run dev` - Start Vite dev server
-- `npm run build` - Type-check + production frontend build
-- `npm run preview` - Preview built frontend
-- `npm run tauri:dev` - Start Tauri desktop development mode
-- `npm run tauri:build` - Build desktop bundle
-- `npm run tauri:android` - Android target flow via script wrapper
+## Provider Notes
 
-## Platform Notes
+### Gemini Base URL
 
-- This repo includes cross-platform Tauri launch scripts in `scripts/`.
-- On macOS, the launcher uses native shell behavior and supports `osascript`-based folder selection.
-- Rust toolchain is pinned via `rust-toolchain.toml` to ensure compatibility.
+Recommended:
 
-If needed:
-
-```bash
-rustup toolchain install 1.88.0
-rustup default 1.88.0
+```text
+https://generativelanguage.googleapis.com
 ```
+
+Also valid:
+
+```text
+https://generativelanguage.googleapis.com/v1beta
+```
+
+Do not put `models/...:streamGenerateContent` or `?key=...` into the base URL field.
 
 ## Data Storage
 
-Application data is stored in platform app-data directories:
+Application data is stored in local app-data directories:
 
 - Windows: `%LOCALAPPDATA%\multi-cli-studio`
 - Linux: `~/.local/share/multi-cli-studio`
@@ -161,35 +268,24 @@ Application data is stored in platform app-data directories:
 
 Common files:
 
-- `automation-jobs.json` - Automation job definitions
-- `automation-runs.json` - Automation run history
-- `automation-rules.json` - Rule profiles
-- `terminal-state.db` - SQLite persistence for sessions/context
+- `terminal-state.db`
+- `session.json`
+- `automation-jobs.json`
+- `automation-runs.json`
+- `automation-rules.json`
 
-## Roadmap Ideas
+## Release
 
-- Plugin-like integration model for additional CLIs
-- Enhanced run analytics and dashboard visualizations
-- Better workflow templates and sharing
-- More granular context-control strategies
+The repo already includes a desktop release workflow:
 
-## Contributing
+- `.github/workflows/release-desktop.yml`
 
-Contributions are welcome.  
-Recommended workflow:
-
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Open a Pull Request with clear change notes
-
-Please ensure your branch builds locally before submitting.
+It synchronizes version metadata, builds the Tauri desktop bundle, and uploads the Windows installer to GitHub Releases.
 
 ## License
 
-This project is licensed under the **MIT License**.  
-See [`LICENSE`](./LICENSE) for full text.
+MIT. See [LICENSE](./LICENSE).
 
-## Star History
+---
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Austin-Patrician/multi-cli-studio&type=Date)](https://star-history.com/#Austin-Patrician/multi-cli-studio&Date)
+Finally，Thanks to everyone on LinuxDo for their support! Welcome to join https://linux.do/ for all kinds of technical exchanges, cutting-edge AI information, and AI experience sharing, all on Linuxdo!
