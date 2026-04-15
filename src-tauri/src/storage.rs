@@ -41,6 +41,28 @@ pub struct PersistedWorkspaceRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PersistedWorkingMemorySnapshot {
+    pub modified_files: Vec<String>,
+    pub active_errors: Vec<String>,
+    pub recent_commands: Vec<String>,
+    pub build_status: String,
+    pub key_decisions: Vec<String>,
+    pub contributing_clis: Vec<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedCliContextBoundary {
+    pub last_seen_message_id: Option<String>,
+    pub last_seen_at: Option<String>,
+    pub last_compacted_summary_version: Option<i64>,
+    #[serde(default)]
+    pub working_memory_snapshot: Option<PersistedWorkingMemorySnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PersistedTerminalTab {
     pub id: String,
     pub title: String,
@@ -52,6 +74,8 @@ pub struct PersistedTerminalTab {
     pub model_overrides: BTreeMap<String, String>,
     pub permission_overrides: BTreeMap<String, String>,
     pub transport_sessions: BTreeMap<String, AgentTransportSession>,
+    #[serde(default)]
+    pub context_boundaries_by_cli: BTreeMap<String, PersistedCliContextBoundary>,
     pub draft_prompt: String,
     pub status: String,
     pub last_active_at: String,
@@ -1466,8 +1490,8 @@ impl TerminalStorage {
                 "INSERT INTO terminal_tabs (
                     id, title, workspace_id, selected_cli, plan_mode, fast_mode, effort_level,
                     model_overrides_json, permission_overrides_json, transport_sessions_json,
-                    draft_prompt, status, last_active_at, tab_order
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    context_boundaries_by_cli_json, draft_prompt, status, last_active_at, tab_order
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     tab.id,
                     tab.title,
@@ -1479,6 +1503,7 @@ impl TerminalStorage {
                     to_json(&tab.model_overrides)?,
                     to_json(&tab.permission_overrides)?,
                     to_json(&tab.transport_sessions)?,
+                    to_json(&tab.context_boundaries_by_cli)?,
                     tab.draft_prompt,
                     tab.status,
                     tab.last_active_at,
@@ -1540,6 +1565,7 @@ impl TerminalStorage {
                 model_overrides_json TEXT NOT NULL,
                 permission_overrides_json TEXT NOT NULL,
                 transport_sessions_json TEXT NOT NULL,
+                context_boundaries_by_cli_json TEXT NOT NULL DEFAULT '{}',
                 draft_prompt TEXT NOT NULL,
                 status TEXT NOT NULL,
                 last_active_at TEXT NOT NULL,
@@ -1839,6 +1865,12 @@ impl TerminalStorage {
         ensure_column_exists(conn, "chat_messages", "automation_run_id", "TEXT")?;
         ensure_column_exists(conn, "chat_messages", "workflow_run_id", "TEXT")?;
         ensure_column_exists(conn, "chat_messages", "workflow_node_id", "TEXT")?;
+        ensure_column_exists(
+            conn,
+            "terminal_tabs",
+            "context_boundaries_by_cli_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )?;
         ensure_column_exists(conn, "handoff_events", "payload_json", "TEXT")?;
         ensure_column_exists(
             conn,
@@ -1950,7 +1982,7 @@ impl TerminalStorage {
             .prepare(
                 "SELECT id, title, workspace_id, selected_cli, plan_mode, fast_mode, effort_level,
                         model_overrides_json, permission_overrides_json, transport_sessions_json,
-                        draft_prompt, status, last_active_at
+                        context_boundaries_by_cli_json, draft_prompt, status, last_active_at
                  FROM terminal_tabs
                  ORDER BY tab_order ASC",
             )
@@ -1968,9 +2000,10 @@ impl TerminalStorage {
                     model_overrides: parse_json_default(row.get::<_, String>(7)?),
                     permission_overrides: parse_json_default(row.get::<_, String>(8)?),
                     transport_sessions: parse_json_default(row.get::<_, String>(9)?),
-                    draft_prompt: row.get(10)?,
-                    status: row.get(11)?,
-                    last_active_at: row.get(12)?,
+                    context_boundaries_by_cli: parse_json_default(row.get::<_, String>(10)?),
+                    draft_prompt: row.get(11)?,
+                    status: row.get(12)?,
+                    last_active_at: row.get(13)?,
                 })
             })
             .map_err(|err| err.to_string())?;

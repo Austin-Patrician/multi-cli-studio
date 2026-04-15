@@ -2,13 +2,14 @@
 
 mod acp;
 mod automation;
+mod local_usage;
 mod storage;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsString,
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str::FromStr,
@@ -43,6 +44,8 @@ use automation::{
 use chrono::Local;
 use cron::Schedule;
 use dirs::data_local_dir;
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use storage::{
@@ -220,11 +223,43 @@ struct TerminalEvent {
     line: TerminalLine,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PtyOutputEvent {
+    terminal_tab_id: String,
+    data: String,
+    stream: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentPromptRequest {
     agent_id: String,
     prompt: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PtyEnsureRequest {
+    terminal_tab_id: String,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PtyInputRequest {
+    terminal_tab_id: String,
+    data: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PtyResizeRequest {
+    terminal_tab_id: String,
+    cols: u16,
+    rows: u16,
 }
 
 // ── Context system models (new) ────────────────────────────────────────
@@ -2243,6 +2278,15 @@ struct WorkspacePickResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceTreeEntry {
+    name: String,
+    path: String,
+    kind: String,
+    has_children: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct OpenWorkspaceFileResult {
     opened: bool,
 }
@@ -2258,6 +2302,32 @@ struct FileMentionCandidate {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceTextSearchMatch {
+    line: usize,
+    column: usize,
+    end_column: usize,
+    preview: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceTextSearchFileResult {
+    path: String,
+    match_count: usize,
+    matches: Vec<WorkspaceTextSearchMatch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceTextSearchResponse {
+    files: Vec<WorkspaceTextSearchFileResult>,
+    file_count: usize,
+    match_count: usize,
+    limit_hit: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CliSkillItem {
     name: String,
     display_name: Option<String>,
@@ -2265,6 +2335,44 @@ struct CliSkillItem {
     path: String,
     scope: Option<String>,
     source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsEngineStatus {
+    engine_type: String,
+    installed: bool,
+    version: Option<String>,
+    bin_path: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GlobalMcpServerEntry {
+    name: String,
+    enabled: bool,
+    transport: Option<String>,
+    command: Option<String>,
+    url: Option<String>,
+    args_count: usize,
+    source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalDirectoryEntry {
+    name: String,
+    path: String,
+    kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalTextFile {
+    exists: bool,
+    content: String,
+    truncated: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2292,6 +2400,16 @@ struct GitFileChange {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GitFileStatus {
+    path: String,
+    status: String,
+    previous_path: Option<String>,
+    additions: u32,
+    deletions: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GitFileDiff {
     path: String,
     status: String,
@@ -2308,7 +2426,161 @@ struct GitFileDiff {
 struct GitPanelData {
     is_git_repo: bool,
     branch: String,
+    file_status: String,
+    staged_files: Vec<GitFileStatus>,
+    unstaged_files: Vec<GitFileStatus>,
     recent_changes: Vec<GitFileChange>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitCommitResult {
+    commit_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitLogEntry {
+    sha: String,
+    summary: String,
+    author: String,
+    timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitLogResponse {
+    total: usize,
+    entries: Vec<GitLogEntry>,
+    ahead: usize,
+    behind: usize,
+    ahead_entries: Vec<GitLogEntry>,
+    behind_entries: Vec<GitLogEntry>,
+    upstream: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHistoryCommit {
+    sha: String,
+    short_sha: String,
+    summary: String,
+    message: String,
+    author: String,
+    author_email: String,
+    timestamp: i64,
+    parents: Vec<String>,
+    refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHistoryResponse {
+    snapshot_id: String,
+    total: usize,
+    offset: usize,
+    limit: usize,
+    has_more: bool,
+    commits: Vec<GitHistoryCommit>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitCommitFileChange {
+    path: String,
+    old_path: Option<String>,
+    status: String,
+    additions: u32,
+    deletions: u32,
+    is_binary: bool,
+    is_image: bool,
+    diff: String,
+    line_count: u32,
+    truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitCommitDetails {
+    sha: String,
+    summary: String,
+    message: String,
+    author: String,
+    author_email: String,
+    committer: String,
+    committer_email: String,
+    author_time: i64,
+    commit_time: i64,
+    parents: Vec<String>,
+    files: Vec<GitCommitFileChange>,
+    total_additions: u32,
+    total_deletions: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitBranchListItem {
+    name: String,
+    is_current: bool,
+    is_remote: bool,
+    remote: Option<String>,
+    upstream: Option<String>,
+    last_commit: i64,
+    head_sha: Option<String>,
+    ahead: usize,
+    behind: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitBranchListResponse {
+    local_branches: Vec<GitBranchListItem>,
+    remote_branches: Vec<GitBranchListItem>,
+    current_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubUser {
+    login: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubIssue {
+    number: u64,
+    title: String,
+    url: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubIssuesResponse {
+    total: usize,
+    issues: Vec<GitHubIssue>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubPullRequest {
+    number: u64,
+    title: String,
+    url: String,
+    updated_at: String,
+    created_at: String,
+    body: String,
+    head_ref_name: String,
+    base_ref_name: String,
+    is_draft: bool,
+    author: Option<GitHubUser>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubPullRequestsResponse {
+    total: usize,
+    pull_requests: Vec<GitHubPullRequest>,
 }
 
 // ── App store ──────────────────────────────────────────────────────────
@@ -2317,6 +2589,7 @@ struct AppStore {
     state: Arc<Mutex<AppStateDto>>,
     context: Arc<Mutex<ContextStore>>,
     settings: Arc<Mutex<AppSettings>>,
+    pty_sessions: Arc<Mutex<HashMap<String, PtySession>>>,
     terminal_storage: TerminalStorage,
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
@@ -2353,6 +2626,13 @@ struct PendingCodexApproval {
 
 type SharedChildStdin = Arc<Mutex<std::process::ChildStdin>>;
 type SharedRpcCounter = Arc<Mutex<u64>>;
+type SharedPtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
+struct PtySession {
+    writer: SharedPtyWriter,
+    master: Box<dyn MasterPty + Send>,
+    child: Box<dyn portable_pty::Child + Send>,
+}
 
 #[derive(Debug, Clone)]
 struct LiveCodexTurnTarget {
@@ -12241,6 +12521,466 @@ fn split_choice_values(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn git_command_output(project_root: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(project_root);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.output().map_err(|err| err.to_string())
+}
+
+fn git_command_status(project_root: &str, args: &[&str]) -> Result<(), String> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(project_root);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().map_err(|err| err.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "git command failed".to_string()
+    };
+    Err(detail)
+}
+
+fn count_text_lines(bytes: &[u8]) -> u32 {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let normalized = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+    normalized.lines().count() as u32
+}
+
+fn parse_git_log_entries(project_root: &str, args: &[&str]) -> Vec<GitLogEntry> {
+    let Ok(output) = git_command_output(project_root, args) else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(4, '\t');
+            let sha = parts.next()?.trim().to_string();
+            let author = parts.next()?.trim().to_string();
+            let timestamp = parts.next()?.trim().parse::<i64>().ok()?;
+            let summary = parts.next().unwrap_or("").trim().to_string();
+            if sha.is_empty() || summary.is_empty() {
+                return None;
+            }
+            Some(GitLogEntry {
+                sha,
+                summary,
+                author,
+                timestamp,
+            })
+        })
+        .collect()
+}
+
+fn parse_git_history_commits(project_root: &str, revision: Option<&str>) -> Vec<GitHistoryCommit> {
+    let mut command = Command::new("git");
+    command.current_dir(project_root);
+    command.arg("log");
+    if let Some(revision) = revision.filter(|value| !value.trim().is_empty()) {
+        command.arg(revision);
+    }
+    command.args([
+        "--decorate=short",
+        "--date-order",
+        "--pretty=format:%H%x1f%h%x1f%s%x1f%B%x1f%an%x1f%ae%x1f%ct%x1f%P%x1f%D%x1e",
+    ]);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .split('\u{1e}')
+        .filter_map(|chunk| {
+            let trimmed = chunk.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let parts = trimmed.split('\u{1f}').collect::<Vec<_>>();
+            if parts.len() < 9 {
+                return None;
+            }
+            let sha = parts[0].trim().to_string();
+            if sha.is_empty() {
+                return None;
+            }
+            let refs = parts[8]
+                .split(',')
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            Some(GitHistoryCommit {
+                sha,
+                short_sha: parts[1].trim().to_string(),
+                summary: parts[2].trim().to_string(),
+                message: parts[3].trim().to_string(),
+                author: parts[4].trim().to_string(),
+                author_email: parts[5].trim().to_string(),
+                timestamp: parts[6].trim().parse::<i64>().unwrap_or(0),
+                parents: parts[7]
+                    .split_whitespace()
+                    .map(|value| value.to_string())
+                    .collect(),
+                refs,
+            })
+        })
+        .collect()
+}
+
+fn git_history_query_matches(commit: &GitHistoryCommit, query: &str) -> bool {
+    if query.trim().is_empty() {
+        return true;
+    }
+    let normalized = query.to_lowercase();
+    format!(
+        "{} {} {} {} {} {}",
+        commit.sha,
+        commit.short_sha,
+        commit.summary,
+        commit.message,
+        commit.author,
+        commit.refs.join(" ")
+    )
+    .to_lowercase()
+    .contains(&normalized)
+}
+
+fn git_head_snapshot_id(project_root: &str) -> String {
+    git_output(project_root, &["rev-parse", "HEAD"]).unwrap_or_else(|| format!("snapshot-{}", Local::now().timestamp_millis()))
+}
+
+fn git_status_letter(status: &str) -> String {
+    match status {
+        "added" => "A".to_string(),
+        "modified" => "M".to_string(),
+        "deleted" => "D".to_string(),
+        "renamed" => "R".to_string(),
+        other => other.to_uppercase(),
+    }
+}
+
+fn is_image_path(path: &str) -> bool {
+    let normalized = path.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg"]
+        .iter()
+        .any(|ext| normalized.ends_with(ext))
+}
+
+fn parse_git_diff_tree_name_status(project_root: &str, commit: &str) -> Vec<(String, Option<String>, String)> {
+    let mut command = Command::new("git");
+    command.current_dir(project_root);
+    command.args(["diff-tree", "--no-commit-id", "--name-status", "-r", "-M", commit]);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let status_raw = parts.next()?.trim().to_string();
+            if status_raw.is_empty() {
+                return None;
+            }
+            let status_code = status_raw.chars().next().unwrap_or('M').to_string();
+            if status_code == "R" {
+                let old_path = parts.next()?.trim().replace('\\', "/");
+                let new_path = parts.next()?.trim().replace('\\', "/");
+                return Some((new_path, Some(old_path), status_code));
+            }
+            let path = parts.next()?.trim().replace('\\', "/");
+            Some((path, None, status_code))
+        })
+        .collect()
+}
+
+fn parse_git_diff_tree_numstat(project_root: &str, commit: &str) -> HashMap<String, (u32, u32)> {
+    let mut command = Command::new("git");
+    command.current_dir(project_root);
+    command.args(["show", "--format=", "--numstat", "-M", commit]);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let Ok(output) = command.output() else {
+        return HashMap::new();
+    };
+    if !output.status.success() {
+        return HashMap::new();
+    }
+
+    let mut stats = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.split('\t');
+        let additions_raw = parts.next().unwrap_or("").trim();
+        let deletions_raw = parts.next().unwrap_or("").trim();
+        let path_raw = parts.next().unwrap_or("").trim();
+        if path_raw.is_empty() {
+            continue;
+        }
+        let path = path_raw
+            .split_once(" -> ")
+            .map(|(_, after)| after.trim().replace('\\', "/"))
+            .unwrap_or_else(|| path_raw.replace('\\', "/"));
+        let additions = additions_raw.parse::<u32>().unwrap_or(0);
+        let deletions = deletions_raw.parse::<u32>().unwrap_or(0);
+        stats.insert(path, (additions, deletions));
+    }
+    stats
+}
+
+fn git_commit_file_diff(project_root: &str, commit: &str, path: &str) -> String {
+    let mut command = Command::new("git");
+    command.current_dir(project_root);
+    command.args(["show", "--format=", "-M", commit, "--", path]);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    match command.output() {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).to_string(),
+        _ => String::new(),
+    }
+}
+
+fn get_git_upstream(project_root: &str) -> Option<String> {
+    git_output(project_root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+}
+
+fn parse_branch_ref_lines(
+    project_root: &str,
+    args: &[&str],
+    is_remote: bool,
+    current_branch: Option<&str>,
+) -> Vec<GitBranchListItem> {
+    let mut command = Command::new("git");
+    command.current_dir(project_root);
+    command.args(args);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let parts = line.split('\t').collect::<Vec<_>>();
+            if parts.len() < 4 {
+                return None;
+            }
+            let name = parts[0].trim().to_string();
+            if name.is_empty() || name.ends_with("/HEAD") {
+                return None;
+            }
+            let upstream = parts[1].trim();
+            let head_sha = parts[2].trim();
+            let last_commit = parts[3].trim().parse::<i64>().unwrap_or(0);
+            let remote = if is_remote {
+                name.split_once('/').map(|(remote, _)| remote.to_string())
+            } else {
+                None
+            };
+            let (ahead, behind) = if !is_remote && !upstream.is_empty() {
+                parse_ahead_behind_counts(project_root, upstream)
+            } else {
+                (0, 0)
+            };
+            Some(GitBranchListItem {
+                is_current: current_branch.is_some_and(|current| current == name),
+                name,
+                is_remote,
+                remote,
+                upstream: if upstream.is_empty() {
+                    None
+                } else {
+                    Some(upstream.to_string())
+                },
+                last_commit,
+                head_sha: if head_sha.is_empty() {
+                    None
+                } else {
+                    Some(head_sha.to_string())
+                },
+                ahead,
+                behind,
+            })
+        })
+        .collect()
+}
+
+fn parse_ahead_behind_counts(project_root: &str, upstream: &str) -> (usize, usize) {
+    let Some(output) = git_output_allow_empty(project_root, &["rev-list", "--left-right", "--count", &format!("{upstream}...HEAD")]) else {
+        return (0, 0);
+    };
+    let mut parts = output.split_whitespace();
+    let behind = parts.next().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+    let ahead = parts.next().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+    (ahead, behind)
+}
+
+fn parse_github_repo_from_remote(remote: &str) -> Option<(String, String)> {
+    let trimmed = remote.trim().trim_end_matches(".git");
+    if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        let (owner, repo) = rest.split_once('/')?;
+        return Some((owner.to_string(), repo.to_string()));
+    }
+    if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        let (owner, repo) = rest.split_once('/')?;
+        return Some((owner.to_string(), repo.to_string()));
+    }
+    if let Some(rest) = trimmed.strip_prefix("http://github.com/") {
+        let (owner, repo) = rest.split_once('/')?;
+        return Some((owner.to_string(), repo.to_string()));
+    }
+    None
+}
+
+fn github_api_get_json(url: &str) -> Result<Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("multi-cli-studio")
+        .build()
+        .map_err(|err| err.to_string())?;
+    let response = client
+        .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|err| err.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("GitHub API returned {}", response.status()));
+    }
+    response.json::<Value>().map_err(|err| err.to_string())
+}
+
+fn parse_numstat_output(project_root: &str, args: &[&str]) -> HashMap<String, (u32, u32)> {
+    let mut stats = HashMap::new();
+    let Ok(output) = git_command_output(project_root, args) else {
+        return stats;
+    };
+    if !output.status.success() {
+        return stats;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let mut parts = line.split('\t');
+        let additions_raw = parts.next().unwrap_or("").trim();
+        let deletions_raw = parts.next().unwrap_or("").trim();
+        let raw_path = parts.next().unwrap_or("").trim();
+        if raw_path.is_empty() {
+            continue;
+        }
+        let additions = additions_raw.parse::<u32>().unwrap_or(0);
+        let deletions = deletions_raw.parse::<u32>().unwrap_or(0);
+        let path = raw_path
+            .split_once(" -> ")
+            .map(|(_, after)| after.trim().to_string())
+            .unwrap_or_else(|| raw_path.to_string());
+        stats.insert(path.replace('\\', "/"), (additions, deletions));
+    }
+    stats
+}
+
+fn parse_porcelain_status_line(line: &str) -> Option<(char, char, Option<String>, String)> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let x = bytes.get(0).copied().unwrap_or(b' ') as char;
+    let y = bytes.get(1).copied().unwrap_or(b' ') as char;
+    let raw_path = line.get(3..).unwrap_or(line).trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+    let (previous_path, path) = if let Some((before, after)) = raw_path.split_once(" -> ") {
+        (Some(before.trim().replace('\\', "/")), after.trim().replace('\\', "/"))
+    } else {
+        (None, raw_path.replace('\\', "/"))
+    };
+    Some((x, y, previous_path, path))
+}
+
+fn status_from_code(status_char: char) -> String {
+    match status_char {
+        'A' | '?' => "added",
+        'D' => "deleted",
+        'R' => "renamed",
+        _ => "modified",
+    }
+    .to_string()
+}
+
+fn build_git_file_statuses(project_root: &str) -> Result<(Vec<GitFileStatus>, Vec<GitFileStatus>), String> {
+    let status_output = git_output_allow_empty(project_root, &["status", "--porcelain"])
+        .unwrap_or_default();
+    let staged_numstats = parse_numstat_output(project_root, &["diff", "--cached", "--numstat", "--find-renames"]);
+    let unstaged_numstats = parse_numstat_output(project_root, &["diff", "--numstat", "--find-renames"]);
+
+    let mut staged_files = Vec::new();
+    let mut unstaged_files = Vec::new();
+
+    for line in status_output.lines() {
+        let Some((index_status, worktree_status, previous_path, path)) = parse_porcelain_status_line(line) else {
+            continue;
+        };
+
+        if index_status != ' ' && index_status != '?' {
+            let (additions, deletions) = staged_numstats.get(&path).copied().unwrap_or((0, 0));
+            staged_files.push(GitFileStatus {
+                path: path.clone(),
+                status: status_from_code(index_status),
+                previous_path: previous_path.clone(),
+                additions,
+                deletions,
+            });
+        }
+
+        let is_untracked = index_status == '?' || worktree_status == '?';
+        if is_untracked || worktree_status != ' ' {
+            let (mut additions, deletions) = unstaged_numstats.get(&path).copied().unwrap_or((0, 0));
+            if is_untracked && additions == 0 {
+                additions = read_workspace_file_bytes(project_root, &path)
+                    .map(|bytes| count_text_lines(&bytes))
+                    .unwrap_or(0);
+            }
+            unstaged_files.push(GitFileStatus {
+                path: path.clone(),
+                status: status_from_code(if is_untracked { '?' } else { worktree_status }),
+                previous_path: previous_path.clone(),
+                additions,
+                deletions,
+            });
+        }
+    }
+
+    staged_files.sort_by(|left, right| left.path.to_lowercase().cmp(&right.path.to_lowercase()));
+    unstaged_files.sort_by(|left, right| left.path.to_lowercase().cmp(&right.path.to_lowercase()));
+
+    Ok((staged_files, unstaged_files))
+}
+
 #[tauri::command]
 fn get_git_panel(project_root: String) -> Result<GitPanelData, String> {
     let git_dir = Path::new(&project_root).join(".git");
@@ -12248,57 +12988,484 @@ fn get_git_panel(project_root: String) -> Result<GitPanelData, String> {
         return Ok(GitPanelData {
             is_git_repo: false,
             branch: String::new(),
+            file_status: "No repository".to_string(),
+            staged_files: Vec::new(),
+            unstaged_files: Vec::new(),
             recent_changes: Vec::new(),
         });
     }
 
     let branch = git_output(&project_root, &["branch", "--show-current"])
         .unwrap_or_else(|| "HEAD".to_string());
-
-    let recent_changes = git_output_allow_empty(&project_root, &["status", "--porcelain"])
-        .unwrap_or_default()
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|line| {
-            let bytes = line.as_bytes();
-            let index_status = bytes.get(0).copied().unwrap_or(b' ') as char;
-            let worktree_status = bytes.get(1).copied().unwrap_or(b' ') as char;
-            let status_char = if worktree_status != ' ' && worktree_status != '?' {
-                worktree_status
-            } else if index_status != ' ' {
-                index_status
-            } else if index_status == '?' || worktree_status == '?' {
-                '?'
-            } else {
-                worktree_status
-            };
-            let status = match status_char {
-                'A' | '?' => "added",
-                'D' => "deleted",
-                'R' => "renamed",
-                _ => "modified",
-            }
-            .to_string();
-
-            let raw_path = line.get(3..).unwrap_or(line).trim();
-            let (previous_path, path) = if let Some((before, after)) = raw_path.split_once(" -> ") {
-                (Some(before.trim().to_string()), after.trim().to_string())
-            } else {
-                (None, raw_path.to_string())
-            };
-
-            GitFileChange {
-                path,
-                status,
-                previous_path,
-            }
+    let (staged_files, unstaged_files) = build_git_file_statuses(&project_root)?;
+    let recent_changes = staged_files
+        .iter()
+        .chain(unstaged_files.iter())
+        .map(|item| GitFileChange {
+            path: item.path.clone(),
+            status: item.status.clone(),
+            previous_path: item.previous_path.clone(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let total_changes = staged_files.len() + unstaged_files.len();
+    let file_status = if total_changes == 0 {
+        "No changes".to_string()
+    } else {
+        format!(
+            "{} file{} changed",
+            total_changes,
+            if total_changes == 1 { "" } else { "s" }
+        )
+    };
 
     Ok(GitPanelData {
         is_git_repo: true,
         branch,
+        file_status,
+        staged_files,
+        unstaged_files,
         recent_changes,
+    })
+}
+
+#[tauri::command]
+fn stage_git_file(project_root: String, path: String) -> Result<(), String> {
+    git_command_status(&project_root, &["add", "--", &path])
+}
+
+#[tauri::command]
+fn unstage_git_file(project_root: String, path: String) -> Result<(), String> {
+    let output = git_command_output(&project_root, &["reset", "HEAD", "--", &path])?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if stderr.to_lowercase().contains("unknown revision")
+        || stderr.to_lowercase().contains("ambiguous argument 'head'")
+    {
+        return git_command_status(&project_root, &["rm", "--cached", "--", &path]);
+    }
+    Err(stderr.trim().to_string())
+}
+
+#[tauri::command]
+fn discard_git_file(project_root: String, path: String) -> Result<(), String> {
+    let output = git_command_output(&project_root, &["checkout", "--", &path])?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    if stderr.contains("pathspec") || stderr.contains("did not match any file") {
+        let absolute_path = Path::new(&project_root).join(&path);
+        if absolute_path.exists() {
+            fs::remove_file(&absolute_path).map_err(|err| err.to_string())?;
+            return Ok(());
+        }
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if detail.is_empty() {
+        "Failed to discard file changes.".to_string()
+    } else {
+        detail
+    })
+}
+
+#[tauri::command]
+fn commit_git_changes(
+    project_root: String,
+    message: String,
+    stage_all: Option<bool>,
+) -> Result<GitCommitResult, String> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return Err("Commit message cannot be empty.".to_string());
+    }
+    if stage_all.unwrap_or(false) {
+        git_command_status(&project_root, &["add", "-A"])?;
+    }
+    git_command_status(&project_root, &["commit", "-m", trimmed])?;
+    let commit_sha = git_output(&project_root, &["rev-parse", "HEAD"]);
+    Ok(GitCommitResult { commit_sha })
+}
+
+#[tauri::command]
+fn get_git_log(project_root: String) -> Result<GitLogResponse, String> {
+    let entries = parse_git_log_entries(
+        &project_root,
+        &["log", "--pretty=format:%H\t%an\t%ct\t%s", "-n", "50"],
+    );
+    let upstream = get_git_upstream(&project_root);
+    let (ahead, behind) = upstream
+        .as_deref()
+        .map(|value| parse_ahead_behind_counts(&project_root, value))
+        .unwrap_or((0, 0));
+    let ahead_entries = upstream
+        .as_deref()
+        .map(|value| parse_git_log_entries(&project_root, &["log", "--pretty=format:%H\t%an\t%ct\t%s", "-n", "20", &format!("{value}..HEAD")]))
+        .unwrap_or_default();
+    let behind_entries = upstream
+        .as_deref()
+        .map(|value| parse_git_log_entries(&project_root, &["log", "--pretty=format:%H\t%an\t%ct\t%s", "-n", "20", &format!("HEAD..{value}")]))
+        .unwrap_or_default();
+
+    Ok(GitLogResponse {
+        total: entries.len(),
+        entries,
+        ahead,
+        behind,
+        ahead_entries,
+        behind_entries,
+        upstream,
+    })
+}
+
+#[tauri::command]
+fn get_git_commit_history(
+    project_root: String,
+    branch: Option<String>,
+    query: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    snapshot_id: Option<String>,
+) -> Result<GitHistoryResponse, String> {
+    let revision = branch.as_deref();
+    let all_commits = parse_git_history_commits(&project_root, revision);
+    let filtered = all_commits
+        .into_iter()
+        .filter(|commit| git_history_query_matches(commit, query.as_deref().unwrap_or_default()))
+        .collect::<Vec<_>>();
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(100);
+    let commits = filtered
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(GitHistoryResponse {
+        snapshot_id: snapshot_id.unwrap_or_else(|| git_head_snapshot_id(&project_root)),
+        total: filtered.len(),
+        offset,
+        limit,
+        has_more: offset + commits.len() < filtered.len(),
+        commits,
+    })
+}
+
+#[tauri::command]
+fn list_git_branches(project_root: String) -> Result<GitBranchListResponse, String> {
+    let current_branch = git_output(&project_root, &["branch", "--show-current"]);
+    let local_branches = parse_branch_ref_lines(
+        &project_root,
+        &[
+            "for-each-ref",
+            "refs/heads",
+            "--format=%(refname:short)\t%(upstream:short)\t%(objectname)\t%(committerdate:unix)",
+        ],
+        false,
+        current_branch.as_deref(),
+    );
+    let remote_branches = parse_branch_ref_lines(
+        &project_root,
+        &[
+            "for-each-ref",
+            "refs/remotes",
+            "--format=%(refname:short)\t\t%(objectname)\t%(committerdate:unix)",
+        ],
+        true,
+        None,
+    );
+
+    Ok(GitBranchListResponse {
+        local_branches,
+        remote_branches,
+        current_branch,
+    })
+}
+
+#[tauri::command]
+fn checkout_git_branch(project_root: String, name: String) -> Result<(), String> {
+    git_command_status(&project_root, &["checkout", &name])
+}
+
+#[tauri::command]
+fn create_git_branch(
+    project_root: String,
+    name: String,
+    source_ref: Option<String>,
+    checkout_after_create: Option<bool>,
+) -> Result<(), String> {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err("Branch name cannot be empty.".to_string());
+    }
+    let source = source_ref
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("HEAD");
+    if checkout_after_create.unwrap_or(false) {
+        git_command_status(&project_root, &["checkout", "-b", trimmed_name, source])
+    } else {
+        git_command_status(&project_root, &["branch", trimmed_name, source])
+    }
+}
+
+#[tauri::command]
+fn rename_git_branch(project_root: String, old_name: String, new_name: String) -> Result<(), String> {
+    let trimmed_new = new_name.trim();
+    if trimmed_new.is_empty() {
+        return Err("New branch name cannot be empty.".to_string());
+    }
+    git_command_status(&project_root, &["branch", "-m", &old_name, trimmed_new])
+}
+
+#[tauri::command]
+fn delete_git_branch(project_root: String, name: String, force: Option<bool>) -> Result<(), String> {
+    let flag = if force.unwrap_or(false) { "-D" } else { "-d" };
+    git_command_status(&project_root, &["branch", flag, &name])
+}
+
+#[tauri::command]
+fn merge_git_branch(project_root: String, source_branch: String) -> Result<(), String> {
+    git_command_status(&project_root, &["merge", &source_branch])
+}
+
+#[tauri::command]
+fn get_git_commit_details(
+    project_root: String,
+    commit_hash: String,
+    max_diff_lines: Option<u32>,
+) -> Result<GitCommitDetails, String> {
+    let mut metadata_command = Command::new("git");
+    metadata_command.current_dir(&project_root);
+    metadata_command.args([
+        "show",
+        "--quiet",
+        "--format=%H%x1f%s%x1f%B%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%at%x1f%ct%x1f%P",
+        &commit_hash,
+    ]);
+    #[cfg(target_os = "windows")]
+    metadata_command.creation_flags(CREATE_NO_WINDOW);
+    let metadata_output = metadata_command.output().map_err(|err| err.to_string())?;
+    if !metadata_output.status.success() {
+        return Err(String::from_utf8_lossy(&metadata_output.stderr).trim().to_string());
+    }
+    let metadata = String::from_utf8_lossy(&metadata_output.stdout);
+    let parts = metadata.trim().split('\u{1f}').collect::<Vec<_>>();
+    if parts.len() < 10 {
+        return Err("Failed to parse commit details.".to_string());
+    }
+
+    let name_status = parse_git_diff_tree_name_status(&project_root, &commit_hash);
+    let numstats = parse_git_diff_tree_numstat(&project_root, &commit_hash);
+    let max_lines = max_diff_lines.unwrap_or(10_000);
+    let mut total_additions = 0u32;
+    let mut total_deletions = 0u32;
+    let mut files = Vec::new();
+
+    for (path, old_path, status) in name_status {
+        let (additions, deletions) = numstats.get(&path).copied().unwrap_or((0, 0));
+        total_additions += additions;
+        total_deletions += deletions;
+        let is_image = is_image_path(&path);
+        let full_diff = git_commit_file_diff(&project_root, &commit_hash, &path);
+        let line_count = full_diff.lines().count() as u32;
+        let truncated = line_count > max_lines;
+        let diff = if truncated {
+            full_diff
+                .lines()
+                .take(max_lines as usize)
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            full_diff
+        };
+        files.push(GitCommitFileChange {
+            path,
+            old_path,
+            status,
+            additions,
+            deletions,
+            is_binary: diff.contains("Binary files"),
+            is_image,
+            diff,
+            line_count,
+            truncated,
+        });
+    }
+
+    Ok(GitCommitDetails {
+        sha: parts[0].trim().to_string(),
+        summary: parts[1].trim().to_string(),
+        message: parts[2].trim().to_string(),
+        author: parts[3].trim().to_string(),
+        author_email: parts[4].trim().to_string(),
+        committer: parts[5].trim().to_string(),
+        committer_email: parts[6].trim().to_string(),
+        author_time: parts[7].trim().parse::<i64>().unwrap_or(0),
+        commit_time: parts[8].trim().parse::<i64>().unwrap_or(0),
+        parents: parts[9]
+            .split_whitespace()
+            .map(|value| value.to_string())
+            .collect(),
+        files,
+        total_additions,
+        total_deletions,
+    })
+}
+
+#[tauri::command]
+fn push_git(
+    project_root: String,
+    remote: Option<String>,
+    target_branch: Option<String>,
+) -> Result<(), String> {
+    let remote_trimmed = remote.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let branch_trimmed = target_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut args = vec!["push".to_string()];
+    if let Some(remote_name) = remote_trimmed {
+        args.push(remote_name.to_string());
+    }
+    if let Some(branch_name) = branch_trimmed {
+        args.push(format!("HEAD:{branch_name}"));
+    }
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git_command_status(&project_root, &refs)
+}
+
+#[tauri::command]
+fn fetch_git(project_root: String, remote: Option<String>) -> Result<(), String> {
+    let remote_trimmed = remote.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    if let Some(remote_name) = remote_trimmed {
+        git_command_status(&project_root, &["fetch", remote_name, "--prune"])
+    } else {
+        git_command_status(&project_root, &["fetch", "--all", "--prune"])
+    }
+}
+
+#[tauri::command]
+fn pull_git(
+    project_root: String,
+    remote: Option<String>,
+    target_branch: Option<String>,
+) -> Result<(), String> {
+    let remote_trimmed = remote.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let branch_trimmed = target_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut args = vec!["pull".to_string()];
+    if let Some(remote_name) = remote_trimmed {
+        args.push(remote_name.to_string());
+    }
+    if let Some(branch_name) = branch_trimmed {
+        args.push(branch_name.to_string());
+    }
+    args.push("--no-edit".to_string());
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git_command_status(&project_root, &refs)
+}
+
+#[tauri::command]
+fn sync_git(
+    project_root: String,
+    remote: Option<String>,
+    target_branch: Option<String>,
+) -> Result<(), String> {
+    pull_git(project_root.clone(), remote.clone(), target_branch.clone())?;
+    push_git(project_root, remote, target_branch)
+}
+
+#[tauri::command]
+fn get_github_issues(project_root: String) -> Result<GitHubIssuesResponse, String> {
+    let remote = git_output(&project_root, &["remote", "get-url", "origin"])
+        .ok_or_else(|| "No git remote configured.".to_string())?;
+    let (owner, repo) = parse_github_repo_from_remote(&remote)
+        .ok_or_else(|| "Git remote is not a GitHub repository.".to_string())?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=30");
+    let value = github_api_get_json(&url)?;
+    let issues = value
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|item| item.get("pull_request").is_none())
+        .map(|item| GitHubIssue {
+            number: item.get("number").and_then(|value| value.as_u64()).unwrap_or(0),
+            title: item.get("title").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            url: item.get("html_url").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            updated_at: item
+                .get("updated_at")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+        .filter(|issue| issue.number > 0 && !issue.title.is_empty())
+        .collect::<Vec<_>>();
+    Ok(GitHubIssuesResponse {
+        total: issues.len(),
+        issues,
+    })
+}
+
+#[tauri::command]
+fn get_github_pull_requests(project_root: String) -> Result<GitHubPullRequestsResponse, String> {
+    let remote = git_output(&project_root, &["remote", "get-url", "origin"])
+        .ok_or_else(|| "No git remote configured.".to_string())?;
+    let (owner, repo) = parse_github_repo_from_remote(&remote)
+        .ok_or_else(|| "Git remote is not a GitHub repository.".to_string())?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page=30");
+    let value = github_api_get_json(&url)?;
+    let pull_requests = value
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| GitHubPullRequest {
+            number: item.get("number").and_then(|value| value.as_u64()).unwrap_or(0),
+            title: item.get("title").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            url: item.get("html_url").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            updated_at: item
+                .get("updated_at")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            created_at: item
+                .get("created_at")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            body: item.get("body").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            head_ref_name: item
+                .get("head")
+                .and_then(|value| value.get("ref"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            base_ref_name: item
+                .get("base")
+                .and_then(|value| value.get("ref"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            is_draft: item.get("draft").and_then(|value| value.as_bool()).unwrap_or(false),
+            author: item
+                .get("user")
+                .and_then(|value| value.get("login"))
+                .and_then(|value| value.as_str())
+                .map(|login| GitHubUser {
+                    login: login.to_string(),
+                }),
+        })
+        .filter(|pr| pr.number > 0 && !pr.title.is_empty())
+        .collect::<Vec<_>>();
+    Ok(GitHubPullRequestsResponse {
+        total: pull_requests.len(),
+        pull_requests,
     })
 }
 
@@ -12352,6 +13519,20 @@ fn open_workspace_file(
     let absolute_path = Path::new(&project_root).join(&path);
     if !absolute_path.exists() {
         return Err("File does not exist.".to_string());
+    }
+
+    let preferred_editors = ["code", "cursor", "windsurf", "code-insiders"];
+    for editor in preferred_editors {
+        if let Some(editor_path) = resolve_command_path(editor) {
+            let status = batch_aware_command(&editor_path, &[&absolute_path.to_string_lossy()]).status();
+            match status {
+                Ok(status) if status.success() => {
+                    return Ok(OpenWorkspaceFileResult { opened: true });
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -12567,6 +13748,77 @@ fn get_cli_skills(
 }
 
 #[tauri::command]
+fn detect_engines(store: State<'_, AppStore>) -> Result<Vec<SettingsEngineStatus>, String> {
+    let state = store.state.lock().map_err(|err| err.to_string())?;
+    Ok(state
+        .agents
+        .iter()
+        .filter(|agent| matches!(agent.id.as_str(), "codex" | "claude" | "gemini"))
+        .map(|agent| SettingsEngineStatus {
+            engine_type: agent.id.clone(),
+            installed: agent.runtime.installed,
+            version: agent.runtime.version.clone(),
+            bin_path: agent.runtime.command_path.clone(),
+            error: agent.runtime.last_error.clone(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn list_global_mcp_servers() -> Result<Vec<GlobalMcpServerEntry>, String> {
+    let home = user_home_dir();
+    let mut entries = Vec::new();
+    entries.extend(parse_claude_global_mcp_servers(&home.join(".claude.json")));
+    entries.extend(parse_codex_global_mcp_servers(&home.join(".codex").join("config.toml")));
+    entries.extend(parse_gemini_global_mcp_servers(
+        &home.join(".gemini").join("settings.json"),
+    ));
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(entries)
+}
+
+#[tauri::command]
+fn list_codex_mcp_runtime_servers(
+    store: State<'_, AppStore>,
+    _workspace_id: Option<String>,
+) -> Result<Value, String> {
+    let state = store.state.lock().map_err(|err| err.to_string())?;
+    let command_path = state
+        .agents
+        .iter()
+        .find(|agent| agent.id == "codex")
+        .and_then(|agent| agent.runtime.command_path.clone())
+        .or_else(|| resolve_agent_command_path("codex"));
+
+    let Some(command_path) = command_path else {
+        return Ok(json!({ "data": [] }));
+    };
+
+    let raw = run_cli_command_capture(&command_path, &["mcp", "list", "--json"])
+        .and_then(|stdout| serde_json::from_str::<Value>(&stdout).ok());
+
+    if let Some(value) = raw {
+        return Ok(value);
+    }
+
+    let home = user_home_dir();
+    let fallback = parse_codex_global_mcp_servers(&home.join(".codex").join("config.toml"))
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "name": entry.name,
+                "authStatus": if entry.enabled { "configured" } else { "disabled" },
+                "tools": {},
+                "resources": [],
+                "resourceTemplates": [],
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({ "data": fallback }))
+}
+
+#[tauri::command]
 fn search_workspace_files(
     project_root: String,
     query: String,
@@ -12580,6 +13832,377 @@ fn search_workspace_files(
     let mut results = Vec::new();
     collect_workspace_files(&root, &root, &lower_query, &mut results)?;
     Ok(results)
+}
+
+#[tauri::command]
+fn search_workspace_text(
+    project_root: String,
+    query: String,
+    case_sensitive: bool,
+    whole_word: bool,
+    is_regex: bool,
+    include_pattern: Option<String>,
+    exclude_pattern: Option<String>,
+) -> Result<WorkspaceTextSearchResponse, String> {
+    let root = PathBuf::from(&project_root);
+    if !root.exists() || !root.is_dir() {
+        return Ok(WorkspaceTextSearchResponse {
+            files: Vec::new(),
+            file_count: 0,
+            match_count: 0,
+            limit_hit: false,
+        });
+    }
+
+    let regex = compile_workspace_search_regex(&query, case_sensitive, whole_word, is_regex)?;
+    let include_patterns = compile_workspace_search_glob_patterns(include_pattern.as_deref())?;
+    let exclude_patterns = compile_workspace_search_glob_patterns(exclude_pattern.as_deref())?;
+    let mut files = Vec::new();
+    let mut total_matches = 0usize;
+    let mut limit_hit = false;
+
+    collect_workspace_text_search_results(
+        &root,
+        &root,
+        &regex,
+        &include_patterns,
+        &exclude_patterns,
+        &mut files,
+        &mut total_matches,
+        &mut limit_hit,
+    )?;
+
+    Ok(WorkspaceTextSearchResponse {
+        file_count: files.len(),
+        files,
+        match_count: total_matches,
+        limit_hit,
+    })
+}
+
+fn normalize_workspace_relative_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn resolve_workspace_target_path(
+    project_root: &str,
+    relative_path: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let root = PathBuf::from(project_root);
+    if !root.exists() || !root.is_dir() {
+        return Err("Workspace root does not exist.".to_string());
+    }
+    let root_canonical = root
+        .canonicalize()
+        .map_err(|err| format!("Unable to resolve workspace root: {}", err))?;
+    let requested_relative = relative_path.trim().replace('\\', "/");
+    let requested_relative = requested_relative.trim_matches('/').to_string();
+    if requested_relative.is_empty() {
+        return Err("Path cannot be empty.".to_string());
+    }
+    let target = root_canonical.join(&requested_relative);
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Invalid workspace path.".to_string())?;
+    let parent_canonical = parent
+        .canonicalize()
+        .map_err(|err| format!("Unable to resolve parent directory: {}", err))?;
+    if !parent_canonical.starts_with(&root_canonical) {
+        return Err("Requested path is outside the workspace root.".to_string());
+    }
+    Ok((root_canonical, target))
+}
+
+fn workspace_tree_entry_has_children(path: &Path) -> bool {
+    let Ok(read_dir) = fs::read_dir(path) else {
+        return false;
+    };
+    for child in read_dir.flatten() {
+        let child_name = child.file_name();
+        if child_name.to_string_lossy() == ".git" {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+#[tauri::command]
+fn list_workspace_entries(
+    project_root: String,
+    relative_path: Option<String>,
+) -> Result<Vec<WorkspaceTreeEntry>, String> {
+    let root = PathBuf::from(&project_root);
+    if !root.exists() || !root.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let root_canonical = root
+        .canonicalize()
+        .map_err(|err| format!("Unable to resolve workspace root: {}", err))?;
+    let requested_relative = relative_path.unwrap_or_default();
+    let requested_relative = requested_relative.trim().replace('\\', "/");
+    let requested_relative = requested_relative.trim_matches('/').to_string();
+
+    let target = if requested_relative.is_empty() {
+        root_canonical.clone()
+    } else {
+        root_canonical.join(&requested_relative)
+    };
+
+    if !target.exists() || !target.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let target_canonical = target
+        .canonicalize()
+        .map_err(|err| format!("Unable to resolve target directory: {}", err))?;
+    if !target_canonical.starts_with(&root_canonical) {
+        return Err("Requested directory is outside the workspace root.".to_string());
+    }
+
+    let mut entries = Vec::new();
+    let read_dir = fs::read_dir(&target_canonical)
+        .map_err(|err| format!("Unable to read workspace directory: {}", err))?;
+
+    for entry in read_dir.flatten() {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if file_name == ".git" {
+            continue;
+        }
+
+        let child_path = entry.path();
+        let kind = if child_path.is_dir() { "directory" } else { "file" };
+        let relative_child = child_path
+            .strip_prefix(&root_canonical)
+            .map(normalize_workspace_relative_path)
+            .unwrap_or_else(|_| normalize_workspace_relative_path(Path::new(&file_name)));
+
+        entries.push(WorkspaceTreeEntry {
+            name: file_name,
+            path: relative_child,
+            kind: kind.to_string(),
+            has_children: if child_path.is_dir() {
+                workspace_tree_entry_has_children(&child_path)
+            } else {
+                false
+            },
+        });
+    }
+
+    entries.sort_by(|left, right| {
+        if left.kind != right.kind {
+            return if left.kind == "directory" {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
+        }
+        left.path.to_lowercase().cmp(&right.path.to_lowercase())
+    });
+
+    Ok(entries)
+}
+
+#[tauri::command]
+fn create_workspace_file(project_root: String, relative_path: String) -> Result<(), String> {
+    let (_root_canonical, target) = resolve_workspace_target_path(&project_root, &relative_path)?;
+    if target.exists() {
+        return Err("File already exists.".to_string());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("Unable to create parent directory: {}", err))?;
+    }
+    fs::write(&target, "").map_err(|err| format!("Unable to create file: {}", err))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn create_workspace_directory(project_root: String, relative_path: String) -> Result<(), String> {
+    let (_root_canonical, target) = resolve_workspace_target_path(&project_root, &relative_path)?;
+    if target.exists() {
+        return Err("Directory already exists.".to_string());
+    }
+    fs::create_dir_all(&target).map_err(|err| format!("Unable to create directory: {}", err))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn trash_workspace_item(project_root: String, relative_path: String) -> Result<(), String> {
+    let (_root_canonical, target) = resolve_workspace_target_path(&project_root, &relative_path)?;
+    if !target.exists() {
+        return Err("Target does not exist.".to_string());
+    }
+    trash::delete(&target).map_err(|err| format!("Failed to move to trash: {}", err))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn ensure_pty_session(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    request: PtyEnsureRequest,
+) -> Result<(), String> {
+    let mut sessions = store.pty_sessions.lock().map_err(|err| err.to_string())?;
+    if let Some(existing) = sessions.get_mut(&request.terminal_tab_id) {
+        let size = PtySize {
+            rows: request.rows.max(1),
+            cols: request.cols.max(1),
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        existing.master.resize(size).map_err(|err| err.to_string())?;
+        return Ok(());
+    }
+
+    let shell = shell_path();
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: request.rows.max(1),
+            cols: request.cols.max(1),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|err| err.to_string())?;
+
+    let mut command = CommandBuilder::new(shell.clone());
+    let args = interactive_shell_args(&shell);
+    if !args.is_empty() {
+        command.args(args);
+    }
+    if let Some(cwd) = request.cwd.as_ref().filter(|value| !value.trim().is_empty()) {
+        let cwd_path = PathBuf::from(cwd);
+        if cwd_path.exists() && cwd_path.is_dir() {
+            command.cwd(cwd_path);
+        }
+    }
+
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|err| err.to_string())?;
+    let mut reader = pair.master.try_clone_reader().map_err(|err| err.to_string())?;
+    let writer = pair.master.take_writer().map_err(|err| err.to_string())?;
+    let terminal_tab_id = request.terminal_tab_id.clone();
+    let app_handle = app.clone();
+
+    thread::spawn(move || {
+        let mut buffer = [0u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    emit_pty_output(&app_handle, &terminal_tab_id, "\r\n[process exited]\r\n".to_string(), "exit");
+                    break;
+                }
+                Ok(read) => {
+                    let data = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    emit_pty_output(&app_handle, &terminal_tab_id, data, "stdout");
+                }
+                Err(_) => {
+                    emit_pty_output(&app_handle, &terminal_tab_id, "\r\n[pty read error]\r\n".to_string(), "stderr");
+                    break;
+                }
+            }
+        }
+    });
+
+    sessions.insert(
+        request.terminal_tab_id,
+        PtySession {
+            writer: Arc::new(Mutex::new(writer)),
+            master: pair.master,
+            child,
+        },
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn write_pty_input(store: State<'_, AppStore>, request: PtyInputRequest) -> Result<(), String> {
+    let sessions = store.pty_sessions.lock().map_err(|err| err.to_string())?;
+    let session = sessions
+        .get(&request.terminal_tab_id)
+        .ok_or_else(|| "PTY session not found.".to_string())?;
+    let mut writer = session.writer.lock().map_err(|err| err.to_string())?;
+    writer
+        .write_all(request.data.as_bytes())
+        .and_then(|_| writer.flush())
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn resize_pty_session(store: State<'_, AppStore>, request: PtyResizeRequest) -> Result<(), String> {
+    let mut sessions = store.pty_sessions.lock().map_err(|err| err.to_string())?;
+    let session = sessions
+        .get_mut(&request.terminal_tab_id)
+        .ok_or_else(|| "PTY session not found.".to_string())?;
+    session
+        .master
+        .resize(PtySize {
+            rows: request.rows.max(1),
+            cols: request.cols.max(1),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn close_pty_session(store: State<'_, AppStore>, terminal_tab_id: String) -> Result<(), String> {
+    let mut sessions = store.pty_sessions.lock().map_err(|err| err.to_string())?;
+    if let Some(mut session) = sessions.remove(&terminal_tab_id) {
+        let _ = session.child.kill();
+        let _ = session.child.wait();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_external_absolute_directory_children(
+    directory_path: String,
+) -> Result<Vec<ExternalDirectoryEntry>, String> {
+    let directory = absolute_path(&directory_path)?;
+    if !directory.exists() || !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = fs::read_dir(&directory)
+        .map_err(|err| err.to_string())?
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            let kind = if path.is_dir() { "dir" } else { "file" }.to_string();
+            ExternalDirectoryEntry {
+                name: entry.file_name().to_string_lossy().to_string(),
+                path: path.to_string_lossy().to_string(),
+                kind,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|left, right| match (left.kind.as_str(), right.kind.as_str()) {
+        ("dir", "file") => std::cmp::Ordering::Less,
+        ("file", "dir") => std::cmp::Ordering::Greater,
+        _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+    });
+
+    Ok(entries)
+}
+
+#[tauri::command]
+fn read_external_absolute_file(path: String) -> Result<ExternalTextFile, String> {
+    let path = absolute_path(&path)?;
+    external_file_response(&path)
+}
+
+#[tauri::command]
+fn write_external_absolute_file(path: String, content: String) -> Result<(), String> {
+    let path = absolute_path(&path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    fs::write(path, content).map_err(|err| err.to_string())
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -17733,6 +19356,202 @@ fn detect_gemini_mcp(settings_path: &Path) -> AgentResourceGroup {
     group
 }
 
+fn json_array_len(value: Option<&Value>) -> usize {
+    value.and_then(Value::as_array).map(|items| items.len()).unwrap_or(0)
+}
+
+fn read_json_string(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).map(|entry| entry.trim().to_string()).filter(|entry| !entry.is_empty())
+}
+
+fn parse_claude_global_mcp_servers(config_path: &Path) -> Vec<GlobalMcpServerEntry> {
+    let Ok(value) = read_json_value(config_path) else {
+        return Vec::new();
+    };
+    let Some(servers) = value.get("mcpServers").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut entries = servers
+        .iter()
+        .map(|(name, config)| GlobalMcpServerEntry {
+            name: name.to_string(),
+            enabled: config
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            transport: read_json_string(config.get("transport")),
+            command: read_json_string(config.get("command")),
+            url: read_json_string(config.get("url")),
+            args_count: json_array_len(config.get("args")),
+            source: "claude_json".to_string(),
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries
+}
+
+fn parse_codex_global_mcp_servers(config_path: &Path) -> Vec<GlobalMcpServerEntry> {
+    let Ok(raw) = fs::read_to_string(config_path) else {
+        return Vec::new();
+    };
+
+    let mut entries = Vec::new();
+    let mut current_name: Option<String> = None;
+    let mut current_transport: Option<String> = None;
+    let mut current_command: Option<String> = None;
+    let mut current_url: Option<String> = None;
+    let mut current_enabled = true;
+    let mut current_args_count = 0usize;
+    let mut collecting_args = false;
+
+    let flush_current = |entries: &mut Vec<GlobalMcpServerEntry>,
+                         current_name: &mut Option<String>,
+                         current_transport: &mut Option<String>,
+                         current_command: &mut Option<String>,
+                         current_url: &mut Option<String>,
+                         current_enabled: &mut bool,
+                         current_args_count: &mut usize,
+                         collecting_args: &mut bool| {
+        if let Some(name) = current_name.take() {
+            entries.push(GlobalMcpServerEntry {
+                name,
+                enabled: *current_enabled,
+                transport: current_transport.take(),
+                command: current_command.take(),
+                url: current_url.take(),
+                args_count: *current_args_count,
+                source: "ccgui_config".to_string(),
+            });
+        }
+        *current_enabled = true;
+        *current_args_count = 0;
+        *collecting_args = false;
+    };
+
+    for raw_line in raw.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("[mcp_servers.") {
+            flush_current(
+                &mut entries,
+                &mut current_name,
+                &mut current_transport,
+                &mut current_command,
+                &mut current_url,
+                &mut current_enabled,
+                &mut current_args_count,
+                &mut collecting_args,
+            );
+            if let Some(name) = rest.strip_suffix(']') {
+                if !name.contains('.') {
+                    current_name = Some(name.to_string());
+                }
+            }
+            continue;
+        }
+
+        if current_name.is_none() {
+            continue;
+        }
+
+        if collecting_args {
+            current_args_count += raw_line.matches('"').count() / 2;
+            if line.contains(']') {
+                collecting_args = false;
+            }
+            continue;
+        }
+
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim().trim_end_matches(',');
+            let cleaned = value.trim_matches('"').trim_matches('\'').to_string();
+            match key {
+                "transport" if !cleaned.is_empty() => current_transport = Some(cleaned),
+                "command" if !cleaned.is_empty() => current_command = Some(cleaned),
+                "url" if !cleaned.is_empty() => current_url = Some(cleaned),
+                "enabled" => current_enabled = !value.eq_ignore_ascii_case("false"),
+                "args" => {
+                    current_args_count += raw_line.matches('"').count() / 2;
+                    if !line.contains(']') {
+                        collecting_args = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    flush_current(
+        &mut entries,
+        &mut current_name,
+        &mut current_transport,
+        &mut current_command,
+        &mut current_url,
+        &mut current_enabled,
+        &mut current_args_count,
+        &mut collecting_args,
+    );
+
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries
+}
+
+fn parse_gemini_global_mcp_servers(settings_path: &Path) -> Vec<GlobalMcpServerEntry> {
+    let Ok(value) = read_json_value(settings_path) else {
+        return Vec::new();
+    };
+    let Some(servers) = value.get("mcpServers").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut entries = servers
+        .iter()
+        .map(|(name, config)| GlobalMcpServerEntry {
+            name: name.to_string(),
+            enabled: config
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            transport: read_json_string(config.get("transport")),
+            command: read_json_string(config.get("command")),
+            url: read_json_string(config.get("url")),
+            args_count: json_array_len(config.get("args")),
+            source: "ccgui_config".to_string(),
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries
+}
+
+fn absolute_path(path: &str) -> Result<PathBuf, String> {
+    let candidate = PathBuf::from(path);
+    if !candidate.is_absolute() {
+        return Err("Path must be absolute.".to_string());
+    }
+    Ok(candidate)
+}
+
+fn external_file_response(path: &Path) -> Result<ExternalTextFile, String> {
+    if !path.exists() {
+        return Ok(ExternalTextFile {
+            exists: false,
+            content: String::new(),
+            truncated: false,
+        });
+    }
+    let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    Ok(ExternalTextFile {
+        exists: true,
+        content,
+        truncated: false,
+    })
+}
+
 fn detect_gemini_extensions(extension_root: &Path) -> AgentResourceGroup {
     let mut group = resource_group(true);
     if !extension_root.exists() {
@@ -18193,6 +20012,40 @@ fn shell_command_args(shell_path: &str, command_text: &str) -> Vec<String> {
     }
 }
 
+fn interactive_shell_args(shell_path: &str) -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = shell_path;
+        vec!["-NoLogo".to_string()]
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let shell_name = Path::new(shell_path)
+            .file_name()
+            .and_then(|entry| entry.to_str())
+            .unwrap_or(shell_path);
+        match shell_name {
+            "bash" | "zsh" => vec!["-l".to_string()],
+            _ => Vec::new(),
+        }
+    }
+}
+
+fn emit_pty_output(app: &AppHandle, terminal_tab_id: &str, data: String, stream: &str) {
+    if data.is_empty() {
+        return;
+    }
+    let _ = app.emit(
+        "pty-output",
+        PtyOutputEvent {
+            terminal_tab_id: terminal_tab_id.to_string(),
+            data,
+            stream: stream.to_string(),
+        },
+    );
+}
+
 fn run_cli_command(command_path: &str, args: &[&str]) -> Option<CliCommandOutput> {
     let resolved_command = resolve_direct_command_path(command_path);
     let output = batch_aware_command(&resolved_command, args).output().ok()?;
@@ -18450,6 +20303,232 @@ fn is_ignored_workspace_dir(name: &str) -> bool {
         name,
         ".git" | "node_modules" | "target" | "dist" | "build" | ".next" | ".turbo"
     )
+}
+
+const MAX_WORKSPACE_TEXT_SEARCH_MATCHES: usize = 1_000;
+const MAX_WORKSPACE_TEXT_SEARCH_FILE_BYTES: u64 = 1_024 * 1_024;
+const MAX_WORKSPACE_TEXT_SEARCH_PREVIEW_CHARS: usize = 180;
+
+fn compile_workspace_search_regex(
+    query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
+    is_regex: bool,
+) -> Result<Regex, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Err("Search query cannot be empty.".to_string());
+    }
+    let pattern = if is_regex {
+        trimmed.to_string()
+    } else {
+        regex::escape(trimmed)
+    };
+    let pattern = if whole_word {
+        format!(r"\b(?:{})\b", pattern)
+    } else {
+        pattern
+    };
+    RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|error| format!("Invalid search pattern: {error}"))
+}
+
+fn split_workspace_search_glob_patterns(input: Option<&str>) -> Vec<String> {
+    input
+        .unwrap_or_default()
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn workspace_search_glob_to_regex(pattern: &str) -> Result<Regex, String> {
+    let normalized = pattern
+        .replace('\\', "/")
+        .trim()
+        .trim_matches('/')
+        .to_string();
+    if normalized.is_empty() {
+        return Err("Glob pattern cannot be empty.".to_string());
+    }
+    let mut regex_source = String::from("^");
+    let chars: Vec<char> = normalized.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let current = chars[index];
+        if current == '*' {
+            let has_double = chars.get(index + 1).copied() == Some('*');
+            if has_double {
+                regex_source.push_str(".*");
+                index += 2;
+                continue;
+            }
+            regex_source.push_str("[^/]*");
+            index += 1;
+            continue;
+        }
+        if current == '?' {
+            regex_source.push_str("[^/]");
+            index += 1;
+            continue;
+        }
+        if matches!(
+            current,
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\'
+        ) {
+            regex_source.push('\\');
+        }
+        regex_source.push(current);
+        index += 1;
+    }
+    regex_source.push('$');
+    Regex::new(&regex_source).map_err(|error| format!("Invalid glob pattern `{pattern}`: {error}"))
+}
+
+fn compile_workspace_search_glob_patterns(input: Option<&str>) -> Result<Vec<Regex>, String> {
+    split_workspace_search_glob_patterns(input)
+        .into_iter()
+        .map(|pattern| workspace_search_glob_to_regex(&pattern))
+        .collect()
+}
+
+fn workspace_search_path_matches_patterns(path: &str, patterns: &[Regex]) -> bool {
+    patterns.iter().any(|pattern| pattern.is_match(path))
+}
+
+fn build_workspace_search_preview(line: &str, start: usize, end: usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= MAX_WORKSPACE_TEXT_SEARCH_PREVIEW_CHARS {
+        return line.trim().to_string();
+    }
+    let start_char = line[..start].chars().count();
+    let end_char = line[..end].chars().count();
+    let context = MAX_WORKSPACE_TEXT_SEARCH_PREVIEW_CHARS / 2;
+    let slice_start = start_char.saturating_sub(context / 2);
+    let slice_end = (end_char + context).min(chars.len());
+    let mut preview = chars[slice_start..slice_end].iter().collect::<String>();
+    if slice_start > 0 {
+        preview = format!("…{preview}");
+    }
+    if slice_end < chars.len() {
+        preview.push('…');
+    }
+    preview.trim().to_string()
+}
+
+fn collect_workspace_text_search_results(
+    root: &Path,
+    current: &Path,
+    regex: &Regex,
+    include_patterns: &[Regex],
+    exclude_patterns: &[Regex],
+    results: &mut Vec<WorkspaceTextSearchFileResult>,
+    total_matches: &mut usize,
+    limit_hit: &mut bool,
+) -> Result<(), String> {
+    if *limit_hit {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(current).map_err(|err| err.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_dir() {
+            if is_ignored_workspace_dir(&name) {
+                continue;
+            }
+            collect_workspace_text_search_results(
+                root,
+                &path,
+                regex,
+                include_patterns,
+                exclude_patterns,
+                results,
+                total_matches,
+                limit_hit,
+            )?;
+            if *limit_hit {
+                return Ok(());
+            }
+            continue;
+        }
+
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.len() > MAX_WORKSPACE_TEXT_SEARCH_FILE_BYTES {
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative.is_empty() {
+            continue;
+        }
+        if !include_patterns.is_empty() && !workspace_search_path_matches_patterns(&relative, include_patterns) {
+            continue;
+        }
+        if !exclude_patterns.is_empty() && workspace_search_path_matches_patterns(&relative, exclude_patterns) {
+            continue;
+        }
+
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        if bytes.contains(&0) {
+            continue;
+        }
+
+        let content = String::from_utf8_lossy(&bytes);
+        let mut file_matches = Vec::new();
+        let mut file_match_count = 0usize;
+        for (line_index, line) in content.lines().enumerate() {
+            for capture in regex.find_iter(line) {
+                file_match_count += 1;
+                *total_matches += 1;
+                if file_matches.len() < 50 {
+                    file_matches.push(WorkspaceTextSearchMatch {
+                        line: line_index + 1,
+                        column: line[..capture.start()].chars().count() + 1,
+                        end_column: line[..capture.end()].chars().count() + 1,
+                        preview: build_workspace_search_preview(line, capture.start(), capture.end()),
+                    });
+                }
+                if *total_matches >= MAX_WORKSPACE_TEXT_SEARCH_MATCHES {
+                    *limit_hit = true;
+                    break;
+                }
+            }
+            if *limit_hit {
+                break;
+            }
+        }
+
+        if file_match_count > 0 {
+            results.push(WorkspaceTextSearchFileResult {
+                path: relative,
+                match_count: file_match_count,
+                matches: file_matches,
+            });
+        }
+
+        if *limit_hit {
+            return Ok(());
+        }
+    }
+
+    Ok(())
 }
 
 fn collect_workspace_files(
@@ -19789,6 +21868,7 @@ pub fn run() {
             state: startup_state,
             context: startup_context,
             settings: startup_settings,
+            pty_sessions: Arc::new(Mutex::new(HashMap::new())),
             terminal_storage,
             automation_jobs,
             automation_runs,
@@ -19926,10 +22006,45 @@ pub fn run() {
             respond_assistant_approval,
             get_git_panel,
             get_git_file_diff,
+            get_git_log,
+            get_git_commit_history,
+            get_git_commit_details,
+            list_git_branches,
+            checkout_git_branch,
+            create_git_branch,
+            rename_git_branch,
+            delete_git_branch,
+            merge_git_branch,
+            fetch_git,
+            pull_git,
+            sync_git,
+            push_git,
+            get_github_issues,
+            get_github_pull_requests,
+            stage_git_file,
+            unstage_git_file,
+            discard_git_file,
+            commit_git_changes,
             open_workspace_file,
             pick_workspace_folder,
             get_cli_skills,
+            detect_engines,
+            list_global_mcp_servers,
+            list_codex_mcp_runtime_servers,
             search_workspace_files,
+            search_workspace_text,
+            list_workspace_entries,
+            create_workspace_file,
+            create_workspace_directory,
+            trash_workspace_item,
+            list_external_absolute_directory_children,
+            read_external_absolute_file,
+            write_external_absolute_file,
+            local_usage::local_usage_statistics,
+            ensure_pty_session,
+            write_pty_input,
+            resize_pty_session,
+            close_pty_session,
             get_settings,
             update_settings,
             refresh_provider_models,

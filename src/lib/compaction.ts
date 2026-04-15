@@ -14,6 +14,7 @@ import type {
   ChatMessage,
   ChatMessageBlock,
   ChatContextTurn,
+  TerminalCliContextBoundary,
   CompactedSummary,
   ConversationSession,
   HandoffDocument,
@@ -23,9 +24,10 @@ import type {
 } from "./models";
 import { summarizeForContext } from "./messageFormatting";
 import {
-  computeDynamicTurnLimit,
   CONTEXT_TURNS_BUDGET_BY_CLI,
   CONTEXT_TURNS_MAX_BUDGET,
+  CONTEXT_TURNS_MAX_COUNT,
+  CONTEXT_TURNS_MIN_COUNT,
   estimateMessageTokens,
   estimateSessionTokens,
   estimateTokens,
@@ -444,12 +446,12 @@ export function formatCrossTabContext(entries: SharedContextEntry[]): string {
     lines.push(`[Tab "${entry.sourceTabTitle}" (${entry.sourceCli}, ${ago})]`);
 
     const s = entry.summary;
-    if (s.intent) lines.push(`Intent: ${truncate(s.intent, 300)}`);
+    if (s.intent) lines.push(`Intent: ${truncate(s.intent, 240)}`);
     if (s.changedFiles.length > 0)
-      lines.push(`Changed: ${s.changedFiles.slice(0, 10).join(", ")}`);
-    if (s.currentState) lines.push(`State: ${truncate(s.currentState, 300)}`);
+      lines.push(`Changed: ${s.changedFiles.slice(0, 6).join(", ")}`);
+    if (s.currentState) lines.push(`State: ${truncate(s.currentState, 240)}`);
 
-    return lines.join("\n");
+    return truncate(lines.join("\n"), CROSS_TAB_SUMMARY_MAX_CHARS);
   });
 
   return `<cross-tab-context>\n${blocks.join("\n\n")}\n</cross-tab-context>`;
@@ -461,8 +463,14 @@ export function formatCrossTabContext(entries: SharedContextEntry[]): string {
 export function formatCompactedSummaries(summaries: CompactedSummary[]): string {
   if (summaries.length === 0) return "";
 
-  const blocks = summaries.map((s, i) => {
-    return `[Compacted segment ${i + 1} (v${s.version})]\n${compactedSummaryToText(s)}`;
+  const limited = summaries.slice(0, 2);
+  const blocks = limited.map((s, i) => {
+    const lines: string[] = [`[Compacted segment ${i + 1} (v${s.version})]`];
+    if (s.intent) lines.push(`Intent: ${truncate(s.intent, 220)}`);
+    if (s.changedFiles.length > 0) lines.push(`Changed files: ${s.changedFiles.slice(0, 8).join(", ")}`);
+    if (s.currentState) lines.push(`State: ${truncate(s.currentState, 260)}`);
+    if (s.nextSteps) lines.push(`Next steps: ${truncate(s.nextSteps, 200)}`);
+    return lines.join("\n");
   });
 
   return `<compacted-history>\n${blocks.join("\n\n")}\n</compacted-history>`;
@@ -547,6 +555,93 @@ export function formatWorkingMemory(wm: WorkingMemory): string {
   return `<working-memory>\n${lines.join("\n")}\n</working-memory>`;
 }
 
+type ScoredTurn = {
+  turn: ChatContextTurn;
+  tokens: number;
+  score: number;
+  recencyRank: number;
+};
+
+export interface WorkingMemoryDelta {
+  modifiedFiles: string[];
+  activeErrors: string[];
+  recentCommands: string[];
+  keyDecisions: string[];
+  buildStatusChanged: boolean;
+  buildStatus: WorkingMemory["buildStatus"];
+  contributingClis: AgentId[];
+  updatedAt: string;
+}
+
+export function diffWorkingMemory(
+  previous: WorkingMemory | null | undefined,
+  current: WorkingMemory
+): WorkingMemoryDelta | null {
+  if (!previous) {
+    return {
+      modifiedFiles: current.modifiedFiles,
+      activeErrors: current.activeErrors,
+      recentCommands: current.recentCommands,
+      keyDecisions: current.keyDecisions,
+      buildStatusChanged: current.buildStatus !== "unknown",
+      buildStatus: current.buildStatus,
+      contributingClis: current.contributingClis,
+      updatedAt: current.updatedAt,
+    };
+  }
+
+  const previousModifiedFiles = new Set(previous.modifiedFiles);
+  const previousErrors = new Set(previous.activeErrors);
+  const previousCommands = new Set(previous.recentCommands);
+  const previousDecisions = new Set(previous.keyDecisions);
+  const previousClis = new Set(previous.contributingClis);
+
+  const delta: WorkingMemoryDelta = {
+    modifiedFiles: current.modifiedFiles.filter((file) => !previousModifiedFiles.has(file)),
+    activeErrors: current.activeErrors.filter((error) => !previousErrors.has(error)),
+    recentCommands: current.recentCommands.filter((command) => !previousCommands.has(command)),
+    keyDecisions: current.keyDecisions.filter((decision) => !previousDecisions.has(decision)),
+    buildStatusChanged: previous.buildStatus !== current.buildStatus,
+    buildStatus: current.buildStatus,
+    contributingClis: current.contributingClis.filter((cli) => !previousClis.has(cli)),
+    updatedAt: current.updatedAt,
+  };
+
+  return delta.modifiedFiles.length > 0 ||
+    delta.activeErrors.length > 0 ||
+    delta.recentCommands.length > 0 ||
+    delta.keyDecisions.length > 0 ||
+    delta.buildStatusChanged ||
+    delta.contributingClis.length > 0
+    ? delta
+    : null;
+}
+
+function formatWorkingMemoryDelta(delta: WorkingMemoryDelta): string {
+  const lines: string[] = [];
+  if (delta.modifiedFiles.length > 0) {
+    lines.push(`Modified files since last session: ${delta.modifiedFiles.join(", ")}`);
+  }
+  if (delta.activeErrors.length > 0) {
+    lines.push(`New active errors:\n${delta.activeErrors.map((entry) => `  - ${entry}`).join("\n")}`);
+  }
+  if (delta.recentCommands.length > 0) {
+    lines.push(`New commands: ${delta.recentCommands.join(", ")}`);
+  }
+  if (delta.keyDecisions.length > 0) {
+    lines.push(`New decisions:\n${delta.keyDecisions.map((entry) => `  - ${entry}`).join("\n")}`);
+  }
+  if (delta.buildStatusChanged) {
+    lines.push(`Build status changed to: ${delta.buildStatus}`);
+  }
+  if (delta.contributingClis.length > 0) {
+    lines.push(`Other contributing CLIs: ${delta.contributingClis.join(", ")}`);
+  }
+  return lines.length > 0
+    ? `<working-memory-delta>\n${lines.join("\n")}\n</working-memory-delta>`
+    : "";
+}
+
 // ── Handoff Document ─────────────────────────────────────────────────
 
 /**
@@ -558,9 +653,10 @@ export function buildDynamicContextTurns(
   fallbackCli: AgentId,
   targetCli?: AgentId
 ): ChatContextTurn[] {
-  const rawTurns: { turn: ChatContextTurn; tokens: number }[] = [];
+  const rawTurns: ScoredTurn[] = [];
   let pendingUser: ChatMessage | null = null;
   const budget = CONTEXT_TURNS_BUDGET_BY_CLI[targetCli ?? fallbackCli] ?? CONTEXT_TURNS_MAX_BUDGET;
+  let assistantRecencyCounter = 0;
 
   for (const message of messages) {
     if (message.role === "user") {
@@ -578,7 +674,6 @@ export function buildDynamicContextTurns(
     const failed = message.exitCode != null && message.exitCode !== 0;
     const userContent = pendingUser.content;
     const assistantContent = message.rawContent ?? message.content;
-    // Failed turns get shorter summaries but are still included for error context
     const summaryLimit = failed ? 1500 : 3000;
     const replyText = summarizeForContext(assistantContent, summaryLimit);
     const turn: ChatContextTurn = {
@@ -588,12 +683,70 @@ export function buildDynamicContextTurns(
       timestamp: message.timestamp,
     };
     const tokens = estimateTokens(userContent) + estimateTokens(turn.assistantReply) + 8;
-    rawTurns.push({ turn, tokens });
+    const hasFileChanges = Boolean(
+      message.blocks?.some((block) => block.kind === "fileChange")
+    );
+    const hasCommand = Boolean(
+      message.blocks?.some((block) => block.kind === "command" || block.kind === "tool")
+    );
+    const hasErrorStatus = Boolean(
+      message.blocks?.some((block) => block.kind === "status" && block.level === "error")
+    );
+    const normalizedReply = turn.assistantReply.toLowerCase();
+    const hasDecisionCue =
+      /(root cause|decision|resolved|fixed|changed|updated|recommend|next step|结论|原因|修复|建议|下一步)/i
+        .test(turn.assistantReply);
+    const looksLowSignal =
+      normalizedReply.length < 120 &&
+      !failed &&
+      !hasFileChanges &&
+      !hasCommand &&
+      !hasErrorStatus &&
+      !hasDecisionCue;
+    const foreignCli = turn.cliId !== (targetCli ?? fallbackCli);
+    const recencyRank = assistantRecencyCounter;
+    assistantRecencyCounter += 1;
+    const recencyBonus = recencyRank < 3 ? 3 : recencyRank < 6 ? 1.5 : 0;
+    const rawScore =
+      (foreignCli ? 4 : -3) +
+      (failed || hasErrorStatus ? 4 : 0) +
+      (hasFileChanges ? 3 : 0) +
+      (hasCommand ? 2 : 0) +
+      (hasDecisionCue ? 2 : 0) +
+      recencyBonus +
+      (looksLowSignal ? -4 : 0);
+    const score = rawScore / Math.max(tokens, 1);
+    rawTurns.push({ turn, tokens, score, recencyRank });
     pendingUser = null;
   }
 
-  const limit = computeDynamicTurnLimit(rawTurns.map((t) => t.tokens), budget);
-  return rawTurns.slice(-limit).map((t) => t.turn);
+  if (rawTurns.length === 0) return [];
+
+  const selected = new Set<number>();
+  const latestIndex = rawTurns.length - 1;
+  selected.add(latestIndex);
+  let used = rawTurns[latestIndex]?.tokens ?? 0;
+
+  const rankedCandidates = rawTurns
+    .map((candidate, index) => ({ ...candidate, index }))
+    .filter((candidate) => candidate.index !== latestIndex)
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return left.recencyRank - right.recencyRank;
+    });
+
+  for (const candidate of rankedCandidates) {
+    if (selected.size >= CONTEXT_TURNS_MAX_COUNT) break;
+    if (selected.size >= CONTEXT_TURNS_MIN_COUNT && used + candidate.tokens > budget) {
+      continue;
+    }
+    selected.add(candidate.index);
+    used += candidate.tokens;
+  }
+
+  return rawTurns
+    .filter((_, index) => selected.has(index))
+    .map((candidate) => candidate.turn);
 }
 
 /**
@@ -634,6 +787,153 @@ export function buildHandoffDocument(
     crossTabEntries,
     timestamp: nowIso(),
   };
+}
+
+function findBoundaryStartIndex(
+  messages: ChatMessage[],
+  boundary: TerminalCliContextBoundary | null | undefined
+): number {
+  if (!boundary) return 0;
+  if (boundary.lastSeenMessageId) {
+    const index = messages.findIndex((message) => message.id === boundary.lastSeenMessageId);
+    if (index >= 0) return index + 1;
+  }
+  if (boundary.lastSeenAt) {
+    const boundaryTime = Date.parse(boundary.lastSeenAt);
+    if (Number.isFinite(boundaryTime)) {
+      const index = messages.findIndex((message) => Date.parse(message.timestamp) > boundaryTime);
+      if (index >= 0) return index;
+    }
+  }
+  return 0;
+}
+
+export function buildDeltaHandoffDocument(
+  session: ConversationSession,
+  targetCli: AgentId,
+  boundary: TerminalCliContextBoundary | null | undefined,
+  crossTabEntries: SharedContextEntry[]
+) {
+  const startIndex = findBoundaryStartIndex(session.messages, boundary);
+  const incrementalMessages = session.messages
+    .slice(startIndex)
+    .filter((message) => message.role !== "system" && message.cliId && message.cliId !== targetCli);
+  const recentTurns = buildDynamicContextTurns(incrementalMessages, targetCli, targetCli);
+  const compactedSummaries = session.compactedSummaries.filter((summary) => {
+    if (summary.sourceCli === targetCli) return false;
+    if (boundary?.lastCompactedSummaryVersion == null) return true;
+    return summary.version > boundary.lastCompactedSummaryVersion;
+  });
+  const crossTabDelta = crossTabEntries.filter((entry) => {
+    if (entry.sourceCli === targetCli) return false;
+    if (!boundary?.lastSeenAt) return true;
+    return Date.parse(entry.updatedAt) > Date.parse(boundary.lastSeenAt);
+  });
+  const hasExternalChanges =
+    recentTurns.length > 0 ||
+    compactedSummaries.length > 0 ||
+    crossTabDelta.length > 0;
+  if (!hasExternalChanges) {
+    return null;
+  }
+  const currentWorkingMemory = buildWorkingMemory(session.messages);
+  const workingMemoryDelta = diffWorkingMemory(boundary?.workingMemorySnapshot, currentWorkingMemory);
+
+  const hasDelta = hasExternalChanges || Boolean(workingMemoryDelta);
+
+  return hasDelta
+    ? {
+        targetCli,
+        summary: buildDeltaSummary(
+          targetCli,
+          recentTurns,
+          compactedSummaries,
+          crossTabDelta,
+          workingMemoryDelta
+        ),
+        recentTurns,
+        compactedSummaries: compactedSummaries.slice(0, 2),
+        crossTabEntries: crossTabDelta.slice(0, CROSS_TAB_MAX_ENTRIES),
+        workingMemoryDelta,
+        timestamp: nowIso(),
+      }
+    : null;
+}
+
+function buildDeltaSummary(
+  targetCli: AgentId,
+  recentTurns: ChatContextTurn[],
+  compactedSummaries: CompactedSummary[],
+  crossTabEntries: SharedContextEntry[],
+  workingMemoryDelta: WorkingMemoryDelta | null
+) {
+  const lines: string[] = [`Updates since ${targetCli} was last active:`];
+  if (workingMemoryDelta?.modifiedFiles.length) {
+    lines.push(`- Files changed: ${workingMemoryDelta.modifiedFiles.slice(0, 6).join(", ")}`);
+  }
+  if (workingMemoryDelta?.activeErrors.length) {
+    lines.push(`- New errors: ${workingMemoryDelta.activeErrors.slice(0, 2).join(" | ")}`);
+  }
+  if (workingMemoryDelta?.buildStatusChanged) {
+    lines.push(`- Build status is now ${workingMemoryDelta.buildStatus}`);
+  }
+  if (workingMemoryDelta?.keyDecisions.length) {
+    lines.push(`- New decisions: ${workingMemoryDelta.keyDecisions.slice(0, 2).join(" | ")}`);
+  }
+  if (recentTurns.length) {
+    const latestForeignTurn = recentTurns[recentTurns.length - 1];
+    if (latestForeignTurn) {
+      lines.push(
+        `- Latest ${latestForeignTurn.cliId} turn: ${truncate(latestForeignTurn.assistantReply, 220)}`
+      );
+    }
+  }
+  if (compactedSummaries.length) {
+    const latestSummary = compactedSummaries[compactedSummaries.length - 1];
+    if (latestSummary?.currentState) {
+      lines.push(`- Summary state: ${truncate(latestSummary.currentState, 220)}`);
+    }
+  }
+  if (crossTabEntries.length) {
+    lines.push(`- Related workspace tabs updated: ${crossTabEntries.slice(0, 2).map((entry) => entry.sourceTabTitle).join(", ")}`);
+  }
+  return lines.slice(0, 6).join("\n");
+}
+
+export function formatDeltaHandoffDocument(
+  doc: ReturnType<typeof buildDeltaHandoffDocument>
+): string {
+  if (!doc) return "";
+
+  const sections: string[] = [`[Context sync for ${doc.targetCli}]`];
+  if (doc.summary) {
+    sections.push(`<delta-summary>\n${doc.summary}\n</delta-summary>`);
+  }
+
+  const workingMemoryText = doc.workingMemoryDelta
+    ? formatWorkingMemoryDelta(doc.workingMemoryDelta)
+    : "";
+  if (workingMemoryText) sections.push(workingMemoryText);
+
+  if (doc.recentTurns.length > 0) {
+    const turnLines = doc.recentTurns.map((turn) => {
+      const ago = formatRelativeTime(turn.timestamp);
+      return `[${turn.cliId}, ${ago}] User: ${truncate(turn.userPrompt, 400)}\nAssistant: ${truncate(turn.assistantReply, 800)}`;
+    });
+    sections.push(
+      `<recent-updates count="${doc.recentTurns.length}">\n${turnLines.join("\n\n")}\n</recent-updates>`
+    );
+  }
+
+  if (doc.compactedSummaries.length > 0) {
+    sections.push(formatCompactedSummaries(doc.compactedSummaries));
+  }
+
+  if (doc.crossTabEntries.length > 0) {
+    sections.push(formatCrossTabContext(doc.crossTabEntries));
+  }
+
+  return `<handoff-delta>\n${sections.join("\n\n")}\n</handoff-delta>`;
 }
 
 /**

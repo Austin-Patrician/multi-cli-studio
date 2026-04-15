@@ -34,18 +34,32 @@ import {
   CreateAutomationRunRequest,
   CreateAutomationWorkflowRunRequest,
   CliSkillItem,
+  ExternalDirectoryEntry,
+  ExternalTextFile,
   FileMentionCandidate,
+  GlobalMcpServerEntry,
   GitFileDiff,
+  GitBranchListResponse,
+  GitCommitDetails,
+  GitHubIssuesResponse,
+  GitHubPullRequestsResponse,
+  GitHistoryResponse,
+  GitLogResponse,
+  GitFileStatus,
   GitPanelData,
   NotificationConfig,
   ModelProviderConfig,
   ModelProviderServiceType,
+  LocalUsageStatistics,
   PersistedTerminalState,
   SemanticMemoryChunk,
   SemanticRecallRequest,
+  SettingsEngineStatus,
   StreamEvent,
   TerminalEvent,
   WorkspacePickResult,
+  WorkspaceTextSearchResponse,
+  WorkspaceTreeEntry,
 } from "./models";
 import type {
   AcpCliCapabilities,
@@ -127,11 +141,96 @@ export interface RuntimeBridge {
   respondAssistantApproval: (requestId: string, decision: AssistantApprovalDecision) => Promise<boolean>;
   getGitPanel: (projectRoot: string) => Promise<GitPanelData>;
   getGitFileDiff: (projectRoot: string, path: string) => Promise<GitFileDiff>;
+  getGitLog: (projectRoot: string) => Promise<GitLogResponse>;
+  getGitCommitHistory: (
+    projectRoot: string,
+    options?: {
+      branch?: string | null;
+      query?: string | null;
+      offset?: number;
+      limit?: number;
+      snapshotId?: string | null;
+    }
+  ) => Promise<GitHistoryResponse>;
+  getGitCommitDetails: (
+    projectRoot: string,
+    commitHash: string,
+    maxDiffLines?: number
+  ) => Promise<GitCommitDetails>;
+  listGitBranches: (projectRoot: string) => Promise<GitBranchListResponse>;
+  checkoutGitBranch: (projectRoot: string, name: string) => Promise<void>;
+  createGitBranch: (
+    projectRoot: string,
+    name: string,
+    sourceRef?: string | null,
+    checkoutAfterCreate?: boolean
+  ) => Promise<void>;
+  renameGitBranch: (projectRoot: string, oldName: string, newName: string) => Promise<void>;
+  deleteGitBranch: (projectRoot: string, name: string, force?: boolean) => Promise<void>;
+  mergeGitBranch: (projectRoot: string, sourceBranch: string) => Promise<void>;
+  fetchGit: (projectRoot: string, remote?: string | null) => Promise<void>;
+  pullGit: (projectRoot: string, remote?: string | null, targetBranch?: string | null) => Promise<void>;
+  syncGit: (projectRoot: string, remote?: string | null, targetBranch?: string | null) => Promise<void>;
+  pushGit: (projectRoot: string, remote?: string | null, targetBranch?: string | null) => Promise<void>;
+  getGitHubIssues: (projectRoot: string) => Promise<GitHubIssuesResponse>;
+  getGitHubPullRequests: (projectRoot: string) => Promise<GitHubPullRequestsResponse>;
+  stageGitFile: (projectRoot: string, path: string) => Promise<void>;
+  unstageGitFile: (projectRoot: string, path: string) => Promise<void>;
+  discardGitFile: (projectRoot: string, path: string) => Promise<void>;
+  commitGitChanges: (
+    projectRoot: string,
+    message: string,
+    options?: { stageAll?: boolean }
+  ) => Promise<{ commitSha: string | null }>;
   openWorkspaceFile: (projectRoot: string, path: string) => Promise<boolean>;
   onStream: (listener: (event: StreamEvent) => void) => Promise<Unlisten>;
   pickWorkspaceFolder: () => Promise<WorkspacePickResult | null>;
   searchWorkspaceFiles: (projectRoot: string, query: string) => Promise<FileMentionCandidate[]>;
+  searchWorkspaceText: (
+    projectRoot: string,
+    options: {
+      query: string;
+      caseSensitive: boolean;
+      wholeWord: boolean;
+      isRegex: boolean;
+      includePattern?: string | null;
+      excludePattern?: string | null;
+    }
+  ) => Promise<WorkspaceTextSearchResponse>;
+  createWorkspaceFile: (projectRoot: string, relativePath: string) => Promise<void>;
+  createWorkspaceDirectory: (projectRoot: string, relativePath: string) => Promise<void>;
+  trashWorkspaceItem: (projectRoot: string, relativePath: string) => Promise<void>;
+  listWorkspaceEntries: (
+    projectRoot: string,
+    relativePath?: string | null
+  ) => Promise<WorkspaceTreeEntry[]>;
   getCliSkills: (cliId: AgentId, projectRoot: string) => Promise<CliSkillItem[]>;
+  detectEngines: () => Promise<SettingsEngineStatus[]>;
+  listGlobalMcpServers: () => Promise<GlobalMcpServerEntry[]>;
+  listCodexMcpRuntimeServers: (workspaceId?: string | null) => Promise<unknown>;
+  listExternalAbsoluteDirectoryChildren: (
+    directoryPath: string
+  ) => Promise<ExternalDirectoryEntry[]>;
+  readExternalAbsoluteFile: (path: string) => Promise<ExternalTextFile>;
+  writeExternalAbsoluteFile: (path: string, content: string) => Promise<void>;
+  localUsageStatistics: (input: {
+    scope: "current" | "all";
+    provider?: string | null;
+    dateRange: "7d" | "30d" | "all";
+    workspacePath?: string | null;
+  }) => Promise<LocalUsageStatistics>;
+  ensurePtySession: (request: {
+    terminalTabId: string;
+    cwd?: string | null;
+    cols: number;
+    rows: number;
+  }) => Promise<void>;
+  writePtyInput: (request: { terminalTabId: string; data: string }) => Promise<void>;
+  resizePtySession: (request: { terminalTabId: string; cols: number; rows: number }) => Promise<void>;
+  closePtySession: (terminalTabId: string) => Promise<void>;
+  onPtyOutput: (
+    listener: (event: { terminalTabId: string; data: string; stream: string }) => void
+  ) => Promise<Unlisten>;
   // ACP methods
   executeAcpCommand: (command: AcpCommand, cliId: AgentId) => Promise<AcpCommandResult>;
   getAcpCommands: (cliId: AgentId) => Promise<AcpCommandDef[]>;
@@ -430,6 +529,102 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<GitFileDiff>("get_git_file_diff", { projectRoot, path });
   },
+  async getGitLog(projectRoot) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<GitLogResponse>("get_git_log", { projectRoot });
+  },
+  async getGitCommitHistory(projectRoot, options) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<GitHistoryResponse>("get_git_commit_history", {
+      projectRoot,
+      branch: options?.branch ?? null,
+      query: options?.query ?? null,
+      offset: options?.offset ?? 0,
+      limit: options?.limit ?? 100,
+      snapshotId: options?.snapshotId ?? null,
+    });
+  },
+  async getGitCommitDetails(projectRoot, commitHash, maxDiffLines) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<GitCommitDetails>("get_git_commit_details", {
+      projectRoot,
+      commitHash,
+      maxDiffLines: maxDiffLines ?? 10000,
+    });
+  },
+  async listGitBranches(projectRoot) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<GitBranchListResponse>("list_git_branches", { projectRoot });
+  },
+  async checkoutGitBranch(projectRoot, name) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("checkout_git_branch", { projectRoot, name });
+  },
+  async createGitBranch(projectRoot, name, sourceRef, checkoutAfterCreate) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("create_git_branch", {
+      projectRoot,
+      name,
+      sourceRef: sourceRef ?? null,
+      checkoutAfterCreate: checkoutAfterCreate ?? false,
+    });
+  },
+  async renameGitBranch(projectRoot, oldName, newName) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("rename_git_branch", { projectRoot, oldName, newName });
+  },
+  async deleteGitBranch(projectRoot, name, force) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("delete_git_branch", { projectRoot, name, force: force ?? false });
+  },
+  async mergeGitBranch(projectRoot, sourceBranch) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("merge_git_branch", { projectRoot, sourceBranch });
+  },
+  async fetchGit(projectRoot, remote) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("fetch_git", { projectRoot, remote: remote ?? null });
+  },
+  async pullGit(projectRoot, remote, targetBranch) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("pull_git", { projectRoot, remote: remote ?? null, targetBranch: targetBranch ?? null });
+  },
+  async syncGit(projectRoot, remote, targetBranch) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("sync_git", { projectRoot, remote: remote ?? null, targetBranch: targetBranch ?? null });
+  },
+  async pushGit(projectRoot, remote, targetBranch) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("push_git", { projectRoot, remote: remote ?? null, targetBranch: targetBranch ?? null });
+  },
+  async getGitHubIssues(projectRoot) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<GitHubIssuesResponse>("get_github_issues", { projectRoot });
+  },
+  async getGitHubPullRequests(projectRoot) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<GitHubPullRequestsResponse>("get_github_pull_requests", { projectRoot });
+  },
+  async stageGitFile(projectRoot, path) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("stage_git_file", { projectRoot, path });
+  },
+  async unstageGitFile(projectRoot, path) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("unstage_git_file", { projectRoot, path });
+  },
+  async discardGitFile(projectRoot, path) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("discard_git_file", { projectRoot, path });
+  },
+  async commitGitChanges(projectRoot, message, options) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<{ commitSha: string | null }>("commit_git_changes", {
+      projectRoot,
+      message,
+      stageAll: options?.stageAll ?? false,
+    });
+  },
   async openWorkspaceFile(projectRoot, path) {
     const { invoke } = await import("@tauri-apps/api/core");
     const result = await invoke<{ opened: boolean }>("open_workspace_file", { projectRoot, path });
@@ -450,9 +645,99 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<FileMentionCandidate[]>("search_workspace_files", { projectRoot, query });
   },
+  async searchWorkspaceText(projectRoot, options) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<WorkspaceTextSearchResponse>("search_workspace_text", {
+      projectRoot,
+      query: options.query,
+      caseSensitive: options.caseSensitive,
+      wholeWord: options.wholeWord,
+      isRegex: options.isRegex,
+      includePattern: options.includePattern ?? null,
+      excludePattern: options.excludePattern ?? null,
+    });
+  },
+  async createWorkspaceFile(projectRoot, relativePath) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("create_workspace_file", { projectRoot, relativePath });
+  },
+  async createWorkspaceDirectory(projectRoot, relativePath) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("create_workspace_directory", { projectRoot, relativePath });
+  },
+  async trashWorkspaceItem(projectRoot, relativePath) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("trash_workspace_item", { projectRoot, relativePath });
+  },
+  async listWorkspaceEntries(projectRoot, relativePath) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<WorkspaceTreeEntry[]>("list_workspace_entries", { projectRoot, relativePath });
+  },
   async getCliSkills(cliId, projectRoot) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<CliSkillItem[]>("get_cli_skills", { cliId, projectRoot });
+  },
+  async detectEngines() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<SettingsEngineStatus[]>("detect_engines");
+  },
+  async listGlobalMcpServers() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<GlobalMcpServerEntry[]>("list_global_mcp_servers");
+  },
+  async listCodexMcpRuntimeServers(workspaceId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<unknown>("list_codex_mcp_runtime_servers", { workspaceId: workspaceId ?? null });
+  },
+  async listExternalAbsoluteDirectoryChildren(directoryPath) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<ExternalDirectoryEntry[]>("list_external_absolute_directory_children", {
+      directoryPath,
+    });
+  },
+  async readExternalAbsoluteFile(path) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<ExternalTextFile>("read_external_absolute_file", { path });
+  },
+  async writeExternalAbsoluteFile(path, content) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("write_external_absolute_file", { path, content });
+  },
+  async localUsageStatistics(input) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<LocalUsageStatistics>("local_usage_statistics", {
+      scope: input.scope,
+      provider: input.provider ?? "all",
+      dateRange: input.dateRange,
+      workspacePath: input.workspacePath ?? null,
+    });
+  },
+  async ensurePtySession(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("ensure_pty_session", { request });
+  },
+  async writePtyInput(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("write_pty_input", { request });
+  },
+  async resizePtySession(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("resize_pty_session", { request });
+  },
+  async closePtySession(terminalTabId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("close_pty_session", { terminalTabId });
+  },
+  async onPtyOutput(listener) {
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlisten = await listen<{
+      terminalTabId: string;
+      data: string;
+      stream: string;
+    }>("pty-output", (event) => {
+      listener(event.payload);
+    });
+    return unlisten;
   },
   async executeAcpCommand(command, cliId) {
     const { invoke } = await import("@tauri-apps/api/core");
