@@ -32,7 +32,7 @@ function parseServiceType(value: string | null | undefined): ModelProviderServic
     : "openaiCompatible";
 }
 
-export function ModelProviderEditorPage() {
+export function ModelProviderEditorPage({ embedded = false }: { embedded?: boolean }) {
   const navigate = useNavigate();
   const params = useParams();
   const [searchParams] = useSearchParams();
@@ -41,6 +41,7 @@ export function ModelProviderEditorPage() {
     isNew ? searchParams.get("serviceType") : params.serviceType
   );
   const providerId = params.providerId ? decodeURIComponent(params.providerId) : null;
+  const providersBasePath = "/settings/model-providers";
 
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [draft, setDraft] = useState<ModelProviderConfig | null>(null);
@@ -96,7 +97,7 @@ export function ModelProviderEditorPage() {
   }, [isNew, providerId, serviceType]);
 
   function goBack() {
-    navigate(`/model-providers?serviceType=${serviceType}`);
+    navigate(`${providersBasePath}?serviceType=${serviceType}`);
   }
 
   function updateDraft(updater: (provider: ModelProviderConfig) => ModelProviderConfig) {
@@ -130,7 +131,7 @@ export function ModelProviderEditorPage() {
       }
       setStatusText("Provider 配置已保存。");
       if (navigateAfterSave) {
-        navigate(`/model-providers?serviceType=${serviceType}`);
+        navigate(`${providersBasePath}?serviceType=${serviceType}`);
       }
       return savedProvider;
     } catch (error) {
@@ -186,7 +187,7 @@ export function ModelProviderEditorPage() {
       );
       const saved = normalizeProviderSettings(await bridge.updateSettings(nextSettings));
       setSettings(saved);
-      navigate(`/model-providers?serviceType=${serviceType}`);
+      navigate(`${providersBasePath}?serviceType=${serviceType}`);
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : "删除 provider 失败。");
     } finally {
@@ -196,7 +197,7 @@ export function ModelProviderEditorPage() {
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center bg-[#f7f7f5]">
+      <div className={cx("flex items-center justify-center", embedded ? "min-h-[320px]" : "h-full bg-[#f7f7f5]")}>
         <div className="rounded-[12px] border border-slate-200 bg-white px-6 py-4 text-sm text-slate-500 shadow-sm">
           正在加载 provider 编辑页...
         </div>
@@ -206,7 +207,7 @@ export function ModelProviderEditorPage() {
 
   if (!draft) {
     return (
-      <div className="flex h-full items-center justify-center bg-[#f7f7f5]">
+      <div className={cx("flex items-center justify-center", embedded ? "min-h-[320px]" : "h-full bg-[#f7f7f5]")}>
         <div className="rounded-[12px] border border-rose-200 bg-rose-50 px-6 py-4 text-sm text-rose-700 shadow-sm">
           {errorText ?? "Provider 加载失败。"}
         </div>
@@ -215,8 +216,14 @@ export function ModelProviderEditorPage() {
   }
 
   return (
-    <div className="min-h-full bg-[#f7f7f5]">
-      <div className="mx-auto flex max-w-[1380px] flex-col gap-6 px-8 py-8">
+    <div className={embedded ? "flex flex-col gap-6" : "min-h-full bg-[#f7f7f5]"}>
+      <div
+        className={
+          embedded
+            ? "flex flex-col gap-6"
+            : "mx-auto flex max-w-[1380px] flex-col gap-6 px-8 py-8"
+        }
+      >
         <section className="flex flex-wrap items-center gap-4 rounded-[12px] border border-[#eceae4] bg-white/92 px-4 py-4 shadow-[0_10px_26px_rgba(15,23,42,0.05)] backdrop-blur">
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <button

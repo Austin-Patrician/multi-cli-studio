@@ -92,7 +92,7 @@ type SidebarNavItem = {
   matchPatterns: SidebarMatchPattern[];
 };
 
-type SettingsMenuSection = "settings" | "vendors" | "projects" | "git" | "mcp" | "skills";
+type SettingsMenuSection = "settings" | "models" | "vendors" | "projects" | "git" | "mcp" | "skills";
 
 const navItems: SidebarNavItem[] = [
   {
@@ -106,12 +106,6 @@ const navItems: SidebarNavItem[] = [
     label: "模型对话",
     icon: IconModelChat,
     matchPatterns: [{ path: "/model-chat", end: false }],
-  },
-  {
-    to: "/model-providers",
-    label: "模型管理",
-    icon: IconProviders,
-    matchPatterns: [{ path: "/model-providers", end: false }],
   },
   {
     to: "/automation",
@@ -292,8 +286,12 @@ export function Sidebar() {
   const canCloneActiveTab = !!activeTab && activeTab.status !== "streaming";
   const settingsIsActive = matchesSidebarItem(location.pathname, [{ path: "/settings", end: false }]);
   const activeSettingsSection = useMemo<SettingsMenuSection>(() => {
+    if (matchesSidebarItem(location.pathname, [{ path: "/settings/model-providers", end: false }])) {
+      return "models";
+    }
     const section = new URLSearchParams(location.search).get("section");
     switch (section) {
+      case "models":
       case "vendors":
       case "projects":
       case "git":
@@ -352,6 +350,7 @@ export function Sidebar() {
   const settingsMenuItems = useMemo(
     () => [
       { id: "settings", label: "设置", section: "settings" as const, icon: IconGear },
+      { id: "models", label: "模型管理", section: "models" as const, icon: IconProviders },
       // { id: "vendors", label: "供应商", section: "vendors" as const, icon: IconProviders },
       // { id: "projects", label: "项目", section: "projects" as const, icon: IconPlus },
       { id: "git", label: "Git", section: "git" as const, icon: IconWorkflow },
@@ -369,6 +368,10 @@ export function Sidebar() {
     }
     if (section === "settings") {
       navigate("/settings");
+      return;
+    }
+    if (section === "models") {
+      navigate("/settings/model-providers");
       return;
     }
     navigate(`/settings?section=${section}`);

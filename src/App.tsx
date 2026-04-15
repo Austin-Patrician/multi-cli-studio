@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation, useParams } from "react-router-dom";
 import { useEffect } from "react";
 import { AppLayout } from "./layouts/AppLayout";
 import { TerminalPage } from "./pages/TerminalPage";
@@ -10,8 +10,41 @@ import { ModelChatPage } from "./pages/ModelChatPage";
 import { ModelProviderEditorPage } from "./pages/ModelProviderEditorPage";
 import { ModelProvidersPage } from "./pages/ModelProvidersPage";
 import { DesktopSettingsPage } from "./pages/DesktopSettingsPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import { useStore } from "./lib/store";
 import { bridge } from "./lib/bridge";
+
+function ModelProvidersRedirect() {
+  const location = useLocation();
+  return (
+    <Navigate
+      to={{
+        pathname: "/settings/model-providers",
+        search: location.search,
+      }}
+      replace
+    />
+  );
+}
+
+function ModelProviderEditorRedirect() {
+  const location = useLocation();
+  const { serviceType, providerId } = useParams();
+  const pathname =
+    serviceType && providerId
+      ? `/settings/model-providers/${serviceType}/${providerId}`
+      : "/settings/model-providers";
+
+  return (
+    <Navigate
+      to={{
+        pathname,
+        search: location.search,
+      }}
+      replace
+    />
+  );
+}
 
 function App() {
   const loadInitialState = useStore((s) => s.loadInitialState);
@@ -118,14 +151,28 @@ function App() {
 
   return (
     <Routes>
-      <Route path="/settings" element={<DesktopSettingsPage />} />
+      <Route path="/settings" element={<DesktopSettingsPage />}>
+        <Route
+          path="general"
+          element={<SettingsPage embedded forcedSection="settings" hideSectionTabs />}
+        />
+        <Route path="model-providers" element={<ModelProvidersPage embedded />} />
+        <Route path="model-providers/new" element={<ModelProviderEditorPage embedded />} />
+        <Route
+          path="model-providers/:serviceType/:providerId"
+          element={<ModelProviderEditorPage embedded />}
+        />
+      </Route>
+      <Route path="/model-providers" element={<ModelProvidersRedirect />} />
+      <Route path="/model-providers/new" element={<ModelProviderEditorRedirect />} />
+      <Route
+        path="/model-providers/:serviceType/:providerId"
+        element={<ModelProviderEditorRedirect />}
+      />
       <Route element={<AppLayout />}>
         <Route path="/" element={<Navigate to="/terminal" replace />} />
         <Route path="/terminal" element={<TerminalPage />} />
         <Route path="/model-chat" element={<ModelChatPage />} />
-        <Route path="/model-providers" element={<ModelProvidersPage />} />
-        <Route path="/model-providers/new" element={<ModelProviderEditorPage />} />
-        <Route path="/model-providers/:serviceType/:providerId" element={<ModelProviderEditorPage />} />
         <Route path="/automation" element={<AutomationJobsPage />} />
         <Route path="/automation/workflows" element={<AutomationWorkflowsPage />} />
         <Route path="/automation/workflows/new" element={<AutomationWorkflowEditorPage />} />

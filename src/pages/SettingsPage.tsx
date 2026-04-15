@@ -18,6 +18,11 @@ const INPUT_CLASS =
 
 type Platform = (typeof PLATFORM_ORDER)[number];
 type SettingsSection = "settings" | "vendors" | "projects" | "mcp" | "skills";
+type SettingsPageProps = {
+  embedded?: boolean;
+  forcedSection?: SettingsSection;
+  hideSectionTabs?: boolean;
+};
 
 type SettingsAgent = {
   id: AgentId;
@@ -337,7 +342,11 @@ function ToggleSwitch({ enabled, onClick, disabled }: { enabled: boolean; onClic
   );
 }
 
-export function SettingsPage() {
+export function SettingsPage({
+  embedded = false,
+  forcedSection,
+  hideSectionTabs = false,
+}: SettingsPageProps) {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const storedSettings = useStore((s) => s.settings);
@@ -363,7 +372,7 @@ export function SettingsPage() {
   const [notificationBusy, setNotificationBusy] = useState(false);
   const [emailTestBusy, setEmailTestBusy] = useState(false);
   const [emailRecipientsInput, setEmailRecipientsInput] = useState("");
-  const activeSection = parseSettingsSection(searchParams.get("section"));
+  const activeSection = forcedSection ?? parseSettingsSection(searchParams.get("section"));
 
   useEffect(() => {
     if (storedSettings) {
@@ -556,18 +565,24 @@ export function SettingsPage() {
 
   if (!local) {
     return (
-      <div className="flex h-full items-center justify-center bg-[#fafafa]">
+      <div className={cx("flex items-center justify-center", embedded ? "min-h-[280px]" : "h-full bg-[#fafafa]")}>
         <div className="text-[11px] text-slate-400 animate-pulse font-bold tracking-widest uppercase">正在加载设置...</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-full bg-[#f8fafc] px-6 py-10 sm:px-8 lg:px-12 relative overflow-x-hidden antialiased">
-      {/* Soft background ambient glow */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-[1200px] h-[600px] bg-[radial-gradient(ellipse_at_top,rgba(99,102,241,0.08),transparent_70%)] pointer-events-none" />
-      
-      <div className="relative px-6 py-10 mx-auto max-w-5xl">
+    <div
+      className={cx(
+        "relative overflow-x-hidden antialiased",
+        embedded ? "min-h-0" : "min-h-full bg-[#f8fafc] px-6 py-10 sm:px-8 lg:px-12"
+      )}
+    >
+      {!embedded ? (
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-[1200px] h-[600px] bg-[radial-gradient(ellipse_at_top,rgba(99,102,241,0.08),transparent_70%)] pointer-events-none" />
+      ) : null}
+
+      <div className={cx("relative mx-auto max-w-5xl", embedded ? "space-y-10" : "px-6 py-10")}>
         <header className="mb-12" style={stageStyle(mounted, 0)}>
           <div className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
             <div>
@@ -631,23 +646,25 @@ export function SettingsPage() {
             </div>
           ) : null}
 
-          <div className="mt-8 flex flex-wrap items-center gap-2 rounded-[12px] border border-slate-200 bg-white/85 p-2 shadow-sm">
-            {(["settings", "vendors", "projects", "mcp", "skills"] as SettingsSection[]).map((section) => (
-              <button
-                key={section}
-                type="button"
-                onClick={() => openSection(section)}
-                className={cx(
-                  "inline-flex items-center rounded-[10px] px-3 py-2 text-sm font-semibold transition-all",
-                  activeSection === section
-                    ? "bg-slate-900 text-white shadow-sm"
-                    : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-                )}
-              >
-                {SETTINGS_SECTION_LABEL[section]}
-              </button>
-            ))}
-          </div>
+          {!hideSectionTabs ? (
+            <div className="mt-8 flex flex-wrap items-center gap-2 rounded-[12px] border border-slate-200 bg-white/85 p-2 shadow-sm">
+              {(["settings", "vendors", "projects", "mcp", "skills"] as SettingsSection[]).map((section) => (
+                <button
+                  key={section}
+                  type="button"
+                  onClick={() => openSection(section)}
+                  className={cx(
+                    "inline-flex items-center rounded-[10px] px-3 py-2 text-sm font-semibold transition-all",
+                    activeSection === section
+                      ? "bg-slate-900 text-white shadow-sm"
+                      : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                  )}
+                >
+                  {SETTINGS_SECTION_LABEL[section]}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </header>
 
         <main className="space-y-10">
@@ -659,7 +676,7 @@ export function SettingsPage() {
                 icon={<CpuIcon />}
                 action={
                   <Link
-                    to="/model-providers"
+                    to="/settings/model-providers"
                     className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition-all hover:bg-slate-50"
                   >
                     打开模型管理
@@ -697,7 +714,7 @@ export function SettingsPage() {
                               </div>
                             </div>
                             <Link
-                              to={`/model-providers/${serviceType}/${provider.id}`}
+                              to={`/settings/model-providers/${serviceType}/${provider.id}`}
                               className="inline-flex h-9 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition-all hover:bg-slate-50"
                             >
                               编辑

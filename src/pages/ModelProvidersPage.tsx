@@ -24,7 +24,7 @@ function parseServiceType(value: string | null): ModelProviderServiceType {
     : "openaiCompatible";
 }
 
-export function ModelProvidersPage() {
+export function ModelProvidersPage({ embedded = false }: { embedded?: boolean }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -32,6 +32,7 @@ export function ModelProvidersPage() {
   const [statusText, setStatusText] = useState<string | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
   const activeServiceType = parseServiceType(searchParams.get("serviceType"));
+  const providersBasePath = "/settings/model-providers";
 
   useEffect(() => {
     let cancelled = false;
@@ -88,13 +89,12 @@ export function ModelProvidersPage() {
       setStatusText("启用的 provider 已更新。");
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : "更新启用 provider 失败。");
-    } finally {
     }
   }
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center bg-[#f7f7f5]">
+      <div className={cx("flex items-center justify-center", embedded ? "min-h-[280px]" : "h-full bg-[#f7f7f5]")}>
         <div className="rounded-[12px] border border-slate-200 bg-white px-6 py-4 text-sm text-slate-500 shadow-sm">
           正在加载模型管理配置...
         </div>
@@ -103,8 +103,14 @@ export function ModelProvidersPage() {
   }
 
   return (
-    <div className="min-h-full bg-[#f7f7f5]">
-      <div className="mx-auto flex max-w-[1540px] flex-col gap-6 px-8 py-8">
+    <div className={embedded ? "flex flex-col gap-6" : "min-h-full bg-[#f7f7f5]"}>
+      <div
+        className={
+          embedded
+            ? "flex flex-col gap-6"
+            : "mx-auto flex max-w-[1540px] flex-col gap-6 px-8 py-8"
+        }
+      >
         <section className="flex flex-wrap items-center gap-4 rounded-[12px] border border-[#eceae4] bg-white/92 px-4 py-4 shadow-[0_10px_26px_rgba(15,23,42,0.05)] backdrop-blur">
           <div className="flex min-w-0 flex-1 justify-center">
             <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-[12px] bg-[#f5f4f1] p-1.5">
@@ -146,7 +152,7 @@ export function ModelProvidersPage() {
             <TopActionButton
               title="新增 Provider"
               onClick={() =>
-                navigate(`/model-providers/new?serviceType=${activeServiceType}`)
+                navigate(`${providersBasePath}/new?serviceType=${activeServiceType}`)
               }
               highlight
             >
@@ -171,7 +177,7 @@ export function ModelProvidersPage() {
                   provider={provider}
                   serviceType={activeServiceType}
                   onEdit={() =>
-                    navigate(`/model-providers/${activeServiceType}/${encodeURIComponent(provider.id)}`)
+                    navigate(`${providersBasePath}/${activeServiceType}/${encodeURIComponent(provider.id)}`)
                   }
                   onEnable={() => void handleEnableProvider(provider.id)}
                 />

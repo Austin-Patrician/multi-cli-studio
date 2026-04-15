@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useLocation, useNavigate, useOutlet, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
   BarChart3,
   BookOpen,
+  Cpu,
   ChevronLeft,
   ChevronRight,
   FolderOpen,
@@ -15,21 +16,12 @@ import { useStore } from "../lib/store";
 import { DesktopMcpSection } from "../components/settings/DesktopMcpSection";
 import { DesktopSkillsSection } from "../components/settings/DesktopSkillsSection";
 import { DesktopUsageSection } from "../components/settings/DesktopUsageSection";
+import { DesktopVendorsSection } from "../components/settings/DesktopVendorsSection";
 import type {
-  ModelProviderServiceType,
+  AgentId,
 } from "../lib/models";
-import {
-  getProvidersForServiceType,
-  MODEL_PROVIDER_META,
-} from "../lib/modelProviders";
-import { SERVICE_ICONS, maskSecret, relativeTime } from "../components/modelProviders/ui";
 
-type SettingsSection = "settings" | "vendors" | "projects" | "mcp" | "skills" | "usage";
-
-type VendorTab = {
-  serviceType: ModelProviderServiceType;
-  label: string;
-};
+type SettingsSection = "settings" | "models" | "vendors" | "projects" | "mcp" | "skills" | "usage";
 
 type SidebarNavItem = {
   id: SettingsSection;
@@ -37,13 +29,9 @@ type SidebarNavItem = {
   icon: typeof Settings;
 };
 
-const VENDOR_TABS: VendorTab[] = [
-  { serviceType: "claude", label: "Claude Code" },
-  { serviceType: "openaiCompatible", label: "Codex" },
-  { serviceType: "gemini", label: "Gemini CLI" },
-];
 const NAV_ITEMS: SidebarNavItem[] = [
   { id: "settings", label: "设置", icon: Settings },
+  { id: "models", label: "模型管理", icon: Cpu },
   { id: "vendors", label: "供应商", icon: Settings },
   { id: "projects", label: "项目", icon: FolderOpen },
   { id: "mcp", label: "MCP", icon: Server },
@@ -53,6 +41,7 @@ const NAV_ITEMS: SidebarNavItem[] = [
 
 function parseSettingsSection(value: string | null): SettingsSection {
   switch (value) {
+    case "models":
     case "projects":
     case "mcp":
     case "skills":
@@ -76,10 +65,13 @@ function badgeToneClass(tone: "default" | "success" | "warn" = "default") {
 }
 
 export function DesktopSettingsPage() {
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
   const navigate = useNavigate();
+  const outlet = useOutlet();
 
   const settings = useStore((state) => state.settings);
+  const appState = useStore((state) => state.appState);
   const workspaces = useStore((state) => state.workspaces);
   const terminalTabs = useStore((state) => state.terminalTabs);
   const activeTerminalTabId = useStore((state) => state.activeTerminalTabId);
@@ -87,23 +79,19 @@ export function DesktopSettingsPage() {
   const openWorkspaceFolder = useStore((state) => state.openWorkspaceFolder);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [activeVendorTab, setActiveVendorTab] = useState<ModelProviderServiceType>("claude");
+  const [activeVendorTab, setActiveVendorTab] = useState<AgentId>("claude");
 
-  const activeSection = parseSettingsSection(searchParams.get("section"));
+  const isGeneralSettingsRoute = location.pathname.startsWith("/settings/general");
+  const isModelProvidersRoute = location.pathname.startsWith("/settings/model-providers");
+  const activeSection = isModelProvidersRoute
+    ? "models"
+    : isGeneralSettingsRoute
+      ? "settings"
+      : parseSettingsSection(searchParams.get("section"));
   const activeTerminalTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
 
   const selectedWorkspace =
     workspaces.find((workspace) => workspace.id === activeTerminalTab?.workspaceId) ?? workspaces[0] ?? null;
-
-  const providerGroups = useMemo(() => {
-    if (!settings) return [];
-    return VENDOR_TABS.map(({ serviceType, label }) => ({
-      serviceType,
-      label,
-      providers: getProvidersForServiceType(settings, serviceType),
-      meta: MODEL_PROVIDER_META[serviceType],
-    }));
-  }, [settings]);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("desktop_settings_sidebar_collapsed");
@@ -113,9 +101,22 @@ export function DesktopSettingsPage() {
   }, []);
 
   function openSection(section: SettingsSection) {
-    const next = new URLSearchParams(searchParams);
+    if (section === "settings") {
+      navigate("/settings/general");
+      return;
+    }
+
+    if (section === "models") {
+      navigate("/settings/model-providers");
+      return;
+    }
+
+    const next = new URLSearchParams();
     next.set("section", section);
-    setSearchParams(next, { replace: true });
+    navigate(
+      next.toString().length > 0 ? `/settings?${next.toString()}` : "/settings",
+      { replace: location.pathname === "/settings" }
+    );
   }
 
   function toggleSidebar() {
@@ -166,8 +167,10 @@ export function DesktopSettingsPage() {
         </aside>
 
         <main className="settings-content">
-          <div className="dcc-settings-scroll">
-            {activeSection === "settings" ? (
+          <div className={cx("dcc-settings-scroll", outlet && "is-full-width")}>
+            {outlet ? (
+              outlet
+            ) : activeSection === "settings" ? (
               <section className="settings-section">
                 <div className="settings-section-title">设置</div>
                 <div className="settings-section-subtitle">
@@ -229,74 +232,17 @@ export function DesktopSettingsPage() {
               </section>
             ) : null}
 
-            {activeSection === "vendors" ? (
-              <section className="settings-section">
-                <div className="settings-section-title">供应商</div>
-                <div className="settings-section-subtitle">
-                  这里展示设置壳中的供应商概览。`/model-providers` 页面仍然是独立的模型对话提供商管理页面。
-                </div>
-                <div className="dcc-vendors-tabs">
-                  {VENDOR_TABS.map((tab) => (
-                    <button
-                      key={tab.serviceType}
-                      type="button"
-                      className={cx("dcc-vendors-tab", activeVendorTab === tab.serviceType && "is-active")}
-                      onClick={() => setActiveVendorTab(tab.serviceType)}
-                    >
-                      <img src={SERVICE_ICONS[tab.serviceType]} alt="" className="dcc-vendors-tab-icon" />
-                      <span>{tab.label}</span>
-                    </button>
-                  ))}
-                </div>
-                {providerGroups
-                  .filter((group) => group.serviceType === activeVendorTab)
-                  .map((group) => (
-                    <div key={group.serviceType} className="dcc-surface-card">
-                      <div className="dcc-card-head">
-                        <div>
-                          <div className="dcc-card-title-row">
-                            <img src={SERVICE_ICONS[group.serviceType]} alt="" className="dcc-provider-service-icon" />
-                            <div className="dcc-card-title">{group.label}</div>
-                            <span className={badgeToneClass(group.providers.some((provider) => provider.enabled) ? "success" : "default")}>
-                              {group.providers.length} 个提供商
-                            </span>
-                          </div>
-                          <div className="dcc-card-description">{group.meta.description}</div>
-                        </div>
-                      </div>
-                      <div className="dcc-provider-list">
-                        {group.providers.map((provider) => (
-                          <div key={provider.id} className="dcc-provider-row">
-                            <div className="dcc-provider-main">
-                              <div className="dcc-provider-name-row">
-                                <span className="dcc-provider-name">{provider.name}</span>
-                                <span className={badgeToneClass(provider.enabled ? "success" : "default")}>
-                                  {provider.enabled ? "已启用" : "已禁用"}
-                                </span>
-                              </div>
-                              <div className="dcc-provider-url">{provider.baseUrl}</div>
-                              <div className="dcc-provider-meta">
-                                {provider.models.length} 个模型 · 密钥 {maskSecret(provider.apiKey)} · {relativeTime(provider.lastRefreshedAt)}
-                              </div>
-                            </div>
-                            <Link
-                              to={`/model-providers/${provider.serviceType}/${provider.id}`}
-                              className="dcc-action-button secondary"
-                            >
-                              编辑
-                            </Link>
-                          </div>
-                        ))}
-                        {group.providers.length === 0 ? (
-                          <div className="dcc-empty-state">当前分类下还没有配置任何提供商。</div>
-                        ) : null}
-                      </div>
-                    </div>
-                  ))}
-              </section>
+            {!outlet && activeSection === "vendors" ? (
+              <DesktopVendorsSection
+                settings={settings}
+                agents={appState?.agents ?? []}
+                activeVendorTab={activeVendorTab}
+                onChangeVendorTab={setActiveVendorTab}
+                subtitle="这里只展示当前接入的 Claude Code、Codex、Gemini CLI 配置。"
+              />
             ) : null}
 
-            {activeSection === "projects" ? (
+            {!outlet && activeSection === "projects" ? (
               <section className="settings-section">
                 <div className="settings-section-title">项目</div>
                 <div className="settings-section-subtitle">
@@ -356,15 +302,15 @@ export function DesktopSettingsPage() {
               </section>
             ) : null}
 
-            {activeSection === "mcp" ? (
+            {!outlet && activeSection === "mcp" ? (
               <DesktopMcpSection activeWorkspace={selectedWorkspace} />
             ) : null}
 
-            {activeSection === "skills" ? (
+            {!outlet && activeSection === "skills" ? (
               <DesktopSkillsSection activeWorkspace={selectedWorkspace} />
             ) : null}
 
-            {activeSection === "usage" ? (
+            {!outlet && activeSection === "usage" ? (
               <DesktopUsageSection activeWorkspace={selectedWorkspace} workspaces={workspaces} />
             ) : null}
           </div>

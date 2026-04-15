@@ -1614,7 +1614,7 @@ export function ModelChatPage() {
                   <RefreshIcon />
                 </HeaderIconButton>
                 <Link
-                  to="/model-providers"
+                  to="/settings/model-providers"
                   className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
                   title="模型提供商"
                   aria-label="模型提供商"
@@ -1727,7 +1727,7 @@ export function ModelChatPage() {
                     <RefreshIcon />
                   </HeaderIconButton>
                   <Link
-                    to="/model-providers"
+                    to="/settings/model-providers"
                     className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
                     title="模型提供商"
                     aria-label="模型提供商"
@@ -1782,7 +1782,7 @@ export function ModelChatPage() {
                       <RefreshIcon />
                     </HeaderIconButton>
                     <Link
-                      to="/model-providers"
+                      to="/settings/model-providers"
                       className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
                       title="模型提供商"
                       aria-label="模型提供商"
@@ -1811,7 +1811,7 @@ export function ModelChatPage() {
                         </div>
                         <div className="mt-8">
                           <Link
-                            to="/model-providers"
+                            to="/settings/model-providers"
                             className="inline-flex items-center rounded-[12px] bg-[#151515] px-5 py-3 text-sm font-medium text-white transition-all hover:-translate-y-[1px] hover:bg-black"
                           >
                             打开模型提供商

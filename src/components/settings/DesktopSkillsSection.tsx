@@ -20,6 +20,8 @@ import {
 import { bridge } from "../../lib/bridge";
 import { useStore } from "../../lib/store";
 import type { AgentId, CliSkillItem, ExternalDirectoryEntry, WorkspaceRef } from "../../lib/models";
+import { cx } from "../modelProviders/ui";
+import { SkillMarkdownPreview } from "./SkillMarkdownPreview";
 
 type TreeNodeKind = "dir" | "file" | null;
 type GlobalEngine = "claude" | "codex" | "gemini";
@@ -68,6 +70,10 @@ function pathBaseName(path: string) {
 
 function extName(path: string) {
   return path.split(".").pop()?.toLowerCase() ?? "";
+}
+
+function isSkillMarkdownPath(path: string | null | undefined) {
+  return normalizePath(path).endsWith("/skill.md") || pathBaseName(String(path ?? "")).toLowerCase() === "skill.md";
 }
 
 function matchesEngine(skill: CliSkillItem, engine: GlobalEngine) {
@@ -407,431 +413,237 @@ export function DesktopSkillsSection({
     setTreePaneWidth((current) => (current === 0 ? TREE_DEFAULT_WIDTH : 0));
   }, []);
 
-  return (
-    <section className="settings-section" style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '100%' }}>
-      <style>{`
-        .refined-skills-container {
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-          height: 100%;
-          color: #333;
-        }
-        .refined-header {
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-        }
-        .refined-title {
-          font-size: 1.125rem;
-          font-weight: 600;
-          color: #1a1a1a;
-          letter-spacing: -0.01em;
-        }
-        .refined-subtitle {
-          font-size: 0.8125rem;
-          color: #666;
-        }
-        .refined-toolbar {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 12px;
-          align-items: center;
-        }
-        .refined-browser {
-          display: grid;
-          flex: 1;
-          min-height: 400px;
-          border: 1px solid #e5e5e5;
-          border-radius: 10px;
-          background: #ffffff;
-          overflow: hidden;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.02);
-        }
-        .refined-pane-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 8px 12px;
-          background: #fafafa;
-          border-bottom: 1px solid #e5e5e5;
-          font-size: 0.8125rem;
-          font-weight: 500;
-          color: #444;
-        }
-        .refined-skill-node {
-          padding: 6px 8px;
-          margin: 2px 8px;
-          border-radius: 6px;
-          font-size: 0.8125rem;
-          color: #333;
-          transition: background 0.15s;
-        }
-        .refined-skill-node:hover {
-          background: #f4f4f5;
-        }
-        .refined-skill-node.is-active {
-          background: #eff6ff;
-          color: #1d4ed8;
-          font-weight: 500;
-        }
-        .refined-badge {
-          display: inline-flex;
-          align-items: center;
-          padding: 2px 8px;
-          background: #f4f4f5;
-          border: 1px solid #e5e5e5;
-          border-radius: 6px;
-          font-size: 0.75rem;
-          color: #555;
-          white-space: nowrap;
-        }
-        .refined-button {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          padding: 6px 12px;
-          background: #ffffff;
-          border: 1px solid #e5e5e5;
-          border-radius: 6px;
-          font-size: 0.8125rem;
-          color: #333;
-          cursor: pointer;
-          transition: all 0.15s;
-        }
-        .refined-button:hover {
-          background: #f9f9f9;
-          border-color: #d4d4d8;
-        }
-        .refined-button.primary {
-          background: #18181b;
-          color: #ffffff;
-          border-color: #18181b;
-        }
-        .refined-button.primary:hover {
-          background: #27272a;
-        }
-        .refined-button:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-        .refined-search {
-          display: flex;
-          align-items: center;
-          background: #ffffff;
-          border: 1px solid #e5e5e5;
-          border-radius: 6px;
-          padding: 0 8px;
-          height: 32px;
-          min-width: 200px;
-        }
-        .refined-search input {
-          border: none;
-          outline: none;
-          background: transparent;
-          font-size: 0.8125rem;
-          padding: 0 8px;
-          width: 100%;
-          color: #333;
-        }
-        .refined-search input::placeholder {
-          color: #999;
-        }
-        .refined-segmented {
-          display: flex;
-          background: #f4f4f5;
-          padding: 2px;
-          border-radius: 8px;
-          border: 1px solid #e5e5e5;
-        }
-        .refined-segmented button {
-          padding: 4px 12px;
-          border-radius: 6px;
-          font-size: 0.8125rem;
-          color: #555;
-          border: none;
-          background: transparent;
-          cursor: pointer;
-          transition: all 0.15s;
-        }
-        .refined-segmented button.is-active {
-          background: #ffffff;
-          color: #18181b;
-          font-weight: 500;
-          box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-        }
-        .refined-splitter {
-          width: 1px;
-          background: #e5e5e5;
-          cursor: col-resize;
-          position: relative;
-        }
-        .refined-splitter::after {
-          content: '';
-          position: absolute;
-          top: 0; left: -3px; right: -3px; bottom: 0;
-          z-index: 10;
-        }
-        .refined-splitter:hover {
-          background: #d4d4d8;
-        }
-        .refined-content-area {
-          padding: 20px;
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          overflow: auto;
-        }
-        .refined-code-block {
-          background: #f4f4f5;
-          border: 1px solid #e5e5e5;
-          border-radius: 8px;
-          padding: 16px;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-          font-size: 0.8125rem;
-          overflow: auto;
-          flex: 1;
-        }
-        .refined-textarea {
-          width: 100%;
-          flex: 1;
-          min-height: 200px;
-          padding: 16px;
-          border: 1px solid #e5e5e5;
-          border-radius: 8px;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-          font-size: 0.8125rem;
-          resize: none;
-          outline: none;
-        }
-        .refined-textarea:focus {
-          border-color: #a1a1aa;
-        }
-        .refined-empty {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          height: 100%;
-          color: #999;
-          font-size: 0.875rem;
-        }
-        .refined-detail-header {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          padding-bottom: 16px;
-          border-bottom: 1px solid #f0f0f0;
-        }
-        .refined-detail-title {
-          font-size: 1.125rem;
-          font-weight: 600;
-          color: #18181b;
-        }
-        .refined-detail-meta {
-          font-size: 0.75rem;
-          color: #71717a;
-        }
-        .refined-detail-desc {
-          background: #fafafa;
-          border: 1px solid #f0f0f0;
-          padding: 12px;
-          border-radius: 8px;
-          font-size: 0.8125rem;
-          color: #555;
-        }
-      `}</style>
+  const selectedFileExtension = extName(selectedNodePath ?? "");
+  const selectedFileIsMarkdown =
+    selectedNodeKind === "file" && MARKDOWN_EXTENSIONS.has(selectedFileExtension);
+  const selectedFileIsSkillMarkdown =
+    selectedNodeKind === "file" && isSkillMarkdownPath(selectedNodePath);
+  const selectedFileHasUnsavedChanges =
+    selectedNodeKind === "file" && selectedFileDraftContent !== selectedFileContent;
 
-      <div className="refined-skills-container">
-        <div className="refined-header">
-          <div className="refined-title">技能管理</div>
-          <div className="refined-subtitle">
-            管理您的各类 Agent 技能，支持多引擎切换、树状导航、Markdown 预览及文件编辑。
-          </div>
+  return (
+    <section className="settings-section dcc-skills-shell">
+      <div>
+        <div className="settings-section-title">技能</div>
+        <div className="settings-section-subtitle">
+          浏览不同引擎的全局技能目录，预览 `SKILL.md` 结构化内容，并直接编辑资源文件。
+        </div>
+      </div>
+
+      <div className="dcc-toolbar-row dcc-toolbar-row-wrap">
+        <div className="dcc-segmented">
+          {ENGINE_ORDER.map((item) => (
+            <button
+              key={item}
+              type="button"
+              className={cx("dcc-segmented-button", engine === item && "is-active")}
+              onClick={() => {
+                setEngine(item);
+                setSelectedNodePath(null);
+                setSelectedNodeKind(null);
+              }}
+            >
+              {ENGINE_LABEL[item]}
+            </button>
+          ))}
         </div>
 
-        <div className="refined-toolbar">
-          <div className="refined-segmented">
-            {ENGINE_ORDER.map((item) => (
-              <button
-                key={item}
-                type="button"
-                className={engine === item ? "is-active" : ""}
-                onClick={() => {
-                  setEngine(item);
-                  setSelectedNodePath(null);
-                  setSelectedNodeKind(null);
-                }}
-              >
-                {ENGINE_LABEL[item]}
-              </button>
-            ))}
-          </div>
+        <div className="dcc-search-shell">
+          <Search className="dcc-search-icon h-4 w-4" />
+          <input
+            className="dcc-search-input dcc-search-input-with-icon"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索技能名、描述、路径..."
+          />
+          {query ? (
+            <button type="button" className="dcc-search-clear" onClick={() => setQuery("")} aria-label="清空搜索">
+              <X className="h-4 w-4" />
+            </button>
+          ) : null}
+        </div>
 
-          <div className="refined-search">
-            <Search className="h-4 w-4" style={{ color: '#999' }} />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索技能..."
-            />
-            {query ? (
-              <button type="button" onClick={() => setQuery("")} style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 2, display: 'flex', color: '#999' }}>
-                <X className="h-4 w-4" />
-              </button>
-            ) : null}
-          </div>
-
-          <button type="button" className="refined-button" onClick={() => void refreshSkills()}>
+        <div className="dcc-detail-actions">
+          <button type="button" className="dcc-action-button" onClick={() => void refreshSkills()}>
             <RefreshCw size={14} className={skillStatus === "loading" ? "dcc-spin" : ""} />
             刷新
           </button>
         </div>
+      </div>
 
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <span className="refined-badge">{ENGINE_LABEL[engine]}</span>
-          <span className="refined-badge">{activeWorkspace?.name ?? "无工作区"}</span>
-          <span className="refined-badge">{filteredSkills.length} 个技能</span>
-          <span className="refined-badge">{engineRootPath || "无全局根目录"}</span>
-        </div>
+      <div className="dcc-skills-summary-strip">
+        <span className="dcc-detail-chip">{ENGINE_LABEL[engine]}</span>
+        <span className="dcc-detail-chip">{activeWorkspace?.name ?? "无工作区"}</span>
+        <span className="dcc-detail-chip">{filteredSkills.length} 个技能</span>
+        <span className="dcc-detail-chip" title={engineRootPath ?? undefined}>
+          {engineRootPath || "未发现全局根目录"}
+        </span>
+        {selectedFileIsSkillMarkdown ? <span className="dcc-detail-chip">结构化 SKILL.md 预览</span> : null}
+      </div>
 
-        <div
-          ref={browserContainerRef}
-          className="refined-browser"
-          style={{ gridTemplateColumns: treePaneCollapsed ? '0 1px 1fr' : `${treePaneWidth}px 1px 1fr` }}
-        >
-          <aside style={{ display: treePaneCollapsed ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            <div className="refined-pane-header">
-              <span>技能树</span>
-              <button type="button" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#666' }} onClick={toggleTreePane} title="收起树">
-                <ChevronLeft className="h-4 w-4" />
-              </button>
+      <div
+        ref={browserContainerRef}
+        className={cx(
+          "dcc-skills-browser",
+          isResizingTreePane && "is-resizing",
+          treePaneCollapsed && "is-tree-collapsed"
+        )}
+        style={treePaneCollapsed ? undefined : { gridTemplateColumns: `${treePaneWidth}px 6px minmax(0, 1fr)` }}
+      >
+        <aside className="dcc-skills-list-pane">
+          <div className="dcc-pane-title-row">
+            <div>
+              <div className="dcc-pane-title">技能树</div>
+              <div className="dcc-skill-detail-copy">目录浏览、文件预览与技能入口识别</div>
             </div>
-            <div style={{ padding: '8px 12px', fontSize: '0.75rem', color: '#888', borderBottom: '1px solid #f4f4f5', background: '#fafafa' }}>
-              {engineRootPath || "未指定目录"}
-            </div>
-            <div style={{ overflow: 'auto', flex: 1, padding: '8px 0' }}>
-              {!engineRootPath ? (
-                <div style={{ padding: '20px', textAlign: 'center', color: '#999', fontSize: '0.8125rem' }}>未找到该引擎的全局技能根目录。</div>
-              ) : rootEntries.length === 0 && skillStatus !== "loading" ? (
-                <div style={{ padding: '20px', textAlign: 'center', color: '#999', fontSize: '0.8125rem' }}>未找到技能。</div>
-              ) : (
-                renderDirectory(engineRootPath, 0)
-              )}
-            </div>
-          </aside>
+            <button type="button" className="dcc-pane-icon-btn" onClick={toggleTreePane} title="收起技能树">
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+          </div>
 
-          <button
-            type="button"
-            className="refined-splitter"
-            onPointerDown={handleTreePaneResizeStart}
-            onDoubleClick={toggleTreePane}
-            aria-label="调整技能树宽度"
-            style={{ border: 'none', padding: 0 }}
-          />
+          <div className="dcc-tree-root">{engineRootPath || "未指定技能目录"}</div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, background: '#ffffff' }}>
-            <div className="refined-pane-header">
-              <span>{selectedNodePath ? pathBaseName(selectedNodePath) : "详细信息"}</span>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                {treePaneCollapsed ? (
-                  <button type="button" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 2, color: '#666' }} onClick={toggleTreePane} title="展开树">
-                    <ChevronRight className="h-4 w-4" />
-                  </button>
-                ) : null}
-                {selectedNodeKind === "file" ? (
-                  isEditingSelectedFile ? (
-                    <>
-                      <button
-                        type="button"
-                        className="refined-button"
-                        onClick={() => {
-                          setIsEditingSelectedFile(false);
-                          setSelectedFileDraftContent(selectedFileContent);
-                          setSelectedFileSaveError(null);
-                        }}
-                        disabled={selectedFileSaveLoading}
-                      >
-                        <X size={14} />
-                        取消
-                      </button>
-                      <button
-                        type="button"
-                        className="refined-button primary"
-                        onClick={() => void handleSaveFile()}
-                        disabled={selectedFileSaveLoading}
-                      >
-                        <Save size={14} />
-                        {selectedFileSaveLoading ? "保存中..." : "保存"}
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      className="refined-button"
-                      onClick={() => setIsEditingSelectedFile(true)}
-                    >
-                      <PencilLine size={14} />
-                      编辑
-                    </button>
-                  )
-                ) : null}
+          <div className="dcc-skills-tree-scroll">
+            {!engineRootPath ? (
+              <div className="dcc-empty-state">未找到该引擎的全局技能根目录。</div>
+            ) : rootEntries.length === 0 && skillStatus !== "loading" ? (
+              <div className="dcc-empty-state">当前目录下没有可浏览的技能文件。</div>
+            ) : (
+              renderDirectory(engineRootPath, 0)
+            )}
+          </div>
+        </aside>
+
+        <button
+          type="button"
+          className="dcc-skills-splitter"
+          onPointerDown={handleTreePaneResizeStart}
+          onDoubleClick={toggleTreePane}
+          aria-label="调整技能树宽度"
+        />
+
+        <section className="dcc-skill-detail-pane">
+          <div className="dcc-pane-title-row">
+            <div>
+              <div className="dcc-pane-title">{selectedNodePath ? pathBaseName(selectedNodePath) : "详细信息"}</div>
+              <div className="dcc-skill-detail-copy">
+                {selectedNodePath ? normalizePath(selectedNodePath) : "请选择左侧技能目录或文件"}
               </div>
             </div>
 
-            <div className="refined-content-area">
-              {selectedSkill ? (
-                <div className="refined-detail-header">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span className="refined-detail-title">{selectedSkill.displayName ?? selectedSkill.name}</span>
-                    <span className="refined-badge">{selectedNodeKind === "dir" ? "目录" : "文件"}</span>
-                    {selectedSkill.source ? <span className="refined-badge">{selectedSkill.source}</span> : null}
-                    {selectedSkill.scope ? <span className="refined-badge">{selectedSkill.scope}</span> : null}
-                  </div>
-                  <div className="refined-detail-meta">{selectedNodePath}</div>
-                  <div className="refined-detail-meta">
-                    技能根目录: {normalizePath(pathParent(selectedSkill.path)) || "不可用"}
-                  </div>
-                  {selectedSkill.description ? (
-                    <div className="refined-detail-desc">{selectedSkill.description}</div>
-                  ) : null}
-                </div>
-              ) : null}
-
-              {selectedNodeKind === "dir" ? (
-                <div className="refined-empty">已选择目录。当前加载了 {selectedDirectoryChildCount} 个子项目。</div>
+            <div className="dcc-detail-actions">
+              {treePaneCollapsed ? (
+                <button type="button" className="dcc-pane-icon-btn" onClick={toggleTreePane} title="展开技能树">
+                  <ChevronRight className="h-4 w-4" />
+                </button>
               ) : null}
 
               {selectedNodeKind === "file" ? (
-                <>
-                  {selectedFileSaveError ? <div style={{ color: '#ef4444', fontSize: '0.8125rem' }}>{selectedFileSaveError}</div> : null}
-                  {selectedFileContentError ? <div style={{ color: '#ef4444', fontSize: '0.8125rem' }}>{selectedFileContentError}</div> : null}
-
-                  {selectedFileContentLoading ? (
-                    <div className="refined-empty">正在加载文件内容...</div>
-                  ) : imagePreviewSrc ? (
-                    <div style={{ display: 'flex', justifyContent: 'center', padding: '20px', background: '#f9f9f9', borderRadius: '8px' }}>
-                      <img src={imagePreviewSrc} alt="" style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain' }} />
-                    </div>
-                  ) : isEditingSelectedFile ? (
-                    <textarea
-                      className="refined-textarea"
-                      value={selectedFileDraftContent}
-                      onChange={(event) => setSelectedFileDraftContent(event.target.value)}
-                    />
-                  ) : MARKDOWN_EXTENSIONS.has(extName(selectedNodePath ?? "")) ? (
-                    <div className="dcc-markdown-preview" style={{ padding: '0 8px' }}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedFileContent}</ReactMarkdown>
-                    </div>
-                  ) : (
-                    <pre className="refined-code-block dcc-code-preview">{selectedFileContent || "空文件。"}</pre>
-                  )}
-                </>
+                isEditingSelectedFile ? (
+                  <>
+                    <button
+                      type="button"
+                      className="dcc-action-button"
+                      onClick={() => {
+                        setIsEditingSelectedFile(false);
+                        setSelectedFileDraftContent(selectedFileContent);
+                        setSelectedFileSaveError(null);
+                      }}
+                      disabled={selectedFileSaveLoading}
+                    >
+                      <X size={14} />
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      className="dcc-action-button"
+                      onClick={() => void handleSaveFile()}
+                      disabled={selectedFileSaveLoading || !selectedFileHasUnsavedChanges}
+                    >
+                      <Save size={14} />
+                      {selectedFileSaveLoading ? "保存中..." : "保存"}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="dcc-action-button"
+                    onClick={() => setIsEditingSelectedFile(true)}
+                  >
+                    <PencilLine size={14} />
+                    编辑
+                  </button>
+                )
               ) : null}
-
-              {!selectedNodePath ? <div className="refined-empty">请在左侧选择一个技能文件夹或文件。</div> : null}
             </div>
           </div>
-        </div>
+
+          {selectedSkill ? (
+            <div className="dcc-skill-detail-panel">
+              <div className="dcc-skill-detail-headline">
+                <div className="dcc-skill-detail-name">{selectedSkill.displayName ?? selectedSkill.name}</div>
+                <span className="dcc-detail-chip">{selectedNodeKind === "dir" ? "目录" : "文件"}</span>
+                {selectedSkill.source ? <span className="dcc-detail-chip">{selectedSkill.source}</span> : null}
+                {selectedSkill.scope ? <span className="dcc-detail-chip">{selectedSkill.scope}</span> : null}
+              </div>
+
+              <div className="dcc-skill-detail-meta">
+                <span className="dcc-detail-chip" title={selectedNodePath ?? undefined}>
+                  当前路径: {selectedNodePath ? pathBaseName(selectedNodePath) : "未选择"}
+                </span>
+                <span className="dcc-detail-chip" title={normalizePath(pathParent(selectedSkill.path)) || undefined}>
+                  技能根目录: {normalizePath(pathParent(selectedSkill.path)) || "不可用"}
+                </span>
+              </div>
+
+              {selectedSkill.description ? (
+                <div className="dcc-skill-detail-description">{selectedSkill.description}</div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {selectedNodeKind === "dir" ? (
+            <div className="dcc-skill-directory-state">
+              <div className="dcc-skill-directory-state-title">目录已选中</div>
+              <div className="dcc-skill-directory-state-copy">
+                当前目录加载了 {selectedDirectoryChildCount} 个子项目。继续从左侧选择 `SKILL.md`、资源文件或子目录查看详情。
+              </div>
+            </div>
+          ) : null}
+
+          {selectedNodeKind === "file" ? (
+            <>
+              {selectedFileSaveError ? <div className="dcc-inline-error">{selectedFileSaveError}</div> : null}
+              {selectedFileContentError ? <div className="dcc-inline-error">{selectedFileContentError}</div> : null}
+
+              {selectedFileContentLoading ? (
+                <div className="dcc-empty-state">正在加载文件内容...</div>
+              ) : imagePreviewSrc ? (
+                <div className="dcc-skill-image-stage">
+                  <img src={imagePreviewSrc} alt="" className="dcc-skill-image-preview" />
+                </div>
+              ) : isEditingSelectedFile ? (
+                <textarea
+                  className="dcc-skill-editor"
+                  value={selectedFileDraftContent}
+                  onChange={(event) => setSelectedFileDraftContent(event.target.value)}
+                />
+              ) : selectedFileIsSkillMarkdown ? (
+                <SkillMarkdownPreview content={selectedFileContent} />
+              ) : selectedFileIsMarkdown ? (
+                <div className="dcc-markdown-preview dcc-skill-preview-frame">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedFileContent}</ReactMarkdown>
+                </div>
+              ) : (
+                <pre className="dcc-code-preview dcc-skill-code-frame">{selectedFileContent || "空文件。"}</pre>
+              )}
+            </>
+          ) : null}
+
+          {!selectedNodePath ? (
+            <div className="dcc-empty-state">请先从左侧技能树选择一个目录或文件。</div>
+          ) : null}
+        </section>
       </div>
     </section>
   );

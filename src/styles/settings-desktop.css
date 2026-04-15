@@ -96,6 +96,10 @@
   padding: 22px 30px 44px;
 }
 
+.dcc-settings-scroll.is-full-width {
+  width: min(1480px, 100%);
+}
+
 .settings-body.is-sidebar-collapsed {
   grid-template-columns: 50px minmax(0, 1fr);
 }
@@ -983,10 +987,26 @@
   border-color: rgba(15, 23, 42, 0.22);
 }
 
+.dcc-skills-shell {
+  width: 100%;
+  max-width: none;
+  min-height: 0;
+  gap: 16px;
+}
+
 .dcc-skills-browser {
   display: grid;
-  grid-template-columns: minmax(260px, 340px) 6px 1fr;
-  gap: 4px;
+  grid-template-columns: minmax(260px, 340px) 6px minmax(0, 1fr);
+  gap: 0;
+  min-height: clamp(520px, calc(100vh - 260px), 780px);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  box-shadow:
+    0 18px 40px rgba(15, 23, 42, 0.07),
+    inset 0 1px 0 rgba(255, 255, 255, 0.78);
   overflow: hidden;
 }
 
@@ -995,23 +1015,28 @@
 }
 
 .dcc-skills-browser.is-tree-collapsed {
+  grid-template-columns: 0 0 minmax(0, 1fr);
   gap: 0;
 }
 
 .dcc-skills-list-pane,
 .dcc-skill-detail-pane {
   min-height: 420px;
-  padding: 18px;
+  padding: 20px;
 }
 
 .dcc-skills-list-pane {
+  position: relative;
   border-right: 1px solid rgba(15, 23, 42, 0.06);
+  background:
+    linear-gradient(180deg, rgba(247, 249, 252, 0.94), rgba(241, 245, 249, 0.92));
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
 
 .dcc-skills-browser.is-tree-collapsed .dcc-skills-list-pane {
+  width: 0;
   min-width: 0;
   border: 0;
   border-radius: 0;
@@ -1032,14 +1057,16 @@
 
 .dcc-skills-tree-scroll {
   margin-top: 0;
+  flex: 1;
+  min-height: 0;
   overflow: auto;
-  padding-top: 10px;
+  padding: 14px 4px 10px 0;
 }
 
 .dcc-skills-splitter {
   width: 6px;
   border: 0;
-  background: transparent;
+  background: linear-gradient(180deg, rgba(148, 163, 184, 0.08), rgba(148, 163, 184, 0.16));
   padding: 0;
   position: relative;
   cursor: col-resize;
@@ -1064,6 +1091,22 @@
 
 .dcc-skills-browser.is-resizing .dcc-skills-splitter::before {
   background: rgba(15, 23, 42, 0.42);
+}
+
+.dcc-skills-browser.is-tree-collapsed .dcc-skills-splitter {
+  width: 0;
+  pointer-events: none;
+  background: transparent;
+}
+
+.dcc-skill-detail-pane {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.94));
 }
 
 .dcc-pane-title-row {
@@ -1170,6 +1213,35 @@
   line-height: 1.55;
 }
 
+.dcc-skill-detail-panel,
+.dcc-skill-directory-state {
+  position: relative;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 18px;
+  padding: 16px 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 247, 250, 0.9));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.dcc-skill-directory-state {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dcc-skill-directory-state-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.dcc-skill-directory-state-copy {
+  font-size: 13px;
+  line-height: 1.65;
+  color: rgba(15, 23, 42, 0.68);
+}
+
 .dcc-empty-state {
   padding: 16px;
   border-radius: 14px;
@@ -1177,6 +1249,42 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.dcc-skill-image-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  padding: 20px;
+  border-radius: 20px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background:
+    linear-gradient(135deg, rgba(241, 245, 249, 0.94), rgba(255, 255, 255, 0.98));
+  overflow: hidden;
+}
+
+.dcc-skill-image-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
+  background-size: 22px 22px;
+  pointer-events: none;
+}
+
+.dcc-skill-image-preview {
+  position: relative;
+  z-index: 1;
+  display: block;
+  max-width: 100%;
+  max-height: 560px;
+  object-fit: contain;
+  border-radius: 16px;
+  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.16);
 }
 
 .dcc-inline-error {
@@ -1475,6 +1583,291 @@
   background: #f7f7fb;
 }
 
+.dcc-skill-editor,
+.dcc-skill-preview-frame,
+.dcc-skill-code-frame {
+  margin-top: 0;
+}
+
+.dcc-skill-editor {
+  min-height: 0;
+  flex: 1;
+  resize: vertical;
+  background:
+    linear-gradient(180deg, rgba(250, 251, 255, 0.96), rgba(244, 247, 250, 0.92));
+}
+
+.dcc-skill-preview-frame,
+.dcc-skill-code-frame {
+  min-height: 0;
+}
+
+.dcc-skill-doc {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.dcc-skill-doc-hero {
+  position: relative;
+  overflow: hidden;
+  padding: 24px;
+  border-radius: 22px;
+  border: 1px solid rgba(59, 130, 246, 0.12);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.12), transparent 32%),
+    linear-gradient(135deg, rgba(245, 249, 255, 0.98), rgba(255, 255, 255, 0.96));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.82),
+    0 14px 34px rgba(15, 23, 42, 0.06);
+}
+
+.dcc-skill-doc-hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(transparent calc(100% - 1px), rgba(148, 163, 184, 0.12) calc(100% - 1px)),
+    linear-gradient(90deg, transparent calc(100% - 1px), rgba(148, 163, 184, 0.09) calc(100% - 1px));
+  background-size: 28px 28px;
+  opacity: 0.3;
+  pointer-events: none;
+}
+
+.dcc-skill-doc-kicker,
+.dcc-skill-doc-title-row,
+.dcc-skill-doc-description,
+.dcc-skill-doc-metadata,
+.dcc-skill-doc-intro {
+  position: relative;
+  z-index: 1;
+}
+
+.dcc-skill-doc-kicker {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.dcc-skill-doc-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.dcc-skill-doc-title {
+  margin: 0;
+  font-size: clamp(28px, 4vw, 40px);
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.dcc-skill-doc-description {
+  max-width: 760px;
+  margin: 14px 0 0;
+  font-size: 14px;
+  line-height: 1.75;
+  color: rgba(15, 23, 42, 0.7);
+}
+
+.dcc-skill-doc-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.dcc-skill-doc-meta-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(12px);
+  color: rgba(15, 23, 42, 0.62);
+  font-size: 12px;
+}
+
+.dcc-skill-doc-meta-pill strong {
+  color: #0f172a;
+  font-weight: 700;
+}
+
+.dcc-skill-doc-intro {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.dcc-skill-doc-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.dcc-skill-doc-card {
+  position: relative;
+  overflow: hidden;
+  padding: 20px 20px 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 248, 251, 0.94));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 10px 28px rgba(15, 23, 42, 0.05);
+}
+
+.dcc-skill-doc-card-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #eff6ff, #dbeafe);
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.dcc-skill-doc-card-title {
+  margin: 14px 0 0;
+  font-size: 18px;
+  line-height: 1.2;
+  font-weight: 750;
+  color: #0f172a;
+}
+
+.dcc-skill-doc-card-body {
+  margin-top: 14px;
+}
+
+.dcc-skill-doc-paragraph {
+  margin: 0;
+  color: rgba(15, 23, 42, 0.74);
+  font-size: 13px;
+  line-height: 1.78;
+}
+
+.dcc-skill-doc-paragraph + .dcc-skill-doc-paragraph {
+  margin-top: 10px;
+}
+
+.dcc-skill-doc-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: rgba(15, 23, 42, 0.74);
+  font-size: 13px;
+  line-height: 1.72;
+}
+
+.dcc-skill-doc-list li + li {
+  margin-top: 6px;
+}
+
+.dcc-skill-doc-list.is-ordered {
+  list-style: decimal;
+}
+
+.dcc-skill-doc-list:not(.is-ordered) {
+  list-style: disc;
+}
+
+.dcc-skill-doc-strong {
+  color: #0f172a;
+  font-weight: 700;
+}
+
+.dcc-skill-doc-em {
+  color: #334155;
+  font-style: italic;
+}
+
+.dcc-skill-doc-link {
+  color: #2563eb;
+  text-decoration: underline;
+  text-decoration-color: rgba(37, 99, 235, 0.28);
+  text-underline-offset: 3px;
+}
+
+.dcc-skill-doc-quote {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border-left: 3px solid rgba(37, 99, 235, 0.24);
+  border-radius: 0 14px 14px 0;
+  background: rgba(239, 246, 255, 0.8);
+  color: #1e3a8a;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.dcc-skill-doc-subheading {
+  margin: 16px 0 8px;
+  font-size: 14px;
+  font-weight: 750;
+  line-height: 1.4;
+  color: #0f172a;
+}
+
+.dcc-skill-doc-microheading {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.dcc-skill-doc-inline-code {
+  padding: 0.18rem 0.42rem;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.06);
+  font-size: 12px;
+  color: #0f172a;
+  font-family: var(--font-mono);
+}
+
+.dcc-skill-doc-code-block {
+  margin: 12px 0 0;
+  overflow: auto;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: #0f172a;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.dcc-skill-doc-code-block-inner {
+  color: #e2e8f0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.dcc-skill-doc-rule {
+  margin: 18px 0;
+  border: 0;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+
 @keyframes dcc-spin {
   from {
     transform: rotate(0deg);
@@ -1496,12 +1889,34 @@
     display: none;
   }
 
+  .dcc-skills-browser,
+  .dcc-skills-browser.is-tree-collapsed {
+    min-height: auto;
+    grid-template-columns: 1fr;
+  }
+
+  .dcc-skills-list-pane {
+    border-right: 0;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+  }
+
+  .dcc-skills-browser.is-tree-collapsed .dcc-skills-list-pane {
+    display: none;
+  }
+
   .dcc-mcp-runtime-grid {
     grid-template-columns: 1fr;
   }
 
   .dcc-settings-scroll {
     padding: 18px 18px 34px;
+  }
+
+  .dcc-skill-doc-hero,
+  .dcc-skill-doc-card,
+  .dcc-skill-detail-panel,
+  .dcc-skill-directory-state {
+    padding: 18px;
   }
 }
 
