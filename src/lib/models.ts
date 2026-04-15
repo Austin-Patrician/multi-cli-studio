@@ -126,6 +126,13 @@ export interface WorkspaceRef {
 
 export type TerminalCliId = AgentId | "auto";
 
+export interface TerminalCliContextBoundary {
+  lastSeenMessageId: string | null;
+  lastSeenAt: string | null;
+  lastCompactedSummaryVersion: number | null;
+  workingMemorySnapshot?: WorkingMemory | null;
+}
+
 export interface TerminalTab {
   id: string;
   title: string;
@@ -137,6 +144,7 @@ export interface TerminalTab {
   modelOverrides: Partial<Record<AgentId, string>>;
   permissionOverrides: Partial<Record<AgentId, string>>;
   transportSessions: Partial<Record<AgentId, AgentTransportSession>>;
+  contextBoundariesByCli: Partial<Record<AgentId, TerminalCliContextBoundary>>;
   draftPrompt: string;
   status: "idle" | "streaming";
   lastActiveAt: string;
@@ -1174,6 +1182,26 @@ export interface FileMentionCandidate {
   absolutePath?: string | null;
 }
 
+export interface WorkspaceTextSearchMatch {
+  line: number;
+  column: number;
+  endColumn: number;
+  preview: string;
+}
+
+export interface WorkspaceTextSearchFileResult {
+  path: string;
+  matchCount: number;
+  matches: WorkspaceTextSearchMatch[];
+}
+
+export interface WorkspaceTextSearchResponse {
+  files: WorkspaceTextSearchFileResult[];
+  fileCount: number;
+  matchCount: number;
+  limitHit: boolean;
+}
+
 export interface CliSkillItem {
   name: string;
   displayName?: string | null;
@@ -1188,10 +1216,54 @@ export interface WorkspacePickResult {
   rootPath: string;
 }
 
+export interface WorkspaceTreeEntry {
+  name: string;
+  path: string;
+  kind: "file" | "directory";
+  hasChildren: boolean;
+}
+
+export type SettingsEngineType = "claude" | "codex" | "gemini";
+
+export interface SettingsEngineStatus {
+  engineType: SettingsEngineType;
+  installed: boolean;
+  version: string | null;
+  binPath: string | null;
+  error: string | null;
+}
+
+export interface GlobalMcpServerEntry {
+  name: string;
+  enabled: boolean;
+  transport?: string | null;
+  command?: string | null;
+  url?: string | null;
+  argsCount: number;
+  source: "claude_json" | "ccgui_config";
+}
+
+export interface ExternalDirectoryEntry {
+  name: string;
+  path: string;
+  kind: "dir" | "file";
+}
+
+export interface ExternalTextFile {
+  exists: boolean;
+  content: string;
+  truncated: boolean;
+}
+
 export interface GitFileChange {
   path: string;
   status: "added" | "modified" | "deleted" | "renamed";
   previousPath?: string | null;
+}
+
+export interface GitFileStatus extends GitFileChange {
+  additions: number;
+  deletions: number;
 }
 
 export interface GitFileDiff {
@@ -1208,8 +1280,216 @@ export interface GitFileDiff {
 export interface GitPanelData {
   isGitRepo: boolean;
   branch: string;
+  fileStatus: string;
+  stagedFiles: GitFileStatus[];
+  unstagedFiles: GitFileStatus[];
   recentChanges: GitFileChange[];
 }
+
+export interface GitLogEntry {
+  sha: string;
+  summary: string;
+  author: string;
+  timestamp: number;
+}
+
+export interface GitLogResponse {
+  total: number;
+  entries: GitLogEntry[];
+  ahead: number;
+  behind: number;
+  aheadEntries: GitLogEntry[];
+  behindEntries: GitLogEntry[];
+  upstream: string | null;
+}
+
+export interface GitHistoryCommit {
+  sha: string;
+  shortSha: string;
+  summary: string;
+  message: string;
+  author: string;
+  authorEmail: string;
+  timestamp: number;
+  parents: string[];
+  refs: string[];
+}
+
+export interface GitHistoryResponse {
+  snapshotId: string;
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  commits: GitHistoryCommit[];
+}
+
+export interface GitCommitFileChange {
+  path: string;
+  oldPath?: string | null;
+  status: string;
+  additions: number;
+  deletions: number;
+  isBinary?: boolean;
+  isImage?: boolean;
+  diff: string;
+  lineCount: number;
+  truncated: boolean;
+}
+
+export interface GitCommitDetails {
+  sha: string;
+  summary: string;
+  message: string;
+  author: string;
+  authorEmail: string;
+  committer: string;
+  committerEmail: string;
+  authorTime: number;
+  commitTime: number;
+  parents: string[];
+  files: GitCommitFileChange[];
+  totalAdditions: number;
+  totalDeletions: number;
+}
+
+export interface GitBranchListItem {
+  name: string;
+  isCurrent: boolean;
+  isRemote: boolean;
+  remote?: string | null;
+  upstream?: string | null;
+  lastCommit: number;
+  headSha?: string | null;
+  ahead: number;
+  behind: number;
+}
+
+export interface GitBranchListResponse {
+  localBranches: GitBranchListItem[];
+  remoteBranches: GitBranchListItem[];
+  currentBranch?: string | null;
+}
+
+export interface GitHubUser {
+  login: string;
+}
+
+export interface GitHubIssue {
+  number: number;
+  title: string;
+  url: string;
+  updatedAt: string;
+}
+
+export interface GitHubIssuesResponse {
+  total: number;
+  issues: GitHubIssue[];
+}
+
+export interface GitHubPullRequest {
+  number: number;
+  title: string;
+  url: string;
+  updatedAt: string;
+  createdAt: string;
+  body: string;
+  headRefName: string;
+  baseRefName: string;
+  isDraft: boolean;
+  author: GitHubUser | null;
+}
+
+export interface GitHubPullRequestsResponse {
+  total: number;
+  pullRequests: GitHubPullRequest[];
+}
+
+export type LocalUsageUsageData = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheWriteTokens: number;
+  cacheReadTokens: number;
+  totalTokens: number;
+};
+
+export type LocalUsageSessionSummary = {
+  sessionId: string;
+  sessionIdAliases?: string[];
+  timestamp: number;
+  model: string;
+  usage: LocalUsageUsageData;
+  cost: number;
+  summary?: string | null;
+  source?: string | null;
+  provider?: string | null;
+  fileSizeBytes?: number;
+  modifiedLines?: number;
+};
+
+export type LocalUsageDailyUsage = {
+  date: string;
+  sessions: number;
+  usage: LocalUsageUsageData;
+  cost: number;
+  modelsUsed: string[];
+};
+
+export type LocalUsageModelUsage = {
+  model: string;
+  totalCost: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  sessionCount: number;
+};
+
+export type LocalUsageEngineUsage = {
+  engine: string;
+  count: number;
+};
+
+export type LocalUsageDailyCodeChange = {
+  date: string;
+  modifiedLines: number;
+};
+
+export type LocalUsageWeekData = {
+  sessions: number;
+  cost: number;
+  tokens: number;
+};
+
+export type LocalUsageTrends = {
+  sessions: number;
+  cost: number;
+  tokens: number;
+};
+
+export type LocalUsageWeeklyComparison = {
+  currentWeek: LocalUsageWeekData;
+  lastWeek: LocalUsageWeekData;
+  trends: LocalUsageTrends;
+};
+
+export type LocalUsageStatistics = {
+  projectPath: string;
+  projectName: string;
+  totalSessions: number;
+  totalUsage: LocalUsageUsageData;
+  estimatedCost: number;
+  sessions: LocalUsageSessionSummary[];
+  dailyUsage: LocalUsageDailyUsage[];
+  weeklyComparison: LocalUsageWeeklyComparison;
+  byModel: LocalUsageModelUsage[];
+  totalEngineUsageCount: number;
+  engineUsage: LocalUsageEngineUsage[];
+  aiCodeModifiedLines: number;
+  dailyCodeChanges: LocalUsageDailyCodeChange[];
+  lastUpdated: number;
+};
 
 export type AgentTransportKind =
   | "codex-app-server"

@@ -1,289 +1,8 @@
-import { Link, matchPath, useLocation } from "react-router-dom";
-import { useEffect, useId, useState, type ComponentType } from "react";
-
-/**
- * MULTI-CLI STUDIO SIDEBAR
- * ------------------------
- * Design Direction: "Circuit Pulse" Light Mode
- * - Light theme matching original aesthetic
- * - Animated brand logo with emerald pulse
- * - Collapsible with icon-only mode
- * - Minimal micro-interactions
- */
-
-// --- Brand Logo with Circuit Pulse Animation ---
-
-const BrandLogo = ({ collapsed }: { collapsed: boolean }) => {
-  const gradientId = useId();
-  const surfaceId = useId();
-  const clipId = useId();
-  const terminalGradientId = useId();
-
-  if (collapsed) {
-    return (
-      <div className="relative h-[84px] w-full overflow-hidden">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_28%,rgba(56,189,248,0.2),transparent_46%),linear-gradient(180deg,#0f172a_0%,#111827_100%)]" />
-        <svg viewBox="0 0 200 200" className="absolute inset-0 h-full w-full">
-          <defs>
-            <linearGradient id={surfaceId} x1="18%" y1="14%" x2="84%" y2="88%">
-              <stop offset="0%" stopColor="#111c31" />
-              <stop offset="100%" stopColor="#0b1220" />
-            </linearGradient>
-            <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#38bdf8" />
-              <stop offset="100%" stopColor="#818cf8" />
-            </linearGradient>
-            <clipPath id={clipId}>
-              <rect x="56" y="68" width="88" height="58" rx="4" />
-            </clipPath>
-          </defs>
-
-          <style>
-            {`
-              @keyframes sidebarBrandCodeScroll {
-                0% { transform: translateY(0); opacity: 0; }
-                12% { opacity: 1; }
-                88% { opacity: 1; }
-                100% { transform: translateY(-18px); opacity: 0; }
-              }
-
-              @keyframes sidebarBrandBlink {
-                0%, 100% { opacity: 0.35; }
-                50% { opacity: 1; }
-              }
-
-              @keyframes sidebarBrandRotate {
-                from { transform: rotate(0deg); }
-                to { transform: rotate(360deg); }
-              }
-
-              .sidebar-brand-code-line {
-                animation: sidebarBrandCodeScroll 3s infinite linear;
-              }
-
-              .sidebar-brand-line-1 { animation-delay: 0s; }
-              .sidebar-brand-line-2 { animation-delay: 1s; }
-              .sidebar-brand-line-3 { animation-delay: 2s; }
-
-              .sidebar-brand-agent-node {
-                animation: sidebarBrandBlink 2.2s infinite ease-in-out;
-              }
-
-              .sidebar-brand-node-1 { animation-delay: 0s; }
-              .sidebar-brand-node-2 { animation-delay: 0.7s; }
-              .sidebar-brand-node-3 { animation-delay: 1.4s; }
-
-              .sidebar-brand-cron-ring {
-                transform-origin: center;
-                animation: sidebarBrandRotate 18s infinite linear;
-              }
-            `}
-          </style>
-
-          <rect x="26" y="26" width="148" height="148" rx="42" fill={`url(#${surfaceId})`} />
-          <circle cx="100" cy="100" r="66" stroke="#1e293b" strokeWidth="2" fill="none" />
-
-          <g className="sidebar-brand-cron-ring">
-            <line x1="100" y1="34" x2="100" y2="46" stroke="#38bdf8" strokeWidth="4" strokeLinecap="round" />
-            <line x1="166" y1="100" x2="154" y2="100" stroke="#38bdf8" strokeWidth="2" strokeLinecap="round" />
-            <line x1="100" y1="166" x2="100" y2="154" stroke="#38bdf8" strokeWidth="2" strokeLinecap="round" />
-            <line x1="34" y1="100" x2="46" y2="100" stroke="#38bdf8" strokeWidth="2" strokeLinecap="round" />
-          </g>
-
-          <rect x="42" y="52" width="116" height="86" rx="12" fill="#1e293b" stroke={`url(#${gradientId})`} strokeWidth="2.4" />
-          <path d="M54 52H146C152.627 52 158 57.373 158 64V66H42V64C42 57.373 47.373 52 54 52Z" fill="#334155" />
-          <circle cx="54" cy="59" r="3" fill="#ef4444" />
-          <circle cx="64" cy="59" r="3" fill="#f59e0b" />
-          <circle cx="74" cy="59" r="3" fill="#10b981" />
-
-          <g clipPath={`url(#${clipId})`}>
-            <g className="sidebar-brand-code-line sidebar-brand-line-1">
-              <rect x="68" y="106" width="38" height="5" rx="2.5" fill="#38bdf8" opacity="0.72" />
-            </g>
-            <g className="sidebar-brand-code-line sidebar-brand-line-2">
-              <rect x="68" y="116" width="56" height="5" rx="2.5" fill="#818cf8" opacity="0.72" />
-            </g>
-            <g className="sidebar-brand-code-line sidebar-brand-line-3">
-              <rect x="68" y="126" width="28" height="5" rx="2.5" fill="#38bdf8" opacity="0.72" />
-            </g>
-          </g>
-
-          <text
-            x="60"
-            y="88"
-            fill="#38bdf8"
-            fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-            fontSize="14"
-            fontWeight="700"
-          >
-            &gt;_
-          </text>
-        </svg>
-      </div>
-    );
-  }
-
-  return (
-    <div className="relative h-[156px] w-full overflow-hidden">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_22%,rgba(56,189,248,0.2),transparent_34%),radial-gradient(circle_at_18%_100%,rgba(129,140,248,0.14),transparent_40%),linear-gradient(180deg,#08101d_0%,#0f172a_58%,#121b2e_100%)]" />
-      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(148,163,184,0.08)_0,rgba(148,163,184,0)_24px),linear-gradient(90deg,rgba(148,163,184,0.03)_1px,transparent_1px)] bg-[size:100%_24px,20px_100%]" />
-      <svg viewBox="0 0 320 220" className="absolute inset-0 h-full w-full">
-        <defs>
-          <linearGradient id={terminalGradientId} x1="16%" y1="10%" x2="82%" y2="88%">
-            <stop offset="0%" stopColor="#162235" />
-            <stop offset="100%" stopColor="#0f172a" />
-          </linearGradient>
-          <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#38bdf8" />
-            <stop offset="100%" stopColor="#818cf8" />
-          </linearGradient>
-          <clipPath id={clipId}>
-            <rect x="92" y="72" width="136" height="58" rx="8" />
-          </clipPath>
-        </defs>
-
-        <style>
-          {`
-            @keyframes sidebarBrandCodeScroll {
-              0% { transform: translateY(0); opacity: 0; }
-              12% { opacity: 1; }
-              88% { opacity: 1; }
-              100% { transform: translateY(-18px); opacity: 0; }
-            }
-
-            @keyframes sidebarBrandBlink {
-              0%, 100% { opacity: 0.35; }
-              50% { opacity: 1; }
-            }
-
-            @keyframes sidebarBrandRotate {
-              from { transform: rotate(0deg); }
-              to { transform: rotate(360deg); }
-            }
-
-            .sidebar-brand-code-line {
-              animation: sidebarBrandCodeScroll 3.2s infinite linear;
-            }
-
-            .sidebar-brand-line-1 { animation-delay: 0s; }
-            .sidebar-brand-line-2 { animation-delay: 0.9s; }
-            .sidebar-brand-line-3 { animation-delay: 1.8s; }
-
-            .sidebar-brand-agent-node {
-              animation: sidebarBrandBlink 2.2s infinite ease-in-out;
-            }
-
-            .sidebar-brand-node-1 { animation-delay: 0s; }
-            .sidebar-brand-node-2 { animation-delay: 0.7s; }
-            .sidebar-brand-node-3 { animation-delay: 1.4s; }
-
-            .sidebar-brand-cron-ring {
-              transform-origin: center;
-              animation: sidebarBrandRotate 22s infinite linear;
-            }
-          `}
-        </style>
-
-        <circle cx="160" cy="96" r="82" stroke="#20324a" strokeWidth="2" fill="none" opacity="0.9" />
-        <circle cx="160" cy="96" r="62" stroke="#1e293b" strokeWidth="1.5" fill="none" opacity="0.9" />
-
-        <g className="sidebar-brand-cron-ring">
-          <line x1="160" y1="14" x2="160" y2="30" stroke="#38bdf8" strokeWidth="4.5" strokeLinecap="round" />
-          <line x1="242" y1="96" x2="226" y2="96" stroke="#38bdf8" strokeWidth="2.5" strokeLinecap="round" />
-          <line x1="160" y1="178" x2="160" y2="162" stroke="#38bdf8" strokeWidth="2.5" strokeLinecap="round" />
-          <line x1="78" y1="96" x2="94" y2="96" stroke="#38bdf8" strokeWidth="2.5" strokeLinecap="round" />
-        </g>
-
-        <path d="M34 28H96" stroke="rgba(148,163,184,0.24)" strokeWidth="1.4" strokeLinecap="round" />
-        <path d="M224 192H286" stroke="rgba(148,163,184,0.16)" strokeWidth="1.4" strokeLinecap="round" />
-
-        <rect x="74" y="48" width="172" height="98" rx="22" fill={`url(#${terminalGradientId})`} stroke={`url(#${gradientId})`} strokeWidth="2.4" />
-        <path d="M96 48H224C236.15 48 246 57.85 246 70V74H74V70C74 57.85 83.85 48 96 48Z" fill="#334155" />
-        <circle cx="94" cy="61" r="3.5" fill="#ef4444" />
-        <circle cx="106" cy="61" r="3.5" fill="#f59e0b" />
-        <circle cx="118" cy="61" r="3.5" fill="#10b981" />
-
-        <text
-          x="96"
-          y="94"
-          fill="#38bdf8"
-          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-          fontSize="16"
-          fontWeight="700"
-        >
-          &gt;_
-        </text>
-
-        <g clipPath={`url(#${clipId})`}>
-          <g className="sidebar-brand-code-line sidebar-brand-line-1">
-            <rect x="126" y="100" width="58" height="5.5" rx="2.75" fill="#38bdf8" opacity="0.76" />
-          </g>
-          <g className="sidebar-brand-code-line sidebar-brand-line-2">
-            <rect x="126" y="112" width="82" height="5.5" rx="2.75" fill="#818cf8" opacity="0.76" />
-          </g>
-          <g className="sidebar-brand-code-line sidebar-brand-line-3">
-            <rect x="126" y="124" width="42" height="5.5" rx="2.75" fill="#38bdf8" opacity="0.76" />
-          </g>
-        </g>
-
-        <path d="M160 146L160 168" stroke="#475569" strokeWidth="1.7" strokeDasharray="4 4" />
-        <path d="M160 146L108 176" stroke="#475569" strokeWidth="1.7" strokeDasharray="4 4" />
-        <path d="M160 146L216 176" stroke="#475569" strokeWidth="1.7" strokeDasharray="4 4" />
-
-        <circle className="sidebar-brand-agent-node sidebar-brand-node-2" cx="108" cy="178" r="7.5" fill="#818cf8" />
-        <circle className="sidebar-brand-agent-node sidebar-brand-node-1" cx="160" cy="178" r="7.5" fill="#38bdf8" />
-        <circle className="sidebar-brand-agent-node sidebar-brand-node-3" cx="216" cy="178" r="7.5" fill="#c084fc" />
-
-        <text
-          x="76"
-          y="206"
-          fill="#818cf8"
-          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-          fontSize="11"
-          fontWeight="700"
-          letterSpacing="0.18em"
-        >
-          CDX
-        </text>
-        <text
-          x="146"
-          y="206"
-          fill="#38bdf8"
-          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-          fontSize="11"
-          fontWeight="700"
-          letterSpacing="0.18em"
-        >
-          CL
-        </text>
-        <text
-          x="204"
-          y="206"
-          fill="#c084fc"
-          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-          fontSize="11"
-          fontWeight="700"
-          letterSpacing="0.18em"
-        >
-          GEM
-        </text>
-      </svg>
-      <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-sky-300/40 to-transparent" />
-    </div>
-  );
-};
+import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { useStore } from "../lib/store";
 
 // --- Navigation Icons ---
-
-const IconDashboard = () => (
-  <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5">
-    <rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
-    <rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
-    <rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
-    <path d="M14 17.5H21" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-    <path d="M17.5 14V21" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-  </svg>
-);
 
 const IconTerminal = () => (
   <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5">
@@ -341,6 +60,26 @@ const IconChevron = ({ collapsed }: { collapsed: boolean }) => (
   </svg>
 );
 
+const IconPlus = () => (
+  <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4">
+    <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+  </svg>
+);
+
+const IconCopy = () => (
+  <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4">
+    <rect x="8" y="8" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.6" />
+    <path d="M6 14H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+  </svg>
+);
+
+const IconSparkles = () => (
+  <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4">
+    <path d="M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7L12 3Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    <path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+  </svg>
+);
+
 type SidebarMatchPattern = {
   path: string;
   end?: boolean;
@@ -353,13 +92,9 @@ type SidebarNavItem = {
   matchPatterns: SidebarMatchPattern[];
 };
 
+type SettingsMenuSection = "settings" | "vendors" | "projects" | "git" | "mcp" | "skills";
+
 const navItems: SidebarNavItem[] = [
-  {
-    to: "/",
-    label: "控制面板",
-    icon: IconDashboard,
-    matchPatterns: [{ path: "/", end: true }],
-  },
   {
     to: "/terminal",
     label: "终端交互",
@@ -394,12 +129,6 @@ const navItems: SidebarNavItem[] = [
     icon: IconWorkflow,
     matchPatterns: [{ path: "/automation/workflows", end: false }],
   },
-  {
-    to: "/settings",
-    label: "系统设置",
-    icon: IconGear,
-    matchPatterns: [{ path: "/settings", end: false }],
-  },
 ];
 
 function matchesSidebarItem(pathname: string, matchPatterns: SidebarMatchPattern[]) {
@@ -412,6 +141,10 @@ function matchesSidebarItem(pathname: string, matchPatterns: SidebarMatchPattern
       pathname
     )
   );
+}
+
+function cx(...values: Array<string | false | null | undefined>) {
+  return values.filter(Boolean).join(" ");
 }
 
 function SidebarLink({
@@ -434,7 +167,7 @@ function SidebarLink({
     <Link
       to={to}
       aria-current={isActive ? "page" : undefined}
-      className={`group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-[13px] font-semibold tracking-tight transition-all duration-200 ${
+      className={`group relative flex items-center gap-2 px-2.5 py-2 rounded-xl text-[12px] font-semibold tracking-tight transition-all duration-200 ${
         isActive
           ? "bg-emerald-50 text-emerald-700"
           : "text-slate-500 hover:text-slate-800 hover:bg-slate-100"
@@ -445,7 +178,7 @@ function SidebarLink({
         <div className={`absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-7 rounded-r-full bg-emerald-500 transition-all duration-200 ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-30'}`} />
 
         {/* Icon */}
-        <div className={`flex shrink-0 items-center justify-center w-8 h-8 rounded-lg transition-all duration-200 ${
+        <div className={`flex shrink-0 items-center justify-center w-7 h-7 rounded-lg transition-all duration-200 ${
           isActive ? 'text-emerald-600' : 'text-slate-400 group-hover:text-slate-600'
         }`}>
           <Icon />
@@ -458,8 +191,119 @@ function SidebarLink({
   );
 }
 
+function SidebarSectionTitle({ label, collapsed }: { label: string; collapsed: boolean }) {
+  if (collapsed) return null;
+  return (
+    <div className="px-2.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+      {label}
+    </div>
+  );
+}
+
+function WorkspaceTabItem({
+  title,
+  subtitle,
+  active,
+  collapsed,
+  planMode,
+  onClick,
+  onClose,
+}: {
+  title: string;
+  subtitle: string;
+  active: boolean;
+  collapsed: boolean;
+  planMode: boolean;
+  onClick: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`group relative flex w-full items-center gap-2 overflow-hidden rounded-xl border px-2.5 py-2 text-left transition-all ${
+        active
+          ? "border-slate-900 bg-slate-900 text-white shadow-[0_8px_20px_rgba(15,23,42,0.14)]"
+          : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+      }`}
+      title={collapsed ? `${title}\n${subtitle}` : title}
+    >
+      <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${active ? "bg-white/10" : "bg-slate-100 text-slate-500"}`}>
+        <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4">
+          <path d="M4 7.5A1.5 1.5 0 0 1 5.5 6h4l1.3 1.6H18.5A1.5 1.5 0 0 1 20 9.1v7.4A1.5 1.5 0 0 1 18.5 18h-13A1.5 1.5 0 0 1 4 16.5v-9Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+        </svg>
+      </div>
+      {!collapsed ? (
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-[12px] font-semibold">{title}</span>
+            {planMode ? (
+              <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${active ? "bg-white/12 text-white" : "bg-amber-100 text-amber-700"}`}>
+                PLAN
+              </span>
+            ) : null}
+          </div>
+          <div className={`truncate text-[10px] ${active ? "text-white/65" : "text-slate-400"}`}>{subtitle}</div>
+        </div>
+      ) : null}
+      {!collapsed ? (
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={(event) => {
+            event.stopPropagation();
+            onClose();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              event.stopPropagation();
+              onClose();
+            }
+          }}
+          className={`rounded-full px-1.5 py-0.5 text-xs transition-colors ${active ? "text-white/65 hover:bg-white/10 hover:text-white" : "text-slate-300 hover:bg-slate-100 hover:text-slate-700"}`}
+        >
+          ×
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const navigate = useNavigate();
+  const location = useLocation();
+  const settingsMenuRef = useRef<HTMLDivElement | null>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const terminalTabs = useStore((s) => s.terminalTabs);
+  const workspaces = useStore((s) => s.workspaces);
+  const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
+  const setActiveTerminalTab = useStore((s) => s.setActiveTerminalTab);
+  const closeTerminalTab = useStore((s) => s.closeTerminalTab);
+  const openWorkspaceFolder = useStore((s) => s.openWorkspaceFolder);
+  const cloneTerminalTab = useStore((s) => s.cloneTerminalTab);
+  const gitWorkbenchOpen = useStore((s) => s.gitWorkbenchOpen);
+  const openGitWorkbench = useStore((s) => s.openGitWorkbench);
+
+  const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
+  const workspaceById = useMemo(() => new Map(workspaces.map((workspace) => [workspace.id, workspace])), [workspaces]);
+  const canCloneActiveTab = !!activeTab && activeTab.status !== "streaming";
+  const settingsIsActive = matchesSidebarItem(location.pathname, [{ path: "/settings", end: false }]);
+  const activeSettingsSection = useMemo<SettingsMenuSection>(() => {
+    const section = new URLSearchParams(location.search).get("section");
+    switch (section) {
+      case "vendors":
+      case "projects":
+      case "git":
+      case "mcp":
+      case "skills":
+        return section;
+      default:
+        return "settings";
+    }
+  }, [location.search]);
 
   // Persist collapse state
   useEffect(() => {
@@ -469,55 +313,207 @@ export function Sidebar() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!settingsMenuOpen) return;
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node;
+      if (
+        settingsMenuRef.current &&
+        !settingsMenuRef.current.contains(target) &&
+        settingsButtonRef.current &&
+        !settingsButtonRef.current.contains(target)
+      ) {
+        setSettingsMenuOpen(false);
+      }
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setSettingsMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [settingsMenuOpen]);
+
+  useEffect(() => {
+    setSettingsMenuOpen(false);
+  }, [location.pathname, location.search]);
+
   const toggleCollapsed = () => {
     const next = !collapsed;
     setCollapsed(next);
     localStorage.setItem('sidebar_collapsed', JSON.stringify(next));
   };
 
+  const settingsMenuItems = useMemo(
+    () => [
+      { id: "settings", label: "设置", section: "settings" as const, icon: IconGear },
+      // { id: "vendors", label: "供应商", section: "vendors" as const, icon: IconProviders },
+      // { id: "projects", label: "项目", section: "projects" as const, icon: IconPlus },
+      { id: "git", label: "Git", section: "git" as const, icon: IconWorkflow },
+      // { id: "mcp", label: "MCP", section: "mcp" as const, icon: IconWorkflow },
+      // { id: "skills", label: "Skills", section: "skills" as const, icon: IconSparkles },
+    ],
+    []
+  );
+
+  function openSettingsSection(section: SettingsMenuSection) {
+    setSettingsMenuOpen(false);
+    if (section === "git") {
+      openGitWorkbench();
+      return;
+    }
+    if (section === "settings") {
+      navigate("/settings");
+      return;
+    }
+    navigate(`/settings?section=${section}`);
+  }
+
   return (
     <aside
       className="relative h-full flex flex-col bg-white border-r border-slate-200 transition-all duration-300 ease-out overflow-hidden shadow-sm"
-      style={{ width: collapsed ? '68px' : '204px' }}
+      style={{ width: collapsed ? '72px' : '228px' }}
     >
-      {/* Subtle top gradient */}
       <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-emerald-400/20 to-transparent" />
 
-      {/* Brand Header */}
-      <div className="relative px-0 pt-0 pb-4">
-        <div className="flex items-center justify-center">
-          {/* Animated Brand Logo */}
-          <div className="flex w-full shrink-0 items-center justify-center transition-transform duration-300 hover:scale-[1.01]">
-            <BrandLogo collapsed={collapsed} />
+      <div className="flex h-6 shrink-0" />
+
+      <div className="flex-1 overflow-y-auto px-3 pb-4">
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <SidebarSectionTitle label="导航" collapsed={collapsed} />
+            {navItems.map((item) => (
+              <SidebarLink key={item.to} {...item} collapsed={collapsed} />
+            ))}
+          </div>
+
+          <div className="mx-1 h-px bg-gradient-to-r from-transparent via-slate-200 to-transparent" />
+
+          <div className="space-y-2">
+            <div className={`flex items-center ${collapsed ? "justify-center" : "justify-between"} gap-2 px-2.5`}>
+              <SidebarSectionTitle label="工作区" collapsed={collapsed} />
+              {!collapsed ? (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => void openWorkspaceFolder()}
+                    title="打开目录"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-xl text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-700"
+                  >
+                    <IconPlus />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => canCloneActiveTab && cloneTerminalTab(activeTerminalTabId ?? undefined)}
+                    title="克隆当前工作区"
+                    disabled={!canCloneActiveTab}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-xl text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-35"
+                  >
+                    <IconCopy />
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            <div className="space-y-2">
+              {terminalTabs.map((tab) => (
+                <WorkspaceTabItem
+                  key={tab.id}
+                  title={tab.title}
+                  subtitle={workspaceById.get(tab.workspaceId)?.rootPath ?? "Detached workspace"}
+                  active={tab.id === activeTerminalTabId}
+                  collapsed={collapsed}
+                  planMode={tab.planMode}
+                  onClick={() => {
+                    setActiveTerminalTab(tab.id);
+                    navigate("/terminal");
+                  }}
+                  onClose={() => closeTerminalTab(tab.id)}
+                />
+              ))}
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Divider */}
-      <div className="mx-4 h-px bg-gradient-to-r from-transparent via-slate-200 to-transparent" />
-
-      {/* Navigation */}
-      <nav className="flex-1 flex flex-col gap-1 px-3 pt-5">
-        {navItems.map((item) => (
-          <SidebarLink key={item.to} {...item} collapsed={collapsed} />
-        ))}
-      </nav>
-
-      {/* Bottom Section */}
       <div className="px-3 pb-5 pt-3">
         <div className="mx-1 h-px bg-gradient-to-r from-transparent via-slate-200 to-transparent mb-4" />
-
-        {/* Collapse Toggle - icon only */}
-        <button
-          onClick={toggleCollapsed}
-          className="w-full flex items-center justify-center p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-all duration-200"
-          title={collapsed ? "展开" : "收起"}
-        >
-          <IconChevron collapsed={collapsed} />
-        </button>
+        <div className="flex items-center gap-2">
+          <div className={collapsed ? "relative" : "relative flex-1"} ref={settingsMenuRef}>
+            <button
+              ref={settingsButtonRef}
+              type="button"
+              onClick={() => setSettingsMenuOpen((value) => !value)}
+              className={cx(
+                "inline-flex items-center justify-center rounded-xl transition-all duration-200",
+                settingsIsActive
+                  ? "bg-emerald-50 text-emerald-700"
+                  : "text-slate-400 hover:bg-slate-100 hover:text-slate-700",
+                collapsed ? "h-9 w-9" : "w-full justify-between gap-2 px-3 py-2"
+              )}
+              title="设置"
+              aria-label="设置"
+              aria-expanded={settingsMenuOpen}
+            >
+              <span className={`inline-flex items-center ${collapsed ? "" : "gap-2"}`}>
+                <IconGear />
+                {!collapsed ? <span className="text-[12px] font-semibold text-slate-600">设置</span> : null}
+              </span>
+              {!collapsed ? (
+                <svg viewBox="0 0 24 24" fill="none" className={`w-4 h-4 transition-transform ${settingsMenuOpen ? "rotate-180" : ""}`}>
+                  <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : null}
+            </button>
+            {settingsMenuOpen ? (
+              <div className={`absolute bottom-[calc(100%+8px)] z-30 min-w-[196px] rounded-2xl border border-slate-200 bg-white p-1.5 shadow-[0_18px_40px_rgba(15,23,42,0.14)] ${collapsed ? "left-0" : "left-0 right-0"}`}>
+                {settingsMenuItems.map((item) => {
+                  const Icon = item.icon;
+                  const itemActive =
+                    item.section === "git"
+                      ? gitWorkbenchOpen
+                      : settingsIsActive && activeSettingsSection === item.section;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => openSettingsSection(item.section)}
+                      className={cx(
+                        "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-medium transition-all",
+                        itemActive
+                          ? "bg-emerald-50 text-emerald-700"
+                          : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                      )}
+                    >
+                      <span
+                        className={cx(
+                          "inline-flex h-8 w-8 items-center justify-center rounded-xl",
+                          itemActive ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"
+                        )}
+                      >
+                        <Icon />
+                      </span>
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+          <button
+            onClick={toggleCollapsed}
+            className={`inline-flex items-center justify-center rounded-xl text-slate-400 transition-all duration-200 hover:bg-slate-100 hover:text-slate-600 ${collapsed ? "h-9 w-9" : "h-9 w-9"}`}
+            title={collapsed ? "展开" : "收起"}
+          >
+            <IconChevron collapsed={collapsed} />
+          </button>
+        </div>
       </div>
 
-      {/* Bottom accent */}
       <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-slate-100 to-transparent" />
     </aside>
   );

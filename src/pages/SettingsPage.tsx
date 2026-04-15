@@ -1,9 +1,12 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { bridge } from "../lib/bridge";
 import { AgentId, AgentResourceGroup, AgentResourceKind, AgentRuntimeResources, AppSettings } from "../lib/models";
 import refreshIcon from "../media/svg/refresh.svg";
 import { useStore } from "../lib/store";
 import { requestDesktopNotificationPermission } from "../lib/desktopNotifications";
+import { getProvidersForServiceType, MODEL_PROVIDER_META, MODEL_PROVIDER_SERVICE_ORDER } from "../lib/modelProviders";
+import { SERVICE_ICONS, maskSecret, relativeTime } from "../components/modelProviders/ui";
 
 // --- Configuration ---
 const CLI_ORDER = ["codex", "claude", "gemini"] as const;
@@ -14,6 +17,7 @@ const INPUT_CLASS =
   "block w-full rounded-xl border-0 py-2.5 px-3.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-200 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-indigo-500 sm:text-sm sm:leading-6 bg-white transition-all hover:bg-slate-50 focus:bg-white";
 
 type Platform = (typeof PLATFORM_ORDER)[number];
+type SettingsSection = "settings" | "vendors" | "projects" | "mcp" | "skills";
 
 type SettingsAgent = {
   id: AgentId;
@@ -44,6 +48,26 @@ const RESOURCE_LABEL: Record<AgentResourceKind, string> = {
   plugin: "插件",
   extension: "扩展",
 };
+
+const SETTINGS_SECTION_LABEL: Record<SettingsSection, string> = {
+  settings: "设置",
+  vendors: "供应商",
+  projects: "项目",
+  mcp: "MCP",
+  skills: "Skills",
+};
+
+function parseSettingsSection(value: string | null): SettingsSection {
+  switch (value) {
+    case "vendors":
+    case "projects":
+    case "mcp":
+    case "skills":
+      return value;
+    default:
+      return "settings";
+  }
+}
 
 const GUIDES: Record<AgentId, { docs: string; install: Record<Platform, string> }> = {
   codex: {
@@ -314,10 +338,20 @@ function ToggleSwitch({ enabled, onClick, disabled }: { enabled: boolean; onClic
 }
 
 export function SettingsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const storedSettings = useStore((s) => s.settings);
   const appState = useStore((s) => s.appState);
   const updateSettings = useStore((s) => s.updateSettings);
   const setAppState = useStore((s) => s.setAppState);
+  const workspaces = useStore((s) => s.workspaces);
+  const terminalTabs = useStore((s) => s.terminalTabs);
+  const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
+  const setActiveTerminalTab = useStore((s) => s.setActiveTerminalTab);
+  const openWorkspaceFolder = useStore((s) => s.openWorkspaceFolder);
+  const loadCliSkills = useStore((s) => s.loadCliSkills);
+  const cliSkillsByContext = useStore((s) => s.cliSkillsByContext);
+  const cliSkillStatusByContext = useStore((s) => s.cliSkillStatusByContext);
 
   const [local, setLocal] = useState<AppSettings | null>(null);
   const [platform, setPlatform] = useState<Platform>(detectPlatform);
@@ -329,6 +363,7 @@ export function SettingsPage() {
   const [notificationBusy, setNotificationBusy] = useState(false);
   const [emailTestBusy, setEmailTestBusy] = useState(false);
   const [emailRecipientsInput, setEmailRecipientsInput] = useState("");
+  const activeSection = parseSettingsSection(searchParams.get("section"));
 
   useEffect(() => {
     if (storedSettings) {
@@ -360,6 +395,39 @@ export function SettingsPage() {
   const dirty = !!storedSettings && !!local && JSON.stringify(storedSettings) !== JSON.stringify(local);
   const runtimeSummary = `${installedCount}/${CLI_ORDER.length} 个运行时已在 ${PLATFORM_LABEL[platform]} 上就绪。`;
   const branch = appState?.workspace.branch ?? "main";
+  const activeTerminalTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
+  const activeWorkspace =
+    workspaces.find((workspace) => workspace.id === activeTerminalTab?.workspaceId) ??
+    workspaces.find((workspace) => workspace.rootPath === local?.projectRoot) ??
+    workspaces[0] ??
+    null;
+  const providerGroups = local
+    ? MODEL_PROVIDER_SERVICE_ORDER.map((serviceType) => ({
+        serviceType,
+        meta: MODEL_PROVIDER_META[serviceType],
+        providers: getProvidersForServiceType(local, serviceType),
+      }))
+    : [];
+  const cliSkillCacheKeys = useMemo<Partial<Record<AgentId, string>>>(
+    () =>
+      activeWorkspace
+        ? Object.fromEntries(CLI_ORDER.map((cli) => [cli, `${cli}:${activeWorkspace.id}`]))
+        : {},
+    [activeWorkspace]
+  );
+
+  useEffect(() => {
+    if (activeSection !== "skills" || !activeWorkspace) return;
+    CLI_ORDER.forEach((cli) => {
+      void loadCliSkills(cli, activeWorkspace.id);
+    });
+  }, [activeSection, activeWorkspace, loadCliSkills]);
+
+  function openSection(section: SettingsSection) {
+    const next = new URLSearchParams(searchParams);
+    next.set("section", section);
+    setSearchParams(next, { replace: true });
+  }
 
   async function copyText(value: string, key: string, label: string) {
     try {
@@ -562,9 +630,239 @@ export function SettingsPage() {
               </button>
             </div>
           ) : null}
+
+          <div className="mt-8 flex flex-wrap items-center gap-2 rounded-[12px] border border-slate-200 bg-white/85 p-2 shadow-sm">
+            {(["settings", "vendors", "projects", "mcp", "skills"] as SettingsSection[]).map((section) => (
+              <button
+                key={section}
+                type="button"
+                onClick={() => openSection(section)}
+                className={cx(
+                  "inline-flex items-center rounded-[10px] px-3 py-2 text-sm font-semibold transition-all",
+                  activeSection === section
+                    ? "bg-slate-900 text-white shadow-sm"
+                    : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                )}
+              >
+                {SETTINGS_SECTION_LABEL[section]}
+              </button>
+            ))}
+          </div>
         </header>
 
         <main className="space-y-10">
+          {activeSection === "vendors" ? (
+            <div style={stageStyle(mounted, 50)}>
+              <Panel
+                title="供应商"
+                description="集中管理 OpenAI Compatible、Claude、Gemini 的 Provider 配置。"
+                icon={<CpuIcon />}
+                action={
+                  <Link
+                    to="/model-providers"
+                    className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition-all hover:bg-slate-50"
+                  >
+                    打开模型管理
+                  </Link>
+                }
+              >
+                <div className="p-8 space-y-5">
+                  {providerGroups.map(({ serviceType, meta, providers }) => (
+                    <div key={serviceType} className="rounded-[12px] border border-slate-200 bg-white p-5 shadow-sm">
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <img src={SERVICE_ICONS[serviceType]} alt="" className="h-5 w-5 object-contain" />
+                          <div className="min-w-0">
+                            <div className="text-sm font-bold text-slate-900">{meta.label}</div>
+                            <div className="text-xs text-slate-500">{meta.description}</div>
+                          </div>
+                        </div>
+                        <MetaChip tone={providers.some((provider) => provider.enabled) ? "ready" : "default"}>
+                          {providers.length} Providers
+                        </MetaChip>
+                      </div>
+                      <div className="mt-4 space-y-3">
+                        {providers.map((provider) => (
+                          <div key={provider.id} className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-slate-100 bg-slate-50/70 px-4 py-3">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="truncate text-sm font-semibold text-slate-900">{provider.name}</span>
+                                <MetaChip tone={provider.enabled ? "ready" : "default"}>
+                                  {provider.enabled ? "Enabled" : "Disabled"}
+                                </MetaChip>
+                              </div>
+                              <div className="mt-1 truncate text-xs text-slate-500">{provider.baseUrl}</div>
+                              <div className="mt-1 text-[11px] text-slate-400">
+                                {provider.models.length} models · key {maskSecret(provider.apiKey)} · {relativeTime(provider.lastRefreshedAt)}
+                              </div>
+                            </div>
+                            <Link
+                              to={`/model-providers/${serviceType}/${provider.id}`}
+                              className="inline-flex h-9 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition-all hover:bg-slate-50"
+                            >
+                              编辑
+                            </Link>
+                          </div>
+                        ))}
+                        {providers.length === 0 ? (
+                          <div className="rounded-[10px] border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-500">
+                            当前还没有配置 {meta.label} Provider。
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            </div>
+          ) : null}
+
+          {activeSection === "projects" ? (
+            <div style={stageStyle(mounted, 50)}>
+              <Panel
+                title="项目"
+                description="查看当前已附加工作区，并快速切回对应终端工作区。"
+                icon={<FolderIcon />}
+                action={
+                  <button
+                    type="button"
+                    onClick={() => void openWorkspaceFolder()}
+                    className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition-all hover:bg-slate-50"
+                  >
+                    添加工作区
+                  </button>
+                }
+              >
+                <div className="p-8 space-y-5">
+                  <div className="rounded-[12px] border border-slate-200 bg-slate-50/70 p-5">
+                    <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-400">当前项目根目录</div>
+                    <div className="mt-3 font-mono text-sm font-semibold text-slate-900">{local.projectRoot}</div>
+                  </div>
+                  {workspaces.map((workspace) => {
+                    const workspaceTab = terminalTabs.find((tab) => tab.workspaceId === workspace.id) ?? null;
+                    const isActiveWorkspace = workspace.id === activeWorkspace?.id;
+                    return (
+                      <div key={workspace.id} className="rounded-[12px] border border-slate-200 bg-white p-5 shadow-sm">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="truncate text-sm font-bold text-slate-900">{workspace.name}</span>
+                              {isActiveWorkspace ? <MetaChip tone="ready">Active</MetaChip> : null}
+                            </div>
+                            <div className="mt-1 truncate text-xs text-slate-500">{workspace.rootPath}</div>
+                            <div className="mt-2 text-[11px] text-slate-400">
+                              Branch {workspace.branch} · Dirty {workspace.dirtyFiles} · Failing {workspace.failingChecks}
+                            </div>
+                          </div>
+                          {workspaceTab ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveTerminalTab(workspaceTab.id);
+                                navigate("/terminal");
+                              }}
+                              className="inline-flex h-9 items-center justify-center rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition-all hover:bg-slate-50"
+                            >
+                              打开终端
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {workspaces.length === 0 ? (
+                    <div className="rounded-[12px] border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+                      当前还没有已附加的工作区。
+                    </div>
+                  ) : null}
+                </div>
+              </Panel>
+            </div>
+          ) : null}
+
+          {activeSection === "mcp" ? (
+            <div style={stageStyle(mounted, 50)}>
+              <Panel title="MCP" description="显示当前各 CLI 已检测到的 MCP 资源。" icon={<CpuIcon />}>
+                <div className="p-8 grid gap-5 md:grid-cols-3">
+                  {agents.map((agent) => {
+                    const group = runtimeResources(agent).mcp;
+                    return (
+                      <div key={agent.id} className="rounded-[12px] border border-slate-200 bg-white p-5 shadow-sm">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-bold text-slate-900">{CLI_META[agent.id].label}</div>
+                            <div className="text-xs text-slate-500">MCP resources</div>
+                          </div>
+                          <MetaChip tone={group.items.length > 0 ? "ready" : group.error ? "warn" : "default"}>
+                            {group.items.length}
+                          </MetaChip>
+                        </div>
+                        <div className="mt-4">
+                          {resourceNamesRow(group)}
+                        </div>
+                        {group.error ? (
+                          <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                            {group.error}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </Panel>
+            </div>
+          ) : null}
+
+          {activeSection === "skills" ? (
+            <div style={stageStyle(mounted, 50)}>
+              <Panel title="Skills" description="显示运行时已检测技能，以及当前工作区可加载技能。" icon={<CpuIcon />}>
+                <div className="p-8 grid gap-5 md:grid-cols-3">
+                  {agents.map((agent) => {
+                    const runtimeGroup = runtimeResources(agent).skill;
+                    const workspaceSkillKey = activeWorkspace ? cliSkillCacheKeys[agent.id] : null;
+                    const workspaceSkills = workspaceSkillKey ? cliSkillsByContext[workspaceSkillKey] ?? [] : [];
+                    const workspaceSkillStatus = workspaceSkillKey ? cliSkillStatusByContext[workspaceSkillKey] ?? "idle" : "idle";
+                    return (
+                      <div key={agent.id} className="rounded-[12px] border border-slate-200 bg-white p-5 shadow-sm">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-bold text-slate-900">{CLI_META[agent.id].label}</div>
+                            <div className="text-xs text-slate-500">
+                              {activeWorkspace ? `${activeWorkspace.name} workspace skills` : "Runtime skills"}
+                            </div>
+                          </div>
+                          <MetaChip tone={workspaceSkills.length > 0 || runtimeGroup.items.length > 0 ? "ready" : "default"}>
+                            {workspaceSkills.length > 0 ? workspaceSkills.length : runtimeGroup.items.length}
+                          </MetaChip>
+                        </div>
+                        <div className="mt-4">
+                          {workspaceSkills.length > 0 ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {workspaceSkills.slice(0, 12).map((item) => (
+                                <span key={item.name} className="px-2 py-0.5 rounded-lg text-[10px] font-bold ring-1 ring-inset bg-white text-slate-700 ring-slate-200 shadow-sm">
+                                  {item.displayName ?? item.name}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            resourceNamesRow(runtimeGroup)
+                          )}
+                        </div>
+                        {activeWorkspace ? (
+                          <div className="mt-3 text-[11px] text-slate-400">
+                            {workspaceSkillStatus === "loading" ? "正在加载工作区技能…" : workspaceSkillStatus === "error" ? "工作区技能加载失败" : "工作区技能已同步"}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </Panel>
+            </div>
+          ) : null}
+
+          {activeSection === "settings" ? (
+            <>
           {/* CLI Runtimes */}
           <div style={stageStyle(mounted, 50)}>
             <Panel
@@ -892,6 +1190,8 @@ export function SettingsPage() {
               </div>
             </Panel>
           </div>
+            </>
+          ) : null}
         </main>
       </div>
     </div>

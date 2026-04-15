@@ -1,7 +1,6 @@
-import { Routes, Route } from "react-router-dom";
+import { Routes, Route, Navigate } from "react-router-dom";
 import { useEffect } from "react";
 import { AppLayout } from "./layouts/AppLayout";
-import { DashboardPage } from "./pages/DashboardPage";
 import { TerminalPage } from "./pages/TerminalPage";
 import { AutomationJobsPage } from "./pages/AutomationJobsPage";
 import { AutomationJobEditorPage } from "./pages/AutomationJobEditorPage";
@@ -10,7 +9,7 @@ import { AutomationWorkflowEditorPage } from "./pages/AutomationWorkflowEditorPa
 import { ModelChatPage } from "./pages/ModelChatPage";
 import { ModelProviderEditorPage } from "./pages/ModelProviderEditorPage";
 import { ModelProvidersPage } from "./pages/ModelProvidersPage";
-import { SettingsPage } from "./pages/SettingsPage";
+import { DesktopSettingsPage } from "./pages/DesktopSettingsPage";
 import { useStore } from "./lib/store";
 import { bridge } from "./lib/bridge";
 
@@ -119,8 +118,9 @@ function App() {
 
   return (
     <Routes>
+      <Route path="/settings" element={<DesktopSettingsPage />} />
       <Route element={<AppLayout />}>
-        <Route path="/" element={<DashboardPage />} />
+        <Route path="/" element={<Navigate to="/terminal" replace />} />
         <Route path="/terminal" element={<TerminalPage />} />
         <Route path="/model-chat" element={<ModelChatPage />} />
         <Route path="/model-providers" element={<ModelProvidersPage />} />
@@ -133,7 +133,6 @@ function App() {
         <Route path="/automation/new" element={<AutomationJobEditorPage />} />
         <Route path="/automation/jobs/new" element={<AutomationJobEditorPage />} />
         <Route path="/automation/jobs/:jobId" element={<AutomationJobEditorPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
       </Route>
     </Routes>
   );

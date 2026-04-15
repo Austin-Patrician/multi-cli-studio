@@ -1,588 +1,288 @@
-import { DiffEditor as MonacoDiffEditor } from "@monaco-editor/react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useShallow } from "zustand/react/shallow";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  CircleCheckBig,
+  FolderTree,
+  LayoutGrid,
+  Minus,
+  Plus,
+  RefreshCw,
+  SquarePen,
+  Undo2,
+  Upload,
+  X,
+} from "lucide-react";
 import { bridge } from "../../lib/bridge";
-import type { GitFileChange, GitFileDiff } from "../../lib/models";
+import type { GitFileDiff, GitFileStatus, GitLogResponse, WorkspaceRef } from "../../lib/models";
 import { useStore } from "../../lib/store";
+import { FileIcon } from "../FileIcon";
+import { GitDiffBlock, type GitDiffStyle } from "../settings/GitDiffBlock";
 
-type DiffViewMode = "split" | "unified";
-
-type DiffHunk = {
-  originalStart: number;
-  originalCount: number;
-  modifiedStart: number;
-  modifiedCount: number;
+type ChangeViewMode = "flat" | "tree";
+type WorktreeSectionKind = "staged" | "unstaged";
+type DiffTreeFolderNode<T extends { path: string }> = {
+  key: string;
+  name: string;
+  folders: Map<string, DiffTreeFolderNode<T>>;
+  files: T[];
 };
-
-const MAX_MONACO_CONTENT_CHARS = 300_000;
-const MAX_MONACO_DIFF_CHARS = 500_000;
-
-const ArrowUpIcon = ({ className }: { className?: string }) => (
-  <svg viewBox="0 0 20 20" fill="none" className={className}>
-    <path
-      d="M10 15V5m0 0L6.5 8.5M10 5l3.5 3.5"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-
-const ArrowDownIcon = ({ className }: { className?: string }) => (
-  <svg viewBox="0 0 20 20" fill="none" className={className}>
-    <path
-      d="M10 5v10m0 0l3.5-3.5M10 15l-3.5-3.5"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-
-const OpenFileIcon = ({ className }: { className?: string }) => (
-  <svg viewBox="0 0 20 20" fill="none" className={className}>
-    <path
-      d="M7.5 5.5H5.75A1.75 1.75 0 004 7.25v7A1.75 1.75 0 005.75 16h8.5A1.75 1.75 0 0016 14.25V12.5"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-    <path
-      d="M10 10L16 4M12 4h4v4"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  </svg>
-);
-
-function samePath(left: string, right: string) {
-  return left.replace(/\//g, "\\").toLowerCase() === right.replace(/\//g, "\\").toLowerCase();
-}
-
-function basename(path: string) {
-  const normalized = path.replace(/[\\/]+$/, "");
-  const parts = normalized.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] ?? path;
-}
-
-function dirname(path: string) {
-  const normalized = path.replace(/[\\/]+$/, "");
-  const parts = normalized.split(/[\\/]/).filter(Boolean);
-  if (parts.length <= 1) return "";
-  return parts.slice(0, -1).join("/");
-}
-
-function extensionOf(path: string) {
-  const name = basename(path);
-  const index = name.lastIndexOf(".");
-  return index >= 0 ? name.slice(index + 1).toLowerCase() : "";
-}
-
-function fileTypeToken(path: string) {
-  const extension = extensionOf(path);
-  switch (extension) {
-    case "tsx":
-      return {
-        label: "TSX",
-        listTone: "border-sky-200 bg-sky-500/10 text-sky-700",
-        overlayTone: "border-sky-300/60 bg-sky-500/15 text-sky-100",
-      };
-    case "ts":
-      return {
-        label: "TS",
-        listTone: "border-blue-200 bg-blue-500/10 text-blue-700",
-        overlayTone: "border-blue-300/60 bg-blue-500/15 text-blue-100",
-      };
-    case "rs":
-      return {
-        label: "RS",
-        listTone: "border-orange-200 bg-orange-500/10 text-orange-700",
-        overlayTone: "border-orange-300/60 bg-orange-500/15 text-orange-100",
-      };
-    case "json":
-      return {
-        label: "JSON",
-        listTone: "border-amber-200 bg-amber-500/10 text-amber-700",
-        overlayTone: "border-amber-300/60 bg-amber-500/15 text-amber-100",
-      };
-    case "md":
-      return {
-        label: "MD",
-        listTone: "border-violet-200 bg-violet-500/10 text-violet-700",
-        overlayTone: "border-violet-300/60 bg-violet-500/15 text-violet-100",
-      };
-    case "css":
-      return {
-        label: "CSS",
-        listTone: "border-cyan-200 bg-cyan-500/10 text-cyan-700",
-        overlayTone: "border-cyan-300/60 bg-cyan-500/15 text-cyan-100",
-      };
-    case "js":
-      return {
-        label: "JS",
-        listTone: "border-yellow-200 bg-yellow-500/10 text-yellow-700",
-        overlayTone: "border-yellow-300/60 bg-yellow-500/15 text-yellow-100",
-      };
-    default:
-      return {
-        label: extension ? extension.slice(0, 4).toUpperCase() : "FILE",
-        listTone: "border-slate-200 bg-slate-200 text-slate-700",
-        overlayTone: "border-slate-500/40 bg-slate-500/10 text-slate-200",
-      };
-  }
-}
-
-function statusToken(status: string) {
-  switch (status) {
-    case "added":
-      return {
-        label: "Added",
-        short: "A",
-        chip: "bg-emerald-500/12 text-emerald-300 ring-1 ring-emerald-400/20",
-        dot: "bg-emerald-400",
-      };
-    case "deleted":
-      return {
-        label: "Deleted",
-        short: "D",
-        chip: "bg-rose-500/12 text-rose-300 ring-1 ring-rose-400/20",
-        dot: "bg-rose-400",
-      };
-    case "renamed":
-      return {
-        label: "Renamed",
-        short: "R",
-        chip: "bg-sky-500/12 text-sky-300 ring-1 ring-sky-400/20",
-        dot: "bg-sky-400",
-      };
-    default:
-      return {
-        label: "Modified",
-        short: "M",
-        chip: "bg-amber-500/12 text-amber-300 ring-1 ring-amber-400/20",
-        dot: "bg-amber-400",
-      };
-  }
-}
-
-function summarizeDiff(diffText: string) {
-  let additions = 0;
-  let deletions = 0;
-
-  for (const line of diffText.split(/\r?\n/)) {
-    if (line.startsWith("+") && !line.startsWith("+++")) additions += 1;
-    if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
-  }
-
-  return { additions, deletions };
-}
-
-function metadataSummaryLines(diffText: string) {
-  return diffText.split(/\r?\n/).filter((line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return false;
-    if (trimmed.startsWith("diff --git")) return false;
-    if (trimmed.startsWith("index ")) return false;
-    if (trimmed.startsWith("--- ")) return false;
-    if (trimmed.startsWith("+++ ")) return false;
-    if (trimmed.startsWith("@@")) return false;
-    return true;
-  });
-}
-
-function canRenderMonacoDiff(diff: GitFileDiff | null) {
-  return (
-    !!diff &&
-    !diff.isBinary &&
-    typeof diff.originalContent === "string" &&
-    typeof diff.modifiedContent === "string"
-  );
-}
-
-function isMetadataOnlyDiff(diff: GitFileDiff | null) {
-  if (!diff || diff.isBinary) return false;
-  return !/^@@/m.test(diff.diff);
-}
-
-function monacoDiffTooLarge(diff: GitFileDiff | null) {
-  if (!diff) return false;
-  const originalLength = typeof diff.originalContent === "string" ? diff.originalContent.length : 0;
-  const modifiedLength = typeof diff.modifiedContent === "string" ? diff.modifiedContent.length : 0;
-  return (
-    originalLength > MAX_MONACO_CONTENT_CHARS ||
-    modifiedLength > MAX_MONACO_CONTENT_CHARS ||
-    diff.diff.length > MAX_MONACO_DIFF_CHARS
-  );
-}
-
-function parseDiffHunks(diffText: string) {
-  const hunks: DiffHunk[] = [];
-  const pattern = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm;
-  for (const match of diffText.matchAll(pattern)) {
-    hunks.push({
-      originalStart: Number(match[1] ?? "1"),
-      originalCount: Number(match[2] ?? "1"),
-      modifiedStart: Number(match[3] ?? "1"),
-      modifiedCount: Number(match[4] ?? "1"),
-    });
-  }
-  return hunks;
-}
-
-function DiffModeToggle({
-  mode,
-  onChange,
-}: {
-  mode: DiffViewMode;
-  onChange: (mode: DiffViewMode) => void;
-}) {
-  return (
-    <div className="inline-flex items-center rounded-full border border-white/10 bg-white/5 p-1">
-      {(["split", "unified"] as const).map((option) => (
-        <button
-          key={option}
-          type="button"
-          onClick={() => onChange(option)}
-          className={`rounded-full px-3 py-1.5 text-[11px] font-semibold transition ${
-            mode === option
-              ? "bg-white text-slate-950 shadow-sm"
-              : "text-slate-300 hover:text-white"
-          }`}
-        >
-          {option === "split" ? "Side by side" : "Inline"}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function DiffStateNotice({
-  title,
-  description,
-  lines = [],
-}: {
-  title: string;
-  description: string;
-  lines?: string[];
-}) {
-  return (
-    <div className="flex h-full items-center justify-center px-8 py-10">
-      <div className="w-full max-w-2xl rounded-[16px] border border-white/10 bg-[#111827] p-6 text-slate-200 shadow-[0_24px_80px_rgba(15,23,42,0.45)]">
-        <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">{title}</div>
-        <div className="mt-4 text-sm leading-7 text-slate-300">{description}</div>
-        {lines.length > 0 ? (
-          <div className="mt-5 rounded-[12px] border border-white/10 bg-black/20 p-4 font-mono text-[12px] leading-6 text-slate-400">
-            {lines.map((line, index) => (
-              <div key={`${index}-${line}`}>{line}</div>
-            ))}
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function MonacoDiffView({
-  diff,
-  mode,
-  activeHunk,
-  onReadyChange,
-}: {
-  diff: GitFileDiff;
-  mode: DiffViewMode;
-  activeHunk: DiffHunk | null;
-  onReadyChange?: (ready: boolean) => void;
-}) {
-  const editorRef = useRef<any>(null);
-
-  useEffect(() => {
-    onReadyChange?.(false);
-    return () => onReadyChange?.(false);
-  }, [diff.path, onReadyChange]);
-
-  useEffect(() => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    const rafId = window.requestAnimationFrame(() => {
-      editor.layout?.();
-    });
-    const timeoutId = window.setTimeout(() => {
-      editor.layout?.();
-    }, 120);
-    return () => {
-      window.cancelAnimationFrame(rafId);
-      window.clearTimeout(timeoutId);
-    };
-  }, [diff.path, mode]);
-
-  useEffect(() => {
-    const editor = editorRef.current;
-    if (!editor || !activeHunk) return;
-    const originalEditor = editor.getOriginalEditor?.();
-    const modifiedEditor = editor.getModifiedEditor?.();
-    if (activeHunk.originalCount > 0 && originalEditor) {
-      originalEditor.revealLineInCenter(activeHunk.originalStart);
-      originalEditor.setPosition?.({ lineNumber: activeHunk.originalStart, column: 1 });
-    }
-    if (activeHunk.modifiedCount > 0 && modifiedEditor) {
-      modifiedEditor.revealLineInCenter(activeHunk.modifiedStart);
-      modifiedEditor.setPosition?.({ lineNumber: activeHunk.modifiedStart, column: 1 });
-    }
-  }, [activeHunk]);
-
-  return (
-    <div className="h-full min-h-0 bg-[#1e1e1e]">
-      <MonacoDiffEditor
-        onMount={(editor) => {
-          editorRef.current = editor;
-          window.requestAnimationFrame(() => {
-            editor.layout?.();
-          });
-          onReadyChange?.(true);
-        }}
-        original={diff.originalContent ?? ""}
-        modified={diff.modifiedContent ?? ""}
-        language={diff.language ?? "plaintext"}
-        theme="vs-dark"
-        height="100%"
-        loading={<div className="flex h-full items-center justify-center text-sm text-slate-400">Loading Monaco diff…</div>}
-        options={{
-          readOnly: true,
-          originalEditable: false,
-          renderSideBySide: mode === "split",
-          minimap: { enabled: false },
-          lineNumbers: "on",
-          scrollBeyondLastLine: false,
-          wordWrap: "off",
-          automaticLayout: true,
-          renderOverviewRuler: false,
-          glyphMargin: false,
-          folding: false,
-          matchBrackets: "never",
-          fixedOverflowWidgets: true,
-          diffWordWrap: "off",
-          ignoreTrimWhitespace: false,
-          codeLens: false,
-          renderValidationDecorations: "off",
-          occurrencesHighlight: "off",
-          selectionHighlight: false,
-        }}
-      />
-    </div>
-  );
-}
-
-function DiffOverlay({
-  workspaceRoot,
-  change,
-  diff,
-  loading,
-  error,
-  hasPreviousFile,
-  hasNextFile,
-  onPreviousFile,
-  onNextFile,
-  initialHunkTarget,
-  onClose,
-}: {
-  workspaceRoot: string;
-  change: GitFileChange | null;
+type DiffModalState = {
+  file: GitFileStatus;
   diff: GitFileDiff | null;
   loading: boolean;
   error: string | null;
-  hasPreviousFile: boolean;
-  hasNextFile: boolean;
-  onPreviousFile: () => void;
-  onNextFile: () => void;
-  initialHunkTarget?: "first" | "last" | null;
-  onClose: () => void;
+};
+
+const TREE_INDENT_STEP = 10;
+const DIFF_STYLE_STORAGE_KEY = "workspace_right_panel_git_diff_style";
+const COMMIT_COLLAPSE_STORAGE_KEY = "workspace_right_panel_git_commit_collapsed";
+
+function splitPath(path: string) {
+  return path.replace(/\\/g, "/").split("/").filter(Boolean);
+}
+
+function buildFileKey(path: string, oldPath?: string | null) {
+  return `${oldPath ?? ""}::${path}`;
+}
+
+function splitNameAndExtension(name: string) {
+  const lastDot = name.lastIndexOf(".");
+  if (lastDot <= 0 || lastDot === name.length - 1) {
+    return { base: name, extension: "" };
+  }
+  return {
+    base: name.slice(0, lastDot),
+    extension: name.slice(lastDot + 1).toLowerCase(),
+  };
+}
+
+function normalizeStatus(status: string) {
+  const normalized = status.trim().toLowerCase();
+  if (normalized === "a" || normalized === "added") return "A";
+  if (normalized === "d" || normalized === "deleted") return "D";
+  if (normalized === "r" || normalized === "renamed") return "R";
+  if (normalized === "t" || normalized === "typechange") return "T";
+  return "M";
+}
+
+function statusToneClass(status: string) {
+  switch (normalizeStatus(status)) {
+    case "A":
+      return "is-add";
+    case "D":
+      return "is-del";
+    case "R":
+      return "is-rename";
+    case "T":
+      return "is-typechange";
+    default:
+      return "is-mod";
+  }
+}
+
+function statusSymbol(status: string) {
+  switch (normalizeStatus(status)) {
+    case "A":
+      return "(A)";
+    case "D":
+      return "(D)";
+    case "R":
+      return "(R)";
+    case "T":
+      return "(T)";
+    default:
+      return "(U)";
+  }
+}
+
+function statusIconClass(status: string) {
+  switch (normalizeStatus(status)) {
+    case "A":
+      return "diff-icon-added";
+    case "D":
+      return "diff-icon-deleted";
+    case "R":
+      return "diff-icon-renamed";
+    case "T":
+      return "diff-icon-typechange";
+    default:
+      return "diff-icon-modified";
+  }
+}
+
+function buildDiffTree<T extends { path: string }>(files: T[], scopeKey: string): DiffTreeFolderNode<T> {
+  const root: DiffTreeFolderNode<T> = {
+    key: `${scopeKey}:/`,
+    name: "",
+    folders: new Map(),
+    files: [],
+  };
+
+  for (const file of files) {
+    const parts = file.path.replace(/\\/g, "/").split("/").filter(Boolean);
+    if (parts.length === 0) continue;
+    let node = root;
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      const segment = parts[index] ?? "";
+      const nextKey = `${node.key}${segment}/`;
+      let child = node.folders.get(segment);
+      if (!child) {
+        child = {
+          key: nextKey,
+          name: segment,
+          folders: new Map(),
+          files: [],
+        };
+        node.folders.set(segment, child);
+      }
+      node = child;
+    }
+    node.files.push(file);
+  }
+
+  return root;
+}
+
+function getTreeLineOpacity(depth: number) {
+  return depth <= 1 ? "1" : "0.62";
+}
+
+function SectionIndicator({ section, count }: { section: WorktreeSectionKind; count: number }) {
+  const Icon = section === "staged" ? CircleCheckBig : SquarePen;
+  return (
+    <span className={`diff-section-indicator is-${section}`}>
+      <Icon size={12} aria-hidden />
+      <strong>{count}</strong>
+    </span>
+  );
+}
+
+function WorktreeFileRow({
+  file,
+  section,
+  active,
+  treeItem = false,
+  indentLevel = 0,
+  treeDepth = 1,
+  parentFolderKey,
+  showDirectory = true,
+  onOpen,
+  onStageFile,
+  onUnstageFile,
+  onDiscardFile,
+}: {
+  file: GitFileStatus;
+  section: WorktreeSectionKind;
+  active: boolean;
+  treeItem?: boolean;
+  indentLevel?: number;
+  treeDepth?: number;
+  parentFolderKey?: string;
+  showDirectory?: boolean;
+  onOpen: () => void;
+  onStageFile?: (path: string) => Promise<void> | void;
+  onUnstageFile?: (path: string) => Promise<void> | void;
+  onDiscardFile?: (path: string) => Promise<void> | void;
 }) {
-  const [isOpeningFile, setIsOpeningFile] = useState(false);
-  const [viewMode, setViewMode] = useState<DiffViewMode>("split");
-  const [activeHunkIndex, setActiveHunkIndex] = useState(0);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-      if (event.key === "[") handlePrevious();
-      if (event.key === "]") handleNext();
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  });
-
-  useEffect(() => {
-    setViewMode("split");
-  }, [diff?.path]);
-
-  const diffHunks = useMemo(() => parseDiffHunks(diff?.diff ?? ""), [diff?.diff]);
-  const activeHunk =
-    diffHunks.length > 0 && activeHunkIndex >= 0 && activeHunkIndex < diffHunks.length
-      ? diffHunks[activeHunkIndex]
-      : null;
-
-  useEffect(() => {
-    if (diffHunks.length === 0) {
-      setActiveHunkIndex(0);
-      return;
-    }
-    setActiveHunkIndex(initialHunkTarget === "last" ? diffHunks.length - 1 : 0);
-  }, [diff?.path, diffHunks.length, initialHunkTarget]);
-
-  const titlePath = diff?.path ?? change?.path ?? "";
-  const fileType = fileTypeToken(titlePath);
-  const status = statusToken(diff?.status ?? change?.status ?? "modified");
-  const { additions, deletions } = useMemo(() => summarizeDiff(diff?.diff ?? ""), [diff?.diff]);
-  const metadataLines = useMemo(() => metadataSummaryLines(diff?.diff ?? ""), [diff?.diff]);
-  const renderMonaco = canRenderMonacoDiff(diff);
-  const metadataOnly = isMetadataOnlyDiff(diff);
-  const monacoTooLarge = monacoDiffTooLarge(diff);
-  const canPrevious = diffHunks.length > 0 ? activeHunkIndex > 0 || hasPreviousFile : hasPreviousFile;
-  const canNext = diffHunks.length > 0 ? activeHunkIndex < diffHunks.length - 1 || hasNextFile : hasNextFile;
-
-  function handlePrevious() {
-    if (diffHunks.length > 0 && activeHunkIndex > 0) {
-      setActiveHunkIndex((current) => current - 1);
-      return;
-    }
-    if (hasPreviousFile) onPreviousFile();
-  }
-
-  function handleNext() {
-    if (diffHunks.length > 0 && activeHunkIndex < diffHunks.length - 1) {
-      setActiveHunkIndex((current) => current + 1);
-      return;
-    }
-    if (hasNextFile) onNextFile();
-  }
-
-  async function handleOpenFile() {
-    if (!titlePath || isOpeningFile) return;
-    setIsOpeningFile(true);
-    try {
-      await bridge.openWorkspaceFile(workspaceRoot, titlePath);
-    } finally {
-      setIsOpeningFile(false);
-    }
-  }
+  const segments = splitPath(file.path);
+  const name = segments[segments.length - 1] ?? file.path;
+  const dir = segments.length > 1 ? segments.slice(0, -1).join("/") : "";
+  const { base, extension } = splitNameAndExtension(name);
+  const status = normalizeStatus(file.status);
+  const iconClass = statusIconClass(file.status);
+  const showStage = section === "unstaged" && Boolean(onStageFile);
+  const showUnstage = section === "staged" && Boolean(onUnstageFile);
+  const showDiscard = section === "unstaged" && Boolean(onDiscardFile);
+  const treeIndentPx = indentLevel * TREE_INDENT_STEP;
+  const rowStyle = treeItem
+    ? ({
+        paddingLeft: `${treeIndentPx}px`,
+        ["--git-tree-indent-x" as string]: `${Math.max(treeIndentPx - 5, 0)}px`,
+        ["--git-tree-line-opacity" as string]: getTreeLineOpacity(indentLevel),
+      } as CSSProperties)
+    : undefined;
 
   return (
     <div
-      className="fixed inset-0 z-40 bg-slate-950/70 backdrop-blur-[3px]"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
+      className={`diff-row git-filetree-row${active ? " active" : ""}`}
+      data-section={section}
+      data-status={status}
+      data-path={file.path}
+      data-tree-depth={treeItem ? treeDepth : undefined}
+      data-parent-folder-key={treeItem ? parentFolderKey : undefined}
+      style={rowStyle}
+      role={treeItem ? "treeitem" : "button"}
+      tabIndex={0}
+      aria-label={file.path}
+      aria-selected={active}
+      aria-level={treeItem ? treeDepth : undefined}
+      onClick={onOpen}
+      onDoubleClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
       }}
     >
-      <div className="absolute inset-x-4 inset-y-4 mx-auto flex max-w-[1480px] flex-col overflow-hidden rounded-[20px] border border-white/10 bg-[#0f172a] shadow-[0_40px_120px_rgba(2,6,23,0.65)]">
-        <div className="border-b border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.98),rgba(15,23,42,0.9))] px-5 py-4">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${fileType.overlayTone}`}>
-                  {fileType.label}
-                </span>
-                <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] ${status.chip}`}>
-                  {status.label}
-                </span>
-              </div>
-              <div className="mt-3 truncate text-[15px] font-semibold text-white">{basename(titlePath)}</div>
-              <div className="mt-1 truncate font-mono text-[11px] text-slate-400">{titlePath}</div>
-              <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
-                {additions > 0 ? <span className="font-semibold text-emerald-300">+{additions}</span> : null}
-                {deletions > 0 ? <span className="font-semibold text-rose-300">-{deletions}</span> : null}
-                {diff?.previousPath ? <span>from {diff.previousPath}</span> : null}
-                {diff?.language ? <span>language: {diff.language}</span> : null}
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <DiffModeToggle mode={viewMode} onChange={setViewMode} />
-              <button
-                type="button"
-                onClick={handlePrevious}
-                disabled={!canPrevious}
-                title="Previous change"
-                aria-label="Previous change"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <ArrowUpIcon className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={handleNext}
-                disabled={!canNext}
-                title="Next change"
-                aria-label="Next change"
-                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <ArrowDownIcon className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleOpenFile()}
-                disabled={isOpeningFile || !titlePath}
-                title={isOpeningFile ? "Opening file..." : "Open file"}
-                aria-label={isOpeningFile ? "Opening file" : "Open file"}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-slate-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <OpenFileIcon className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={onClose}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-sm text-slate-300 transition hover:bg-white/10 hover:text-white"
-                aria-label="Close diff"
-              >
-                x
-              </button>
-            </div>
-          </div>
+      <span className={`diff-icon ${iconClass}`} aria-hidden>
+        {statusSymbol(file.status)}
+      </span>
+      <span className="diff-file-icon" aria-hidden>
+        <FileIcon filePath={file.path} className="h-4 w-4" />
+      </span>
+      <div className="diff-file">
+        <div className="diff-path">
+          <span className="diff-name">
+            <span className="diff-name-base">{base}</span>
+            {extension ? <span className="diff-name-ext">.{extension}</span> : null}
+          </span>
         </div>
-
-        <div className="min-h-0 flex-1 bg-[#111827]">
-          {loading ? (
-            <div className="flex h-full items-center justify-center text-sm text-slate-400">Loading diff...</div>
-          ) : error ? (
-            <div className="flex h-full items-center justify-center px-6">
-              <div className="max-w-md rounded-[14px] border border-rose-400/20 bg-rose-500/10 px-5 py-4 text-sm text-rose-200">
-                {error}
-              </div>
-            </div>
-          ) : diff?.isBinary ? (
-            <DiffStateNotice
-              title="Binary change"
-              description="Git reported this file as binary, so Monaco cannot render a text comparison for it."
-              lines={metadataLines}
-            />
-          ) : metadataOnly ? (
-            <DiffStateNotice
-              title="Metadata-only change"
-              description="This change only carries file-level metadata, such as rename or mode updates. There are no textual hunks to compare."
-              lines={metadataLines}
-            />
-          ) : monacoTooLarge ? (
-            <DiffStateNotice
-              title="Large change"
-              description="This diff is too large for Monaco DiffEditor in the desktop shell. Open the file directly or narrow the change before previewing it here."
-              lines={[
-                `Diff length: ${diff?.diff.length ?? 0} chars`,
-                `Original length: ${diff?.originalContent?.length ?? 0} chars`,
-                `Modified length: ${diff?.modifiedContent?.length ?? 0} chars`,
-              ]}
-            />
-          ) : diff && renderMonaco ? (
-            <MonacoDiffView
-              diff={diff}
-              mode={viewMode}
-              activeHunk={activeHunk}
-              onReadyChange={() => {}}
-            />
+        {showDirectory && dir ? <div className="diff-dir">{dir}</div> : null}
+      </div>
+      <div className="diff-row-meta">
+        <span className="diff-counts-inline git-filetree-badge" aria-label={`+${file.additions} -${file.deletions}`}>
+          <span className="diff-add">+{file.additions}</span>
+          <span className="diff-sep">/</span>
+          <span className="diff-del">-{file.deletions}</span>
+        </span>
+        <div className="diff-row-actions" role="group" aria-label="File actions" onClick={(event) => event.stopPropagation()}>
+          {showStage ? (
+            <button
+              type="button"
+              className="diff-row-action diff-row-action--stage"
+              onClick={() => void onStageFile?.(file.path)}
+              data-tooltip="Stage file"
+              aria-label="Stage file"
+            >
+              <Plus size={12} aria-hidden />
+            </button>
+          ) : null}
+          {showUnstage ? (
+            <button
+              type="button"
+              className="diff-row-action diff-row-action--unstage"
+              onClick={() => void onUnstageFile?.(file.path)}
+              data-tooltip="Unstage file"
+              aria-label="Unstage file"
+            >
+              <Minus size={12} aria-hidden />
+            </button>
+          ) : null}
+          {showDiscard ? (
+            <button
+              type="button"
+              className="diff-row-action diff-row-action--discard"
+              onClick={() => void onDiscardFile?.(file.path)}
+              data-tooltip="Discard changes"
+              aria-label="Discard changes"
+            >
+              <Undo2 size={12} aria-hidden />
+            </button>
           ) : null}
         </div>
       </div>
@@ -590,237 +290,861 @@ function DiffOverlay({
   );
 }
 
-export function GitPanel() {
-  const workspaceState = useStore(
-    useShallow((state) => {
-      const tab = state.terminalTabs.find((item) => item.id === state.activeTerminalTabId);
-      const workspace = state.workspaces.find((item) => item.id === tab?.workspaceId);
-      return {
-        workspaceId: workspace?.id ?? null,
-        workspaceName: workspace?.name ?? null,
-        workspaceRootPath: workspace?.rootPath ?? null,
-        gitPanel: workspace ? state.gitPanelsByWorkspace[workspace.id] ?? null : null,
-      };
-    })
+function WorktreeSection({
+  title,
+  section,
+  files,
+  activeFileKey,
+  rootFolderName,
+  compactHeader = false,
+  leadingMeta,
+  onOpenFile,
+  onStageAll,
+  onUnstageAll,
+  onDiscardAll,
+  onStageFile,
+  onUnstageFile,
+  onDiscardFile,
+}: {
+  title: string;
+  section: WorktreeSectionKind;
+  files: GitFileStatus[];
+  activeFileKey: string | null;
+  rootFolderName?: string;
+  compactHeader?: boolean;
+  leadingMeta?: ReactNode;
+  onOpenFile: (file: GitFileStatus) => void;
+  onStageAll?: () => void;
+  onUnstageAll?: () => void;
+  onDiscardAll?: () => void;
+  onStageFile?: (path: string) => Promise<void> | void;
+  onUnstageFile?: (path: string) => Promise<void> | void;
+  onDiscardFile?: (path: string) => Promise<void> | void;
+}) {
+  const showCompactRoot = compactHeader && Boolean(rootFolderName?.trim());
+
+  return (
+    <div className={`diff-section git-history-worktree-section git-filetree-section diff-section--${section}`}>
+      <div className={`diff-section-title diff-section-title--row git-history-worktree-section-header${showCompactRoot ? " is-compact" : ""}`}>
+        {showCompactRoot ? (
+          <span className="diff-tree-summary-root is-static">
+            <span className="diff-tree-summary-root-toggle" aria-hidden>
+              <span className="diff-tree-folder-spacer" />
+            </span>
+            <FileIcon filePath={rootFolderName ?? ""} isFolder isOpen={false} className="diff-tree-summary-root-icon" />
+            <span className="diff-tree-summary-root-name">{rootFolderName}</span>
+          </span>
+        ) : null}
+        <span className="diff-tree-summary-section-label">
+          <SectionIndicator section={section} count={files.length} />
+        </span>
+        {leadingMeta ? <span className="diff-tree-summary-meta">{leadingMeta}</span> : null}
+        <div className="diff-section-actions git-history-worktree-section-actions" role="group" aria-label={`${title} actions`}>
+          {section === "unstaged" ? (
+            <>
+              <button
+                type="button"
+                className="diff-row-action diff-row-action--stage"
+                onClick={onStageAll}
+                data-tooltip="Stage all"
+                aria-label="Stage all"
+              >
+                <Plus size={12} aria-hidden />
+              </button>
+              <button
+                type="button"
+                className="diff-row-action diff-row-action--discard"
+                onClick={onDiscardAll}
+                data-tooltip="Discard all"
+                aria-label="Discard all"
+              >
+                <Undo2 size={12} aria-hidden />
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="diff-row-action diff-row-action--unstage"
+              onClick={onUnstageAll}
+              data-tooltip="Unstage all"
+              aria-label="Unstage all"
+            >
+              <Minus size={12} aria-hidden />
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="diff-section-list git-history-worktree-section-list git-filetree-list">
+        {files.map((file) => {
+          const key = buildFileKey(file.path, file.previousPath);
+          return (
+            <WorktreeFileRow
+              key={`${section}-${key}`}
+              file={file}
+              section={section}
+              active={activeFileKey === key}
+              onOpen={() => onOpenFile(file)}
+              onStageFile={onStageFile}
+              onUnstageFile={onUnstageFile}
+              onDiscardFile={onDiscardFile}
+            />
+          );
+        })}
+      </div>
+    </div>
   );
+}
 
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [selectedDiff, setSelectedDiff] = useState<GitFileDiff | null>(null);
-  const [diffCacheByPath, setDiffCacheByPath] = useState<Record<string, GitFileDiff>>({});
-  const [isLoadingDiff, setIsLoadingDiff] = useState(false);
-  const [diffError, setDiffError] = useState<string | null>(null);
-  const [pendingHunkTarget, setPendingHunkTarget] = useState<"first" | "last" | null>(null);
+function WorktreeTreeSection({
+  title,
+  section,
+  files,
+  activeFileKey,
+  rootFolderName,
+  compactHeader = false,
+  collapsedFolders,
+  onToggleFolder,
+  leadingMeta,
+  onOpenFile,
+  onStageAll,
+  onUnstageAll,
+  onDiscardAll,
+  onStageFile,
+  onUnstageFile,
+  onDiscardFile,
+}: {
+  title: string;
+  section: WorktreeSectionKind;
+  files: GitFileStatus[];
+  activeFileKey: string | null;
+  rootFolderName: string;
+  compactHeader?: boolean;
+  collapsedFolders: Set<string>;
+  onToggleFolder: (folderKey: string) => void;
+  leadingMeta?: ReactNode;
+  onOpenFile: (file: GitFileStatus) => void;
+  onStageAll?: () => void;
+  onUnstageAll?: () => void;
+  onDiscardAll?: () => void;
+  onStageFile?: (path: string) => Promise<void> | void;
+  onUnstageFile?: (path: string) => Promise<void> | void;
+  onDiscardFile?: (path: string) => Promise<void> | void;
+}) {
+  const tree = useMemo(() => buildDiffTree(files, section), [files, section]);
+  const rootFolderKey = `${section}:__repo_root__/`;
+  const rootCollapsed = collapsedFolders.has(rootFolderKey);
+  const useCompactHeader = compactHeader && rootFolderName.trim().length > 0;
 
-  const workspace = useMemo(
-    () =>
-      workspaceState.workspaceId &&
-      workspaceState.workspaceName &&
-      workspaceState.workspaceRootPath
-        ? {
-            id: workspaceState.workspaceId,
-            name: workspaceState.workspaceName,
-            rootPath: workspaceState.workspaceRootPath,
-          }
-        : null,
-    [
-      workspaceState.workspaceId,
-      workspaceState.workspaceName,
-      workspaceState.workspaceRootPath,
-    ]
-  );
-  const gitPanel = workspaceState.gitPanel;
+  function renderFolder(folder: DiffTreeFolderNode<GitFileStatus>, depth: number, parentKey?: string): ReactNode {
+    const isCollapsed = collapsedFolders.has(folder.key);
+    const hasChildren = folder.folders.size > 0 || folder.files.length > 0;
+    const treeIndentPx = depth * TREE_INDENT_STEP;
+    const folderStyle = {
+      paddingLeft: `${treeIndentPx}px`,
+      ["--git-tree-indent-x" as string]: `${Math.max(treeIndentPx - 5, 0)}px`,
+      ["--git-tree-line-opacity" as string]: getTreeLineOpacity(depth),
+    } as CSSProperties;
+    const childStyle = {
+      ["--git-tree-branch-x" as string]: `${Math.max((depth + 1) * TREE_INDENT_STEP - 5, 0)}px`,
+      ["--git-tree-branch-opacity" as string]: getTreeLineOpacity(depth + 1),
+    } as CSSProperties;
 
-  const selectedChange =
-    selectedPath && gitPanel
-      ? gitPanel.recentChanges.find((change) => samePath(change.path, selectedPath)) ?? null
-      : null;
-
-  const changesVersion = useMemo(() => {
-    if (!gitPanel) return "";
-    return gitPanel.recentChanges
-      .map((change) => `${change.status}:${change.previousPath ?? ""}:${change.path}`)
-      .join("|");
-  }, [gitPanel]);
-
-  useEffect(() => {
-    setSelectedPath(null);
-    setSelectedDiff(null);
-    setDiffCacheByPath({});
-    setDiffError(null);
-    setIsLoadingDiff(false);
-  }, [workspace?.id]);
-
-  useEffect(() => {
-    if (!workspace || !gitPanel || !selectedPath) return;
-
-    const currentChange = gitPanel.recentChanges.find((change) => samePath(change.path, selectedPath));
-    if (!currentChange) {
-      setSelectedPath(null);
-      setSelectedDiff(null);
-      setDiffError(null);
-      setIsLoadingDiff(false);
-      return;
-    }
-
-    let cancelled = false;
-    const cached = diffCacheByPath[currentChange.path];
-    if (cached) {
-      setSelectedDiff(cached);
-      setDiffError(null);
-      setIsLoadingDiff(false);
-      return;
-    }
-    setIsLoadingDiff(true);
-    setDiffError(null);
-
-    bridge
-      .getGitFileDiff(workspace.rootPath, currentChange.path)
-      .then((result) => {
-        if (cancelled) return;
-        setSelectedDiff(result);
-        setDiffCacheByPath((current) => ({ ...current, [currentChange.path]: result }));
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        const message = error instanceof Error ? error.message : "Unable to load diff.";
-        setDiffError(message);
-        setSelectedDiff(null);
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoadingDiff(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [diffCacheByPath, workspace?.rootPath, gitPanel, selectedPath, changesVersion]);
-
-  if (!workspace) return null;
-
-  const recentChanges = gitPanel?.recentChanges ?? [];
-  const changeCount = recentChanges.length;
-  const selectedIndex = selectedPath
-    ? recentChanges.findIndex((change) => samePath(change.path, selectedPath))
-    : -1;
-  const hasPrevious = selectedIndex > 0;
-  const hasNext = selectedIndex >= 0 && selectedIndex < recentChanges.length - 1;
-
-  function selectRelativeChange(direction: -1 | 1) {
-    if (selectedIndex < 0) return;
-    const nextChange = recentChanges[selectedIndex + direction];
-    if (!nextChange) return;
-    setPendingHunkTarget(direction < 0 ? "last" : "first");
-    setSelectedPath(nextChange.path);
+    return (
+      <div key={folder.key} className="diff-tree-folder-group">
+        <button
+          type="button"
+          className="diff-tree-folder-row git-filetree-folder-row"
+          style={folderStyle}
+          data-folder-key={folder.key}
+          data-tree-depth={depth + 1}
+          data-collapsed={hasChildren ? String(isCollapsed) : undefined}
+          role="treeitem"
+          aria-level={depth + 1}
+          aria-label={folder.name}
+          aria-expanded={hasChildren ? !isCollapsed : undefined}
+          onClick={() => {
+            if (hasChildren) onToggleFolder(folder.key);
+          }}
+        >
+          <span className="diff-tree-folder-toggle" aria-hidden>
+            {hasChildren ? (isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />) : <span className="diff-tree-folder-spacer" />}
+          </span>
+          <FileIcon filePath={folder.name} isFolder isOpen={!isCollapsed} className="diff-tree-folder-icon" />
+          <span className="diff-tree-folder-name">{folder.name}</span>
+        </button>
+        {!isCollapsed ? (
+          <div className="diff-tree-folder-children" style={childStyle}>
+            {Array.from(folder.folders.values()).map((child) => renderFolder(child, depth + 1, folder.key))}
+            {folder.files.map((file) => {
+              const key = buildFileKey(file.path, file.previousPath);
+              return (
+                <WorktreeFileRow
+                  key={`${section}-${key}`}
+                  file={file}
+                  section={section}
+                  active={activeFileKey === key}
+                  treeItem
+                  indentLevel={depth + 1}
+                  treeDepth={depth + 2}
+                  parentFolderKey={parentKey ?? folder.key}
+                  showDirectory={false}
+                  onOpen={() => onOpenFile(file)}
+                  onStageFile={onStageFile}
+                  onUnstageFile={onUnstageFile}
+                  onDiscardFile={onDiscardFile}
+                />
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   return (
-    <>
-      <aside className="w-[320px] border-l border-border bg-[#fcfcfd]">
-        <div className="flex h-full min-h-0 flex-col">
-          <div className="border-b border-border px-5 py-4">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted">
-              Changes
-            </div>
-            <div className="mt-2 flex items-end justify-between gap-3">
-              <div className="text-sm font-semibold text-text">
-                {gitPanel?.isGitRepo ? "Working tree" : "Git unavailable"}
-              </div>
-              <div className="text-xs text-secondary">
-                {gitPanel?.isGitRepo ? `${changeCount} file${changeCount === 1 ? "" : "s"}` : "No repository"}
-              </div>
-            </div>
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            {!gitPanel ? (
-              <div className="px-5 py-6 text-sm text-secondary">Loading changes...</div>
-            ) : !gitPanel.isGitRepo ? (
-              <div className="px-5 py-6 text-sm leading-6 text-secondary">
-                The current workspace is not a Git repository, so there is no working tree diff to inspect.
-              </div>
-            ) : recentChanges.length === 0 ? (
-              <div className="px-5 py-6 text-sm leading-6 text-secondary">
-                No uncommitted changes in this workspace. New edits will appear here automatically.
-              </div>
-            ) : (
-              <div className="px-3 py-3">
-                {recentChanges.map((change) => {
-                  const status = statusToken(change.status);
-                  const fileType = fileTypeToken(change.path);
-                  const isSelected = selectedPath ? samePath(change.path, selectedPath) : false;
-
+    <div className={`diff-section git-history-worktree-section git-filetree-section diff-section--${section}`}>
+      <div className={`diff-section-title diff-section-title--row git-history-worktree-section-header${useCompactHeader ? " is-compact" : ""}`}>
+        {useCompactHeader ? (
+          <button
+            type="button"
+            className="diff-tree-summary-root"
+            aria-label={rootFolderName}
+            aria-expanded={!rootCollapsed}
+            onClick={() => onToggleFolder(rootFolderKey)}
+          >
+            <span className="diff-tree-summary-root-toggle" aria-hidden>
+              {rootCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+            </span>
+            <FileIcon filePath={rootFolderName} isFolder isOpen={!rootCollapsed} className="diff-tree-summary-root-icon" />
+            <span className="diff-tree-summary-root-name">{rootFolderName}</span>
+          </button>
+        ) : null}
+        <span className="diff-tree-summary-section-label">
+          <SectionIndicator section={section} count={files.length} />
+        </span>
+        {leadingMeta ? <span className="diff-tree-summary-meta">{leadingMeta}</span> : null}
+        <div className="diff-section-actions git-history-worktree-section-actions" role="group" aria-label={`${title} actions`}>
+          {section === "unstaged" ? (
+            <>
+              <button
+                type="button"
+                className="diff-row-action diff-row-action--stage"
+                onClick={onStageAll}
+                data-tooltip="Stage all"
+                aria-label="Stage all"
+              >
+                <Plus size={12} aria-hidden />
+              </button>
+              <button
+                type="button"
+                className="diff-row-action diff-row-action--discard"
+                onClick={onDiscardAll}
+                data-tooltip="Discard all"
+                aria-label="Discard all"
+              >
+                <Undo2 size={12} aria-hidden />
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="diff-row-action diff-row-action--unstage"
+              onClick={onUnstageAll}
+              data-tooltip="Unstage all"
+              aria-label="Unstage all"
+            >
+              <Minus size={12} aria-hidden />
+            </button>
+          )}
+        </div>
+      </div>
+      <div className={`diff-section-list diff-section-tree-list git-history-worktree-section-list git-filetree-list git-filetree-list--tree${useCompactHeader ? " is-compact-root" : ""}`}>
+        {useCompactHeader ? (
+          !rootCollapsed ? (
+            <>
+              {Array.from(tree.folders.values()).map((folder) => renderFolder(folder, 1, rootFolderKey))}
+              {tree.files.map((file) => {
+                const key = buildFileKey(file.path, file.previousPath);
+                return (
+                  <WorktreeFileRow
+                    key={`${section}-${key}`}
+                    file={file}
+                    section={section}
+                    active={activeFileKey === key}
+                    treeItem
+                    indentLevel={1}
+                    treeDepth={2}
+                    parentFolderKey={rootFolderKey}
+                    showDirectory={false}
+                    onOpen={() => onOpenFile(file)}
+                    onStageFile={onStageFile}
+                    onUnstageFile={onUnstageFile}
+                    onDiscardFile={onDiscardFile}
+                  />
+                );
+              })}
+            </>
+          ) : null
+        ) : (
+          <div className="diff-tree-folder-group">
+            <button
+              type="button"
+              className="diff-tree-folder-row git-filetree-folder-row"
+              style={{ paddingLeft: "0px" }}
+              data-folder-key={rootFolderKey}
+              data-tree-depth={1}
+              data-collapsed={String(rootCollapsed)}
+              role="treeitem"
+              aria-level={1}
+              aria-label={rootFolderName}
+              aria-expanded={!rootCollapsed}
+              onClick={() => onToggleFolder(rootFolderKey)}
+            >
+              <span className="diff-tree-folder-toggle" aria-hidden>
+                {rootCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+              </span>
+              <FileIcon filePath={rootFolderName} isFolder isOpen={!rootCollapsed} className="diff-tree-folder-icon" />
+              <span className="diff-tree-folder-name">{rootFolderName}</span>
+            </button>
+            {!rootCollapsed ? (
+              <div
+                className="diff-tree-folder-children"
+                style={
+                  {
+                    ["--git-tree-branch-x" as string]: `${Math.max(TREE_INDENT_STEP - 5, 0)}px`,
+                    ["--git-tree-branch-opacity" as string]: getTreeLineOpacity(1),
+                  } as CSSProperties
+                }
+              >
+                {Array.from(tree.folders.values()).map((folder) => renderFolder(folder, 1, rootFolderKey))}
+                {tree.files.map((file) => {
+                  const key = buildFileKey(file.path, file.previousPath);
                   return (
-                    <button
-                      key={`${change.previousPath ?? ""}:${change.path}:${change.status}`}
-                      type="button"
-                      onClick={() => {
-                        setPendingHunkTarget(null);
-                        setSelectedPath(change.path);
-                      }}
-                      className={`mb-1.5 flex w-full items-start gap-3 rounded-[20px] px-3 py-3 text-left transition-all ${
-                        isSelected
-                          ? "bg-[#edf4ff] shadow-[inset_0_0_0_1px_rgba(59,130,246,0.12)]"
-                          : "hover:bg-[#f4f7fb]"
-                      }`}
-                    >
-                      <span className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${status.dot}`} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] ${
-                              fileType.listTone
-                            }`}
-                          >
-                            {fileType.label}
-                          </span>
-                          <span className="truncate text-[13px] font-semibold text-slate-900">
-                            {basename(change.path)}
-                          </span>
-                          <span
-                            className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold ${status.chip}`}
-                          >
-                            {status.short}
-                          </span>
-                        </div>
-                        <div className="mt-1 truncate text-[11px] text-slate-500">
-                          {dirname(change.path) || "."}
-                        </div>
-                        {change.previousPath ? (
-                          <div className="mt-1 truncate text-[11px] text-slate-400">
-                            from {change.previousPath}
-                          </div>
-                        ) : null}
-                      </div>
-                    </button>
+                    <WorktreeFileRow
+                      key={`${section}-${key}`}
+                      file={file}
+                      section={section}
+                      active={activeFileKey === key}
+                      treeItem
+                      indentLevel={1}
+                      treeDepth={2}
+                      parentFolderKey={rootFolderKey}
+                      showDirectory={false}
+                      onOpen={() => onOpenFile(file)}
+                      onStageFile={onStageFile}
+                      onUnstageFile={onUnstageFile}
+                      onDiscardFile={onDiscardFile}
+                    />
                   );
                 })}
               </div>
-            )}
+            ) : null}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DiffModal({
+  state,
+  diffStyle,
+  onDiffStyleChange,
+  onClose,
+}: {
+  state: DiffModalState;
+  diffStyle: GitDiffStyle;
+  onDiffStyleChange: (style: GitDiffStyle) => void;
+  onClose: () => void;
+}) {
+  const file = state.file;
+  const diffText = state.diff?.diff ?? "";
+  const binary = state.diff?.isBinary ?? false;
+  const status = normalizeStatus(file.status);
+
+  return (
+    <div className="git-history-diff-modal-overlay" role="presentation" onClick={onClose}>
+      <div className="git-history-diff-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+        <div className="git-history-diff-modal-header">
+          <div className="git-history-diff-modal-title">
+            <span className={`git-history-file-status ${statusToneClass(file.status)}`}>{status}</span>
+            <span className="git-history-tree-icon is-file" aria-hidden>
+              <FileIcon filePath={file.path} className="h-4 w-4" />
+            </span>
+            <span className="git-history-diff-modal-path">{file.path}</span>
+            <span className="git-history-diff-modal-stats">
+              <span className="is-add">+{file.additions}</span>
+              <span className="is-sep">/</span>
+              <span className="is-del">-{file.deletions}</span>
+            </span>
+          </div>
+          <div className="git-history-diff-modal-actions">
+            {!binary && diffText.trim() ? (
+              <div className="diff-viewer-header-controls is-external">
+                <div className="diff-viewer-header-mode" role="group" aria-label="Diff style">
+                  <button
+                    type="button"
+                    className={`diff-viewer-header-mode-icon-button ${diffStyle === "split" ? "active" : ""}`}
+                    onClick={() => onDiffStyleChange("split")}
+                    aria-label="Dual panel diff"
+                    title="Dual panel diff"
+                  >
+                    <span className="diff-viewer-mode-glyph diff-viewer-mode-glyph-split" aria-hidden />
+                    <span className="diff-viewer-mode-label">Dual panel</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`diff-viewer-header-mode-icon-button ${diffStyle === "unified" ? "active" : ""}`}
+                    onClick={() => onDiffStyleChange("unified")}
+                    aria-label="Single column diff"
+                    title="Single column diff"
+                  >
+                    <span className="diff-viewer-mode-glyph diff-viewer-mode-glyph-unified" aria-hidden />
+                    <span className="diff-viewer-mode-label">Single column</span>
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            <button type="button" className="git-history-diff-modal-close" onClick={onClose} aria-label="Close diff" title="Close diff">
+              <X size={14} />
+            </button>
           </div>
         </div>
-      </aside>
+        {state.loading ? <div className="git-history-empty">Loading diff...</div> : null}
+        {state.error ? <div className="git-history-error">{state.error}</div> : null}
+        {!state.loading && !state.error ? (
+          binary || !diffText.trim() ? (
+            <pre className="git-history-diff-modal-code">{diffText || "No diff available."}</pre>
+          ) : (
+            <div className="git-history-diff-modal-viewer">
+              <GitDiffBlock diff={diffText} style={diffStyle} />
+            </div>
+          )
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
-      {selectedPath ? (
-        <DiffOverlay
-          workspaceRoot={workspace.rootPath}
-          change={selectedChange}
-          diff={selectedDiff}
-          loading={isLoadingDiff}
-          error={diffError}
-          hasPreviousFile={hasPrevious}
-          hasNextFile={hasNext}
-          onPreviousFile={() => selectRelativeChange(-1)}
-          onNextFile={() => selectRelativeChange(1)}
-          initialHunkTarget={pendingHunkTarget}
-          onClose={() => {
-            setSelectedPath(null);
-            setSelectedDiff(null);
-            setDiffError(null);
-            setIsLoadingDiff(false);
-            setPendingHunkTarget(null);
-          }}
-        />
+export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
+  const refreshGitPanel = useStore((state) => state.refreshGitPanel);
+  const setGitCommitMessage = useStore((state) => state.setGitCommitMessage);
+  const stageGitFile = useStore((state) => state.stageGitFile);
+  const unstageGitFile = useStore((state) => state.unstageGitFile);
+  const discardGitFile = useStore((state) => state.discardGitFile);
+  const commitGitChanges = useStore((state) => state.commitGitChanges);
+
+  const workspaceId = workspace?.id ?? null;
+  const projectRoot = workspace?.rootPath ?? null;
+  const repositoryRootName = workspace ? splitPath(workspace.rootPath).at(-1) ?? workspace.name : "";
+  const gitPanel = useStore((state) => (workspaceId ? state.gitPanelsByWorkspace[workspaceId] ?? null : null));
+  const commitMessage = useStore((state) => (workspaceId ? state.gitCommitMessageByWorkspace[workspaceId] ?? "" : ""));
+  const commitLoading = useStore((state) => (workspaceId ? Boolean(state.gitCommitLoadingByWorkspace[workspaceId]) : false));
+  const commitError = useStore((state) => (workspaceId ? state.gitCommitErrorByWorkspace[workspaceId] ?? null : null));
+
+  const [changeView, setChangeView] = useState<ChangeViewMode>("flat");
+  const [selectedWorktreeFileKey, setSelectedWorktreeFileKey] = useState<string | null>(null);
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
+  const [diffModal, setDiffModal] = useState<DiffModalState | null>(null);
+  const [diffViewStyle, setDiffViewStyle] = useState<GitDiffStyle>(() => {
+    if (typeof window === "undefined") return "split";
+    const stored = window.localStorage.getItem(DIFF_STYLE_STORAGE_KEY);
+    return stored === "unified" ? "unified" : "split";
+  });
+  const [commitSectionCollapsed, setCommitSectionCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(COMMIT_COLLAPSE_STORAGE_KEY) === "true";
+  });
+  const [refreshLoading, setRefreshLoading] = useState(false);
+  const [pushLoading, setPushLoading] = useState(false);
+  const [pushError, setPushError] = useState<string | null>(null);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const [gitLog, setGitLog] = useState<GitLogResponse | null>(null);
+
+  const stagedFiles = gitPanel?.stagedFiles ?? [];
+  const unstagedFiles = gitPanel?.unstagedFiles ?? [];
+  const hasAnyChanges = stagedFiles.length > 0 || unstagedFiles.length > 0;
+  const hasDualWorktreeSections = stagedFiles.length > 0 && unstagedFiles.length > 0;
+  const primarySection = stagedFiles.length > 0 ? "staged" : unstagedFiles.length > 0 ? "unstaged" : null;
+  const commitsAhead = gitLog?.ahead ?? 0;
+  const canCommit = commitMessage.trim().length > 0 && hasAnyChanges && !commitLoading;
+
+  const loadGitLog = useCallback(async () => {
+    if (!projectRoot) {
+      setGitLog(null);
+      return;
+    }
+    try {
+      setGitLog(await bridge.getGitLog(projectRoot));
+    } catch {
+      setGitLog(null);
+    }
+  }, [projectRoot]);
+
+  const refreshAll = useCallback(async () => {
+    if (!workspaceId) return;
+    setRefreshLoading(true);
+    setPanelError(null);
+    try {
+      await Promise.all([refreshGitPanel(workspaceId), loadGitLog()]);
+    } catch (error) {
+      setPanelError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRefreshLoading(false);
+    }
+  }, [loadGitLog, refreshGitPanel, workspaceId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(DIFF_STYLE_STORAGE_KEY, diffViewStyle);
+  }, [diffViewStyle]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(COMMIT_COLLAPSE_STORAGE_KEY, String(commitSectionCollapsed));
+  }, [commitSectionCollapsed]);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    setSelectedWorktreeFileKey(null);
+    setCollapsedFolders(new Set());
+    setDiffModal(null);
+    setPushError(null);
+    setPanelError(null);
+    void refreshAll();
+  }, [refreshAll, workspaceId]);
+
+  const openWorktreeDiff = useCallback(
+    async (file: GitFileStatus) => {
+      if (!projectRoot) return;
+      setSelectedWorktreeFileKey(buildFileKey(file.path, file.previousPath));
+      setDiffModal({ file, diff: null, loading: true, error: null });
+      try {
+        const diff = await bridge.getGitFileDiff(projectRoot, file.path);
+        setDiffModal({ file, diff, loading: false, error: null });
+      } catch (error) {
+        setDiffModal({
+          file,
+          diff: null,
+          loading: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [projectRoot]
+  );
+
+  function toggleCollapsedFolder(folderKey: string) {
+    setCollapsedFolders((current) => {
+      const next = new Set(current);
+      if (next.has(folderKey)) next.delete(folderKey);
+      else next.add(folderKey);
+      return next;
+    });
+  }
+
+  const handleStageFile = useCallback(async (path: string) => {
+    if (!workspaceId) return;
+    setPanelError(null);
+    setPushError(null);
+    await stageGitFile(workspaceId, path);
+    await loadGitLog();
+  }, [loadGitLog, stageGitFile, workspaceId]);
+
+  const handleUnstageFile = useCallback(async (path: string) => {
+    if (!workspaceId) return;
+    setPanelError(null);
+    setPushError(null);
+    await unstageGitFile(workspaceId, path);
+    await loadGitLog();
+  }, [loadGitLog, unstageGitFile, workspaceId]);
+
+  const handleDiscardFile = useCallback(async (path: string) => {
+    if (!workspaceId) return;
+    setPanelError(null);
+    setPushError(null);
+    await discardGitFile(workspaceId, path);
+    if (selectedWorktreeFileKey?.endsWith(`::${path}`)) {
+      setSelectedWorktreeFileKey(null);
+    }
+    await loadGitLog();
+  }, [discardGitFile, loadGitLog, selectedWorktreeFileKey, workspaceId]);
+
+  const stageAllChanges = useCallback(async () => {
+    if (!workspaceId || !projectRoot) return;
+    setPanelError(null);
+    setPushError(null);
+    try {
+      for (const file of unstagedFiles) {
+        await bridge.stageGitFile(projectRoot, file.path);
+      }
+      await Promise.all([refreshGitPanel(workspaceId), loadGitLog()]);
+    } catch (error) {
+      setPanelError(error instanceof Error ? error.message : String(error));
+    }
+  }, [loadGitLog, projectRoot, refreshGitPanel, unstagedFiles, workspaceId]);
+
+  const unstageAllChanges = useCallback(async () => {
+    if (!workspaceId || !projectRoot) return;
+    setPanelError(null);
+    setPushError(null);
+    try {
+      for (const file of stagedFiles) {
+        await bridge.unstageGitFile(projectRoot, file.path);
+      }
+      await Promise.all([refreshGitPanel(workspaceId), loadGitLog()]);
+    } catch (error) {
+      setPanelError(error instanceof Error ? error.message : String(error));
+    }
+  }, [loadGitLog, projectRoot, refreshGitPanel, stagedFiles, workspaceId]);
+
+  const discardAllChanges = useCallback(async () => {
+    if (!workspaceId || !projectRoot) return;
+    setPanelError(null);
+    setPushError(null);
+    try {
+      for (const file of unstagedFiles) {
+        await bridge.discardGitFile(projectRoot, file.path);
+      }
+      setSelectedWorktreeFileKey(null);
+      await Promise.all([refreshGitPanel(workspaceId), loadGitLog()]);
+    } catch (error) {
+      setPanelError(error instanceof Error ? error.message : String(error));
+    }
+  }, [loadGitLog, projectRoot, refreshGitPanel, unstagedFiles, workspaceId]);
+
+  const handleCommit = useCallback(async () => {
+    if (!workspaceId) return;
+    setPanelError(null);
+    setPushError(null);
+    await commitGitChanges(workspaceId, { stageAll: stagedFiles.length === 0 && unstagedFiles.length > 0 });
+    if (!useStore.getState().gitCommitErrorByWorkspace[workspaceId]) {
+      setSelectedWorktreeFileKey(null);
+      await loadGitLog();
+    }
+  }, [commitGitChanges, loadGitLog, stagedFiles.length, unstagedFiles.length, workspaceId]);
+
+  const pushChanges = useCallback(async () => {
+    if (!projectRoot) return;
+    setPushLoading(true);
+    setPushError(null);
+    setPanelError(null);
+    try {
+      await bridge.pushGit(projectRoot, null, null);
+      await refreshAll();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPushError(message);
+      setPanelError(message);
+    } finally {
+      setPushLoading(false);
+    }
+  }, [projectRoot, refreshAll]);
+
+  if (!workspaceId || !workspace) {
+    return (
+      <div className="workspace-git-panel-shell">
+        <div className="git-history-changes diff-panel workspace-git-panel">
+          <div className="git-history-empty">No active workspace.</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="workspace-git-panel-shell">
+      <section className="git-history-changes diff-panel workspace-git-panel">
+        <div className="git-panel-header">
+          <div className="git-panel-actions" role="group" aria-label="Git change panel">
+            <div className="diff-list-view-toggle" role="group" aria-label="List view">
+              <button
+                type="button"
+                className={`diff-list-view-button ${changeView === "flat" ? "active" : ""}`}
+                onClick={() => setChangeView("flat")}
+                aria-pressed={changeView === "flat"}
+              >
+                <LayoutGrid size={13} aria-hidden />
+                <span>Flat</span>
+              </button>
+              <button
+                type="button"
+                className={`diff-list-view-button ${changeView === "tree" ? "active" : ""}`}
+                onClick={() => setChangeView("tree")}
+                aria-pressed={changeView === "tree"}
+              >
+                <FolderTree size={13} aria-hidden />
+                <span>Tree</span>
+              </button>
+              {hasAnyChanges ? (
+                <button
+                  type="button"
+                  className={`diff-list-view-collapse-toggle ${!commitSectionCollapsed ? "active" : ""}`}
+                  onClick={() => setCommitSectionCollapsed((value) => !value)}
+                  aria-expanded={!commitSectionCollapsed}
+                  title={commitSectionCollapsed ? "Expand commit section" : "Collapse commit section"}
+                >
+                  {commitSectionCollapsed ? <ChevronsUpDown size={13} aria-hidden /> : <ChevronsDownUp size={13} aria-hidden />}
+                  <span>Commit</span>
+                </button>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              className="git-history-mini-chip"
+              onClick={() => void refreshAll()}
+              title="Refresh Git data"
+              aria-label="Refresh Git data"
+            >
+              <RefreshCw size={12} className={refreshLoading ? "animate-spin" : ""} />
+            </button>
+          </div>
+        </div>
+
+        <div className="diff-list">
+          {panelError ? <div className="git-history-error">{panelError}</div> : null}
+          {!gitPanel ? <div className="git-history-empty">Loading changes...</div> : null}
+          {gitPanel && !gitPanel.isGitRepo ? <div className="git-history-empty">This workspace is not a Git repository.</div> : null}
+
+          {gitPanel?.isGitRepo ? (
+            <>
+              {hasAnyChanges && !commitSectionCollapsed ? (
+                <div className="commit-message-section">
+                  <div className="commit-message-input-wrapper">
+                    <textarea
+                      className="commit-message-input"
+                      placeholder="Commit message"
+                      value={commitMessage}
+                      onChange={(event) => {
+                        if (workspaceId) {
+                          setGitCommitMessage(workspaceId, event.target.value);
+                        }
+                      }}
+                      rows={2}
+                      disabled={commitLoading}
+                    />
+                  </div>
+                  {commitError ? <div className="commit-message-error">{commitError}</div> : null}
+                  <div className="commit-button-container">
+                    <button
+                      type="button"
+                      className={`commit-button${commitLoading ? " is-loading" : ""}`}
+                      onClick={() => void handleCommit()}
+                      disabled={!canCommit}
+                      aria-busy={commitLoading}
+                    >
+                      {commitLoading ? <span className="commit-button-spinner" aria-hidden /> : <Check size={14} aria-hidden />}
+                      <span>{commitLoading ? "Committing..." : "Commit"}</span>
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {commitsAhead > 0 && stagedFiles.length === 0 ? (
+                <div className="push-section">
+                  {pushError ? <div className="commit-message-error">{pushError}</div> : null}
+                  <button
+                    type="button"
+                    className={`push-button${pushLoading ? " is-loading" : ""}`}
+                    onClick={() => void pushChanges()}
+                    disabled={pushLoading}
+                    aria-busy={pushLoading}
+                  >
+                    {pushLoading ? <span className="commit-button-spinner" aria-hidden /> : <Upload size={14} aria-hidden />}
+                    <span>Push</span>
+                    <span className="push-count">{commitsAhead}</span>
+                  </button>
+                </div>
+              ) : null}
+
+              {!hasAnyChanges && commitsAhead === 0 ? <div className="git-history-empty">No changes detected.</div> : null}
+
+              {hasAnyChanges ? (
+                <div
+                  className={[
+                    "git-history-worktree-sections",
+                    hasDualWorktreeSections ? "has-dual-sections" : "",
+                    stagedFiles.length === 0 || unstagedFiles.length === 0 ? "is-single" : "",
+                    changeView === "flat" ? "is-flat-view" : "is-tree-view",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                >
+                  {stagedFiles.length > 0
+                    ? changeView === "tree"
+                      ? (
+                          <WorktreeTreeSection
+                            title="Staged"
+                            section="staged"
+                            files={stagedFiles}
+                            activeFileKey={selectedWorktreeFileKey}
+                            rootFolderName={repositoryRootName}
+                            compactHeader={false}
+                            collapsedFolders={collapsedFolders}
+                            onToggleFolder={toggleCollapsedFolder}
+                            onOpenFile={openWorktreeDiff}
+                            onUnstageAll={() => void unstageAllChanges()}
+                            onUnstageFile={(path) => void handleUnstageFile(path)}
+                          />
+                        )
+                      : (
+                          <WorktreeSection
+                            title="Staged"
+                            section="staged"
+                            files={stagedFiles}
+                            activeFileKey={selectedWorktreeFileKey}
+                            rootFolderName={repositoryRootName}
+                            compactHeader={false}
+                            onOpenFile={openWorktreeDiff}
+                            onUnstageAll={() => void unstageAllChanges()}
+                            onUnstageFile={(path) => void handleUnstageFile(path)}
+                          />
+                        )
+                    : null}
+                  {unstagedFiles.length > 0
+                    ? changeView === "tree"
+                      ? (
+                          <WorktreeTreeSection
+                            title="Unstaged"
+                            section="unstaged"
+                            files={unstagedFiles}
+                            activeFileKey={selectedWorktreeFileKey}
+                            rootFolderName={repositoryRootName}
+                            compactHeader={Boolean(repositoryRootName)}
+                            collapsedFolders={collapsedFolders}
+                            onToggleFolder={toggleCollapsedFolder}
+                            onOpenFile={openWorktreeDiff}
+                            onStageAll={() => void stageAllChanges()}
+                            onDiscardAll={() => void discardAllChanges()}
+                            onStageFile={(path) => void handleStageFile(path)}
+                            onDiscardFile={(path) => void handleDiscardFile(path)}
+                          />
+                        )
+                      : (
+                          <WorktreeSection
+                            title="Unstaged"
+                            section="unstaged"
+                            files={unstagedFiles}
+                            activeFileKey={selectedWorktreeFileKey}
+                            rootFolderName={repositoryRootName}
+                            compactHeader={primarySection === "unstaged"}
+                            onOpenFile={openWorktreeDiff}
+                            onStageAll={() => void stageAllChanges()}
+                            onDiscardAll={() => void discardAllChanges()}
+                            onStageFile={(path) => void handleStageFile(path)}
+                            onDiscardFile={(path) => void handleDiscardFile(path)}
+                          />
+                        )
+                    : null}
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      </section>
+
+      {diffModal ? (
+        <DiffModal state={diffModal} diffStyle={diffViewStyle} onDiffStyleChange={setDiffViewStyle} onClose={() => setDiffModal(null)} />
       ) : null}
-    </>
+    </div>
   );
 }

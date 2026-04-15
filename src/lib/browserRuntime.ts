@@ -42,6 +42,9 @@ import {
   ChatMessageStreamUpdateRequest,
   CliHandoffRequest,
   CliSkillItem,
+  ExternalDirectoryEntry,
+  ExternalTextFile,
+  GlobalMcpServerEntry,
   TerminalEvent,
   TerminalLine,
   ContextStore,
@@ -54,7 +57,19 @@ import {
   EnrichedHandoff,
   ChatPromptRequest,
   FileMentionCandidate,
+  LocalUsageStatistics,
+  WorkspaceTextSearchResponse,
   GitFileDiff,
+  GitBranchListResponse,
+  GitCommitDetails,
+  GitHistoryResponse,
+  GitHubIssue,
+  GitHubIssuesResponse,
+  GitHubPullRequest,
+  GitHubPullRequestsResponse,
+  GitLogEntry,
+  GitLogResponse,
+  GitFileStatus,
   StreamEvent,
   GitPanelData,
   GitFileChange,
@@ -62,7 +77,9 @@ import {
   ModelProviderServiceType,
   PersistedTerminalState,
   SemanticMemoryChunk,
+  SettingsEngineStatus,
   WorkspacePickResult,
+  WorkspaceTreeEntry,
 } from "./models";
 import { parseApiAssistantContent } from "./apiChatFormatting";
 import {
@@ -2832,17 +2849,8 @@ export const browserRuntime = {
   },
 
   async searchWorkspaceFiles(_projectRoot: string, query: string): Promise<FileMentionCandidate[]> {
-    const candidates = [
-      "src/pages/TerminalPage.tsx",
-      "src/components/chat/ChatPromptBar.tsx",
-      "src/components/chat/ChatConversation.tsx",
-      "src/components/chat/GitPanel.tsx",
-      "src/lib/store.ts",
-      "src/lib/bridge.ts",
-      "src-tauri/src/main.rs",
-    ];
     const lower = query.toLowerCase();
-    return candidates
+    return MOCK_WORKSPACE_FILE_PATHS
       .filter((path) => path.toLowerCase().includes(lower))
       .slice(0, 20)
       .map((relativePath) => ({
@@ -2853,22 +2861,338 @@ export const browserRuntime = {
       }));
   },
 
+  async searchWorkspaceText(
+    _projectRoot: string,
+    options: {
+      query: string;
+      caseSensitive: boolean;
+      wholeWord: boolean;
+      isRegex: boolean;
+      includePattern?: string | null;
+      excludePattern?: string | null;
+    }
+  ): Promise<WorkspaceTextSearchResponse> {
+    const trimmed = options.query.trim();
+    if (!trimmed) {
+      return { files: [], fileCount: 0, matchCount: 0, limitHit: false };
+    }
+    const filtered = MOCK_WORKSPACE_FILE_PATHS.filter((path) => {
+      const include = options.includePattern?.trim();
+      const exclude = options.excludePattern?.trim();
+      if (include && !path.includes(include.replaceAll("*", ""))) return false;
+      if (exclude && path.includes(exclude.replaceAll("*", ""))) return false;
+      return true;
+    }).slice(0, 12);
+
+    const files = filtered
+      .map((path) => {
+        const haystack = options.caseSensitive ? path : path.toLowerCase();
+        const needle = options.caseSensitive ? trimmed : trimmed.toLowerCase();
+        if (!haystack.includes(needle)) return null;
+        return {
+          path,
+          matchCount: 1,
+          matches: [
+            {
+              line: 1,
+              column: 1,
+              endColumn: Math.max(2, trimmed.length + 1),
+              preview: `Mock match in ${path}`,
+            },
+          ],
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+
+    return {
+      files,
+      fileCount: files.length,
+      matchCount: files.length,
+      limitHit: false,
+    };
+  },
+
+  async createWorkspaceFile(_projectRoot: string, _relativePath: string): Promise<void> {
+    return;
+  },
+
+  async createWorkspaceDirectory(_projectRoot: string, _relativePath: string): Promise<void> {
+    return;
+  },
+
+  async trashWorkspaceItem(_projectRoot: string, _relativePath: string): Promise<void> {
+    return;
+  },
+
+  async listWorkspaceEntries(
+    _projectRoot: string,
+    relativePath?: string | null
+  ): Promise<WorkspaceTreeEntry[]> {
+    return listMockWorkspaceEntries(relativePath);
+  },
+
   async getCliSkills(cliId: AgentId, _projectRoot: string): Promise<CliSkillItem[]> {
     return structuredClone(fallbackCliSkills(cliId));
   },
 
-  async getGitPanel(_projectRoot: string): Promise<GitPanelData> {
-    const fakeChanges: GitFileChange[] = [
-      { path: "src/pages/TerminalPage.tsx", status: "modified" },
-      { path: "src/components/chat/ChatConversation.tsx", status: "added" },
-      { path: "src/lib/store.ts", status: "modified" },
-      { path: "src/components/chat/GitPanel.tsx", status: "renamed", previousPath: "src/components/GitPanel.tsx" },
+  async detectEngines(): Promise<SettingsEngineStatus[]> {
+    return [
+      { engineType: "claude", installed: true, version: "browser-fallback", binPath: null, error: null },
+      { engineType: "codex", installed: true, version: "browser-fallback", binPath: null, error: null },
+      { engineType: "gemini", installed: true, version: "browser-fallback", binPath: null, error: null },
     ];
+  },
+
+  async listGlobalMcpServers(): Promise<GlobalMcpServerEntry[]> {
+    return [];
+  },
+
+  async listCodexMcpRuntimeServers(): Promise<unknown> {
+    return { data: [] };
+  },
+
+  async listExternalAbsoluteDirectoryChildren(_directoryPath: string): Promise<ExternalDirectoryEntry[]> {
+    return [];
+  },
+
+  async readExternalAbsoluteFile(_path: string): Promise<ExternalTextFile> {
+    return { exists: false, content: "", truncated: false };
+  },
+
+  async writeExternalAbsoluteFile(_path: string, _content: string): Promise<void> {
+    throw new Error("External file editing is not available in browser runtime.");
+  },
+  async localUsageStatistics(input: {
+    scope: "current" | "all";
+    provider?: string | null;
+    dateRange: "7d" | "30d" | "all";
+    workspacePath?: string | null;
+  }): Promise<LocalUsageStatistics> {
+    return {
+      projectPath: input.workspacePath ?? (input.scope === "all" ? "all" : "current"),
+      projectName: input.scope === "all" ? "全部项目" : "当前项目",
+      totalSessions: 0,
+      totalUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheWriteTokens: 0,
+        cacheReadTokens: 0,
+        totalTokens: 0,
+      },
+      estimatedCost: 0,
+      sessions: [],
+      dailyUsage: [],
+      weeklyComparison: {
+        currentWeek: { sessions: 0, cost: 0, tokens: 0 },
+        lastWeek: { sessions: 0, cost: 0, tokens: 0 },
+        trends: { sessions: 0, cost: 0, tokens: 0 },
+      },
+      byModel: [],
+      totalEngineUsageCount: 0,
+      engineUsage: [],
+      aiCodeModifiedLines: 0,
+      dailyCodeChanges: [],
+      lastUpdated: Date.now(),
+    };
+  },
+  async ensurePtySession(): Promise<void> {
+    return;
+  },
+  async writePtyInput(): Promise<void> {
+    return;
+  },
+  async resizePtySession(): Promise<void> {
+    return;
+  },
+  async closePtySession(): Promise<void> {
+    return;
+  },
+  async onPtyOutput(): Promise<() => void> {
+    return () => {};
+  },
+
+  async getGitPanel(_projectRoot: string): Promise<GitPanelData> {
+    const stagedFiles: GitFileStatus[] = [
+      { path: "src/components/chat/WorkspaceRightPanel.tsx", status: "modified", additions: 18, deletions: 6 },
+    ];
+    const unstagedFiles: GitFileStatus[] = [
+      { path: "src/pages/TerminalPage.tsx", status: "modified", additions: 4, deletions: 2 },
+      { path: "src/components/chat/ChatConversation.tsx", status: "added", additions: 8, deletions: 0 },
+      { path: "src/lib/store.ts", status: "modified", additions: 3, deletions: 1 },
+      {
+        path: "src/components/chat/GitPanel.tsx",
+        status: "renamed",
+        previousPath: "src/components/GitPanel.tsx",
+        additions: 0,
+        deletions: 0,
+      },
+    ];
+    const fakeChanges: GitFileChange[] = [...stagedFiles, ...unstagedFiles].map(
+      ({ additions: _additions, deletions: _deletions, ...change }) => change
+    );
+    const totalFiles = stagedFiles.length + unstagedFiles.length;
     return {
       isGitRepo: true,
       branch: state.workspace.branch || "main",
+      fileStatus: totalFiles === 0 ? "No changes" : `${totalFiles} file${totalFiles === 1 ? "" : "s"} changed`,
+      stagedFiles,
+      unstagedFiles,
       recentChanges: fakeChanges,
     };
+  },
+  async getGitCommitHistory(
+    _projectRoot: string,
+    options?: {
+      branch?: string | null;
+      query?: string | null;
+      offset?: number;
+      limit?: number;
+      snapshotId?: string | null;
+    }
+  ): Promise<GitHistoryResponse> {
+    const query = (options?.query ?? "").toLowerCase();
+    const all = [
+      {
+        sha: "a".repeat(40),
+        shortSha: "aaaaaaa",
+        summary: "Refine workspace right panel layout",
+        message: "Refine workspace right panel layout\n\nAdjust spacing and metadata chips.",
+        author: "Codex",
+        authorEmail: "codex@example.com",
+        timestamp: Date.now() - 1000 * 60 * 30,
+        parents: ["0".repeat(40)],
+        refs: ["HEAD", "main"],
+      },
+      {
+        sha: "b".repeat(40),
+        shortSha: "bbbbbbb",
+        summary: "Add settings desktop shell",
+        message: "Add settings desktop shell\n\nIntroduce dedicated settings layout.",
+        author: "Codex",
+        authorEmail: "codex@example.com",
+        timestamp: Date.now() - 1000 * 60 * 90,
+        parents: ["a".repeat(40)],
+        refs: [],
+      },
+    ].filter((entry) =>
+      !query ||
+      `${entry.sha} ${entry.shortSha} ${entry.summary} ${entry.author} ${entry.refs.join(" ")}`.toLowerCase().includes(query)
+    );
+    const offset = options?.offset ?? 0;
+    const limit = options?.limit ?? 100;
+    const commits = all.slice(offset, offset + limit);
+    return {
+      snapshotId: "browser-fallback",
+      total: all.length,
+      offset,
+      limit,
+      hasMore: offset + commits.length < all.length,
+      commits,
+    };
+  },
+  async getGitCommitDetails(_projectRoot: string, commitHash: string): Promise<GitCommitDetails> {
+    return {
+      sha: commitHash,
+      summary: "Refine workspace right panel layout",
+      message: "Refine workspace right panel layout\n\nAdjust spacing and metadata chips.",
+      author: "Codex",
+      authorEmail: "codex@example.com",
+      committer: "Codex",
+      committerEmail: "codex@example.com",
+      authorTime: Math.floor((Date.now() - 1000 * 60 * 30) / 1000),
+      commitTime: Math.floor((Date.now() - 1000 * 60 * 30) / 1000),
+      parents: ["0".repeat(40)],
+      totalAdditions: 22,
+      totalDeletions: 6,
+      files: [
+        {
+          path: "src/components/chat/WorkspaceRightPanel.tsx",
+          status: "M",
+          additions: 18,
+          deletions: 6,
+          isBinary: false,
+          isImage: false,
+          diff: "@@ -1,3 +1,5 @@\n-import old\n+import new\n+const next = true",
+          lineCount: 3,
+          truncated: false,
+        },
+        {
+          path: "src/styles/workspace-right-panel.css",
+          status: "A",
+          additions: 4,
+          deletions: 0,
+          isBinary: false,
+          isImage: false,
+          diff: "@@ -0,0 +1,4 @@\n+.workspace {}\n+.panel {}",
+          lineCount: 2,
+          truncated: false,
+        },
+      ],
+    };
+  },
+  async listGitBranches(_projectRoot: string): Promise<GitBranchListResponse> {
+    return {
+      currentBranch: "main",
+      localBranches: [
+        {
+          name: "main",
+          isCurrent: true,
+          isRemote: false,
+          upstream: "origin/main",
+          lastCommit: Date.now() - 1000 * 60 * 30,
+          headSha: "a".repeat(40),
+          ahead: 1,
+          behind: 0,
+        },
+        {
+          name: "feature/settings-git",
+          isCurrent: false,
+          isRemote: false,
+          upstream: null,
+          lastCommit: Date.now() - 1000 * 60 * 120,
+          headSha: "b".repeat(40),
+          ahead: 0,
+          behind: 0,
+        },
+      ],
+      remoteBranches: [
+        {
+          name: "origin/main",
+          isCurrent: false,
+          isRemote: true,
+          remote: "origin",
+          upstream: null,
+          lastCommit: Date.now() - 1000 * 60 * 60,
+          headSha: "c".repeat(40),
+          ahead: 0,
+          behind: 0,
+        },
+      ],
+    };
+  },
+  async checkoutGitBranch(): Promise<void> {
+    return;
+  },
+  async createGitBranch(): Promise<void> {
+    return;
+  },
+  async renameGitBranch(): Promise<void> {
+    return;
+  },
+  async deleteGitBranch(): Promise<void> {
+    return;
+  },
+  async mergeGitBranch(): Promise<void> {
+    return;
+  },
+  async fetchGit(_projectRoot: string, _remote?: string | null): Promise<void> {
+    return;
+  },
+  async pullGit(_projectRoot: string, _remote?: string | null, _targetBranch?: string | null): Promise<void> {
+    return;
+  },
+  async syncGit(_projectRoot: string, _remote?: string | null, _targetBranch?: string | null): Promise<void> {
+    return;
   },
 
   async getGitFileDiff(_projectRoot: string, path: string): Promise<GitFileDiff> {
@@ -3006,6 +3330,86 @@ rename to src/components/chat/GitPanel.tsx`,
         isBinary: false,
       }
     );
+  },
+
+  async getGitLog(_projectRoot: string): Promise<GitLogResponse> {
+    const entries: GitLogEntry[] = [
+      {
+        sha: "a1b2c3d4",
+        summary: "Refine workspace right panel styles",
+        author: "Codex",
+        timestamp: Date.now() - 1000 * 60 * 45,
+      },
+      {
+        sha: "b2c3d4e5",
+        summary: "Add staged and unstaged Git sections",
+        author: "Codex",
+        timestamp: Date.now() - 1000 * 60 * 120,
+      },
+    ];
+    return {
+      total: entries.length,
+      entries,
+      ahead: 2,
+      behind: 0,
+      aheadEntries: entries,
+      behindEntries: [],
+      upstream: "origin/main",
+    };
+  },
+
+  async pushGit(_projectRoot: string, _remote?: string | null, _targetBranch?: string | null): Promise<void> {
+    return;
+  },
+
+  async getGitHubIssues(_projectRoot: string): Promise<GitHubIssuesResponse> {
+    const issues: GitHubIssue[] = [
+      {
+        number: 12,
+        title: "Unify Git panel with desktop layout",
+        url: "https://github.com/example/repo/issues/12",
+        updatedAt: new Date(Date.now() - 1000 * 60 * 90).toISOString(),
+      },
+    ];
+    return { total: issues.length, issues };
+  },
+
+  async getGitHubPullRequests(_projectRoot: string): Promise<GitHubPullRequestsResponse> {
+    const pullRequests: GitHubPullRequest[] = [
+      {
+        number: 34,
+        title: "Improve workspace right panel parity",
+        url: "https://github.com/example/repo/pull/34",
+        updatedAt: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
+        createdAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+        body: "Align Git panel interactions with desktop-cc-gui.",
+        headRefName: "feature/git-panel",
+        baseRefName: "main",
+        isDraft: false,
+        author: { login: "codex" },
+      },
+    ];
+    return { total: pullRequests.length, pullRequests };
+  },
+
+  async stageGitFile(_projectRoot: string, _path: string): Promise<void> {
+    return;
+  },
+
+  async unstageGitFile(_projectRoot: string, _path: string): Promise<void> {
+    return;
+  },
+
+  async discardGitFile(_projectRoot: string, _path: string): Promise<void> {
+    return;
+  },
+
+  async commitGitChanges(
+    _projectRoot: string,
+    _message: string,
+    _options?: { stageAll?: boolean }
+  ): Promise<{ commitSha: string | null }> {
+    return { commitSha: "browser-fallback-commit" };
   },
 
   async openWorkspaceFile(_projectRoot: string, path: string): Promise<boolean> {
@@ -3261,3 +3665,63 @@ rename to src/components/chat/GitPanel.tsx`,
     return [];
   },
 };
+const MOCK_WORKSPACE_FILE_PATHS = [
+  "src/pages/TerminalPage.tsx",
+  "src/components/chat/ChatPromptBar.tsx",
+  "src/components/chat/ChatConversation.tsx",
+  "src/components/chat/GitPanel.tsx",
+  "src/lib/store.ts",
+  "src/lib/bridge.ts",
+  "src-tauri/src/main.rs",
+];
+
+function normalizeMockWorkspaceRelativePath(value: string | null | undefined) {
+  if (!value) return "";
+  return value.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+}
+
+function listMockWorkspaceEntries(relativePath?: string | null): WorkspaceTreeEntry[] {
+  const normalizedParent = normalizeMockWorkspaceRelativePath(relativePath);
+  const childrenByPath = new Map<string, WorkspaceTreeEntry>();
+
+  for (const filePath of MOCK_WORKSPACE_FILE_PATHS) {
+    const normalizedPath = normalizeMockWorkspaceRelativePath(filePath);
+    if (!normalizedPath) continue;
+    const segments = normalizedPath.split("/");
+    const parentSegments = normalizedParent ? normalizedParent.split("/") : [];
+    if (segments.length <= parentSegments.length) continue;
+    if (parentSegments.some((segment, index) => segments[index] !== segment)) continue;
+
+    const nextSegment = segments[parentSegments.length];
+    if (!nextSegment) continue;
+    const childSegments = [...parentSegments, nextSegment];
+    const childPath = childSegments.join("/");
+    const isDirectory = segments.length > childSegments.length;
+
+    if (!childrenByPath.has(childPath)) {
+      childrenByPath.set(childPath, {
+        name: nextSegment,
+        path: childPath,
+        kind: isDirectory ? "directory" : "file",
+        hasChildren: isDirectory,
+      });
+      continue;
+    }
+
+    if (isDirectory) {
+      childrenByPath.set(childPath, {
+        name: nextSegment,
+        path: childPath,
+        kind: "directory",
+        hasChildren: true,
+      });
+    }
+  }
+
+  return Array.from(childrenByPath.values()).sort((left, right) => {
+    if (left.kind !== right.kind) {
+      return left.kind === "directory" ? -1 : 1;
+    }
+    return left.path.localeCompare(right.path, undefined, { sensitivity: "base" });
+  });
+}

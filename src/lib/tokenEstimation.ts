@@ -46,24 +46,24 @@ export const FULL_COMPACT_THRESHOLD = 400_000;
 export const FULL_COMPACT_PRESERVE_TURNS = 12;
 
 /** Cross-tab context: max chars per sibling summary */
-export const CROSS_TAB_SUMMARY_MAX_CHARS = 3000;
+export const CROSS_TAB_SUMMARY_MAX_CHARS = 1600;
 /** Max sibling summaries injected */
-export const CROSS_TAB_MAX_ENTRIES = 8;
+export const CROSS_TAB_MAX_ENTRIES = 2;
 
 // ── Dynamic context budget ───────────────────────────────────────────
 
 /** Maximum tokens allocated for recent turn context injection */
-export const CONTEXT_TURNS_MAX_BUDGET = 80_000;
+export const CONTEXT_TURNS_MAX_BUDGET = 10_000;
 /** Per-CLI budgets — Claude has larger context window, Codex/Gemini smaller */
 export const CONTEXT_TURNS_BUDGET_BY_CLI: Record<string, number> = {
-  claude: 100_000,
-  codex: 80_000,
-  gemini: 80_000,
+  claude: 16_000,
+  codex: 10_000,
+  gemini: 10_000,
 };
 /** Minimum turns to always include (even if over budget) */
-export const CONTEXT_TURNS_MIN_COUNT = 2;
+export const CONTEXT_TURNS_MIN_COUNT = 1;
 /** Absolute upper limit of turns regardless of budget */
-export const CONTEXT_TURNS_MAX_COUNT = 50;
+export const CONTEXT_TURNS_MAX_COUNT = 12;
 
 /**
  * Compute how many recent turns can fit within a token budget.
