@@ -141,9 +141,9 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
   },
   {
     kind: "effort", slash: "/effort", label: "Effort Level",
-    description: "Set reasoning effort (Claude only)",
+    description: "Set reasoning effort for the active CLI",
     argsHint: "[low|medium|high|max]",
-    execution: "flag-inject", supportedClis: ["claude"],
+    execution: "flag-inject", supportedClis: ["codex", "claude"],
   },
   {
     kind: "fast", slash: "/fast", label: "Fast Mode",

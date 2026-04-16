@@ -195,10 +195,10 @@ pub fn command_registry() -> Vec<AcpCommandDef> {
             kind: "effort".into(),
             slash: "/effort".into(),
             label: "Effort Level".into(),
-            description: "Set reasoning effort (Claude only)".into(),
+            description: "Set reasoning effort for the active CLI".into(),
             args_hint: Some("[low|medium|high|max]".into()),
             execution: "flag-inject".into(),
-            supported_clis: vec!["claude".into()],
+            supported_clis: vec!["codex".into(), "claude".into()],
         },
         AcpCommandDef {
             kind: "fast".into(),

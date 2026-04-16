@@ -1,3 +1,5 @@
+import { useEffect, useRef } from "react";
+
 export interface PromptOverlayItem {
   id: string;
   title: string;
@@ -49,8 +51,33 @@ export function PromptOverlay({
   footer,
   interactive = true,
 }: PromptOverlayProps) {
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const itemRefs = useRef<Record<string, HTMLButtonElement | HTMLDivElement | null>>({});
   const hasItems = sections.some((section) => section.items.length > 0);
   if (!hasItems) return null;
+
+  useEffect(() => {
+    if (!interactive || selectedIndex < 0) {
+      return;
+    }
+
+    const flatItems = sections.flatMap((section) => section.items);
+    const selectedItem = flatItems[selectedIndex] ?? null;
+    if (!selectedItem) {
+      return;
+    }
+
+    const node = itemRefs.current[selectedItem.id];
+    const container = scrollContainerRef.current;
+    if (!node || !container) {
+      return;
+    }
+
+    node.scrollIntoView({
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [interactive, sections, selectedIndex]);
 
   let flatIndex = -1;
 
@@ -84,7 +111,7 @@ export function PromptOverlay({
         </div>
       )}
 
-      <div className="max-h-[23rem] overflow-y-auto p-2">
+      <div ref={scrollContainerRef} className="max-h-[23rem] overflow-y-auto p-2">
         <div className="space-y-2">
           {sections.map((section) => {
             if (section.items.length === 0) return null;
@@ -146,7 +173,13 @@ export function PromptOverlay({
 
                   if (!interactive || !onSelect) {
                     return (
-                      <div key={item.id} className={rowClasses}>
+                      <div
+                        key={item.id}
+                        ref={(node) => {
+                          itemRefs.current[item.id] = node;
+                        }}
+                        className={rowClasses}
+                      >
                         {content}
                       </div>
                     );
@@ -155,6 +188,9 @@ export function PromptOverlay({
                   return (
                     <button
                       key={item.id}
+                      ref={(node) => {
+                        itemRefs.current[item.id] = node;
+                      }}
                       type="button"
                       disabled={item.disabled}
                       onClick={() => !item.disabled && onSelect(item)}

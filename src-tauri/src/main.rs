@@ -12238,8 +12238,8 @@ fn probe_acp_capabilities(cli_id: &str) -> acp::AcpCliCapabilities {
             },
         },
         effort: acp::AcpOptionCatalog {
-            supported: cli_id == "claude",
-            options: if cli_id == "claude" {
+            supported: cli_id == "claude" || cli_id == "codex",
+            options: if cli_id == "claude" || cli_id == "codex" {
                 if effort_uses_runtime {
                     effort_runtime_options
                 } else {
@@ -12254,6 +12254,8 @@ fn probe_acp_capabilities(cli_id: &str) -> acp::AcpCliCapabilities {
                 } else {
                     "Could not interrogate Claude locally, so effort levels fell back to known values.".to_string()
                 })
+            } else if cli_id == "codex" {
+                Some("Codex effort levels use known presets and are applied when the turn starts.".to_string())
             } else {
                 Some("Reasoning effort is only exposed by Claude CLI.".to_string())
             },
@@ -12460,10 +12462,10 @@ fn describe_runtime_option(cli_id: &str, kind: &str, value: &str) -> Option<&'st
         ("gemini", "permissions", "auto_edit") => Some("Auto-approve edit tools"),
         ("gemini", "permissions", "yolo") => Some("Auto-approve all tools"),
         ("gemini", "permissions", "plan") => Some("Read-only plan mode"),
-        ("claude", "effort", "low") => Some("Lower reasoning effort"),
-        ("claude", "effort", "medium") => Some("Balanced reasoning effort"),
-        ("claude", "effort", "high") => Some("High reasoning effort"),
-        ("claude", "effort", "max") => Some("Maximum reasoning effort"),
+        ("claude", "effort", "low") | ("codex", "effort", "low") => Some("Lower reasoning effort"),
+        ("claude", "effort", "medium") | ("codex", "effort", "medium") => Some("Balanced reasoning effort"),
+        ("claude", "effort", "high") | ("codex", "effort", "high") => Some("High reasoning effort"),
+        ("claude", "effort", "max") | ("codex", "effort", "max") => Some("Maximum reasoning effort"),
         _ => None,
     }
 }

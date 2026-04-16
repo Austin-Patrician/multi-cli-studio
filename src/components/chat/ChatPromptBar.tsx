@@ -418,7 +418,10 @@ function buildArgumentOverlay(
     commandKind,
     loading: false,
     title: `Select ${commandKind} for ${titleCaseCli(activeTab.selectedCli)}`,
-    description: `Current: ${current}.${catalog.note ? ` ${catalog.note}` : ""}`,
+    description:
+      commandKind === "model" && activeTab.selectedCli === "codex"
+        ? `Current: ${current}. After selecting a Codex model, you will immediately choose reasoning effort.${catalog.note ? ` ${catalog.note}` : ""}`
+        : `Current: ${current}.${catalog.note ? ` ${catalog.note}` : ""}`,
     footer: "Arrow keys move, Enter applies, Esc returns to the command palette.",
     sections,
     entries,
@@ -1042,15 +1045,21 @@ export function ChatPromptBar() {
 
   function selectOption(commandKind: AcpPickerCommandKind, option: AcpOptionDef) {
     if (!activeTab) return;
+    const command = {
+      kind: commandKind,
+      args: [option.value],
+      rawInput: `/${commandKind} ${option.value}`,
+    };
+
+    if (commandKind === "model" && effectiveCli === "codex") {
+      setPrompt("/effort ");
+      void loadAcpCapabilities(effectiveCli);
+      void executeAcpCommand(command, activeTab.id);
+      return;
+    }
+
     setPrompt("");
-    void executeAcpCommand(
-      {
-        kind: commandKind,
-        args: [option.value],
-        rawInput: `/${commandKind} ${option.value}`,
-      },
-      activeTab.id
-    );
+    void executeAcpCommand(command, activeTab.id);
   }
 
   function handleOverlaySelect(index: number) {
