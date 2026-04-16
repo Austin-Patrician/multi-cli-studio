@@ -1,0 +1,452 @@
+.runtime-console-panel {
+  --runtime-console-line-system: #2f6fdd;
+  --runtime-console-line-info: #334155;
+  --runtime-console-line-warn: #8a4f08;
+  --runtime-console-line-error: #b22d2d;
+  --runtime-console-line-debug: #475569;
+  --runtime-console-token-time: #2d5ca3;
+  --runtime-console-token-thread: #6b7280;
+  --runtime-console-token-level-info: #2f8f46;
+  --runtime-console-token-level-warn: #b06500;
+  --runtime-console-token-level-error: #be2f2f;
+  --runtime-console-token-level-debug: #7a5ac6;
+  --runtime-console-token-level-trace: #637186;
+  --runtime-console-token-pid: #697489;
+  --runtime-console-token-separator: #7a8598;
+  --runtime-console-token-java-package: #7f8798;
+  --runtime-console-token-java-class: #286b9b;
+  --runtime-console-token-java-meta: #64748b;
+  --runtime-console-token-java: #2f739f;
+  --runtime-console-log-bg: #f8fafc;
+  --runtime-console-log-font-size: 12px;
+  --runtime-console-log-line-height: 1.45;
+  --runtime-console-border: rgba(15, 23, 42, 0.1);
+  --runtime-console-border-strong: rgba(15, 23, 42, 0.22);
+  --runtime-console-surface: #f6f8fb;
+  --runtime-console-surface-muted: rgba(255, 255, 255, 0.9);
+  --runtime-console-hover: rgba(15, 23, 42, 0.04);
+  --runtime-console-active: rgba(37, 99, 235, 0.08);
+  --runtime-console-text: #0f172a;
+  --runtime-console-text-faint: #64748b;
+  border-top: 1px solid var(--runtime-console-border);
+  background: var(--runtime-console-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  min-height: 160px;
+  flex-shrink: 0;
+  padding: 4px 12px 10px;
+  position: relative;
+  z-index: 2;
+}
+
+.runtime-console-panel.is-resizing {
+  user-select: none;
+  cursor: row-resize;
+}
+
+.runtime-console-panel.is-idea-classic {
+  --runtime-console-line-info: #2f3f59;
+  --runtime-console-line-warn: #8a4f08;
+  --runtime-console-line-error: #b73232;
+  --runtime-console-line-debug: #4f5f79;
+  --runtime-console-token-time: #325f9b;
+  --runtime-console-token-thread: #666f82;
+  --runtime-console-token-level-info: #2f8a44;
+  --runtime-console-token-level-warn: #af6709;
+  --runtime-console-token-level-error: #bc3636;
+  --runtime-console-token-level-debug: #7257ba;
+  --runtime-console-token-level-trace: #5d6e88;
+  --runtime-console-token-pid: #66748a;
+  --runtime-console-token-separator: #78859a;
+  --runtime-console-token-java-package: #758094;
+  --runtime-console-token-java-class: #2f6e9d;
+  --runtime-console-token-java-meta: #5f7088;
+  --runtime-console-token-java: #3576a4;
+  --runtime-console-log-bg: #eff4fb;
+  --runtime-console-log-font-size: 11px;
+  --runtime-console-log-line-height: 1.5;
+}
+
+.runtime-console-resizer {
+  height: 8px;
+  cursor: row-resize;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.runtime-console-resizer-bar {
+  width: 56px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--runtime-console-border);
+  transition: background 140ms ease, width 140ms ease;
+}
+
+.runtime-console-resizer:hover .runtime-console-resizer-bar,
+.runtime-console-panel.is-resizing .runtime-console-resizer-bar {
+  width: 72px;
+  background: var(--runtime-console-border-strong);
+}
+
+.runtime-console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.runtime-console-header-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.runtime-console-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 0 1 auto;
+  white-space: nowrap;
+}
+
+.runtime-console-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--runtime-console-text);
+}
+
+.runtime-console-status,
+.runtime-console-exit {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 4px 3px;
+  border-bottom: 2px solid transparent;
+  color: var(--runtime-console-text-faint);
+  font-size: 11px;
+  line-height: 1.3;
+  background: transparent;
+}
+
+.runtime-console-status.is-starting,
+.runtime-console-status.is-running,
+.runtime-console-exit.is-ok {
+  border-bottom-color: #22c55e;
+  color: #15803d;
+}
+
+.runtime-console-status.is-error,
+.runtime-console-status.is-stopped,
+.runtime-console-exit.is-fail {
+  border-bottom-color: #ef4444;
+  color: #dc2626;
+}
+
+.runtime-console-truncated {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.08);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.runtime-console-command-inline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.runtime-console-select-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.runtime-console-select-wrap {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.runtime-console-select-wrap-preset,
+.runtime-console-select-wrap-goal {
+  width: 146px;
+}
+
+.runtime-console-select-wrap-goal.is-compact {
+  width: 38px;
+  min-width: 38px;
+}
+
+.runtime-console-select-trigger {
+  width: 100%;
+  border-color: var(--runtime-console-border);
+  background: var(--runtime-console-surface-muted);
+  color: var(--runtime-console-text);
+  box-shadow: none;
+}
+
+.runtime-console-select-trigger:hover:not([data-disabled]) {
+  border-color: var(--runtime-console-border-strong);
+  background: #fff;
+}
+
+.runtime-console-select-trigger:focus-visible {
+  border-color: rgba(37, 99, 235, 0.4);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.runtime-console-select-trigger[data-disabled] {
+  opacity: 0.55;
+}
+
+.runtime-console-select-trigger-goal.is-compact {
+  padding-right: 6px;
+  padding-left: 6px;
+}
+
+.runtime-console-select-trigger-goal.is-compact .runtime-console-select-trigger-text {
+  display: none;
+}
+
+.runtime-console-select-trigger-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-console-select-list [data-slot="select-group-label"] {
+  padding: 6px 8px 4px;
+  color: var(--runtime-console-text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.runtime-console-select-list [data-slot="select-separator"] {
+  margin: 4px 8px;
+  height: 1px;
+  background: rgba(15, 23, 42, 0.08);
+}
+
+.runtime-console-select-list [data-slot="select-item"][aria-selected="true"] {
+  background: rgba(37, 99, 235, 0.08);
+  color: #0f172a;
+}
+
+.runtime-console-command-input {
+  min-width: 0;
+  flex: 1;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--runtime-console-border);
+  background: var(--runtime-console-surface-muted);
+  color: var(--runtime-console-text);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.runtime-console-command-input:focus {
+  outline: none;
+  border-color: rgba(37, 99, 235, 0.4);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+  background: #fff;
+}
+
+.runtime-console-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.runtime-console-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--runtime-console-text-faint);
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.runtime-console-action:hover:not(:disabled) {
+  color: var(--runtime-console-text);
+  background: var(--runtime-console-hover);
+}
+
+.runtime-console-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.runtime-console-action.is-active {
+  color: var(--runtime-console-text);
+  border-color: rgba(37, 99, 235, 0.18);
+  background: var(--runtime-console-active);
+}
+
+.runtime-console-action-run {
+  color: #16a34a;
+}
+
+.runtime-console-action-stop {
+  color: #dc2626;
+}
+
+.runtime-console-action-theme {
+  color: var(--runtime-console-token-java-class);
+}
+
+.runtime-console-action-theme.is-active {
+  border-color: rgba(40, 107, 155, 0.25);
+  background: rgba(40, 107, 155, 0.1);
+}
+
+.runtime-console-log {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  background: var(--runtime-console-log-bg);
+  color: var(--runtime-console-line-info);
+  padding: 12px;
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: var(--runtime-console-log-font-size);
+  line-height: var(--runtime-console-log-line-height);
+}
+
+.runtime-console-log.is-wrap {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.runtime-console-log.is-nowrap {
+  white-space: pre;
+}
+
+.runtime-console-line {
+  display: inline;
+}
+
+.runtime-console-line.is-system {
+  color: var(--runtime-console-line-system);
+}
+
+.runtime-console-line.is-info {
+  color: var(--runtime-console-line-info);
+}
+
+.runtime-console-line.is-warn {
+  color: var(--runtime-console-line-warn);
+}
+
+.runtime-console-line.is-error {
+  color: var(--runtime-console-line-error);
+}
+
+.runtime-console-line.is-debug {
+  color: var(--runtime-console-line-debug);
+}
+
+.runtime-console-token.is-level {
+  font-weight: 600;
+}
+
+.runtime-console-token.is-level-info {
+  color: var(--runtime-console-token-level-info);
+}
+
+.runtime-console-token.is-level-warn {
+  color: var(--runtime-console-token-level-warn);
+}
+
+.runtime-console-token.is-level-error {
+  color: var(--runtime-console-token-level-error);
+}
+
+.runtime-console-token.is-level-debug {
+  color: var(--runtime-console-token-level-debug);
+}
+
+.runtime-console-token.is-level-trace {
+  color: var(--runtime-console-token-level-trace);
+}
+
+.runtime-console-token.is-time {
+  color: var(--runtime-console-token-time);
+}
+
+.runtime-console-token.is-thread {
+  color: var(--runtime-console-token-thread);
+}
+
+.runtime-console-token.is-java {
+  color: var(--runtime-console-token-java);
+}
+
+.runtime-console-token.is-java-package {
+  color: var(--runtime-console-token-java-package);
+}
+
+.runtime-console-token.is-java-class {
+  color: var(--runtime-console-token-java-class);
+}
+
+.runtime-console-token.is-java-meta {
+  color: var(--runtime-console-token-java-meta);
+}
+
+.runtime-console-token.is-pid {
+  color: var(--runtime-console-token-pid);
+}
+
+.runtime-console-token.is-separator {
+  color: var(--runtime-console-token-separator);
+}
+
+@media (max-width: 980px) {
+  .runtime-console-header,
+  .runtime-console-header-main,
+  .runtime-console-command-inline {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .runtime-console-title-wrap {
+    width: 100%;
+  }
+
+  .runtime-console-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .runtime-console-select-wrap-preset,
+  .runtime-console-select-wrap-goal {
+    width: 132px;
+  }
+}

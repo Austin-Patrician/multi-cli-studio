@@ -54,6 +54,7 @@ import {
   PersistedTerminalState,
   SemanticMemoryChunk,
   SemanticRecallRequest,
+  CodexRuntimeReloadResult,
   SettingsEngineStatus,
   StreamEvent,
   TerminalEvent,
@@ -70,6 +71,39 @@ import type {
 } from "./acp";
 
 type Unlisten = () => void;
+
+export type RuntimeLogOutputEvent = {
+  workspaceId: string;
+  terminalId: string;
+  data: string;
+};
+
+export type RuntimeLogSessionStatus =
+  | "idle"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "failed";
+
+export type RuntimeLogSessionSnapshot = {
+  workspaceId: string;
+  terminalId: string;
+  status: RuntimeLogSessionStatus;
+  commandPreview: string | null;
+  profileId?: string | null;
+  detectedStack?: string | null;
+  startedAtMs: number | null;
+  stoppedAtMs: number | null;
+  exitCode: number | null;
+  error: string | null;
+};
+
+export type RuntimeProfileDescriptor = {
+  id: string;
+  defaultCommand: string;
+  detectedStack: string;
+};
 
 export interface RuntimeBridge {
   loadAppState: (projectRoot?: string, refreshRuntime?: boolean) => Promise<AppState>;
@@ -206,6 +240,9 @@ export interface RuntimeBridge {
   ) => Promise<WorkspaceTreeEntry[]>;
   getCliSkills: (cliId: AgentId, projectRoot: string) => Promise<CliSkillItem[]>;
   detectEngines: () => Promise<SettingsEngineStatus[]>;
+  getClaudeSettingsPath: () => Promise<string | null>;
+  getCodexConfigPath: () => Promise<string | null>;
+  reloadCodexRuntimeConfig: () => Promise<CodexRuntimeReloadResult>;
   listGlobalMcpServers: () => Promise<GlobalMcpServerEntry[]>;
   listCodexMcpRuntimeServers: (workspaceId?: string | null) => Promise<unknown>;
   listExternalAbsoluteDirectoryChildren: (
@@ -231,6 +268,20 @@ export interface RuntimeBridge {
   onPtyOutput: (
     listener: (event: { terminalTabId: string; data: string; stream: string }) => void
   ) => Promise<Unlisten>;
+  runtimeLogDetectProfiles: (workspaceId: string) => Promise<RuntimeProfileDescriptor[]>;
+  runtimeLogStart: (
+    workspaceId: string,
+    options?: {
+      profileId?: string | null;
+      commandOverride?: string | null;
+    }
+  ) => Promise<RuntimeLogSessionSnapshot>;
+  runtimeLogStop: (workspaceId: string) => Promise<RuntimeLogSessionSnapshot>;
+  runtimeLogGetSession: (workspaceId: string) => Promise<RuntimeLogSessionSnapshot | null>;
+  runtimeLogMarkExit: (workspaceId: string, exitCode: number) => Promise<RuntimeLogSessionSnapshot>;
+  onRuntimeLogOutput: (listener: (event: RuntimeLogOutputEvent) => void) => Promise<Unlisten>;
+  onRuntimeLogStatus: (listener: (event: RuntimeLogSessionSnapshot) => void) => Promise<Unlisten>;
+  onRuntimeLogExited: (listener: (event: RuntimeLogSessionSnapshot) => void) => Promise<Unlisten>;
   // ACP methods
   executeAcpCommand: (command: AcpCommand, cliId: AgentId) => Promise<AcpCommandResult>;
   getAcpCommands: (cliId: AgentId) => Promise<AcpCommandDef[]>;
@@ -681,6 +732,18 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<SettingsEngineStatus[]>("detect_engines");
   },
+  async getClaudeSettingsPath() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<string | null>("get_claude_settings_path");
+  },
+  async getCodexConfigPath() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<string | null>("get_codex_config_path");
+  },
+  async reloadCodexRuntimeConfig() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<CodexRuntimeReloadResult>("reload_codex_runtime_config");
+  },
   async listGlobalMcpServers() {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<GlobalMcpServerEntry[]>("list_global_mcp_servers");
@@ -738,6 +801,48 @@ const tauriRuntime: RuntimeBridge = {
       listener(event.payload);
     });
     return unlisten;
+  },
+  async runtimeLogDetectProfiles(workspaceId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<RuntimeProfileDescriptor[]>("runtime_log_detect_profiles", { workspaceId });
+  },
+  async runtimeLogStart(workspaceId, options) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<RuntimeLogSessionSnapshot>("runtime_log_start", {
+      workspaceId,
+      profileId: options?.profileId ?? null,
+      commandOverride: options?.commandOverride ?? null,
+    });
+  },
+  async runtimeLogStop(workspaceId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<RuntimeLogSessionSnapshot>("runtime_log_stop", { workspaceId });
+  },
+  async runtimeLogGetSession(workspaceId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<RuntimeLogSessionSnapshot | null>("runtime_log_get_session", { workspaceId });
+  },
+  async runtimeLogMarkExit(workspaceId, exitCode) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<RuntimeLogSessionSnapshot>("runtime_log_mark_exit", { workspaceId, exitCode });
+  },
+  async onRuntimeLogOutput(listener) {
+    const { listen } = await import("@tauri-apps/api/event");
+    return listen<RuntimeLogOutputEvent>("runtime-log:line-appended", (event) => {
+      listener(event.payload);
+    });
+  },
+  async onRuntimeLogStatus(listener) {
+    const { listen } = await import("@tauri-apps/api/event");
+    return listen<RuntimeLogSessionSnapshot>("runtime-log:status-changed", (event) => {
+      listener(event.payload);
+    });
+  },
+  async onRuntimeLogExited(listener) {
+    const { listen } = await import("@tauri-apps/api/event");
+    return listen<RuntimeLogSessionSnapshot>("runtime-log:session-exited", (event) => {
+      listener(event.payload);
+    });
   },
   async executeAcpCommand(command, cliId) {
     const { invoke } = await import("@tauri-apps/api/core");

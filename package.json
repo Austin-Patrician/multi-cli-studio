@@ -14,6 +14,7 @@
     "tauri:android": "node ./scripts/run-tauri.mjs android"
   },
   "dependencies": {
+    "@base-ui/react": "^1.2.0",
     "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/api": "^2.8.0",

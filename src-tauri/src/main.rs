@@ -6,7 +6,7 @@ mod local_usage;
 mod storage;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ffi::OsString,
     fs,
     io::{BufRead, BufReader, Read, Write},
@@ -70,6 +70,7 @@ const FALLBACK_SHELL: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
 
 #[cfg(not(target_os = "windows"))]
 const FALLBACK_SHELL: &str = "/bin/zsh";
+const RUNTIME_LOG_TERMINAL_ID: &str = "runtime-console";
 const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
@@ -229,6 +230,48 @@ struct PtyOutputEvent {
     terminal_tab_id: String,
     data: String,
     stream: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeLogOutputEvent {
+    workspace_id: String,
+    terminal_id: String,
+    data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum RuntimeLogSessionStatus {
+    Idle,
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeLogSessionSnapshot {
+    workspace_id: String,
+    terminal_id: String,
+    status: RuntimeLogSessionStatus,
+    command_preview: Option<String>,
+    profile_id: Option<String>,
+    detected_stack: Option<String>,
+    started_at_ms: Option<u64>,
+    stopped_at_ms: Option<u64>,
+    exit_code: Option<i32>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeProfileDescriptor {
+    id: String,
+    default_command: String,
+    detected_stack: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2375,6 +2418,15 @@ struct ExternalTextFile {
     truncated: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexRuntimeReloadResult {
+    status: String,
+    stage: String,
+    restarted_sessions: usize,
+    message: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct LocalSkillManifest {
     name: Option<String>,
@@ -2590,6 +2642,7 @@ struct AppStore {
     context: Arc<Mutex<ContextStore>>,
     settings: Arc<Mutex<AppSettings>>,
     pty_sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+    runtime_log_sessions: Arc<Mutex<HashMap<String, RuntimeLogSession>>>,
     terminal_storage: TerminalStorage,
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
@@ -2632,6 +2685,14 @@ struct PtySession {
     writer: SharedPtyWriter,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
+}
+
+#[derive(Debug)]
+struct RuntimeLogSession {
+    snapshot: RuntimeLogSessionSnapshot,
+    child: Option<Arc<Mutex<std::process::Child>>>,
+    stop_requested: Arc<AtomicBool>,
+    finalized: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -14159,6 +14220,243 @@ fn close_pty_session(store: State<'_, AppStore>, terminal_tab_id: String) -> Res
 }
 
 #[tauri::command]
+fn runtime_log_detect_profiles(
+    store: State<'_, AppStore>,
+    workspace_id: String,
+) -> Result<Vec<RuntimeProfileDescriptor>, String> {
+    let project_root = resolve_runtime_workspace_root(&store, &workspace_id)?;
+    Ok(detect_runtime_profiles(&project_root))
+}
+
+#[tauri::command]
+fn runtime_log_start(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    workspace_id: String,
+    profile_id: Option<String>,
+    command_override: Option<String>,
+) -> Result<RuntimeLogSessionSnapshot, String> {
+    let project_root = resolve_runtime_workspace_root(&store, &workspace_id)?;
+    let detected_profiles = detect_runtime_profiles(&project_root);
+    let trimmed_override = command_override
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let selected_profile = profile_id
+        .as_ref()
+        .and_then(|target| detected_profiles.iter().find(|profile| profile.id == *target))
+        .cloned();
+    let active_profile = selected_profile.clone().or_else(|| detected_profiles.first().cloned());
+    let command_preview = trimmed_override
+        .clone()
+        .or_else(|| active_profile.as_ref().map(|profile| profile.default_command.clone()))
+        .ok_or_else(|| "No runnable runtime profile detected for this workspace.".to_string())?;
+
+    let previous_session = {
+        let mut sessions = store
+            .runtime_log_sessions
+            .lock()
+            .map_err(|err| err.to_string())?;
+        sessions.remove(&workspace_id)
+    };
+
+    if let Some(previous) = previous_session {
+        previous.stop_requested.store(true, Ordering::SeqCst);
+        if let Some(child) = previous.child {
+            let _ = {
+                let mut child = child.lock().map_err(|err| err.to_string())?;
+                terminate_process_tree(child.id());
+                child.wait().ok().and_then(|status| status.code()).unwrap_or(130)
+            };
+        }
+    }
+
+    let shell = shell_path();
+    let mut command = Command::new(&shell);
+    command.args(shell_command_args(&shell, &command_preview));
+    command.current_dir(&project_root);
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("Failed to start runtime command: {}", err))?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let child = Arc::new(Mutex::new(child));
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let finalized = Arc::new(AtomicBool::new(false));
+    let snapshot = RuntimeLogSessionSnapshot {
+        workspace_id: workspace_id.clone(),
+        terminal_id: RUNTIME_LOG_TERMINAL_ID.to_string(),
+        status: RuntimeLogSessionStatus::Running,
+        command_preview: Some(command_preview),
+        profile_id: active_profile.as_ref().map(|profile| profile.id.clone()),
+        detected_stack: active_profile.as_ref().map(|profile| profile.detected_stack.clone()),
+        started_at_ms: Some(runtime_now_ms()),
+        stopped_at_ms: None,
+        exit_code: None,
+        error: None,
+    };
+
+    {
+        let mut sessions = store
+            .runtime_log_sessions
+            .lock()
+            .map_err(|err| err.to_string())?;
+        sessions.insert(
+            workspace_id.clone(),
+            RuntimeLogSession {
+                snapshot: snapshot.clone(),
+                child: Some(child.clone()),
+                stop_requested: stop_requested.clone(),
+                finalized: finalized.clone(),
+            },
+        );
+    }
+
+    if let Some(stdout) = stdout {
+        spawn_runtime_output_reader(
+            app.clone(),
+            workspace_id.clone(),
+            RUNTIME_LOG_TERMINAL_ID.to_string(),
+            stdout,
+        );
+    }
+    if let Some(stderr) = stderr {
+        spawn_runtime_output_reader(
+            app.clone(),
+            workspace_id.clone(),
+            RUNTIME_LOG_TERMINAL_ID.to_string(),
+            stderr,
+        );
+    }
+
+    emit_runtime_log_status(&app, snapshot.clone());
+    spawn_runtime_exit_watcher(
+        app,
+        store.runtime_log_sessions.clone(),
+        workspace_id,
+        child,
+        stop_requested,
+        finalized,
+    );
+
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn runtime_log_stop(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    workspace_id: String,
+) -> Result<RuntimeLogSessionSnapshot, String> {
+    let (child, stop_requested, finalized, current_snapshot) = {
+        let mut sessions = store
+            .runtime_log_sessions
+            .lock()
+            .map_err(|err| err.to_string())?;
+        let session = sessions
+            .get_mut(&workspace_id)
+            .ok_or_else(|| "Runtime session not found.".to_string())?;
+        session.stop_requested.store(true, Ordering::SeqCst);
+        session.snapshot.status = RuntimeLogSessionStatus::Stopping;
+        (
+            session.child.clone(),
+            session.stop_requested.clone(),
+            session.finalized.clone(),
+            session.snapshot.clone(),
+        )
+    };
+
+    emit_runtime_log_status(&app, current_snapshot);
+
+    if let Some(child) = child {
+        let exit_code = {
+            let mut child = child.lock().map_err(|err| err.to_string())?;
+            terminate_process_tree(child.id());
+            child.wait().ok().and_then(|status| status.code()).unwrap_or(130)
+        };
+        return Ok(finalize_runtime_session(
+            &store.runtime_log_sessions,
+            &app,
+            &workspace_id,
+            &finalized,
+            RuntimeLogSessionStatus::Stopped,
+            exit_code,
+            None,
+            true,
+        ));
+    }
+
+    stop_requested.store(true, Ordering::SeqCst);
+    let sessions = store
+        .runtime_log_sessions
+        .lock()
+        .map_err(|err| err.to_string())?;
+    Ok(sessions
+        .get(&workspace_id)
+        .map(|session| session.snapshot.clone())
+        .unwrap_or(RuntimeLogSessionSnapshot {
+            workspace_id,
+            terminal_id: RUNTIME_LOG_TERMINAL_ID.to_string(),
+            status: RuntimeLogSessionStatus::Stopped,
+            command_preview: None,
+            profile_id: None,
+            detected_stack: None,
+            started_at_ms: None,
+            stopped_at_ms: Some(runtime_now_ms()),
+            exit_code: Some(130),
+            error: None,
+        }))
+}
+
+#[tauri::command]
+fn runtime_log_get_session(
+    store: State<'_, AppStore>,
+    workspace_id: String,
+) -> Result<Option<RuntimeLogSessionSnapshot>, String> {
+    let sessions = store
+        .runtime_log_sessions
+        .lock()
+        .map_err(|err| err.to_string())?;
+    Ok(sessions.get(&workspace_id).map(|session| session.snapshot.clone()))
+}
+
+#[tauri::command]
+fn runtime_log_mark_exit(
+    store: State<'_, AppStore>,
+    workspace_id: String,
+    exit_code: i32,
+) -> Result<RuntimeLogSessionSnapshot, String> {
+    let mut sessions = store
+        .runtime_log_sessions
+        .lock()
+        .map_err(|err| err.to_string())?;
+    let session = sessions
+        .get_mut(&workspace_id)
+        .ok_or_else(|| "Runtime session not found.".to_string())?;
+    session.snapshot.exit_code = Some(exit_code);
+    session.snapshot.status = if exit_code == 0 {
+        RuntimeLogSessionStatus::Stopped
+    } else {
+        RuntimeLogSessionStatus::Failed
+    };
+    session.snapshot.error = if exit_code == 0 {
+        None
+    } else {
+        Some(format!("Process exited with code {}.", exit_code))
+    };
+    session.snapshot.stopped_at_ms = Some(runtime_now_ms());
+    Ok(session.snapshot.clone())
+}
+
+#[tauri::command]
 fn list_external_absolute_directory_children(
     directory_path: String,
 ) -> Result<Vec<ExternalDirectoryEntry>, String> {
@@ -14203,6 +14501,36 @@ fn write_external_absolute_file(path: String, content: String) -> Result<(), Str
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     fs::write(path, content).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_claude_settings_path() -> Result<String, String> {
+    Ok(user_home_dir()
+        .join(".claude")
+        .join("settings.json")
+        .to_string_lossy()
+        .to_string())
+}
+
+#[tauri::command]
+fn get_codex_config_path() -> Result<String, String> {
+    Ok(resolve_codex_home_dir()
+        .join("config.toml")
+        .to_string_lossy()
+        .to_string())
+}
+
+#[tauri::command]
+fn reload_codex_runtime_config() -> Result<CodexRuntimeReloadResult, String> {
+    Ok(CodexRuntimeReloadResult {
+        status: "applied".to_string(),
+        stage: "refresh-only".to_string(),
+        restarted_sessions: 0,
+        message: Some(
+            "multi-cli-studio 当前只执行 vendors/runtime 状态刷新，不重启现有会话。"
+                .to_string(),
+        ),
+    })
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -19942,6 +20270,13 @@ fn user_home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn resolve_codex_home_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(home);
+    }
+    user_home_dir().join(".codex")
+}
+
 fn rust_available() -> bool {
     resolve_command_path("cargo").is_some() && resolve_command_path("rustc").is_some()
 }
@@ -20044,6 +20379,346 @@ fn emit_pty_output(app: &AppHandle, terminal_tab_id: &str, data: String, stream:
             stream: stream.to_string(),
         },
     );
+}
+
+fn runtime_now_ms() -> u64 {
+    Local::now().timestamp_millis().max(0) as u64
+}
+
+fn emit_runtime_log_output(
+    app: &AppHandle,
+    workspace_id: &str,
+    terminal_id: &str,
+    data: String,
+) {
+    if data.is_empty() {
+        return;
+    }
+    let _ = app.emit(
+        "runtime-log:line-appended",
+        RuntimeLogOutputEvent {
+            workspace_id: workspace_id.to_string(),
+            terminal_id: terminal_id.to_string(),
+            data,
+        },
+    );
+}
+
+fn emit_runtime_log_status(app: &AppHandle, snapshot: RuntimeLogSessionSnapshot) {
+    let _ = app.emit("runtime-log:status-changed", snapshot);
+}
+
+fn emit_runtime_log_exited(app: &AppHandle, snapshot: RuntimeLogSessionSnapshot) {
+    let _ = app.emit("runtime-log:session-exited", snapshot);
+}
+
+fn resolve_runtime_workspace_root(store: &AppStore, workspace_id: &str) -> Result<String, String> {
+    if let Some(state) = store.terminal_storage.load_state()? {
+        if let Some(workspace) = state.workspaces.iter().find(|item| item.id == workspace_id) {
+            return Ok(workspace.root_path.clone());
+        }
+        if state.workspaces.len() == 1 {
+            return Ok(state.workspaces[0].root_path.clone());
+        }
+    }
+
+    let state = store.state.lock().map_err(|err| err.to_string())?;
+    Ok(state.workspace.project_root.clone())
+}
+
+fn read_workspace_entries(project_root: &str) -> HashSet<String> {
+    let Ok(entries) = fs::read_dir(project_root) else {
+        return HashSet::new();
+    };
+
+    entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect()
+}
+
+fn read_package_scripts(project_root: &str) -> HashSet<String> {
+    let package_json = Path::new(project_root).join("package.json");
+    let Ok(content) = fs::read_to_string(package_json) else {
+        return HashSet::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&content) else {
+        return HashSet::new();
+    };
+    parsed
+        .get("scripts")
+        .and_then(|value| value.as_object())
+        .map(|scripts| scripts.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn resolve_node_runner(entries: &HashSet<String>) -> String {
+    if entries.contains("bun.lockb") {
+        "bun run".to_string()
+    } else if entries.contains("pnpm-lock.yaml") {
+        "pnpm run".to_string()
+    } else if entries.contains("yarn.lock") {
+        "yarn".to_string()
+    } else {
+        "npm run".to_string()
+    }
+}
+
+fn detect_runtime_profiles(project_root: &str) -> Vec<RuntimeProfileDescriptor> {
+    let entries = read_workspace_entries(project_root);
+    let scripts = read_package_scripts(project_root);
+    let mut profiles = Vec::new();
+
+    if entries.contains("pom.xml") {
+        #[cfg(target_os = "windows")]
+        let command = if entries.contains("mvnw.cmd") {
+            "mvnw.cmd spring-boot:run".to_string()
+        } else {
+            "mvn spring-boot:run".to_string()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let command = if entries.contains("mvnw") {
+            "./mvnw spring-boot:run".to_string()
+        } else {
+            "mvn spring-boot:run".to_string()
+        };
+
+        profiles.push(RuntimeProfileDescriptor {
+            id: "java-maven".to_string(),
+            default_command: command,
+            detected_stack: "java".to_string(),
+        });
+    }
+
+    if entries.contains("build.gradle") || entries.contains("build.gradle.kts") {
+        #[cfg(target_os = "windows")]
+        let command = if entries.contains("gradlew.bat") {
+            "gradlew.bat bootRun".to_string()
+        } else {
+            "gradle bootRun".to_string()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let command = if entries.contains("gradlew") {
+            "./gradlew bootRun".to_string()
+        } else {
+            "gradle bootRun".to_string()
+        };
+
+        profiles.push(RuntimeProfileDescriptor {
+            id: "java-gradle".to_string(),
+            default_command: command,
+            detected_stack: "java".to_string(),
+        });
+    }
+
+    if entries.contains("package.json") {
+        let runner = resolve_node_runner(&entries);
+        if scripts.contains("dev") {
+            profiles.push(RuntimeProfileDescriptor {
+                id: "node-dev".to_string(),
+                default_command: format!("{} dev", runner),
+                detected_stack: "node".to_string(),
+            });
+        }
+        if scripts.contains("start") {
+            profiles.push(RuntimeProfileDescriptor {
+                id: "node-start".to_string(),
+                default_command: format!("{} start", runner),
+                detected_stack: "node".to_string(),
+            });
+        }
+    }
+
+    let python_command = if entries.contains("manage.py") {
+        #[cfg(target_os = "windows")]
+        {
+            Some("py -3 manage.py runserver".to_string())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Some("python3 manage.py runserver".to_string())
+        }
+    } else if entries.contains("main.py") {
+        #[cfg(target_os = "windows")]
+        {
+            Some("py -3 main.py".to_string())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Some("python3 main.py".to_string())
+        }
+    } else if entries.contains("app.py") {
+        #[cfg(target_os = "windows")]
+        {
+            Some("py -3 app.py".to_string())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Some("python3 app.py".to_string())
+        }
+    } else {
+        None
+    };
+
+    if let Some(command) = python_command {
+        profiles.push(RuntimeProfileDescriptor {
+            id: "python-main".to_string(),
+            default_command: command,
+            detected_stack: "python".to_string(),
+        });
+    }
+
+    if entries.contains("go.mod") {
+        let targets = ["cmd/server", "cmd/api", "cmd/main"];
+        let command = targets
+            .iter()
+            .find_map(|entry| {
+                let path = Path::new(project_root).join(entry);
+                if path.exists() && path.is_dir() {
+                    Some(format!("go run ./{}", entry.replace('\\', "/")))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "go run .".to_string());
+        profiles.push(RuntimeProfileDescriptor {
+            id: "go-run".to_string(),
+            default_command: command,
+            detected_stack: "go".to_string(),
+        });
+    }
+
+    profiles
+}
+
+fn finalize_runtime_session(
+    sessions: &Arc<Mutex<HashMap<String, RuntimeLogSession>>>,
+    app: &AppHandle,
+    workspace_id: &str,
+    finalized: &Arc<AtomicBool>,
+    status: RuntimeLogSessionStatus,
+    exit_code: i32,
+    error: Option<String>,
+    emit_marker: bool,
+) -> RuntimeLogSessionSnapshot {
+    if finalized.swap(true, Ordering::SeqCst) {
+        let sessions = sessions.lock().map_err(|err| err.to_string()).ok();
+        if let Some(snapshot) = sessions
+            .as_ref()
+            .and_then(|items| items.get(workspace_id).map(|item| item.snapshot.clone()))
+        {
+            return snapshot;
+        }
+    }
+
+    let snapshot = {
+        let mut sessions = sessions.lock().map_err(|err| err.to_string()).unwrap();
+        let session = sessions.get_mut(workspace_id).unwrap();
+        session.child = None;
+        session.snapshot.status = status;
+        session.snapshot.stopped_at_ms = Some(runtime_now_ms());
+        session.snapshot.exit_code = Some(exit_code);
+        session.snapshot.error = error.clone();
+        session.snapshot.clone()
+    };
+
+    if emit_marker {
+        emit_runtime_log_output(
+            app,
+            workspace_id,
+            &snapshot.terminal_id,
+            format!("[multi-cli Run] __EXIT__:{}\n", exit_code),
+        );
+    }
+    emit_runtime_log_status(app, snapshot.clone());
+    emit_runtime_log_exited(app, snapshot.clone());
+    snapshot
+}
+
+fn spawn_runtime_output_reader<R: Read + Send + 'static>(
+    app: AppHandle,
+    workspace_id: String,
+    terminal_id: String,
+    mut reader: R,
+) {
+    thread::spawn(move || {
+        let mut buffer = [0u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    emit_runtime_log_output(
+                        &app,
+                        &workspace_id,
+                        &terminal_id,
+                        String::from_utf8_lossy(&buffer[..read]).to_string(),
+                    );
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn spawn_runtime_exit_watcher(
+    app: AppHandle,
+    sessions: Arc<Mutex<HashMap<String, RuntimeLogSession>>>,
+    workspace_id: String,
+    child: Arc<Mutex<std::process::Child>>,
+    stop_requested: Arc<AtomicBool>,
+    finalized: Arc<AtomicBool>,
+) {
+    thread::spawn(move || loop {
+        let poll_result = {
+            let mut child = child.lock().map_err(|err| err.to_string()).unwrap();
+            child.try_wait()
+        };
+
+        match poll_result {
+            Ok(Some(status)) => {
+                let exit_code = status
+                    .code()
+                    .unwrap_or_else(|| if stop_requested.load(Ordering::SeqCst) { 130 } else { 1 });
+                let status_value = if stop_requested.load(Ordering::SeqCst) || exit_code == 0 {
+                    RuntimeLogSessionStatus::Stopped
+                } else {
+                    RuntimeLogSessionStatus::Failed
+                };
+                let error = if stop_requested.load(Ordering::SeqCst) || exit_code == 0 {
+                    None
+                } else {
+                    Some(format!("Process exited with code {}.", exit_code))
+                };
+                finalize_runtime_session(
+                    &sessions,
+                    &app,
+                    &workspace_id,
+                    &finalized,
+                    status_value,
+                    exit_code,
+                    error,
+                    true,
+                );
+                break;
+            }
+            Ok(None) => {
+                thread::sleep(Duration::from_millis(150));
+            }
+            Err(err) => {
+                finalize_runtime_session(
+                    &sessions,
+                    &app,
+                    &workspace_id,
+                    &finalized,
+                    RuntimeLogSessionStatus::Failed,
+                    1,
+                    Some(format!("Failed to poll runtime process: {}", err)),
+                    false,
+                );
+                break;
+            }
+        }
+    });
 }
 
 fn run_cli_command(command_path: &str, args: &[&str]) -> Option<CliCommandOutput> {
@@ -21869,6 +22544,7 @@ pub fn run() {
             context: startup_context,
             settings: startup_settings,
             pty_sessions: Arc::new(Mutex::new(HashMap::new())),
+            runtime_log_sessions: Arc::new(Mutex::new(HashMap::new())),
             terminal_storage,
             automation_jobs,
             automation_runs,
@@ -22029,6 +22705,9 @@ pub fn run() {
             pick_workspace_folder,
             get_cli_skills,
             detect_engines,
+            get_claude_settings_path,
+            get_codex_config_path,
+            reload_codex_runtime_config,
             list_global_mcp_servers,
             list_codex_mcp_runtime_servers,
             search_workspace_files,
@@ -22045,6 +22724,11 @@ pub fn run() {
             write_pty_input,
             resize_pty_session,
             close_pty_session,
+            runtime_log_detect_profiles,
+            runtime_log_start,
+            runtime_log_stop,
+            runtime_log_get_session,
+            runtime_log_mark_exit,
             get_settings,
             update_settings,
             refresh_provider_models,

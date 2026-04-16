@@ -10,13 +10,78 @@ import {
 import { Terminal } from "xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { bridge } from "../../lib/bridge";
-import { useStore } from "../../lib/store";
 
 const OPEN_STORAGE_KEY = "multi-cli-studio::terminal-dock-open";
 const HEIGHT_STORAGE_KEY = "multi-cli-studio::terminal-dock-height";
+const TABS_STORAGE_KEY = "multi-cli-studio::terminal-dock-tabs";
+const ACTIVE_TAB_STORAGE_KEY = "multi-cli-studio::terminal-dock-active-tab";
 const DEFAULT_HEIGHT = 220;
 const MIN_HEIGHT = 160;
 const MAX_HEIGHT = 520;
+
+type DockTerminalTab = {
+  id: string;
+  title: string;
+  workspaceId: string | null;
+  cwd: string | null;
+};
+
+function createDockTerminalId() {
+  return `dock-terminal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function readStoredTabs(): DockTerminalTab[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(TABS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as DockTerminalTab[];
+    return Array.isArray(parsed)
+      ? parsed.filter((item) => typeof item?.id === "string" && typeof item?.title === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function readStoredActiveTabId() {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(ACTIVE_TAB_STORAGE_KEY);
+}
+
+function persistTabs(tabs: DockTerminalTab[], activeTabId: string | null) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(TABS_STORAGE_KEY, JSON.stringify(tabs));
+  if (activeTabId) {
+    window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, activeTabId);
+  } else {
+    window.localStorage.removeItem(ACTIVE_TAB_STORAGE_KEY);
+  }
+}
+
+function nextTerminalTitle(tabs: DockTerminalTab[]) {
+  const numbers = tabs
+    .map((tab) => {
+      const match = tab.title.match(/^终端\s*(\d+)$/);
+      return match ? Number.parseInt(match[1] ?? "", 10) : Number.NaN;
+    })
+    .filter((value) => Number.isFinite(value));
+  const next = numbers.length ? Math.max(...numbers) + 1 : 1;
+  return `终端 ${next}`;
+}
+
+function createDockTerminalTab(defaults?: {
+  workspaceId?: string | null;
+  cwd?: string | null;
+  title?: string;
+}): DockTerminalTab {
+  return {
+    id: createDockTerminalId(),
+    title: defaults?.title ?? "终端 1",
+    workspaceId: defaults?.workspaceId ?? null,
+    cwd: defaults?.cwd ?? null,
+  };
+}
 
 function XtermSurface({
   terminalTabId,
@@ -123,42 +188,68 @@ function XtermSurface({
 export function TerminalDock({
   isOpen,
   onToggleOpen,
+  defaultWorkspace,
 }: {
   isOpen: boolean;
   onToggleOpen: () => void;
+  defaultWorkspace?: {
+    id: string;
+    rootPath: string;
+    name: string;
+  } | null;
 }) {
-  const terminalTabs = useStore((state) => state.terminalTabs);
-  const activeTerminalTabId = useStore((state) => state.activeTerminalTabId);
-  const setActiveTerminalTab = useStore((state) => state.setActiveTerminalTab);
-  const createTerminalTab = useStore((state) => state.createTerminalTab);
-  const closeTerminalTab = useStore((state) => state.closeTerminalTab);
-  const workspaces = useStore((state) => state.workspaces);
-
   const [height, setHeight] = useState<number>(() => {
     if (typeof window === "undefined") return DEFAULT_HEIGHT;
     const raw = window.localStorage.getItem(HEIGHT_STORAGE_KEY);
     const value = raw ? Number(raw) : DEFAULT_HEIGHT;
     return Number.isFinite(value) ? Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, value)) : DEFAULT_HEIGHT;
   });
+  const [terminalTabs, setTerminalTabs] = useState<DockTerminalTab[]>(() => readStoredTabs());
+  const [activeTerminalTabId, setActiveTerminalTabId] = useState<string | null>(() => readStoredActiveTabId());
   const cleanupRef = useRef<(() => void) | null>(null);
   const outputBuffersRef = useRef<Record<string, string>>({});
   const previousTabIdsRef = useRef<string[]>([]);
+  const wasOpenRef = useRef(false);
 
   const activeTab = useMemo(
     () => terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null,
     [activeTerminalTabId, terminalTabs]
   );
-  const activeWorkspace = useMemo(
-    () => workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null,
-    [activeTab?.workspaceId, workspaces]
-  );
-
   useEffect(() => {
     return () => {
       cleanupRef.current?.();
       cleanupRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (activeTerminalTabId && terminalTabs.some((tab) => tab.id === activeTerminalTabId)) {
+      persistTabs(terminalTabs, activeTerminalTabId);
+      return;
+    }
+    const fallbackId = terminalTabs[0]?.id ?? null;
+    if (fallbackId !== activeTerminalTabId) {
+      setActiveTerminalTabId(fallbackId);
+      persistTabs(terminalTabs, fallbackId);
+      return;
+    }
+    persistTabs(terminalTabs, fallbackId);
+  }, [activeTerminalTabId, terminalTabs]);
+
+  useEffect(() => {
+    const openedNow = isOpen && !wasOpenRef.current;
+    wasOpenRef.current = isOpen;
+    if (!isOpen || terminalTabs.length > 0 || !openedNow) {
+      return;
+    }
+    const nextTab = createDockTerminalTab({
+      title: "终端 1",
+      workspaceId: defaultWorkspace?.id ?? null,
+      cwd: defaultWorkspace?.rootPath ?? null,
+    });
+    setTerminalTabs([nextTab]);
+    setActiveTerminalTabId(nextTab.id);
+  }, [defaultWorkspace?.id, defaultWorkspace?.rootPath, isOpen, terminalTabs.length]);
 
   useEffect(() => {
     const previous = previousTabIdsRef.current;
@@ -215,13 +306,29 @@ export function TerminalDock({
   }
 
   function handleNewTerminal() {
-    createTerminalTab(activeTab?.workspaceId);
+    const nextTab = createDockTerminalTab({
+      title: nextTerminalTitle(terminalTabs),
+      workspaceId: defaultWorkspace?.id ?? activeTab?.workspaceId ?? null,
+      cwd: defaultWorkspace?.rootPath ?? activeTab?.cwd ?? null,
+    });
+    setTerminalTabs((current) => [...current, nextTab]);
+    setActiveTerminalTabId(nextTab.id);
   }
 
   function handleCloseTab(tabId: string) {
     void bridge.closePtySession(tabId);
     delete outputBuffersRef.current[tabId];
-    closeTerminalTab(tabId);
+    setTerminalTabs((current) => {
+      const nextTabs = current.filter((tab) => tab.id !== tabId);
+      setActiveTerminalTabId((currentActive) => {
+        if (currentActive !== tabId) {
+          return currentActive;
+        }
+        const closedIndex = current.findIndex((tab) => tab.id === tabId);
+        return nextTabs[closedIndex]?.id ?? nextTabs[closedIndex - 1]?.id ?? nextTabs[0]?.id ?? null;
+      });
+      return nextTabs;
+    });
   }
 
   function handleBufferData(tabId: string, data: string) {
@@ -244,7 +351,6 @@ export function TerminalDock({
       <div className="terminal-header">
         <div className="terminal-tabs" role="tablist" aria-label="Terminal tabs">
           {terminalTabs.map((tab) => {
-            const workspace = workspaces.find((item) => item.id === tab.workspaceId) ?? null;
             const isActive = tab.id === activeTerminalTabId;
             return (
               <button
@@ -253,23 +359,21 @@ export function TerminalDock({
                 type="button"
                 role="tab"
                 aria-selected={isActive}
-                onClick={() => setActiveTerminalTab(tab.id)}
-                title={workspace?.rootPath ?? tab.title}
+                onClick={() => setActiveTerminalTabId(tab.id)}
+                title={tab.cwd ?? tab.title}
               >
                 <span className="terminal-tab-label">{tab.title}</span>
-                {terminalTabs.length > 1 ? (
-                  <span
-                    className="terminal-tab-close"
-                    role="button"
-                    aria-label={`Close ${tab.title}`}
-                    onClick={(innerEvent) => {
-                      innerEvent.stopPropagation();
-                      handleCloseTab(tab.id);
-                    }}
-                  >
-                    ×
-                  </span>
-                ) : null}
+                <span
+                  className="terminal-tab-close"
+                  role="button"
+                  aria-label={`Close ${tab.title}`}
+                  onClick={(innerEvent) => {
+                    innerEvent.stopPropagation();
+                    handleCloseTab(tab.id);
+                  }}
+                >
+                  ×
+                </span>
               </button>
             );
           })}
@@ -299,13 +403,13 @@ export function TerminalDock({
             {activeTab ? (
               <XtermSurface
                 terminalTabId={activeTab.id}
-                cwd={activeWorkspace?.rootPath ?? null}
+                cwd={activeTab.cwd}
                 initialContent={outputBuffersRef.current[activeTab.id] ?? ""}
                 onData={handleBufferData}
               />
             ) : (
               <div className="terminal-overlay">
-                <div className="terminal-status">No active terminal tab.</div>
+                <div className="terminal-status">没有终端，点击 + 创建一个。</div>
               </div>
             )}
           </div>
@@ -321,6 +425,13 @@ export function useTerminalDockState() {
     return window.localStorage.getItem(OPEN_STORAGE_KEY) === "true";
   });
 
+  function persist(next: boolean) {
+    setOpen(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(OPEN_STORAGE_KEY, String(next));
+    }
+  }
+
   function toggle() {
     setOpen((current) => {
       const next = !current;
@@ -331,5 +442,13 @@ export function useTerminalDockState() {
     });
   }
 
-  return { open, toggle };
+  function openDock() {
+    persist(true);
+  }
+
+  function closeDock() {
+    persist(false);
+  }
+
+  return { open, toggle, openDock, closeDock };
 }

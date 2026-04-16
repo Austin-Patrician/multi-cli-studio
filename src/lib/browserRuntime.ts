@@ -77,6 +77,7 @@ import {
   ModelProviderServiceType,
   PersistedTerminalState,
   SemanticMemoryChunk,
+  CodexRuntimeReloadResult,
   SettingsEngineStatus,
   WorkspacePickResult,
   WorkspaceTreeEntry,
@@ -2943,6 +2944,23 @@ export const browserRuntime = {
     ];
   },
 
+  async getClaudeSettingsPath(): Promise<string | null> {
+    return null;
+  },
+
+  async getCodexConfigPath(): Promise<string | null> {
+    return null;
+  },
+
+  async reloadCodexRuntimeConfig(): Promise<CodexRuntimeReloadResult> {
+    return {
+      status: "applied",
+      stage: "browser-fallback",
+      restartedSessions: 0,
+      message: "浏览器回退环境不需要重新加载 Codex 运行时。",
+    };
+  },
+
   async listGlobalMcpServers(): Promise<GlobalMcpServerEntry[]> {
     return [];
   },
@@ -3008,6 +3026,30 @@ export const browserRuntime = {
     return;
   },
   async onPtyOutput(): Promise<() => void> {
+    return () => {};
+  },
+  async runtimeLogDetectProfiles(): Promise<Array<{ id: string; defaultCommand: string; detectedStack: string }>> {
+    return [];
+  },
+  async runtimeLogStart(): Promise<never> {
+    throw new Error("运行控制台仅在桌面端运行时可用。");
+  },
+  async runtimeLogStop(): Promise<never> {
+    throw new Error("运行控制台仅在桌面端运行时可用。");
+  },
+  async runtimeLogGetSession(): Promise<null> {
+    return null;
+  },
+  async runtimeLogMarkExit(): Promise<never> {
+    throw new Error("运行控制台仅在桌面端运行时可用。");
+  },
+  async onRuntimeLogOutput(): Promise<() => void> {
+    return () => {};
+  },
+  async onRuntimeLogStatus(): Promise<() => void> {
+    return () => {};
+  },
+  async onRuntimeLogExited(): Promise<() => void> {
     return () => {};
   },
 

@@ -1,6 +1,6 @@
 import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../../lib/store";
-import { TerminalSquare } from "lucide-react";
+import { Construction, TerminalSquare } from "lucide-react";
 
 function RightPanelToggleIcon({ collapsed }: { collapsed: boolean }) {
   return (
@@ -25,11 +25,15 @@ export function ProjectBar({
   onToggleRightPanel,
   terminalDockOpen,
   onToggleTerminalDock,
+  runtimeConsoleOpen,
+  onToggleRuntimeConsole,
 }: {
   rightPanelCollapsed: boolean;
   onToggleRightPanel: () => void;
   terminalDockOpen: boolean;
   onToggleTerminalDock: () => void;
+  runtimeConsoleOpen: boolean;
+  onToggleRuntimeConsole: () => void;
 }) {
   const persistenceIssue = useStore((state) => state.persistenceIssue);
   const activeTab = useStore(
@@ -80,6 +84,19 @@ export function ProjectBar({
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={onToggleRuntimeConsole}
+              title={runtimeConsoleOpen ? "收起运行控制台" : "打开运行控制台"}
+              aria-label={runtimeConsoleOpen ? "收起运行控制台" : "打开运行控制台"}
+              className={`inline-flex h-9 w-9 items-center justify-center rounded-xl border transition-all ${
+                runtimeConsoleOpen
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-slate-200 bg-white text-slate-500 hover:-translate-y-[1px] hover:border-slate-300 hover:text-slate-900"
+              }`}
+            >
+              <Construction className="h-4 w-4" />
+            </button>
             <button
               type="button"
               onClick={onToggleTerminalDock}

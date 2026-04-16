@@ -1233,6 +1233,13 @@ export interface SettingsEngineStatus {
   error: string | null;
 }
 
+export interface CodexRuntimeReloadResult {
+  status: string;
+  stage: string;
+  restartedSessions: number;
+  message?: string | null;
+}
+
 export interface GlobalMcpServerEntry {
   name: string;
   enabled: boolean;
@@ -1253,6 +1260,24 @@ export interface ExternalTextFile {
   exists: boolean;
   content: string;
   truncated: boolean;
+}
+
+export interface VendorConfigField {
+  label: string;
+  value: string;
+  tone?: "default" | "muted" | "warn" | "success";
+  monospace?: boolean;
+}
+
+export interface VendorLocalConfigEntry {
+  id: string;
+  name: string;
+  sourcePath: string;
+  summary: string;
+  meta?: string | null;
+  badgeLabel?: string | null;
+  badgeTone?: "default" | "muted" | "warn" | "success";
+  fields: VendorConfigField[];
 }
 
 export interface GitFileChange {
