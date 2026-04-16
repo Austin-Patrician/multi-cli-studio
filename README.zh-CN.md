@@ -275,7 +275,17 @@ https://generativelanguage.googleapis.com/v1beta
 
 - `.github/workflows/release-desktop.yml`
 
-该流程会同步版本号、构建 Tauri 桌面安装包，并将 Windows 安装包上传到 GitHub Releases。
+该流程会同步版本号、构建 Tauri 桌面安装包，并将 macOS DMG、Windows 安装包和 `latest.json` 更新源上传到 GitHub Releases。
+
+当前采用低成本 GitHub 分发：
+
+- 不依赖 Apple Developer ID / notarization。
+- macOS 构建使用 ad-hoc signing，用户首次打开时可能需要在“系统设置 -> 隐私与安全性”里手动放行。
+- 应用内更新仍然依赖 Tauri updater 签名，需要在 `src-tauri/tauri.conf.json` 中写入真实公钥，并在 GitHub Actions 中配置 updater 私钥。
+
+首次配置和发版步骤见：
+
+- [docs/desktop-release.zh-CN.md](./docs/desktop-release.zh-CN.md)
 
 ## 许可证
 

@@ -3,5 +3,10 @@
   "identifier": "default",
   "description": "Default capability set for Multi CLI Studio.",
   "windows": ["main"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "process:default",
+    "updater:default"
+  ]
 }

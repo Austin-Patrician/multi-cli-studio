@@ -206,6 +206,14 @@ export function DesktopSettingsPage() {
                       <span>邮件通知</span>
                       <strong>{settings?.notificationConfig.smtpEnabled ? "已启用" : "已禁用"}</strong>
                     </div>
+                    <div className="dcc-detail-row">
+                      <span>自动检查更新</span>
+                      <strong>{settings?.updateConfig.autoCheckForUpdates ? "已启用" : "已禁用"}</strong>
+                    </div>
+                    <div className="dcc-detail-row">
+                      <span>更新桌面提醒</span>
+                      <strong>{settings?.updateConfig.notifyOnUpdateAvailable ? "已启用" : "已禁用"}</strong>
+                    </div>
                   </div>
                   <div className="dcc-detail-panel">
                     <div className="dcc-panel-title">执行限制</div>

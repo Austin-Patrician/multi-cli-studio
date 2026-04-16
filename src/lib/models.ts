@@ -235,6 +235,11 @@ export interface NotificationConfig {
   emailRecipients: string[];
 }
 
+export interface UpdateConfig {
+  autoCheckForUpdates: boolean;
+  notifyOnUpdateAvailable: boolean;
+}
+
 export type ModelProviderServiceType = "openaiCompatible" | "claude" | "gemini";
 
 export interface ModelProviderModel {
@@ -330,6 +335,7 @@ export interface AppSettings {
   processTimeoutMs: number;
   notifyOnTerminalCompletion: boolean;
   notificationConfig: NotificationConfig;
+  updateConfig: UpdateConfig;
   openaiCompatibleProviders: ModelProviderConfig[];
   claudeProviders: ModelProviderConfig[];
   geminiProviders: ModelProviderConfig[];

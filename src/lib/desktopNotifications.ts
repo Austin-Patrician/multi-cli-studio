@@ -15,6 +15,10 @@ export type TerminalCompletionNotice = {
   durationMs: number;
 };
 
+export type UpdateAvailableNotice = {
+  version: string;
+};
+
 const CLI_LABEL: Record<AgentId, string> = {
   codex: "Codex",
   claude: "Claude Code",
@@ -153,5 +157,28 @@ export async function notifyTerminalCompletion(notice: TerminalCompletionNotice)
 
   if (typeof Notification === "undefined") return false;
   new Notification(title, { body, tag: `terminal:${notice.tabTitle}:${notice.cliId}` });
+  return true;
+}
+
+export async function notifyUpdateAvailable(notice: UpdateAvailableNotice): Promise<boolean> {
+  const permission = await getDesktopNotificationPermission();
+  if (permission !== "granted") return false;
+  if (await isAppFocused()) return false;
+
+  const title = "Multi CLI Studio update available";
+  const body = `Version ${notice.version} is ready to install.`;
+
+  if (isTauriRuntime()) {
+    try {
+      const { sendNotification } = await import("@tauri-apps/plugin-notification");
+      await sendNotification({ title, body });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  if (typeof Notification === "undefined") return false;
+  new Notification(title, { body, tag: `update:${notice.version}` });
   return true;
 }

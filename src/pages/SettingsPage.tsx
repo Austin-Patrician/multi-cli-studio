@@ -7,6 +7,7 @@ import { useStore } from "../lib/store";
 import { requestDesktopNotificationPermission } from "../lib/desktopNotifications";
 import { getProvidersForServiceType, MODEL_PROVIDER_META, MODEL_PROVIDER_SERVICE_ORDER } from "../lib/modelProviders";
 import { SERVICE_ICONS, maskSecret, relativeTime } from "../components/modelProviders/ui";
+import { useAppUpdate } from "../features/update/AppUpdateProvider";
 
 // --- Configuration ---
 const CLI_ORDER = ["codex", "claude", "gemini"] as const;
@@ -114,6 +115,14 @@ const MailIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-5 h-5">
     <path d="M4 7.5A1.5 1.5 0 015.5 6h13A1.5 1.5 0 0120 7.5v9A1.5 1.5 0 0118.5 18h-13A1.5 1.5 0 014 16.5v-9z" stroke="currentColor" strokeWidth="1.5"/>
     <path d="M5 7l7 5 7-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>
+);
+
+const UpdateIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-5 h-5">
+    <path d="M12 3V14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    <path d="M8 10L12 14L16 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    <path d="M5 16.5V18C5 19.1046 5.89543 20 7 20H17C18.1046 20 19 19.1046 19 18V16.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
   </svg>
 );
 
@@ -361,6 +370,13 @@ export function SettingsPage({
   const loadCliSkills = useStore((s) => s.loadCliSkills);
   const cliSkillsByContext = useStore((s) => s.cliSkillsByContext);
   const cliSkillStatusByContext = useStore((s) => s.cliSkillStatusByContext);
+  const {
+    supported: updateSupported,
+    configured: updateConfigured,
+    state: updaterState,
+    checkForUpdates,
+    startUpdate,
+  } = useAppUpdate();
 
   const [local, setLocal] = useState<AppSettings | null>(null);
   const [platform, setPlatform] = useState<Platform>(detectPlatform);
@@ -370,13 +386,19 @@ export function SettingsPage({
   const [banner, setBanner] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [notificationBusy, setNotificationBusy] = useState(false);
+  const [updateNotificationBusy, setUpdateNotificationBusy] = useState(false);
   const [emailTestBusy, setEmailTestBusy] = useState(false);
   const [emailRecipientsInput, setEmailRecipientsInput] = useState("");
   const activeSection = forcedSection ?? parseSettingsSection(searchParams.get("section"));
 
   useEffect(() => {
     if (storedSettings) {
-      setLocal({ ...storedSettings, cliPaths: { ...storedSettings.cliPaths } });
+      setLocal({
+        ...storedSettings,
+        cliPaths: { ...storedSettings.cliPaths },
+        notificationConfig: { ...storedSettings.notificationConfig },
+        updateConfig: { ...storedSettings.updateConfig },
+      });
       setEmailRecipientsInput((storedSettings.notificationConfig.emailRecipients ?? []).join(", "));
     }
   }, [storedSettings]);
@@ -404,6 +426,22 @@ export function SettingsPage({
   const dirty = !!storedSettings && !!local && JSON.stringify(storedSettings) !== JSON.stringify(local);
   const runtimeSummary = `${installedCount}/${CLI_ORDER.length} 个运行时已在 ${PLATFORM_LABEL[platform]} 上就绪。`;
   const branch = appState?.workspace.branch ?? "main";
+  const updateStatusLabel =
+    updaterState.stage === "available" && updaterState.version
+      ? `发现 v${updaterState.version}`
+      : updaterState.stage === "downloading"
+        ? "下载中"
+        : updaterState.stage === "installing"
+          ? "安装中"
+          : updaterState.stage === "restarting"
+            ? "重启中"
+            : updaterState.stage === "error"
+              ? "检查失败"
+              : updaterState.stage === "latest"
+                ? "已是最新"
+                : updaterState.stage === "checking"
+                  ? "检查中"
+                  : "待检查";
   const activeTerminalTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
   const activeWorkspace =
     workspaces.find((workspace) => workspace.id === activeTerminalTab?.workspaceId) ??
@@ -561,6 +599,47 @@ export function SettingsPage({
     } finally {
       setNotificationBusy(false);
     }
+  }
+
+  async function toggleUpdateNotifications() {
+    if (!local) return;
+    if (local.updateConfig.notifyOnUpdateAvailable) {
+      setLocal({
+        ...local,
+        updateConfig: {
+          ...local.updateConfig,
+          notifyOnUpdateAvailable: false,
+        },
+      });
+      setBanner("新版本桌面提醒已关闭。");
+      return;
+    }
+
+    setUpdateNotificationBusy(true);
+    try {
+      const permission = await requestDesktopNotificationPermission();
+      if (permission !== "granted") {
+        setBanner("通知权限未授予。");
+        return;
+      }
+      setLocal({
+        ...local,
+        updateConfig: {
+          ...local.updateConfig,
+          notifyOnUpdateAvailable: true,
+        },
+      });
+      setBanner("新版本桌面提醒已开启。");
+    } finally {
+      setUpdateNotificationBusy(false);
+    }
+  }
+
+  async function handleCheckForUpdates() {
+    await checkForUpdates({
+      announceNoUpdate: true,
+      userInitiated: true,
+    });
   }
 
   if (!local) {
@@ -997,6 +1076,110 @@ export function SettingsPage({
                   </span>
                   <ToggleSwitch enabled={local.notifyOnTerminalCompletion} onClick={toggleCompletionNotifications} disabled={notificationBusy} />
                 </div>
+              </div>
+            </Panel>
+          </div>
+
+          <div style={stageStyle(mounted, 165)}>
+            <Panel title="应用更新" description="配置桌面版自动检查更新、用户提醒与当前版本安装状态。" icon={<UpdateIcon />}>
+              <div className="p-8 space-y-6">
+                <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="max-w-2xl">
+                    <div className="flex items-center gap-3">
+                      <h3 className="text-[15px] font-bold text-slate-900 uppercase tracking-tight">更新检测</h3>
+                      <MetaChip tone={updaterState.stage === "error" ? "warn" : updaterState.stage === "available" ? "ready" : "default"}>
+                        {updateStatusLabel}
+                      </MetaChip>
+                      <MetaChip tone={updateConfigured ? "ready" : "warn"}>
+                        {updateConfigured ? "Feed 已配置" : "待配置签名"}
+                      </MetaChip>
+                    </div>
+                    <p className="mt-2 text-[14px] text-slate-500 leading-relaxed font-medium">
+                      桌面版会通过 GitHub Release feed 检查新版本。发现更新后会弹出下载提示，并支持一键安装重启。
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => void handleCheckForUpdates()}
+                      disabled={!updateSupported || updaterState.stage === "checking" || updaterState.stage === "downloading" || updaterState.stage === "installing" || updaterState.stage === "restarting"}
+                      className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition-all hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {updaterState.stage === "checking" ? "检查中..." : "检查更新"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void startUpdate()}
+                      disabled={!updateSupported || updaterState.stage !== "available"}
+                      className="inline-flex h-10 items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition-all hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {updaterState.stage === "available" ? "立即更新" : "等待新版本"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="flex items-center justify-between gap-4 rounded-[12px] border border-slate-200 bg-white px-4 py-4 shadow-sm">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">启动后自动检查</div>
+                      <div className="mt-1 text-xs leading-relaxed text-slate-500">
+                        发布版应用启动后和后台轮询时自动检查是否有新版本。
+                      </div>
+                    </div>
+                    <ToggleSwitch
+                      enabled={local.updateConfig.autoCheckForUpdates}
+                      onClick={() =>
+                        setLocal({
+                          ...local,
+                          updateConfig: {
+                            ...local.updateConfig,
+                            autoCheckForUpdates: !local.updateConfig.autoCheckForUpdates,
+                          },
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4 rounded-[12px] border border-slate-200 bg-white px-4 py-4 shadow-sm">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-900">发现更新时桌面提醒</div>
+                      <div className="mt-1 text-xs leading-relaxed text-slate-500">
+                        应用在后台或失焦时，额外发送系统通知提醒用户安装新版本。
+                      </div>
+                    </div>
+                    <ToggleSwitch
+                      enabled={local.updateConfig.notifyOnUpdateAvailable}
+                      onClick={() => void toggleUpdateNotifications()}
+                      disabled={updateNotificationBusy}
+                    />
+                  </div>
+                </div>
+
+                {!updateSupported ? (
+                  <div className="rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    当前是开发环境或非桌面运行时，在线更新仅在发布版桌面应用中生效。
+                  </div>
+                ) : null}
+
+                {updateSupported ? (
+                  <div className="rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                    当前桌面版采用 GitHub Releases 低成本分发，不包含 Apple notarization 或 Windows 代码签名。
+                    macOS 首次打开下载的应用时，可能需要前往系统“隐私与安全性”里手动点“仍要打开”。
+                  </div>
+                ) : null}
+
+                {!updateConfigured ? (
+                  <div className="rounded-[10px] border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-800">
+                    还需要将真实的 Tauri updater 公钥写入 <span className="font-mono">src-tauri/tauri.conf.json</span>，
+                    并在 GitHub Actions 中配置 updater 私钥后，应用内更新才会真正可用。这个流程不依赖 Apple 证书。
+                  </div>
+                ) : null}
+
+                {updaterState.error ? (
+                  <div className="rounded-[10px] border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+                    {updaterState.error}
+                  </div>
+                ) : null}
               </div>
             </Panel>
           </div>

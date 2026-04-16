@@ -9,6 +9,9 @@
     "preview": "vite preview --config vite.config.ts",
     "version:sync": "node ./scripts/sync-version.mjs",
     "version:check": "node ./scripts/sync-version.mjs --check",
+    "release:setup": "node ./scripts/setup-desktop-release.mjs",
+    "release:check": "node ./scripts/release-preflight.mjs",
+    "release:feed": "node ./scripts/configure-release-feed.mjs",
     "tauri:dev": "node ./scripts/run-tauri.mjs dev",
     "tauri:build": "node ./scripts/run-tauri.mjs build",
     "tauri:android": "node ./scripts/run-tauri.mjs android"
@@ -19,6 +22,8 @@
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-notification": "^2.0.0",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xyflow/react": "^12.10.2",
     "echarts": "^6.0.0",

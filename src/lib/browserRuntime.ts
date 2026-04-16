@@ -372,6 +372,10 @@ function defaultSettings(): AppSettings {
       smtpFrom: "",
       emailRecipients: [],
     },
+    updateConfig: {
+      autoCheckForUpdates: true,
+      notifyOnUpdateAvailable: false,
+    },
     openaiCompatibleProviders: [],
     claudeProviders: [],
     geminiProviders: [],
@@ -404,6 +408,21 @@ function normalizeNotificationConfig(value: unknown, fallback = defaultSettings(
   };
 }
 
+function normalizeUpdateConfig(value: unknown, fallback = defaultSettings().updateConfig) {
+  if (!value || typeof value !== "object") return fallback;
+  const raw = value as Partial<AppSettings["updateConfig"]>;
+  return {
+    autoCheckForUpdates:
+      typeof raw.autoCheckForUpdates === "boolean"
+        ? raw.autoCheckForUpdates
+        : fallback.autoCheckForUpdates,
+    notifyOnUpdateAvailable:
+      typeof raw.notifyOnUpdateAvailable === "boolean"
+        ? raw.notifyOnUpdateAvailable
+        : fallback.notifyOnUpdateAvailable,
+  };
+}
+
 function normalizeSettings(value: unknown): AppSettings {
   const defaults = defaultSettings();
   if (!value || typeof value !== "object") return defaults;
@@ -426,6 +445,7 @@ function normalizeSettings(value: unknown): AppSettings {
     processTimeoutMs: parsePositiveNumber(raw.processTimeoutMs, defaults.processTimeoutMs),
     notifyOnTerminalCompletion: raw.notifyOnTerminalCompletion === true,
     notificationConfig: normalizeNotificationConfig(raw.notificationConfig, defaults.notificationConfig),
+    updateConfig: normalizeUpdateConfig(raw.updateConfig, defaults.updateConfig),
     openaiCompatibleProviders: raw.openaiCompatibleProviders ?? defaults.openaiCompatibleProviders,
     claudeProviders: raw.claudeProviders ?? defaults.claudeProviders,
     geminiProviders: raw.geminiProviders ?? defaults.geminiProviders,

@@ -280,7 +280,17 @@ The repo already includes a desktop release workflow:
 
 - `.github/workflows/release-desktop.yml`
 
-It synchronizes version metadata, builds the Tauri desktop bundle, and uploads the Windows installer to GitHub Releases.
+It synchronizes version metadata, builds the Tauri desktop bundle, and uploads the macOS DMGs, Windows installer, and `latest.json` update feed to GitHub Releases.
+
+The current distribution flow is intentionally low-cost:
+
+- It does not rely on Apple Developer ID or notarization.
+- macOS builds use ad-hoc signing, so first launch may require manually allowing the app in `Privacy & Security`.
+- In-app updates still require a real Tauri updater keypair: put the public key in `src-tauri/tauri.conf.json` and configure the private key in GitHub Actions secrets.
+
+Full setup and release steps:
+
+- [docs/desktop-release.md](./docs/desktop-release.md)
 
 ## License
 

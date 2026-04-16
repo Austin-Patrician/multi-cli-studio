@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability set for Multi CLI Studio.","local":true,"windows":["main"],"permissions":["core:default","notification:default"]}}
+{"default":{"identifier":"default","description":"Default capability set for Multi CLI Studio.","local":true,"windows":["main"],"permissions":["core:default","notification:default","process:default","updater:default"]}}

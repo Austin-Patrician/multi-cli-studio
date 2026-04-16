@@ -368,6 +368,8 @@ struct AppSettings {
     #[serde(default)]
     notification_config: NotificationConfig,
     #[serde(default)]
+    update_config: UpdateConfig,
+    #[serde(default)]
     openai_compatible_providers: Vec<ModelProviderConfig>,
     #[serde(default)]
     claude_providers: Vec<ModelProviderConfig>,
@@ -406,6 +408,15 @@ struct NotificationConfig {
     smtp_from: String,
     #[serde(default)]
     email_recipients: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateConfig {
+    #[serde(default = "default_auto_check_for_updates")]
+    auto_check_for_updates: bool,
+    #[serde(default)]
+    notify_on_update_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -566,6 +577,19 @@ impl Default for NotificationConfig {
             email_recipients: Vec::new(),
         }
     }
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_check_for_updates: true,
+            notify_on_update_available: false,
+        }
+    }
+}
+
+fn default_auto_check_for_updates() -> bool {
+    true
 }
 
 fn default_smtp_port() -> u16 {
@@ -22117,6 +22141,10 @@ fn seed_settings(project_root: &str) -> AppSettings {
             smtp_from: String::new(),
             email_recipients: Vec::new(),
         },
+        update_config: UpdateConfig {
+            auto_check_for_updates: true,
+            notify_on_update_available: false,
+        },
         openai_compatible_providers: Vec::new(),
         claude_providers: Vec::new(),
         gemini_providers: Vec::new(),
@@ -22541,6 +22569,7 @@ pub fn run() {
     let scheduler_codex_pending_approvals = codex_pending_approvals.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
         .manage(AppStore {
             state: startup_state,
             context: startup_context,
@@ -22562,6 +22591,10 @@ pub fn run() {
             live_chat_turns: Arc::new(Mutex::new(BTreeMap::new())),
         })
         .setup(move |app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())
+                .map_err(|error| error.to_string())?;
             schedule_existing_automation_runs(
                 app.handle().clone(),
                 scheduler_state.clone(),
