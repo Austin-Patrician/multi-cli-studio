@@ -6,6 +6,7 @@ import { ChatPromptBar } from "../components/chat/ChatPromptBar";
 import { TerminalDock, useTerminalDockState } from "../components/chat/TerminalDock";
 import { RuntimeLogDock } from "../components/chat/RuntimeLogDock";
 import { useRuntimeLogSession } from "../components/chat/useRuntimeLogSession";
+import { useWorkspaceLaunchScript } from "../components/chat/useWorkspaceLaunchScript";
 import { useStore } from "../lib/store";
 
 const WorkspaceRightPanel = lazy(async () =>
@@ -33,6 +34,14 @@ export function TerminalPage() {
     return raw == null ? true : raw === "true";
   });
   const runtimeRunState = useRuntimeLogSession({ activeWorkspace });
+  const launchScriptState = useWorkspaceLaunchScript({
+    activeWorkspace,
+    onOpenRuntimeConsole: () => {
+      closeDock();
+      runtimeRunState.onOpenRuntimeConsole();
+    },
+    onRunProjectWithCommand: runtimeRunState.onRunProjectWithCommand,
+  });
 
   useEffect(() => {
     if (!activeTerminalTabId) return;
@@ -82,6 +91,20 @@ export function TerminalPage() {
         onToggleTerminalDock={handleToggleTerminalPanel}
         runtimeConsoleOpen={runtimeRunState.runtimeConsoleVisible}
         onToggleRuntimeConsole={handleToggleRuntimeConsole}
+        launchScript={launchScriptState.launchScript}
+        launchScriptEditorOpen={launchScriptState.editorOpen}
+        launchScriptDraft={launchScriptState.draftScript}
+        launchScriptSaving={launchScriptState.isSaving}
+        launchScriptError={launchScriptState.error}
+        onRunLaunchScript={() => {
+          void launchScriptState.onRunLaunchScript();
+        }}
+        onOpenLaunchScriptEditor={launchScriptState.onOpenEditor}
+        onCloseLaunchScriptEditor={launchScriptState.onCloseEditor}
+        onLaunchScriptDraftChange={launchScriptState.onDraftScriptChange}
+        onSaveLaunchScript={() => {
+          void launchScriptState.onSaveLaunchScript();
+        }}
       />
       <div className="flex-1 flex min-h-0 flex-col">
         <div className="flex min-h-0 flex-1">

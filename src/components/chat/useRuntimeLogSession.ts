@@ -11,7 +11,6 @@ import {
 const RUNTIME_TERMINAL_ID = "runtime-console";
 const MAX_LOG_LINES = 5000;
 const EXIT_CODE_PATTERN = /\[(?:multi-cli|ccgui|CodeMoss) Run\] __EXIT__:(-?\d+)/;
-const OPEN_STORAGE_KEY = "multi-cli-studio::runtime-console-open";
 
 export type RuntimeConsoleStatus = "idle" | "starting" | "running" | "stopped" | "error";
 export type RuntimeCommandPresetId =
@@ -43,6 +42,7 @@ export type RuntimeLogSessionState = {
   onSelectRuntimeCommandPreset: (presetId: RuntimeCommandPresetId) => void;
   onChangeRuntimeCommandInput: (value: string) => void;
   onRunProject: () => Promise<void>;
+  onRunProjectWithCommand: (command: string) => Promise<void>;
   onStopProject: () => Promise<void>;
   onClearRuntimeLogs: () => void;
   onCopyRuntimeLogs: () => Promise<void>;
@@ -76,19 +76,6 @@ const DEFAULT_SESSION: RuntimeWorkspaceSession = {
   autoScroll: true,
   wrapLines: true,
 };
-
-function readStoredVisibility() {
-  if (typeof window === "undefined") {
-    return false;
-  }
-  return window.localStorage.getItem(OPEN_STORAGE_KEY) === "true";
-}
-
-function persistVisibility(open: boolean) {
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(OPEN_STORAGE_KEY, String(open));
-  }
-}
 
 function normalizeProfilePresetId(rawId: string | null | undefined): RuntimeCommandPresetId | null {
   switch (rawId) {
@@ -164,7 +151,10 @@ function applyRuntimeSnapshot(
       : current.commandInput;
   return {
     ...current,
-    visible: mappedStatus !== "idle" || current.visible,
+    visible:
+      current.visible ||
+      mappedStatus === "running" ||
+      mappedStatus === "starting",
     status: mappedStatus,
     commandPreview: snapshot.commandPreview,
     commandPresetId: resolveCommandPresetId(
@@ -191,11 +181,18 @@ export function useRuntimeLogSession({
   >({});
   const exitBufferByWorkspaceRef = useRef<Record<string, string>>({});
   const detectedProfilesByWorkspaceRef = useRef<Record<string, RuntimeProfileDescriptor[]>>({});
+  const previousWorkspaceIdRef = useRef<string | null>(null);
   const activeWorkspaceId = activeWorkspace?.id ?? null;
 
   useEffect(() => {
     detectedProfilesByWorkspaceRef.current = detectedProfilesByWorkspace;
   }, [detectedProfilesByWorkspace]);
+
+  const switchedWorkspace = previousWorkspaceIdRef.current !== activeWorkspaceId;
+
+  useEffect(() => {
+    previousWorkspaceIdRef.current = activeWorkspaceId;
+  }, [activeWorkspaceId]);
 
   const updateWorkspaceSession = useCallback(
     (
@@ -205,7 +202,6 @@ export function useRuntimeLogSession({
       setSessionByWorkspace((prev) => {
         const current = prev[workspaceId] ?? {
           ...DEFAULT_SESSION,
-          visible: readStoredVisibility(),
         };
         return {
           ...prev,
@@ -323,6 +319,31 @@ export function useRuntimeLogSession({
   }, [updateWorkspaceSession]);
 
   useEffect(() => {
+    setSessionByWorkspace((prev) => {
+      let changed = false;
+      const next: Record<string, RuntimeWorkspaceSession> = {};
+
+      for (const [workspaceId, session] of Object.entries(prev)) {
+        if (
+          session.visible &&
+          session.status !== "running" &&
+          session.status !== "starting"
+        ) {
+          next[workspaceId] = {
+            ...session,
+            visible: false,
+          };
+          changed = true;
+        } else {
+          next[workspaceId] = session;
+        }
+      }
+
+      return changed ? next : prev;
+    });
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
     if (!activeWorkspaceId) {
       return;
     }
@@ -394,13 +415,23 @@ export function useRuntimeLogSession({
     if (!activeWorkspaceId) {
       return {
         ...DEFAULT_SESSION,
-        visible: readStoredVisibility(),
       };
     }
-    return sessionByWorkspace[activeWorkspaceId] ?? {
+    const session = sessionByWorkspace[activeWorkspaceId] ?? {
       ...DEFAULT_SESSION,
-      visible: readStoredVisibility(),
     };
+    if (
+      switchedWorkspace &&
+      session.visible &&
+      session.status !== "running" &&
+      session.status !== "starting"
+    ) {
+      return {
+        ...session,
+        visible: false,
+      };
+    }
+    return session;
   }, [activeWorkspaceId, sessionByWorkspace]);
 
   const onSelectRuntimeCommandPreset = useCallback(
@@ -457,13 +488,13 @@ export function useRuntimeLogSession({
     return ["auto", ...Array.from(new Set(detectedIds)), "custom"];
   }, [activeDetectedProfiles]);
 
-  const onRunProject = useCallback(async () => {
+  const runProjectWithCommand = useCallback(async (explicitCommand?: string | null) => {
     const workspaceId = activeWorkspace?.id;
     if (!workspaceId) {
       return;
     }
 
-    const normalizedInput = activeSession.commandInput.trim();
+    const normalizedInput = (explicitCommand ?? activeSession.commandInput).trim();
     const selectedProfile =
       activeDetectedProfiles.find(
         (profile) => normalizeProfilePresetId(profile.id) === activeSession.commandPresetId,
@@ -484,12 +515,13 @@ export function useRuntimeLogSession({
       visible: true,
       status: "starting",
       commandPreview: null,
+      commandInput: normalizedInput,
+      commandPresetId: resolveCommandPresetId(normalizedInput, activeDetectedProfiles),
       error: null,
       exitCode: null,
       truncated: false,
       autoScroll: true,
     }));
-    persistVisibility(true);
     appendWorkspaceLog(
       workspaceId,
       `\n[multi-cli Run] Starting at ${new Date().toLocaleTimeString()}\n`,
@@ -526,11 +558,21 @@ export function useRuntimeLogSession({
     updateWorkspaceSession,
   ]);
 
+  const onRunProject = useCallback(async () => {
+    await runProjectWithCommand(null);
+  }, [runProjectWithCommand]);
+
+  const onRunProjectWithCommand = useCallback(
+    async (command: string) => {
+      await runProjectWithCommand(command);
+    },
+    [runProjectWithCommand],
+  );
+
   const onOpenRuntimeConsole = useCallback(() => {
     if (!activeWorkspaceId) {
       return;
     }
-    persistVisibility(true);
     updateWorkspaceSession(activeWorkspaceId, (current) => ({
       ...current,
       visible: true,
@@ -605,7 +647,6 @@ export function useRuntimeLogSession({
     if (!activeWorkspaceId) {
       return;
     }
-    persistVisibility(false);
     updateWorkspaceSession(activeWorkspaceId, (current) => ({
       ...current,
       visible: false,
@@ -617,6 +658,7 @@ export function useRuntimeLogSession({
     onSelectRuntimeCommandPreset,
     onChangeRuntimeCommandInput,
     onRunProject,
+    onRunProjectWithCommand,
     onStopProject,
     onClearRuntimeLogs,
     onCopyRuntimeLogs,

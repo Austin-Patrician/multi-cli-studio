@@ -200,23 +200,37 @@ function WorkspaceTabItem({
   active,
   collapsed,
   planMode,
+  dragging,
+  dragOver,
   onClick,
   onClose,
+  onPointerDown,
+  onPointerEnter,
 }: {
   title: string;
   subtitle: string;
   active: boolean;
   collapsed: boolean;
   planMode: boolean;
+  dragging?: boolean;
+  dragOver?: boolean;
   onClick: () => void;
   onClose: () => void;
+  onPointerDown?: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  onPointerEnter?: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`group relative flex w-full items-center gap-2 overflow-hidden rounded-xl border px-2.5 py-2 text-left transition-all ${
-        active
+      onMouseDown={onPointerDown}
+      onMouseEnter={onPointerEnter}
+      className={`group relative flex w-full cursor-grab items-center gap-2 overflow-hidden rounded-xl border px-2.5 py-2 text-left transition-all active:cursor-grabbing ${
+        dragging
+          ? "border-slate-300 bg-slate-100 text-slate-500 opacity-60"
+          : dragOver
+            ? "border-emerald-300 bg-emerald-50/80 text-slate-800 shadow-[0_10px_24px_rgba(16,185,129,0.10)]"
+          : active
           ? "border-slate-900 bg-slate-900 text-white shadow-[0_8px_20px_rgba(15,23,42,0.14)]"
           : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
       }`}
@@ -267,10 +281,17 @@ function WorkspaceTabItem({
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
+  const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
   const settingsMenuRef = useRef<HTMLDivElement | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number; tabId: string } | null>(null);
+  const dragMovedRef = useRef(false);
+  const suppressClickRef = useRef(false);
+  const draggingTabIdRef = useRef<string | null>(null);
+  const dragOverTabIdRef = useRef<string | null>(null);
   const terminalTabs = useStore((s) => s.terminalTabs);
   const workspaces = useStore((s) => s.workspaces);
   const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
@@ -278,6 +299,7 @@ export function Sidebar() {
   const closeTerminalTab = useStore((s) => s.closeTerminalTab);
   const openWorkspaceFolder = useStore((s) => s.openWorkspaceFolder);
   const cloneTerminalTab = useStore((s) => s.cloneTerminalTab);
+  const reorderTerminalTabs = useStore((s) => s.reorderTerminalTabs);
   const gitWorkbenchOpen = useStore((s) => s.gitWorkbenchOpen);
   const openGitWorkbench = useStore((s) => s.openGitWorkbench);
 
@@ -377,6 +399,70 @@ export function Sidebar() {
     navigate(`/settings?section=${section}`);
   }
 
+  function setDraggingState(tabId: string | null) {
+    draggingTabIdRef.current = tabId;
+    setDraggingTabId(tabId);
+  }
+
+  function setDragOverState(tabId: string | null) {
+    dragOverTabIdRef.current = tabId;
+    setDragOverTabId(tabId);
+  }
+
+  function finishDrag() {
+    const sourceTabId = draggingTabIdRef.current || dragStartRef.current?.tabId || null;
+    const targetTabId = dragOverTabIdRef.current;
+
+    if (dragMovedRef.current && sourceTabId && targetTabId && sourceTabId !== targetTabId) {
+      reorderTerminalTabs(sourceTabId, targetTabId);
+    }
+
+    dragStartRef.current = null;
+    dragMovedRef.current = false;
+    setDraggingState(null);
+    setDragOverState(null);
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+  }
+
+  function startPointerDrag(tabId: string, event: React.MouseEvent<HTMLButtonElement>) {
+    if (event.button !== 0) return;
+    if ((event.target as HTMLElement | null)?.closest("[role='button']")) {
+      return;
+    }
+
+    dragStartRef.current = { x: event.clientX, y: event.clientY, tabId };
+    dragMovedRef.current = false;
+    suppressClickRef.current = false;
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      const start = dragStartRef.current;
+      if (!start) return;
+      const deltaX = moveEvent.clientX - start.x;
+      const deltaY = moveEvent.clientY - start.y;
+      if (!dragMovedRef.current && Math.hypot(deltaX, deltaY) < 6) {
+        return;
+      }
+      dragMovedRef.current = true;
+      suppressClickRef.current = true;
+      setDraggingState(start.tabId);
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "grabbing";
+    };
+
+    const handleUp = () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+      finishDrag();
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  }
+
   return (
     <aside
       className="relative h-full flex flex-col bg-white border-r border-slate-200 transition-all duration-300 ease-out overflow-hidden shadow-sm"
@@ -389,7 +475,6 @@ export function Sidebar() {
       <div className="flex-1 overflow-y-auto px-3 pb-4">
         <div className="space-y-4">
           <div className="space-y-1">
-            <SidebarSectionTitle label="导航" collapsed={collapsed} />
             {navItems.map((item) => (
               <SidebarLink key={item.to} {...item} collapsed={collapsed} />
             ))}
@@ -431,11 +516,22 @@ export function Sidebar() {
                   active={tab.id === activeTerminalTabId}
                   collapsed={collapsed}
                   planMode={tab.planMode}
+                  dragging={draggingTabId === tab.id}
+                  dragOver={dragOverTabId === tab.id && draggingTabId !== tab.id}
                   onClick={() => {
+                    if (suppressClickRef.current) {
+                      return;
+                    }
                     setActiveTerminalTab(tab.id);
                     navigate("/terminal");
                   }}
                   onClose={() => closeTerminalTab(tab.id)}
+                  onPointerDown={(event) => startPointerDrag(tab.id, event)}
+                  onPointerEnter={() => {
+                    if (draggingTabIdRef.current && draggingTabIdRef.current !== tab.id) {
+                      setDragOverState(tab.id);
+                    }
+                  }}
                 />
               ))}
             </div>
@@ -466,11 +562,11 @@ export function Sidebar() {
                 <IconGear />
                 {!collapsed ? <span className="text-[12px] font-semibold text-slate-600">设置</span> : null}
               </span>
-              {!collapsed ? (
+              {/* {!collapsed ? (
                 <svg viewBox="0 0 24 24" fill="none" className={`w-4 h-4 transition-transform ${settingsMenuOpen ? "rotate-180" : ""}`}>
                   <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-              ) : null}
+              ) : null} */}
             </button>
             {settingsMenuOpen ? (
               <div className={`absolute bottom-[calc(100%+8px)] z-30 min-w-[196px] rounded-2xl border border-slate-200 bg-white p-1.5 shadow-[0_18px_40px_rgba(15,23,42,0.14)] ${collapsed ? "left-0" : "left-0 right-0"}`}>

@@ -55,6 +55,13 @@ type SessionSummary = {
   messageCount: number;
 };
 
+type TaskNode = {
+  id: string;
+  detail: string;
+  timestamp: string;
+  isLatest: boolean;
+};
+
 type ActivityEntry = {
   id: string;
   messageId: string;
@@ -111,6 +118,14 @@ function formatTimeAgo(iso: string | null | undefined) {
   return `${diffDays}d ago`;
 }
 
+function formatDateKey(timestamp: number) {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function resolveEffectiveCli(tab: TerminalTab, workspace: WorkspaceRef, session: ConversationSession): AgentId {
   const selectedCli = tab.selectedCli === "auto" || !tab.selectedCli ? workspace.activeAgent : tab.selectedCli;
   const recentCli =
@@ -157,6 +172,30 @@ function buildSessionSummary(tab: TerminalTab, workspace: WorkspaceRef, session:
     changedFiles: collectChangedFiles(session),
     messageCount,
   };
+}
+
+function buildTaskNodes(session: ConversationSession | null): TaskNode[] {
+  if (!session) return [];
+
+  const prompts = session.messages
+    .filter((message) => message.role === "user")
+    .map((message) => {
+      const detail = (message.rawContent ?? message.content).replace(/\s+/g, " ").trim();
+      return {
+        id: message.id,
+        detail: detail.length > 160 ? `${detail.slice(0, 157)}...` : detail,
+        timestamp: formatTimeAgo(message.timestamp),
+      };
+    })
+    .filter((message) => message.detail.length > 0)
+    .slice(-10);
+
+  return prompts
+    .reverse()
+    .map((prompt, index) => ({
+      ...prompt,
+      isLatest: index === 0,
+    }));
 }
 
 function formatActivityDetail(message: ChatMessage, block: ChatMessageBlock | null) {
@@ -345,95 +384,204 @@ function changeStatusMap(changes: GitFileChange[]) {
 
 function WorkspaceSessionRadarPanel({
   sessions,
+  workspace,
   onSelectTab,
 }: {
   sessions: SessionSummary[];
+  workspace: WorkspaceRef;
   onSelectTab: (tabId: string) => void;
 }) {
   const runningSessions = sessions.filter((session) => session.isRunning);
   const recentCompleted = sessions.filter((session) => !session.isRunning).slice(0, 8);
+  const [previewExpandedById, setPreviewExpandedById] = useState<Record<string, boolean>>({});
+  const [collapsedDateGroups, setCollapsedDateGroups] = useState<Record<string, boolean>>({});
+  const headerSummary = useMemo(
+    () => [`运行中 ${runningSessions.length}`, `最近 ${recentCompleted.length}`].join(" · "),
+    [recentCompleted.length, runningSessions.length]
+  );
+
+  const recentGroups = useMemo(() => {
+    const groups = new Map<string, SessionSummary[]>();
+    for (const session of recentCompleted) {
+      const key = formatDateKey(session.updatedAt);
+      const existing = groups.get(key);
+      if (existing) existing.push(session);
+      else groups.set(key, [session]);
+    }
+    return Array.from(groups.entries()).sort((left, right) => right[0].localeCompare(left[0]));
+  }, [recentCompleted]);
+
+  const togglePreviewAndSelect = (session: SessionSummary) => {
+    setPreviewExpandedById((current) => ({
+      ...current,
+      [session.tabId]: !current[session.tabId],
+    }));
+    onSelectTab(session.tabId);
+  };
 
   return (
     <div className="workspace-radar-panel session-activity-panel">
       <div className="session-activity-header">
         <div className="session-activity-title-group">
-          <div className="session-activity-title-row">Workspace sessions</div>
-        </div>
-      </div>
-      <div className="workspace-panel-scroll">
-        <section>
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">Running</div>
-            <div className="rounded-full bg-[#eef4ff] px-2 py-0.5 text-[11px] font-semibold text-[#2859c5]">
-              {runningSessions.length}
+          <div className="session-activity-heading-row">
+            <div className="session-activity-title-row">
+              <span>Workspace sessions</span>
             </div>
           </div>
+        </div>
+        <div className="session-activity-summary">{headerSummary}</div>
+      </div>
+      <div className="session-activity-radar">
+        <section className="session-activity-radar-section">
+          <header className="session-activity-radar-section-header">
+            <span>{`运行中（${runningSessions.length}）`}</span>
+          </header>
           {runningSessions.length === 0 ? (
-            <div className="rounded-[18px] border border-dashed border-border bg-white px-4 py-4 text-sm text-secondary">
-              No active CLI session in this workspace.
+            <div className="session-activity-radar-empty">
+              当前没有正在运行的会话。
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="session-activity-radar-list">
               {runningSessions.map((session) => (
                 <button
                   key={session.tabId}
                   type="button"
-                  onClick={() => onSelectTab(session.tabId)}
-                  className="workspace-radar-card is-running"
+                  onClick={() => togglePreviewAndSelect(session)}
+                  className={`session-activity-radar-row is-running${previewExpandedById[session.tabId] ? " is-preview-expanded" : ""}`}
+                  aria-expanded={previewExpandedById[session.tabId] ? true : false}
                 >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="truncate text-sm font-semibold text-text">{session.title}</div>
-                    <div className="inline-flex items-center gap-1 rounded-full bg-[#eef4ff] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#2859c5]">
-                      <SpinnerIcon className="h-3 w-3 animate-spin" />
-                      {session.cliId}
-                    </div>
-                  </div>
-                  <div className="mt-1 line-clamp-2 text-[12px] leading-5 text-secondary">{session.preview}</div>
-                  <div className="mt-2 text-[11px] text-muted">{session.messageCount} messages</div>
+                  <span className="session-activity-radar-row-main">
+                    <span className="session-activity-radar-row-meta-line">
+                      <span className="session-activity-radar-engine-icon is-running">
+                        <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />
+                      </span>
+                      <span className="session-activity-radar-workspace">{workspace.name}</span>
+                      <span>{session.cliId}</span>
+                      <span>{session.messageCount} messages</span>
+                      {session.changedFiles.length > 0 ? <span>{session.changedFiles.length} files</span> : null}
+                    </span>
+                    <span className="session-activity-radar-row-preview">
+                      {session.preview}
+                    </span>
+                  </span>
                 </button>
               ))}
             </div>
           )}
         </section>
 
-        <section className="mt-6">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">Recent</div>
-            <div className="rounded-full bg-[#f3f4f6] px-2 py-0.5 text-[11px] font-semibold text-slate-600">
-              {recentCompleted.length}
-            </div>
-          </div>
+        <section className="session-activity-radar-section">
+          <header className="session-activity-radar-section-header">
+            <span>{`最近完成（${recentCompleted.length}）`}</span>
+          </header>
           {recentCompleted.length === 0 ? (
-            <div className="rounded-[18px] border border-dashed border-border bg-white px-4 py-4 text-sm text-secondary">
-              Recent completed sessions will appear here.
+            <div className="session-activity-radar-empty">
+              最近结束的会话会显示在这里。
             </div>
           ) : (
-            <div className="space-y-2">
-              {recentCompleted.map((session) => (
-                <button
-                  key={session.tabId}
-                  type="button"
-                  onClick={() => onSelectTab(session.tabId)}
-                  className="workspace-radar-card"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="truncate text-sm font-semibold text-text">{session.title}</div>
-                    <div className="rounded-full bg-[#f5f7fb] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600">
-                      {session.cliId}
+            <div className="session-activity-radar-list">
+              {recentGroups.map(([dateKey, group]) => {
+                const isCollapsed = collapsedDateGroups[dateKey] ?? true;
+                return (
+                  <div key={dateKey} className="session-activity-radar-date-group">
+                    <div className="session-activity-radar-date-group-header">
+                      <button
+                        type="button"
+                        className="session-activity-radar-date-toggle"
+                        onClick={() =>
+                          setCollapsedDateGroups((current) => ({
+                            ...current,
+                            [dateKey]: !isCollapsed,
+                          }))
+                        }
+                      >
+                        <span className="session-activity-radar-date-toggle-left">
+                          {isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                          <span>{dateKey}</span>
+                        </span>
+                        <span className="session-activity-radar-date-toggle-count">{group.length}</span>
+                      </button>
                     </div>
+                    {!isCollapsed ? (
+                      <div className="session-activity-radar-date-group-list">
+                        {group.map((session) => (
+                          <div key={session.tabId} className="session-activity-radar-row-shell">
+                            <button
+                              type="button"
+                              onClick={() => togglePreviewAndSelect(session)}
+                              className={`session-activity-radar-row${previewExpandedById[session.tabId] ? " is-preview-expanded" : ""}`}
+                              aria-expanded={previewExpandedById[session.tabId] ? true : false}
+                            >
+                              <span className="session-activity-radar-row-main">
+                                <span className="session-activity-radar-row-meta-line">
+                                  <span className="session-activity-radar-engine-icon">
+                                    <ClockIcon className="h-3.5 w-3.5" />
+                                  </span>
+                                  <span className="session-activity-radar-workspace">{workspace.name}</span>
+                                  <span>{session.cliId}</span>
+                                  <span>{session.updatedAt > 0 ? formatTimeAgo(new Date(session.updatedAt).toISOString()) : "Unknown time"}</span>
+                                  <span>{session.messageCount} messages</span>
+                                </span>
+                                <span className="session-activity-radar-row-preview">
+                                  {session.preview}
+                                </span>
+                              </span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
-                  <div className="mt-1 line-clamp-2 text-[12px] leading-5 text-secondary">{session.preview}</div>
-                  <div className="mt-2 flex items-center gap-1 text-[11px] text-muted">
-                    <ClockIcon className="h-3.5 w-3.5" />
-                    {session.updatedAt > 0 ? formatTimeAgo(new Date(session.updatedAt).toISOString()) : "Unknown time"}
-                  </div>
-                </button>
-              ))}
+                );
+              })}
             </div>
           )}
         </section>
       </div>
     </div>
+  );
+}
+
+function WorkspaceTaskRail({
+  tabTitle,
+  tasks,
+}: {
+  tabTitle: string;
+  tasks: TaskNode[];
+}) {
+  const latestTask = tasks[0] ?? null;
+
+  return (
+    <section className="workspace-task-rail">
+      <div className="workspace-task-rail-header">
+        <div className="workspace-task-rail-pills">
+          <div className="workspace-task-pill is-primary">
+            <span className="workspace-task-pill-label">任务</span>
+            <span className="workspace-task-pill-value">{tasks.length}</span>
+          </div>
+        </div>
+      </div>
+
+      {tasks.length === 0 ? (
+        <div className="workspace-task-rail-empty">
+          当前会话里的用户消息会在这里形成任务节点。
+        </div>
+      ) : (
+        <div className="workspace-task-rail-list">
+          {tasks.map((task) => (
+            <div key={task.id} className={`workspace-task-node${task.isLatest ? " is-latest" : ""}`}>
+              <div className="workspace-task-node-marker" aria-hidden>
+                <div className="workspace-task-node-dot" />
+              </div>
+              <div className="workspace-task-node-main">
+                <div className="workspace-task-node-detail">{task.detail}</div>
+                <div className="workspace-task-node-time">{task.timestamp || "just now"}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1288,6 +1436,7 @@ export function WorkspaceRightPanel() {
   const activeTabId = useStore((state) => state.activeTerminalTabId);
   const terminalTabs = useStore((state) => state.terminalTabs);
   const workspaces = useStore((state) => state.workspaces);
+  const chatSessions = useStore((state) => state.chatSessions);
   const setActiveTerminalTab = useStore((state) => state.setActiveTerminalTab);
   const refreshGitPanel = useStore((state) => state.refreshGitPanel);
 
@@ -1325,6 +1474,11 @@ export function WorkspaceRightPanel() {
   const fileModeChanges = useStore((state) =>
     mode === "files" && workspace ? state.gitPanelsByWorkspace[workspace.id]?.recentChanges ?? EMPTY_GIT_CHANGES : EMPTY_GIT_CHANGES
   );
+  const activeSession = useMemo(
+    () => (activeTabId ? chatSessions[activeTabId] ?? null : null),
+    [activeTabId, chatSessions]
+  );
+  const taskNodes = useMemo(() => buildTaskNodes(activeSession), [activeSession]);
 
   const sessionSummaries = useMemo(() => {
     if (!workspace || mode !== "radar") return [];
@@ -1414,23 +1568,34 @@ export function WorkspaceRightPanel() {
           </div> */}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-hidden">
-          {mode === "activity" ? (
-            <WorkspaceSessionActivityPanel
-              activities={activityEntries}
-              workspace={workspace}
-              onSelectTab={setActiveTerminalTab}
-              tabTitlesById={workspaceTabTitlesById}
-            />
-          ) : mode === "radar" ? (
-            <WorkspaceSessionRadarPanel sessions={sessionSummaries} onSelectTab={setActiveTerminalTab} />
-          ) : mode === "files" ? (
-            <WorkspaceFilesPanel workspace={workspace} changes={fileModeChanges} />
-          ) : mode === "search" ? (
-            <WorkspaceSearchPanel workspace={workspace} />
-          ) : (
-            <GitPanel workspace={workspace} />
-          )}
+        <div className="workspace-right-panel-body">
+          <div className="workspace-right-panel-main">
+            {mode === "activity" ? (
+              <WorkspaceSessionActivityPanel
+                activities={activityEntries}
+                workspace={workspace}
+                onSelectTab={setActiveTerminalTab}
+                tabTitlesById={workspaceTabTitlesById}
+              />
+            ) : mode === "radar" ? (
+              <WorkspaceSessionRadarPanel
+                sessions={sessionSummaries}
+                workspace={workspace}
+                onSelectTab={setActiveTerminalTab}
+              />
+            ) : mode === "files" ? (
+              <WorkspaceFilesPanel workspace={workspace} changes={fileModeChanges} />
+            ) : mode === "search" ? (
+              <WorkspaceSearchPanel workspace={workspace} />
+            ) : (
+              <GitPanel workspace={workspace} />
+            )}
+          </div>
+
+          <WorkspaceTaskRail
+            tabTitle={activeTab?.title || workspace.name}
+            tasks={taskNodes}
+          />
         </div>
       </div>
     </aside>

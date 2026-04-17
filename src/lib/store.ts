@@ -920,6 +920,7 @@ interface StoreState {
   openWorkspaceFolder: () => Promise<void>;
   createTerminalTab: (workspaceId?: string) => void;
   cloneTerminalTab: (sourceTabId?: string) => void;
+  reorderTerminalTabs: (sourceTabId: string, targetTabId: string) => void;
   closeTerminalTab: (tabId: string) => void;
   setActiveTerminalTab: (tabId: string) => void;
   setTabSelectedCli: (tabId: string, cliId: TerminalCliId) => void;
@@ -1635,6 +1636,44 @@ export const useStore = create<StoreState>((set, get) => {
         seeds: [toPersistedSessionSeed(session, tab.id, session.messages)],
       })
     );
+  },
+
+  reorderTerminalTabs: (sourceTabId, targetTabId) => {
+    if (!sourceTabId || !targetTabId || sourceTabId === targetTabId) return;
+
+    set((state) => {
+      const sourceIndex = state.terminalTabs.findIndex((tab) => tab.id === sourceTabId);
+      const targetIndex = state.terminalTabs.findIndex((tab) => tab.id === targetTabId);
+
+      if (sourceIndex < 0 || targetIndex < 0) {
+        return {};
+      }
+
+      const nextTerminalTabs = [...state.terminalTabs];
+      const [movedTab] = nextTerminalTabs.splice(sourceIndex, 1);
+      nextTerminalTabs.splice(targetIndex, 0, movedTab);
+
+      const appState = state.appState
+        ? deriveActiveWorkspaceState(
+            state.appState,
+            state.workspaces,
+            nextTerminalTabs,
+            state.activeTerminalTabId,
+          )
+        : null;
+
+      persistTerminalState(
+        state.workspaces,
+        nextTerminalTabs,
+        state.activeTerminalTabId,
+        state.chatSessions,
+      );
+
+      return {
+        appState,
+        terminalTabs: nextTerminalTabs,
+      };
+    });
   },
 
   closeTerminalTab: (tabId) => {

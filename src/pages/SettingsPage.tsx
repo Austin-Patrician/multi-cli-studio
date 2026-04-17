@@ -1043,7 +1043,7 @@ export function SettingsPage({
           </div>
 
           {/* Workspace */}
-          <div style={stageStyle(mounted, 100)}>
+          {/* <div style={stageStyle(mounted, 100)}>
             <Panel title="工作区上下文" description="用于执行与上下文提取的根目录映射配置。" icon={<FolderIcon />}>
               <div className="p-8 space-y-8">
                 <div>
@@ -1057,7 +1057,7 @@ export function SettingsPage({
                 </div>
               </div>
             </Panel>
-          </div>
+          </div> */}
 
           {/* Alerts */}
           <div style={stageStyle(mounted, 150)}>
@@ -1337,7 +1337,7 @@ export function SettingsPage({
           </div>
 
           {/* Limits */}
-          <div style={stageStyle(mounted, 200)}>
+          {/* <div style={stageStyle(mounted, 200)}>
             <Panel title="执行限制" description="用于自动化智能体操作的安全边界配置。" icon={<CpuIcon />}>
               <div className="grid gap-6 p-8 sm:grid-cols-3">
                 <div className="rounded-[10px] border border-slate-100 bg-slate-50/50 p-5">
@@ -1389,7 +1389,7 @@ export function SettingsPage({
                 {formatLimit(local.processTimeoutMs)}ms
               </div>
             </Panel>
-          </div>
+          </div> */}
             </>
           ) : null}
         </main>

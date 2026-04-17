@@ -22,6 +22,9 @@ import { ChatSearchBar } from "./ChatSearchBar";
 import { UserBubble } from "./UserBubble";
 
 const AUTO_FOLLOW_THRESHOLD_PX = 120;
+const LOAD_MORE_THRESHOLD_PX = 72;
+const INITIAL_VISIBLE_MESSAGE_COUNT = 8;
+const VISIBLE_MESSAGE_BATCH = 60;
 const SEARCHABLE_SELECTOR = "[data-chat-searchable-content='true']";
 const SEARCH_MATCH_SELECTOR = "mark[data-chat-search-match='true']";
 const SEARCH_MATCH_BASE_CLASS =
@@ -368,9 +371,12 @@ export function ChatConversation() {
   const shouldAutoFollowRef = useRef(true);
   const searchMatchesRef = useRef<SearchDomMatch[]>([]);
   const suppressMutationObserverRef = useRef(false);
+  const pendingPrependScrollRef = useRef<{ previousScrollHeight: number; previousScrollTop: number } | null>(null);
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [visibleMessageCount, setVisibleMessageCount] = useState(INITIAL_VISIBLE_MESSAGE_COUNT);
+  const [showLoadOlderHint, setShowLoadOlderHint] = useState(false);
   const [searchOptions, setSearchOptions] = useState<SearchOptions>({
     caseSensitive: false,
     wholeWord: false,
@@ -433,6 +439,17 @@ export function ChatConversation() {
   const clearQueuedChatMessage = useStore((state) => state.clearQueuedChatMessage);
   const editQueuedChatMessage = useStore((state) => state.editQueuedChatMessage);
 
+  const allMessages = activeSession?.messages ?? [];
+  const shouldShowAllMessages = isSearchOpen && compiledSearch.hasQuery;
+  const visibleMessages = useMemo(() => {
+    if (shouldShowAllMessages) {
+      return allMessages;
+    }
+    return allMessages.slice(Math.max(0, allMessages.length - visibleMessageCount));
+  }, [allMessages, shouldShowAllMessages, visibleMessageCount]);
+  const hasHiddenMessages =
+    !shouldShowAllMessages && allMessages.length > visibleMessages.length;
+
   useEffect(() => {
     const scrollContainer = scrollContainerRef.current;
     if (!scrollContainer) return;
@@ -442,12 +459,10 @@ export function ChatConversation() {
       behavior: activeTab?.status === "streaming" ? "auto" : "smooth",
       block: "end",
     });
-  }, [activeSession?.messages, activeTab?.status, isSearchOpen, queuedPrompt?.queuedAt]);
+  }, [visibleMessages, activeTab?.status, isSearchOpen, queuedPrompt?.queuedAt]);
 
   useEffect(() => {
-    const scrollContainer = scrollContainerRef.current;
-    if (!scrollContainer) return;
-    shouldAutoFollowRef.current = isNearBottom(scrollContainer);
+    shouldAutoFollowRef.current = true;
   }, [activeTab?.id]);
 
   useEffect(() => {
@@ -456,8 +471,24 @@ export function ChatConversation() {
     setCurrentMatchIndex(0);
     setMatchCount(0);
     setSearchRefreshTick(0);
+    setVisibleMessageCount(INITIAL_VISIBLE_MESSAGE_COUNT);
+    setShowLoadOlderHint(false);
+    pendingPrependScrollRef.current = null;
     searchMatchesRef.current = [];
   }, [activeTab?.id]);
+
+  useEffect(() => {
+    if (shouldShowAllMessages) {
+      return;
+    }
+    setVisibleMessageCount((current) => Math.max(INITIAL_VISIBLE_MESSAGE_COUNT, Math.min(current, allMessages.length || INITIAL_VISIBLE_MESSAGE_COUNT)));
+  }, [allMessages.length, shouldShowAllMessages]);
+
+  useEffect(() => {
+    if (!hasHiddenMessages) {
+      setShowLoadOlderHint(false);
+    }
+  }, [hasHiddenMessages]);
 
   useEffect(() => {
     setCurrentMatchIndex(0);
@@ -505,6 +536,26 @@ export function ChatConversation() {
       observer.disconnect();
     };
   }, [isSearchOpen, activeTab?.id]);
+
+  useLayoutEffect(() => {
+    const pendingScroll = pendingPrependScrollRef.current;
+    const scrollContainer = scrollContainerRef.current;
+    if (!pendingScroll || !scrollContainer) {
+      return;
+    }
+    pendingPrependScrollRef.current = null;
+    const nextScrollTop =
+      scrollContainer.scrollHeight - pendingScroll.previousScrollHeight + pendingScroll.previousScrollTop;
+    scrollContainer.scrollTop = nextScrollTop;
+  }, [visibleMessages.length]);
+
+  useLayoutEffect(() => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer || !shouldAutoFollowRef.current || isSearchOpen) {
+      return;
+    }
+    scrollContainer.scrollTop = scrollContainer.scrollHeight;
+  }, [activeTab?.id, visibleMessages.length, isSearchOpen]);
 
   useLayoutEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -698,10 +749,24 @@ export function ChatConversation() {
     void respondAutoRoute(activeTab.id, action);
   }
 
+  function loadOlderMessages() {
+    if (shouldShowAllMessages || !hasHiddenMessages || pendingPrependScrollRef.current) return;
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) return;
+    pendingPrependScrollRef.current = {
+      previousScrollHeight: scrollContainer.scrollHeight,
+      previousScrollTop: scrollContainer.scrollTop,
+    };
+    setVisibleMessageCount((current) => current + VISIBLE_MESSAGE_BATCH);
+  }
+
   function handleScroll() {
     const scrollContainer = scrollContainerRef.current;
     if (!scrollContainer) return;
     shouldAutoFollowRef.current = isNearBottom(scrollContainer);
+    setShowLoadOlderHint(
+      hasHiddenMessages && scrollContainer.scrollTop <= LOAD_MORE_THRESHOLD_PX
+    );
   }
 
   function handleEditQueuedPrompt() {
@@ -780,12 +845,25 @@ export function ChatConversation() {
             <div className="text-right text-xs text-secondary">
               <div>
                 <div>{activeTab.planMode ? "Plan mode" : "Execution mode"}</div>
-                <div>{activeSession.messages.length} messages</div>
+                <div>{allMessages.length} messages</div>
               </div>
             </div>
           </div>
 
-          {activeSession.messages.length === 0 && (
+          {hasHiddenMessages && showLoadOlderHint && (
+            <div className="sticky top-0 z-10 flex justify-center px-2">
+              <button
+                type="button"
+                onClick={loadOlderMessages}
+                className="inline-flex items-center gap-1 rounded-full border border-slate-200/80 bg-white/88 px-3 py-1 text-[11px] font-medium text-slate-500 shadow-[0_8px_20px_rgba(15,23,42,0.04)] backdrop-blur transition-colors hover:border-slate-300 hover:bg-white hover:text-slate-800"
+              >
+                <span className="text-slate-400">↑</span>
+                加载更早消息
+              </button>
+            </div>
+          )}
+
+          {allMessages.length === 0 && (
             <div className="flex items-center justify-center rounded-[22px] border border-dashed border-border bg-white px-6 py-12 text-sm text-muted">
               {emptyMessage}
             </div>
@@ -794,7 +872,7 @@ export function ChatConversation() {
           {(() => {
             let lastUserPrompt: { content: string; cliId: AgentId | null } | null = null;
 
-            return activeSession.messages.map((msg) => {
+            return visibleMessages.map((msg) => {
               if (msg.role === "system") {
                 const systemTone =
                   msg.exitCode != null && msg.exitCode !== 0

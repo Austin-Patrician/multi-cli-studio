@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { bridge } from "../../lib/bridge";
 import { FileIcon } from "../FileIcon";
+import { GitTooltipButton } from "../GitTooltipButton";
 import { GitDiffBlock, type GitDiffStyle } from "./GitDiffBlock";
 import type {
   GitBranchListItem,
@@ -612,37 +613,31 @@ function WorktreeFileRow({
         </span>
         <div className="diff-row-actions" role="group" aria-label="File actions" onClick={(event) => event.stopPropagation()}>
           {showStage ? (
-            <button
-              type="button"
+            <GitTooltipButton
               className="diff-row-action diff-row-action--stage"
               onClick={() => void onStageFile?.(file.path)}
-              data-tooltip="Stage file"
-              aria-label="Stage file"
+              tooltip="Stage file"
             >
               <Plus size={12} aria-hidden />
-            </button>
+            </GitTooltipButton>
           ) : null}
           {showUnstage ? (
-            <button
-              type="button"
+            <GitTooltipButton
               className="diff-row-action diff-row-action--unstage"
               onClick={() => void onUnstageFile?.(file.path)}
-              data-tooltip="Unstage file"
-              aria-label="Unstage file"
+              tooltip="Unstage file"
             >
               <Minus size={12} aria-hidden />
-            </button>
+            </GitTooltipButton>
           ) : null}
           {showDiscard ? (
-            <button
-              type="button"
+            <GitTooltipButton
               className="diff-row-action diff-row-action--discard"
               onClick={() => void onDiscardFile?.(file.path)}
-              data-tooltip="Discard changes"
-              aria-label="Discard changes"
+              tooltip="Discard changes"
             >
               <Undo2 size={12} aria-hidden />
-            </button>
+            </GitTooltipButton>
           ) : null}
         </div>
       </div>
@@ -702,35 +697,29 @@ function WorktreeSection({
         <div className="diff-section-actions git-history-worktree-section-actions" role="group" aria-label={`${title} actions`}>
           {section === "unstaged" ? (
             <>
-              <button
-                type="button"
+              <GitTooltipButton
                 className="diff-row-action diff-row-action--stage"
                 onClick={onStageAll}
-                data-tooltip="Stage all"
-                aria-label="Stage all"
+                tooltip="Stage all"
               >
                 <Plus size={12} aria-hidden />
-              </button>
-              <button
-                type="button"
+              </GitTooltipButton>
+              <GitTooltipButton
                 className="diff-row-action diff-row-action--discard"
                 onClick={onDiscardAll}
-                data-tooltip="Discard all"
-                aria-label="Discard all"
+                tooltip="Discard all"
               >
                 <Undo2 size={12} aria-hidden />
-              </button>
+              </GitTooltipButton>
             </>
           ) : (
-            <button
-              type="button"
+            <GitTooltipButton
               className="diff-row-action diff-row-action--unstage"
               onClick={onUnstageAll}
-              data-tooltip="Unstage all"
-              aria-label="Unstage all"
+              tooltip="Unstage all"
             >
               <Minus size={12} aria-hidden />
-            </button>
+            </GitTooltipButton>
           )}
         </div>
       </div>
@@ -886,35 +875,29 @@ function WorktreeTreeSection({
         <div className="diff-section-actions git-history-worktree-section-actions" role="group" aria-label={`${title} actions`}>
           {section === "unstaged" ? (
             <>
-              <button
-                type="button"
+              <GitTooltipButton
                 className="diff-row-action diff-row-action--stage"
                 onClick={onStageAll}
-                data-tooltip="Stage all"
-                aria-label="Stage all"
+                tooltip="Stage all"
               >
                 <Plus size={12} aria-hidden />
-              </button>
-              <button
-                type="button"
+              </GitTooltipButton>
+              <GitTooltipButton
                 className="diff-row-action diff-row-action--discard"
                 onClick={onDiscardAll}
-                data-tooltip="Discard all"
-                aria-label="Discard all"
+                tooltip="Discard all"
               >
                 <Undo2 size={12} aria-hidden />
-              </button>
+              </GitTooltipButton>
             </>
           ) : (
-            <button
-              type="button"
+            <GitTooltipButton
               className="diff-row-action diff-row-action--unstage"
               onClick={onUnstageAll}
-              data-tooltip="Unstage all"
-              aria-label="Unstage all"
+              tooltip="Unstage all"
             >
               <Minus size={12} aria-hidden />
-            </button>
+            </GitTooltipButton>
           )}
         </div>
       </div>
