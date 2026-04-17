@@ -50,10 +50,11 @@ if (!fs.existsSync(privateKeyPath) || !fs.existsSync(publicKeyPath) || !fs.exist
 
 const privateKey = fs.readFileSync(privateKeyPath, "utf8").trim();
 const publicKey = fs.readFileSync(publicKeyPath, "utf8").trim();
+const privateKeySecret = Buffer.from(privateKey, "utf8").toString("base64");
 
-fs.writeFileSync(privateKeySecretPath, `${privateKey}\n`, "utf8");
+fs.writeFileSync(privateKeySecretPath, `${privateKeySecret}\n`, "utf8");
 fs.writeFileSync(publicKeyValuePath, `${publicKey}\n`, "utf8");
-writeGitHubSecretsSummary(privateKey, fs.readFileSync(passwordPath, "utf8").trim());
+writeGitHubSecretsSummary(privateKeySecret, fs.readFileSync(passwordPath, "utf8").trim());
 updateTauriConfig(publicKey, repository);
 
 console.log("Desktop release setup is ready.");
@@ -119,12 +120,12 @@ function updateTauriConfig(publicKey, repositoryName) {
   fs.writeFileSync(tauriConfigPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
-function writeGitHubSecretsSummary(privateKey, password) {
+function writeGitHubSecretsSummary(privateKeyBase64, password) {
   const lines = [
     "GitHub repository secrets to create:",
     "",
     "TAURI_SIGNING_PRIVATE_KEY_B64",
-    privateKey,
+    privateKeyBase64,
     "",
     "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     password,

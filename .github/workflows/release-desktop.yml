@@ -91,11 +91,10 @@ jobs:
       - name: Validate version metadata
         run: node ./scripts/sync-version.mjs --check ${{ inputs.version }}
 
-      - name: Write Tauri signing key
+      - name: Materialize Tauri signing key
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.tauri"
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY_B64" > "$HOME/.tauri/multi-cli-studio.key"
+          node ./scripts/materialize-tauri-signing-key.mjs "$HOME/.tauri/multi-cli-studio.key"
 
       - name: Build ad-hoc signed app bundle
         env:
@@ -103,7 +102,7 @@ jobs:
           NODE_OPTIONS: "--max-old-space-size=8192"
         run: |
           set -euo pipefail
-          export TAURI_SIGNING_PRIVATE_KEY="$TAURI_SIGNING_PRIVATE_KEY_B64"
+          export TAURI_SIGNING_PRIVATE_KEY="$(cat "$HOME/.tauri/multi-cli-studio.key")"
           npm run tauri:build -- --bundles app
 
       - name: Package macOS artifacts
@@ -181,7 +180,8 @@ jobs:
         env:
           NODE_OPTIONS: "--max-old-space-size=8192"
         run: |
-          $env:TAURI_SIGNING_PRIVATE_KEY = $env:TAURI_SIGNING_PRIVATE_KEY_B64
+          node .\scripts\materialize-tauri-signing-key.mjs "$env:USERPROFILE\.tauri\multi-cli-studio.key"
+          $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "$env:USERPROFILE\.tauri\multi-cli-studio.key"
           npm run tauri:build -- --bundles nsis
 
       - name: Package Windows artifacts
