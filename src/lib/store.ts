@@ -1116,9 +1116,8 @@ export const useStore = create<StoreState>((set, get) => {
 
   hydrateTerminalSession: async (tabId) => {
     try {
-      const persisted = await bridge.loadTerminalState();
+      const persistedSession = await bridge.loadTerminalSession(tabId);
       updatePersistenceIssue("terminalState", null);
-      const persistedSession = persisted?.chatSessions?.[tabId] ?? null;
       if (!persistedSession) return;
       const current = get();
       const tab = current.terminalTabs.find((item) => item.id === tabId);

@@ -8097,6 +8097,16 @@ fn load_terminal_state(
 }
 
 #[tauri::command]
+fn load_terminal_session(
+    store: State<'_, AppStore>,
+    terminal_tab_id: String,
+) -> Result<Option<PersistedConversationSession>, String> {
+    store
+        .terminal_storage
+        .load_conversation_session_by_terminal_tab(&terminal_tab_id)
+}
+
+#[tauri::command]
 fn save_terminal_state(
     store: State<'_, AppStore>,
     state: PersistedTerminalState,
@@ -13407,18 +13417,68 @@ fn push_git(
     project_root: String,
     remote: Option<String>,
     target_branch: Option<String>,
+    push_tags: Option<bool>,
+    no_verify: Option<bool>,
+    force_with_lease: Option<bool>,
+    push_to_gerrit: Option<bool>,
+    topic: Option<String>,
+    reviewers: Option<String>,
+    cc: Option<String>,
 ) -> Result<(), String> {
+    fn parse_csv_people(value: Option<&str>) -> Vec<String> {
+        value
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    }
+
     let remote_trimmed = remote.as_deref().map(str::trim).filter(|value| !value.is_empty());
     let branch_trimmed = target_branch
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let topic_trimmed = topic.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let reviewer_items = parse_csv_people(reviewers.as_deref());
+    let cc_items = parse_csv_people(cc.as_deref());
     let mut args = vec!["push".to_string()];
+    if force_with_lease.unwrap_or(false) {
+        args.push("--force-with-lease".to_string());
+    }
+    if no_verify.unwrap_or(false) {
+        args.push("--no-verify".to_string());
+    }
+    if push_tags.unwrap_or(false) {
+        args.push("--tags".to_string());
+    }
     if let Some(remote_name) = remote_trimmed {
         args.push(remote_name.to_string());
     }
     if let Some(branch_name) = branch_trimmed {
-        args.push(format!("HEAD:{branch_name}"));
+        if push_to_gerrit.unwrap_or(false) {
+            let mut gerrit_params = Vec::new();
+            if let Some(topic_value) = topic_trimmed {
+                gerrit_params.push(format!("topic={topic_value}"));
+            }
+            for reviewer in reviewer_items {
+                gerrit_params.push(format!("r={reviewer}"));
+            }
+            for item in cc_items {
+                gerrit_params.push(format!("cc={item}"));
+            }
+            if gerrit_params.is_empty() {
+                args.push(format!("HEAD:refs/for/{branch_name}"));
+            } else {
+                args.push(format!(
+                    "HEAD:refs/for/{branch_name}%{}",
+                    gerrit_params.join(",")
+                ));
+            }
+        } else {
+            args.push(format!("HEAD:{branch_name}"));
+        }
     }
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     git_command_status(&project_root, &refs)
@@ -13439,9 +13499,14 @@ fn pull_git(
     project_root: String,
     remote: Option<String>,
     target_branch: Option<String>,
+    pull_option: Option<String>,
 ) -> Result<(), String> {
     let remote_trimmed = remote.as_deref().map(str::trim).filter(|value| !value.is_empty());
     let branch_trimmed = target_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let option_trimmed = pull_option
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
@@ -13451,6 +13516,9 @@ fn pull_git(
     }
     if let Some(branch_name) = branch_trimmed {
         args.push(branch_name.to_string());
+    }
+    if let Some(option) = option_trimmed {
+        args.push(option.to_string());
     }
     args.push("--no-edit".to_string());
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -13463,8 +13531,19 @@ fn sync_git(
     remote: Option<String>,
     target_branch: Option<String>,
 ) -> Result<(), String> {
-    pull_git(project_root.clone(), remote.clone(), target_branch.clone())?;
-    push_git(project_root, remote, target_branch)
+    pull_git(project_root.clone(), remote.clone(), target_branch.clone(), None)?;
+    push_git(
+        project_root,
+        remote,
+        target_branch,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -22670,6 +22749,7 @@ pub fn run() {
             create_manual_kernel_checkpoint,
             get_conversation_history,
             load_terminal_state,
+            load_terminal_session,
             save_terminal_state,
             append_chat_messages,
             update_chat_message_stream,

@@ -29,6 +29,7 @@ import {
   AssistantApprovalDecision,
   CliHandoffRequest,
   ContextStore,
+  ConversationSession,
   ConversationTurn,
   CreateAutomationRunFromJobRequest,
   CreateAutomationRunRequest,
@@ -127,6 +128,7 @@ export interface RuntimeBridge {
   onApiChatStream: (listener: (event: ApiChatStreamEvent) => void) => Promise<Unlisten>;
   sendTestEmailNotification: (config: NotificationConfig) => Promise<string>;
   loadTerminalState: () => Promise<PersistedTerminalState | null>;
+  loadTerminalSession: (terminalTabId: string) => Promise<ConversationSession | null>;
   saveTerminalState: (state: PersistedTerminalState) => Promise<void>;
   switchCliForTask: (request: CliHandoffRequest) => Promise<void>;
   appendChatMessages: (request: ChatMessagesAppendRequest) => Promise<void>;
@@ -203,9 +205,27 @@ export interface RuntimeBridge {
   deleteGitBranch: (projectRoot: string, name: string, force?: boolean) => Promise<void>;
   mergeGitBranch: (projectRoot: string, sourceBranch: string) => Promise<void>;
   fetchGit: (projectRoot: string, remote?: string | null) => Promise<void>;
-  pullGit: (projectRoot: string, remote?: string | null, targetBranch?: string | null) => Promise<void>;
+  pullGit: (
+    projectRoot: string,
+    remote?: string | null,
+    targetBranch?: string | null,
+    pullOption?: string | null,
+  ) => Promise<void>;
   syncGit: (projectRoot: string, remote?: string | null, targetBranch?: string | null) => Promise<void>;
-  pushGit: (projectRoot: string, remote?: string | null, targetBranch?: string | null) => Promise<void>;
+  pushGit: (
+    projectRoot: string,
+    remote?: string | null,
+    targetBranch?: string | null,
+    options?: {
+      pushTags?: boolean;
+      noVerify?: boolean;
+      forceWithLease?: boolean;
+      pushToGerrit?: boolean;
+      topic?: string | null;
+      reviewers?: string | null;
+      cc?: string | null;
+    }
+  ) => Promise<void>;
   getGitHubIssues: (projectRoot: string) => Promise<GitHubIssuesResponse>;
   getGitHubPullRequests: (projectRoot: string) => Promise<GitHubPullRequestsResponse>;
   stageGitFile: (projectRoot: string, path: string) => Promise<void>;
@@ -383,6 +403,10 @@ const tauriRuntime: RuntimeBridge = {
   async loadTerminalState() {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<PersistedTerminalState | null>("load_terminal_state");
+  },
+  async loadTerminalSession(terminalTabId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<ConversationSession | null>("load_terminal_session", { terminalTabId });
   },
   async saveTerminalState(state) {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -636,17 +660,38 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("fetch_git", { projectRoot, remote: remote ?? null });
   },
-  async pullGit(projectRoot, remote, targetBranch) {
+  async pullGit(
+    projectRoot: string,
+    remote?: string | null,
+    targetBranch?: string | null,
+    pullOption?: string | null,
+  ) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("pull_git", { projectRoot, remote: remote ?? null, targetBranch: targetBranch ?? null });
+    await invoke("pull_git", {
+      projectRoot,
+      remote: remote ?? null,
+      targetBranch: targetBranch ?? null,
+      pullOption: pullOption ?? null,
+    });
   },
   async syncGit(projectRoot, remote, targetBranch) {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("sync_git", { projectRoot, remote: remote ?? null, targetBranch: targetBranch ?? null });
   },
-  async pushGit(projectRoot, remote, targetBranch) {
+  async pushGit(projectRoot, remote, targetBranch, options) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("push_git", { projectRoot, remote: remote ?? null, targetBranch: targetBranch ?? null });
+    await invoke("push_git", {
+      projectRoot,
+      remote: remote ?? null,
+      targetBranch: targetBranch ?? null,
+      pushTags: options?.pushTags ?? false,
+      noVerify: options?.noVerify ?? false,
+      forceWithLease: options?.forceWithLease ?? false,
+      pushToGerrit: options?.pushToGerrit ?? false,
+      topic: options?.topic ?? null,
+      reviewers: options?.reviewers ?? null,
+      cc: options?.cc ?? null,
+    });
   },
   async getGitHubIssues(projectRoot) {
     const { invoke } = await import("@tauri-apps/api/core");

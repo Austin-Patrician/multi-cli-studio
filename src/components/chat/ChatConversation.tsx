@@ -835,12 +835,12 @@ export function ChatConversation() {
         <div className="mx-auto flex max-w-6xl flex-col gap-4">
           <div className="flex items-center justify-between rounded-[22px] border border-border bg-white/85 px-4 py-3 backdrop-blur">
             <div>
-              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+              <div className="text-base font-bold text-text">
                 Active Terminal
               </div>
-              <div className="mt-1 text-sm font-semibold text-text">
-                {workspace?.name} · {activeTab.selectedCli}
-              </div>
+            <div className="mt-1 text-sm font-medium text-text/70">
+              {workspace?.name} · {activeTab.selectedCli}
+            </div>
             </div>
             <div className="text-right text-xs text-secondary">
               <div>

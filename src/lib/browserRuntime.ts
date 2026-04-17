@@ -2117,6 +2117,11 @@ export const browserRuntime = {
     return structuredClone(loadStoredTerminalState());
   },
 
+  async loadTerminalSession(terminalTabId: string) {
+    const state = loadStoredTerminalState();
+    return structuredClone(state?.chatSessions?.[terminalTabId] ?? null);
+  },
+
   async saveTerminalState(nextState: PersistedTerminalState) {
     persistTerminalState(nextState);
   },
@@ -3250,7 +3255,12 @@ export const browserRuntime = {
   async fetchGit(_projectRoot: string, _remote?: string | null): Promise<void> {
     return;
   },
-  async pullGit(_projectRoot: string, _remote?: string | null, _targetBranch?: string | null): Promise<void> {
+  async pullGit(
+    _projectRoot: string,
+    _remote?: string | null,
+    _targetBranch?: string | null,
+    _pullOption?: string | null,
+  ): Promise<void> {
     return;
   },
   async syncGit(_projectRoot: string, _remote?: string | null, _targetBranch?: string | null): Promise<void> {
@@ -3420,7 +3430,20 @@ rename to src/components/chat/GitPanel.tsx`,
     };
   },
 
-  async pushGit(_projectRoot: string, _remote?: string | null, _targetBranch?: string | null): Promise<void> {
+  async pushGit(
+    _projectRoot: string,
+    _remote?: string | null,
+    _targetBranch?: string | null,
+    _options?: {
+      pushTags?: boolean;
+      noVerify?: boolean;
+      forceWithLease?: boolean;
+      pushToGerrit?: boolean;
+      topic?: string | null;
+      reviewers?: string | null;
+      cc?: string | null;
+    }
+  ): Promise<void> {
     return;
   },
 

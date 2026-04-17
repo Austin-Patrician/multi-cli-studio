@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Check,
   ChevronsDownUp,
@@ -95,6 +95,7 @@ type GitToolbarConfirmFact = {
   label: string;
   value: string;
 };
+type PullDialogOption = "none" | "rebase" | "ff-only" | "no-ff" | "squash" | "no-commit" | "no-verify";
 type RemoteBranchRef = {
   remote: string | null;
   branch: string | null;
@@ -107,6 +108,71 @@ const GIT_DETAILS_MIN_WIDTH = 260;
 const GIT_COLUMN_MIN_WIDTHS = [GIT_OVERVIEW_MIN_WIDTH, GIT_BRANCHES_MIN_WIDTH, GIT_COMMITS_MIN_WIDTH] as const;
 const GIT_RESIZER_TOTAL_WIDTH = 24;
 const TREE_INDENT_STEP = 10;
+const PULL_DIALOG_OPTIONS: Array<{
+  id: PullDialogOption;
+  label: string;
+  flag: string | null;
+  intent: string;
+  willHappen: string;
+  wontHappen: string;
+}> = [
+  {
+    id: "none",
+    label: "默认",
+    flag: null,
+    intent: "将远端提交按 Git 默认策略集成到当前分支。",
+    willHappen: "会执行标准 pull，并由 Git 决定具体合并方式。",
+    wontHappen: "不会强制使用 rebase、squash 或 fast-forward only。",
+  },
+  {
+    id: "rebase",
+    label: "--rebase",
+    flag: "--rebase",
+    intent: "将本地提交改写到远端提交之后，保持历史更线性。",
+    willHappen: "会在 pull 时使用 rebase，把你的本地提交重新应用到最新远端之上。",
+    wontHappen: "不会生成额外 merge commit。",
+  },
+  {
+    id: "ff-only",
+    label: "--ff-only",
+    flag: "--ff-only",
+    intent: "只允许快进更新，确保历史完全线性。",
+    willHappen: "只有在当前分支可以 fast-forward 时才会成功 pull。",
+    wontHappen: "不会发生 merge，也不会在需要 rebase 时自动处理。",
+  },
+  {
+    id: "no-ff",
+    label: "--no-ff",
+    flag: "--no-ff",
+    intent: "即使可以快进，也强制保留 merge commit。",
+    willHappen: "会在 pull 合并后生成明确的 merge commit。",
+    wontHappen: "不会把这次同步压平成 fast-forward 更新。",
+  },
+  {
+    id: "squash",
+    label: "--squash",
+    flag: "--squash",
+    intent: "把远端差异压成一组待提交改动，便于手动整理。",
+    willHappen: "会拉取改动并以 squash 结果放入工作区，等待你后续提交。",
+    wontHappen: "不会自动生成 merge commit。",
+  },
+  {
+    id: "no-commit",
+    label: "--no-commit",
+    flag: "--no-commit",
+    intent: "先完成合并但暂停在提交前，方便人工检查。",
+    willHappen: "会把合并结果停留在待提交状态，让你确认后再 commit。",
+    wontHappen: "不会自动创建合并提交。",
+  },
+  {
+    id: "no-verify",
+    label: "--no-verify",
+    flag: "--no-verify",
+    intent: "跳过本地 hook 检查，直接执行 pull。",
+    willHappen: "会在 pull 时跳过 Git hooks 校验。",
+    wontHappen: "不会运行本地 pre-merge / pre-commit 之类的 hook。",
+  },
+];
 
 function getDefaultColumnWidths(containerWidth: number) {
   const safeWidth = Number.isFinite(containerWidth) && containerWidth > 0 ? containerWidth : 1600;
@@ -278,6 +344,37 @@ function buildRemoteBranchList(branches: GitBranchListItem[] | undefined, remote
     }
   }
   return Array.from(values).sort((left, right) => left.localeCompare(right));
+}
+
+function splitCommaSeparated(value: string) {
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function buildGerritRefSpec(params: {
+  targetBranch: string;
+  topic?: string;
+  reviewers?: string[];
+  cc?: string[];
+}) {
+  const branch = params.targetBranch.trim() || "main";
+  const parts: string[] = [];
+  const topic = params.topic?.trim();
+  if (topic) {
+    parts.push(`topic=${topic}`);
+  }
+  for (const reviewer of params.reviewers ?? []) {
+    parts.push(`r=${reviewer}`);
+  }
+  for (const item of params.cc ?? []) {
+    parts.push(`cc=${item}`);
+  }
+  if (!parts.length) {
+    return `HEAD:refs/for/${branch}`;
+  }
+  return `HEAD:refs/for/${branch}%${parts.join(",")}`;
 }
 
 function formatRelativeTime(timestamp: number) {
@@ -1114,36 +1211,61 @@ function GitToolbarConfirmDialog({
         aria-label={title}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="git-history-dialog-title git-history-toolbar-confirm-title">
-          {icon}
-          <span>{title}</span>
-        </div>
-        <div className="git-history-toolbar-confirm-hero">
-          <div className="git-history-toolbar-confirm-hero-line">
-            <span>{heroSource}</span>
-            <span aria-hidden>{"->"}</span>
-            <span>{heroTarget}</span>
-          </div>
-          <code>{command}</code>
-        </div>
-        {fields ? (
-          <div className={`git-history-toolbar-confirm-grid ${fieldsSingle ? "is-single" : ""}`}>
-            {fields}
-          </div>
-        ) : null}
-        {preflight ? <div className="git-history-toolbar-confirm-preflight">{preflight}</div> : null}
-        <dl className="git-history-toolbar-confirm-facts">
-          {facts.map((fact) => (
-            <div key={fact.label} className="git-history-toolbar-confirm-fact">
-              <dt>{fact.label}</dt>
-              <dd>{fact.value}</dd>
+        <div className="git-history-toolbar-confirm-header">
+          <div className="git-history-dialog-title git-history-toolbar-confirm-title">
+            <span className="git-history-toolbar-confirm-icon">{icon}</span>
+            <div className="git-history-toolbar-confirm-title-copy">
+              <span>{title}</span>
+              <small>确认本次 Git 操作的目标和影响后再执行。</small>
             </div>
-          ))}
-        </dl>
-        <div className="git-history-toolbar-confirm-command">
-          <span>命令预览</span>
-          <code>{command}</code>
+          </div>
+          <button
+            type="button"
+            className="git-history-toolbar-confirm-close"
+            onClick={onClose}
+            disabled={loading}
+            aria-label="关闭"
+            title="关闭"
+          >
+            <X size={14} />
+          </button>
         </div>
+
+        {fields ? (
+          <section className="git-history-toolbar-confirm-section">
+            <div className="git-history-toolbar-confirm-section-title">参数设置</div>
+            <div className={`git-history-toolbar-confirm-grid ${fieldsSingle ? "is-single" : ""}`}>
+              {fields}
+            </div>
+          </section>
+        ) : null}
+
+        {preflight ? (
+          <section className="git-history-toolbar-confirm-section">
+            <div className="git-history-toolbar-confirm-section-title">执行前信息</div>
+            <div className="git-history-toolbar-confirm-preflight">{preflight}</div>
+          </section>
+        ) : null}
+
+        <section className="git-history-toolbar-confirm-section">
+          <div className="git-history-toolbar-confirm-section-title">执行影响</div>
+          <dl className="git-history-toolbar-confirm-facts">
+            {facts.map((fact) => (
+              <div key={fact.label} className="git-history-toolbar-confirm-fact">
+                <dt>{fact.label}</dt>
+                <dd>{fact.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <section className="git-history-toolbar-confirm-section">
+          <div className="git-history-toolbar-confirm-section-title">命令预览</div>
+          <div className="git-history-toolbar-confirm-command">
+            <code>{command}</code>
+          </div>
+        </section>
+
         <div className="git-history-toolbar-confirm-actions">
           <button type="button" className="dcc-action-button secondary" onClick={onClose} disabled={loading}>
             取消
@@ -1175,6 +1297,7 @@ export function DesktopGitSection({
   const [gitPanel, setGitPanel] = useState<GitPanelData | null>(null);
   const [branches, setBranches] = useState<GitBranchListResponse | null>(null);
   const [history, setHistory] = useState<GitHistoryResponse | null>(null);
+  const [historyProjectRoot, setHistoryProjectRoot] = useState<string | null>(null);
   const [details, setDetails] = useState<GitCommitDetails | null>(null);
   const [panelLoading, setPanelLoading] = useState(false);
   const [branchesLoading, setBranchesLoading] = useState(false);
@@ -1216,8 +1339,17 @@ export function DesktopGitSection({
   const [activeToolbarDialog, setActiveToolbarDialog] = useState<GitToolbarDialogKind | null>(null);
   const [pullRemoteDraft, setPullRemoteDraft] = useState("origin");
   const [pullTargetBranchDraft, setPullTargetBranchDraft] = useState("");
+  const [pullOptionDraft, setPullOptionDraft] = useState<PullDialogOption>("none");
   const [pushRemoteDraft, setPushRemoteDraft] = useState("origin");
   const [pushTargetBranchDraft, setPushTargetBranchDraft] = useState("");
+  const [pushTags, setPushTags] = useState(false);
+  const [pushRunHooks, setPushRunHooks] = useState(true);
+  const [pushForceWithLease, setPushForceWithLease] = useState(false);
+  const [pushToGerrit, setPushToGerrit] = useState(false);
+  const [pushTopic, setPushTopic] = useState("");
+  const [pushReviewers, setPushReviewers] = useState("");
+  const [pushCc, setPushCc] = useState("");
+  const [pushPreviewSelectedSha, setPushPreviewSelectedSha] = useState<string | null>(null);
   const [syncRemoteDraft, setSyncRemoteDraft] = useState("origin");
   const [syncTargetBranchDraft, setSyncTargetBranchDraft] = useState("");
   const [fetchRemoteDraft, setFetchRemoteDraft] = useState("all");
@@ -1249,6 +1381,7 @@ export function DesktopGitSection({
   });
   const workbenchRef = useRef<HTMLDivElement | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
+  const detailRequestSeqRef = useRef(0);
 
   const stagedFiles = gitPanel?.stagedFiles ?? [];
   const unstagedFiles = gitPanel?.unstagedFiles ?? [];
@@ -1344,8 +1477,53 @@ export function DesktopGitSection({
   const normalizedPullTargetBranch = pullTargetBranchDraft.trim() || currentUpstreamRef.branch || currentBranch || "main";
   const normalizedPushTargetBranch = pushTargetBranchDraft.trim() || currentUpstreamRef.branch || currentBranch || "main";
   const normalizedSyncTargetBranch = syncTargetBranchDraft.trim() || currentUpstreamRef.branch || currentBranch || "main";
-  const pullCommandPreview = `git pull ${normalizedPullRemote} ${normalizedPullTargetBranch} --no-edit`;
-  const pushCommandPreview = `git push ${normalizedPushRemote} HEAD:${normalizedPushTargetBranch}`;
+  const pushTargetSummaryBranch = normalizedPushTargetBranch || currentBranch || "main";
+  const pushIsNewBranchTarget = !pushBranchOptions.includes(pushTargetSummaryBranch);
+  const pushHasOutgoingCommits = commitsAhead > 0;
+  const pushPreviewCommits = useMemo(() => {
+    if (!history?.commits.length || commitsAhead <= 0) {
+      return [];
+    }
+    return history.commits.slice(0, Math.min(commitsAhead, 20));
+  }, [commitsAhead, history?.commits]);
+  const pushPreviewSelectedCommit = useMemo(
+    () =>
+      pushPreviewCommits.find((entry) => entry.sha === pushPreviewSelectedSha) ??
+      pushPreviewCommits[0] ??
+      null,
+    [pushPreviewCommits, pushPreviewSelectedSha]
+  );
+  const pushReviewerList = useMemo(() => splitCommaSeparated(pushReviewers), [pushReviewers]);
+  const pushCcList = useMemo(() => splitCommaSeparated(pushCc), [pushCc]);
+  const pushRefSpec = pushToGerrit
+    ? buildGerritRefSpec({
+        targetBranch: pushTargetSummaryBranch,
+        topic: pushTopic,
+        reviewers: pushReviewerList,
+        cc: pushCcList,
+      })
+    : `HEAD:${pushTargetSummaryBranch}`;
+  const pushCanConfirm = !pushLoading && (pushHasOutgoingCommits || pushIsNewBranchTarget || pushTags);
+  const selectedPullOption = PULL_DIALOG_OPTIONS.find((option) => option.id === pullOptionDraft) ?? PULL_DIALOG_OPTIONS[0];
+  const pullCommandPreview = [
+    "git pull",
+    normalizedPullRemote,
+    normalizedPullTargetBranch,
+    selectedPullOption.flag,
+    "--no-edit",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const pushCommandPreview = [
+    "git push",
+    pushForceWithLease ? "--force-with-lease" : null,
+    !pushRunHooks ? "--no-verify" : null,
+    pushTags ? "--tags" : null,
+    normalizedPushRemote,
+    pushRefSpec,
+  ]
+    .filter(Boolean)
+    .join(" ");
   const syncCommandPreview = `${pullCommandPreview} && ${pushCommandPreview}`;
   const fetchCommandPreview =
     normalizedFetchRemote === "all" ? "git fetch --all --prune" : `git fetch ${normalizedFetchRemote} --prune`;
@@ -1375,7 +1553,7 @@ export function DesktopGitSection({
     try {
       const next = await bridge.listGitBranches(projectRoot);
       setBranches(next);
-      setSelectedBranch((current) => current ?? next.currentBranch ?? next.localBranches[0]?.name ?? null);
+      setSelectedBranch(next.currentBranch ?? next.localBranches[0]?.name ?? next.remoteBranches[0]?.name ?? null);
     } catch (error) {
       setBranchesError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1395,6 +1573,7 @@ export function DesktopGitSection({
         limit: historyLimit,
       });
       setHistory((current) => (reset || !current ? next : { ...next, commits: [...current.commits, ...next.commits] }));
+      setHistoryProjectRoot(projectRoot);
       setHistoryOffset(offset);
       if (reset) {
         setSelectedCommitSha(next.commits[0]?.sha ?? null);
@@ -1411,15 +1590,25 @@ export function DesktopGitSection({
       setDetails(null);
       return;
     }
+    const requestSeq = ++detailRequestSeqRef.current;
     setDetailsLoading(true);
     setDetailsError(null);
     try {
-      setDetails(await bridge.getGitCommitDetails(projectRoot, commitSha));
+      const next = await bridge.getGitCommitDetails(projectRoot, commitSha);
+      if (detailRequestSeqRef.current !== requestSeq) {
+        return;
+      }
+      setDetails(next);
     } catch (error) {
+      if (detailRequestSeqRef.current !== requestSeq) {
+        return;
+      }
       setDetailsError(error instanceof Error ? error.message : String(error));
       setDetails(null);
     } finally {
-      setDetailsLoading(false);
+      if (detailRequestSeqRef.current === requestSeq) {
+        setDetailsLoading(false);
+      }
     }
   }
 
@@ -1454,6 +1643,7 @@ export function DesktopGitSection({
     const defaults = resolveDefaultRemoteBranch();
     setPullRemoteDraft(defaults.remote);
     setPullTargetBranchDraft(defaults.branch);
+    setPullOptionDraft("none");
     setActiveToolbarDialog("pull");
   }
 
@@ -1461,6 +1651,14 @@ export function DesktopGitSection({
     const defaults = resolveDefaultRemoteBranch();
     setPushRemoteDraft(defaults.remote);
     setPushTargetBranchDraft(defaults.branch);
+    setPushTags(false);
+    setPushRunHooks(true);
+    setPushForceWithLease(false);
+    setPushToGerrit(false);
+    setPushTopic("");
+    setPushReviewers("");
+    setPushCc("");
+    setPushPreviewSelectedSha(null);
     setActiveToolbarDialog("push");
   }
 
@@ -1476,9 +1674,24 @@ export function DesktopGitSection({
     setActiveToolbarDialog("fetch");
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!projectRoot) return;
-    void refreshAll();
+    detailRequestSeqRef.current += 1;
+    setGitPanel(null);
+    setBranches(null);
+    setHistory(null);
+    setHistoryProjectRoot(null);
+    setDetails(null);
+    setPanelError(null);
+    setBranchesError(null);
+    setHistoryError(null);
+    setDetailsError(null);
+    setPanelLoading(false);
+    setBranchesLoading(false);
+    setHistoryLoading(false);
+    setDetailsLoading(false);
+    setSelectedBranch(null);
+    setSelectedCommitSha(null);
     setCollapsedFolders(new Set());
     setDetailsCollapsedFolders(new Set());
     setLocalSectionExpanded(true);
@@ -1491,6 +1704,7 @@ export function DesktopGitSection({
     setCommitError(null);
     setPushError(null);
     setActiveToolbarDialog(null);
+    void refreshAll();
   }, [projectRoot]);
 
   useEffect(() => {
@@ -1544,7 +1758,15 @@ export function DesktopGitSection({
   }, [groupedRemoteBranches, selectedBranchItem]);
 
   useEffect(() => {
-    if (!projectRoot) return;
+    if (activeToolbarDialog !== "push") {
+      return;
+    }
+    const nextSelected = pushPreviewCommits[0]?.sha ?? null;
+    setPushPreviewSelectedSha((current) => current ?? nextSelected);
+  }, [activeToolbarDialog, pushPreviewCommits]);
+
+  useEffect(() => {
+    if (!projectRoot || !selectedBranch) return;
     const id = window.setTimeout(() => {
       void loadHistory(true, 0);
     }, 180);
@@ -1552,9 +1774,20 @@ export function DesktopGitSection({
   }, [projectRoot, selectedBranch, commitQuery]);
 
   useEffect(() => {
-    if (!projectRoot) return;
+    if (!projectRoot || !selectedCommitSha) return;
+    if (historyProjectRoot !== projectRoot) {
+      setDetails(null);
+      setDetailsError(null);
+      return;
+    }
+    const commitExists = history?.commits.some((entry) => entry.sha === selectedCommitSha) ?? false;
+    if (!commitExists) {
+      setDetails(null);
+      setDetailsError(null);
+      return;
+    }
     void loadCommitDetails(selectedCommitSha);
-  }, [projectRoot, selectedCommitSha]);
+  }, [projectRoot, selectedCommitSha, history?.snapshotId, historyProjectRoot]);
 
   useEffect(() => {
     setDetailsCollapsedFolders(new Set());
@@ -1892,13 +2125,31 @@ export function DesktopGitSection({
     }
   }
 
-  async function pushChanges(params?: { remote?: string | null; targetBranch?: string | null }) {
+  async function pushChanges(params?: {
+    remote?: string | null;
+    targetBranch?: string | null;
+    pushTags?: boolean;
+    noVerify?: boolean;
+    forceWithLease?: boolean;
+    pushToGerrit?: boolean;
+    topic?: string | null;
+    reviewers?: string | null;
+    cc?: string | null;
+  }) {
     if (!projectRoot) return;
     setPushLoading(true);
     setPushError(null);
     setOperationError(null);
     try {
-      await bridge.pushGit(projectRoot, params?.remote ?? null, params?.targetBranch ?? null);
+      await bridge.pushGit(projectRoot, params?.remote ?? null, params?.targetBranch ?? null, {
+        pushTags: params?.pushTags ?? false,
+        noVerify: params?.noVerify ?? false,
+        forceWithLease: params?.forceWithLease ?? false,
+        pushToGerrit: params?.pushToGerrit ?? false,
+        topic: params?.topic ?? null,
+        reviewers: params?.reviewers ?? null,
+        cc: params?.cc ?? null,
+      });
       await refreshWorkbenchData();
       return true;
     } catch (error) {
@@ -1911,14 +2162,19 @@ export function DesktopGitSection({
     }
   }
 
-  async function pullChanges(params?: { remote?: string | null; targetBranch?: string | null }) {
+  async function pullChanges(params?: { remote?: string | null; targetBranch?: string | null; pullOption?: string | null }) {
     if (!projectRoot) return;
     setPullLoading(true);
     setOperationError(null);
     setPushError(null);
     setCommitError(null);
     try {
-      await bridge.pullGit(projectRoot, params?.remote ?? null, params?.targetBranch ?? null);
+      await bridge.pullGit(
+        projectRoot,
+        params?.remote ?? null,
+        params?.targetBranch ?? null,
+        params?.pullOption ?? null,
+      );
       await refreshWorkbenchData();
       return true;
     } catch (error) {
@@ -1967,6 +2223,7 @@ export function DesktopGitSection({
     const ok = await pullChanges({
       remote: normalizedPullRemote,
       targetBranch: normalizedPullTargetBranch,
+      pullOption: selectedPullOption.flag,
     });
     if (ok) {
       setActiveToolbarDialog(null);
@@ -1976,7 +2233,14 @@ export function DesktopGitSection({
   async function confirmPushDialog() {
     const ok = await pushChanges({
       remote: normalizedPushRemote,
-      targetBranch: normalizedPushTargetBranch,
+      targetBranch: pushTargetSummaryBranch,
+      pushTags,
+      noVerify: !pushRunHooks,
+      forceWithLease: pushForceWithLease,
+      pushToGerrit,
+      topic: pushTopic.trim() || null,
+      reviewers: pushReviewers.trim() || null,
+      cc: pushCc.trim() || null,
     });
     if (ok) {
       setActiveToolbarDialog(null);
@@ -2732,31 +2996,50 @@ export function DesktopGitSection({
               </label>
               <label className="git-history-toolbar-confirm-field">
                 <span>目标远端分支</span>
-                <input
-                  list="git-pull-target-branches"
-                  value={pullTargetBranchDraft}
+                <select
+                  value={normalizedPullTargetBranch}
                   disabled={pullLoading}
                   onChange={(event) => setPullTargetBranchDraft(event.target.value)}
-                  placeholder={currentBranch ?? "main"}
-                />
-                <datalist id="git-pull-target-branches">
+                >
                   {pullBranchOptions.map((branch) => (
-                    <option key={`pull-branch-${branch}`} value={branch} />
+                    <option key={`pull-branch-${branch}`} value={branch}>
+                      {branch}
+                    </option>
                   ))}
-                </datalist>
+                </select>
               </label>
+              <div className="git-history-toolbar-confirm-field git-history-toolbar-confirm-field-wide">
+                <span>修改选项</span>
+                <div className="git-history-toolbar-confirm-options" role="radiogroup" aria-label="拉取选项">
+                  {PULL_DIALOG_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`git-history-toolbar-confirm-option ${pullOptionDraft === option.id ? "is-active" : ""}`}
+                      onClick={() => setPullOptionDraft(option.id)}
+                      role="radio"
+                      aria-checked={pullOptionDraft === option.id}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="git-history-toolbar-confirm-option-summary">
+                  {selectedPullOption.intent} {selectedPullOption.willHappen}
+                </p>
+              </div>
             </>
           }
           preflight={
             <>
               <div>当前分支：{toolbarBranchLabel}</div>
-              <div>将把远端提交集成到当前分支。</div>
+              <div>{selectedPullOption.intent}</div>
             </>
           }
           facts={[
-            { label: "操作意图", value: "将远端提交集成到当前分支。" },
-            { label: "将会发生", value: "会按所选远端、目标分支执行 pull。" },
-            { label: "不会发生", value: "不会主动把本地提交推送到远端。" },
+            { label: "操作意图", value: selectedPullOption.intent },
+            { label: "将会发生", value: `${selectedPullOption.willHappen} 会按所选远端、目标分支执行 pull。` },
+            { label: "不会发生", value: selectedPullOption.wontHappen },
           ]}
           confirmLabel="拉取"
           loading={pullLoading}
@@ -2768,70 +3051,296 @@ export function DesktopGitSection({
       ) : null}
 
       {activeToolbarDialog === "push" ? (
-        <GitToolbarConfirmDialog
-          title="推送变更"
-          icon={<Upload size={14} />}
-          heroSource={toolbarBranchLabel}
-          heroTarget={`${normalizedPushRemote}:${normalizedPushTargetBranch}`}
-          command={pushCommandPreview}
-          fields={
-            <>
-              <label className="git-history-toolbar-confirm-field">
-                <span>远端</span>
-                <select
-                  value={normalizedPushRemote}
+        <div
+          className="git-history-dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !pushLoading) {
+              setActiveToolbarDialog(null);
+            }
+          }}
+        >
+          <div
+            className="git-history-push-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="推送变更"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="git-history-push-hero">
+              <div className="git-history-push-head">
+                <div className="git-history-dialog-title git-history-push-title">
+                  <span className="git-history-toolbar-confirm-icon">
+                    <Upload size={14} />
+                  </span>
+                  <div className="git-history-toolbar-confirm-title-copy">
+                    <span>推送变更</span>
+                    <small>先确认目标分支、推送选项，再执行 push。</small>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="git-history-toolbar-confirm-close"
+                  onClick={() => setActiveToolbarDialog(null)}
                   disabled={pushLoading}
-                  onChange={(event) => {
-                    const nextRemote = event.target.value;
-                    const nextBranches = buildRemoteBranchList(branches?.remoteBranches, nextRemote);
-                    setPushRemoteDraft(nextRemote);
-                    setPushTargetBranchDraft((current) =>
-                      current && nextBranches.includes(current) ? current : nextBranches[0] ?? currentBranch ?? "main"
-                    );
+                  aria-label="关闭"
+                  title="关闭"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+
+              <div className="git-history-push-summary-row">
+                <div className="git-history-push-target-wrap">
+                  <div className="git-history-push-target">
+                    将 <strong>{toolbarBranchLabel}</strong> 推送到{" "}
+                    <strong>
+                      {normalizedPushRemote}:{pushTargetSummaryBranch}
+                    </strong>
+                  </div>
+                  {pushIsNewBranchTarget ? <span className="git-history-push-target-badge">(新分支)</span> : null}
+                </div>
+                <code className="git-history-push-readonly">{toolbarBranchLabel}</code>
+              </div>
+            </div>
+
+            <div className="git-history-push-section git-history-push-section-preview">
+              <div className="git-history-push-preview">
+                <div className="git-history-push-preview-pane is-commits">
+                  <div className="git-history-push-preview-head">
+                    <span className="git-history-push-preview-title">
+                      <GitCommitHorizontal size={12} />
+                      待推送提交
+                    </span>
+                    <strong>{pushPreviewCommits.length}</strong>
+                  </div>
+                  {pushError ? <div className="git-history-push-preview-error">{pushError}</div> : null}
+                  {!pushError && !pushHasOutgoingCommits ? (
+                    <div className="git-history-push-preview-empty">
+                      当前分支没有领先提交。可继续用于推送 tags 或创建远端新分支。
+                    </div>
+                  ) : null}
+                  {!pushError && pushHasOutgoingCommits ? (
+                    <div className="git-history-push-preview-commit-list">
+                      {pushPreviewCommits.map((entry) => {
+                        const active = entry.sha === pushPreviewSelectedCommit?.sha;
+                        return (
+                          <button
+                            key={entry.sha}
+                            type="button"
+                            className={`git-history-push-preview-commit${active ? " is-active" : ""}`}
+                            onClick={() => setPushPreviewSelectedSha(entry.sha)}
+                          >
+                            <span className="git-history-push-preview-commit-summary">{entry.summary || "(no message)"}</span>
+                            <span className="git-history-push-preview-commit-meta">
+                              <code>{entry.shortSha}</code>
+                              <em>{entry.author || "unknown"}</em>
+                              <time>{formatRelativeTime(entry.timestamp)}</time>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                  {!pushError && pushHasOutgoingCommits && commitsAhead > pushPreviewCommits.length ? (
+                    <div className="git-history-push-preview-hint">仅展示最近 {pushPreviewCommits.length} 条提交。</div>
+                  ) : null}
+                </div>
+
+                <div className="git-history-push-preview-pane is-details">
+                  <div className="git-history-push-preview-head">
+                    <span className="git-history-push-preview-title">
+                      <FolderTree size={12} />
+                      提交详情
+                    </span>
+                  </div>
+                  {!pushPreviewSelectedCommit ? (
+                    <div className="git-history-push-preview-empty">选择左侧提交可查看详情。</div>
+                  ) : (
+                    <div className="git-history-push-preview-metadata">
+                      <strong>{pushPreviewSelectedCommit.summary || "(no message)"}</strong>
+                      <span className="git-history-push-preview-metadata-row">
+                        <code>{pushPreviewSelectedCommit.sha}</code>
+                        <em>{pushPreviewSelectedCommit.author || "unknown"}</em>
+                        <time>{new Date(pushPreviewSelectedCommit.timestamp).toLocaleString()}</time>
+                      </span>
+                      <div className="git-history-push-preview-message">
+                        {pushPreviewSelectedCommit.message || pushPreviewSelectedCommit.summary || "(empty)"}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="git-history-push-section git-history-push-section-controls">
+              <div className="git-history-push-grid">
+                <label className="git-history-toolbar-confirm-field">
+                  <span className="git-history-push-field-label">
+                    <Cloud size={12} />
+                    远端
+                  </span>
+                  <select
+                    value={normalizedPushRemote}
+                    disabled={pushLoading}
+                    onChange={(event) => {
+                      const nextRemote = event.target.value;
+                      const nextBranches = buildRemoteBranchList(branches?.remoteBranches, nextRemote);
+                      setPushRemoteDraft(nextRemote);
+                      setPushTargetBranchDraft((current) =>
+                        current && nextBranches.includes(current) ? current : nextBranches[0] ?? currentBranch ?? "main"
+                      );
+                    }}
+                  >
+                    {remoteOptions.map((remote) => (
+                      <option key={`push-remote-${remote}`} value={remote}>
+                        {remote}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="git-history-toolbar-confirm-field">
+                  <span className="git-history-push-field-label">
+                    <GitBranch size={12} />
+                    目标远端分支
+                  </span>
+                  <input
+                    list="git-push-target-branches"
+                    value={pushTargetBranchDraft}
+                    disabled={pushLoading}
+                    onChange={(event) => setPushTargetBranchDraft(event.target.value)}
+                    placeholder={currentBranch ?? "main"}
+                  />
+                  <datalist id="git-push-target-branches">
+                    {pushBranchOptions.map((branch) => (
+                      <option key={`push-branch-${branch}`} value={branch} />
+                    ))}
+                  </datalist>
+                </label>
+              </div>
+
+              <button
+                type="button"
+                className={`git-history-push-toggle${pushToGerrit ? " is-active" : ""}`}
+                aria-pressed={pushToGerrit}
+                disabled={pushLoading}
+                onClick={() => setPushToGerrit((previous) => !previous)}
+              >
+                <span className="git-history-push-toggle-indicator" aria-hidden>
+                  {pushToGerrit ? "✓" : ""}
+                </span>
+                <Upload size={12} className="git-history-push-toggle-icon" />
+                <span>Push to Gerrit</span>
+              </button>
+
+              {pushToGerrit ? (
+                <>
+                  <div className="git-history-push-hint">
+                    将使用 <code>refs/for/{pushTargetSummaryBranch}</code> 推送，并附带 topic/reviewers/cc 参数。
+                  </div>
+                  <div className="git-history-push-grid">
+                    <label className="git-history-toolbar-confirm-field">
+                      <span>Topic</span>
+                      <input
+                        value={pushTopic}
+                        disabled={pushLoading}
+                        onChange={(event) => setPushTopic(event.target.value)}
+                        placeholder="feature-sync"
+                      />
+                    </label>
+                    <label className="git-history-toolbar-confirm-field">
+                      <span>Reviewers</span>
+                      <input
+                        value={pushReviewers}
+                        disabled={pushLoading}
+                        onChange={(event) => setPushReviewers(event.target.value)}
+                        placeholder="alice@corp.com,bob@corp.com"
+                      />
+                    </label>
+                    <label className="git-history-toolbar-confirm-field">
+                      <span>CC</span>
+                      <input
+                        value={pushCc}
+                        disabled={pushLoading}
+                        onChange={(event) => setPushCc(event.target.value)}
+                        placeholder="team@corp.com"
+                      />
+                    </label>
+                  </div>
+                </>
+              ) : null}
+
+              <div className="git-history-toolbar-confirm-command">
+                <code>{pushCommandPreview}</code>
+              </div>
+            </div>
+
+            <div className="git-history-push-footer">
+              <div className="git-history-push-options">
+                <button
+                  type="button"
+                  className={`git-history-push-toggle${pushTags ? " is-active" : ""}`}
+                  aria-pressed={pushTags}
+                  disabled={pushLoading}
+                  onClick={() => setPushTags((previous) => !previous)}
+                >
+                  <span className="git-history-push-toggle-indicator" aria-hidden>
+                    {pushTags ? "✓" : ""}
+                  </span>
+                  <GitBranch size={12} className="git-history-push-toggle-icon" />
+                  <span>推送 Tags</span>
+                </button>
+                <button
+                  type="button"
+                  className={`git-history-push-toggle${pushRunHooks ? " is-active" : ""}`}
+                  aria-pressed={pushRunHooks}
+                  disabled={pushLoading}
+                  onClick={() => setPushRunHooks((previous) => !previous)}
+                >
+                  <span className="git-history-push-toggle-indicator" aria-hidden>
+                    {pushRunHooks ? "✓" : ""}
+                  </span>
+                  <RefreshCw size={12} className="git-history-push-toggle-icon" />
+                  <span>运行 Hooks</span>
+                </button>
+                <button
+                  type="button"
+                  className={`git-history-push-toggle${pushForceWithLease ? " is-active" : ""}`}
+                  aria-pressed={pushForceWithLease}
+                  disabled={pushLoading}
+                  onClick={() => setPushForceWithLease((previous) => !previous)}
+                >
+                  <span className="git-history-push-toggle-indicator" aria-hidden>
+                    {pushForceWithLease ? "✓" : ""}
+                  </span>
+                  <Repeat size={12} className="git-history-push-toggle-icon" />
+                  <span>Force With Lease</span>
+                </button>
+              </div>
+
+              <div className="git-history-push-actions">
+                <button
+                  type="button"
+                  className="dcc-action-button secondary"
+                  onClick={() => setActiveToolbarDialog(null)}
+                  disabled={pushLoading}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="dcc-action-button"
+                  disabled={!pushCanConfirm}
+                  title={!pushCanConfirm ? "当前没有可推送提交，可开启“推送 Tags”或切换目标分支。" : undefined}
+                  onClick={() => {
+                    void confirmPushDialog();
                   }}
                 >
-                  {remoteOptions.map((remote) => (
-                    <option key={`push-remote-${remote}`} value={remote}>
-                      {remote}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="git-history-toolbar-confirm-field">
-                <span>目标远端分支</span>
-                <input
-                  list="git-push-target-branches"
-                  value={pushTargetBranchDraft}
-                  disabled={pushLoading}
-                  onChange={(event) => setPushTargetBranchDraft(event.target.value)}
-                  placeholder={currentBranch ?? "main"}
-                />
-                <datalist id="git-push-target-branches">
-                  {pushBranchOptions.map((branch) => (
-                    <option key={`push-branch-${branch}`} value={branch} />
-                  ))}
-                </datalist>
-              </label>
-            </>
-          }
-          preflight={
-            <>
-              <div>当前分支：{toolbarBranchLabel}</div>
-              <div>待推送提交：{commitsAhead} 个</div>
-            </>
-          }
-          facts={[
-            { label: "操作意图", value: "将当前分支的本地提交发送到选定远端分支。" },
-            { label: "将会发生", value: "会按所选远端、目标分支执行 push。" },
-            { label: "不会发生", value: "不会自动拉取或合并远端变更。" },
-          ]}
-          confirmLabel="推送"
-          loading={pushLoading}
-          onClose={() => setActiveToolbarDialog(null)}
-          onConfirm={() => {
-            void confirmPushDialog();
-          }}
-        />
+                  {pushLoading ? "执行中…" : "推送"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {activeToolbarDialog === "sync" ? (
