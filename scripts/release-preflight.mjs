@@ -49,6 +49,8 @@ if (!fs.existsSync(privateKeyPath) || !fs.existsSync(privateKeySecretPath) || !f
 if (requireSecrets) {
   if (!process.env.TAURI_SIGNING_PRIVATE_KEY_B64?.trim()) {
     issues.push("GitHub secret `TAURI_SIGNING_PRIVATE_KEY_B64` is missing.");
+  } else if (!isRecognizedSecretKey(process.env.TAURI_SIGNING_PRIVATE_KEY_B64)) {
+    issues.push("GitHub secret `TAURI_SIGNING_PRIVATE_KEY_B64` is not a valid Tauri updater secret key.");
   }
   if (!process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD?.trim()) {
     issues.push("GitHub secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is missing.");
@@ -86,5 +88,22 @@ function detectGitHubRepository() {
     return match?.[1] ?? null;
   } catch {
     return null;
+  }
+}
+
+function isRecognizedSecretKey(value) {
+  const normalized = value.replace(/\r/g, "").trim();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.includes("untrusted comment:")) {
+    return true;
+  }
+  const compact = normalized.replace(/\s+/g, "");
+  try {
+    const decoded = Buffer.from(compact, "base64").toString("utf8");
+    return decoded.includes("untrusted comment:");
+  } catch {
+    return false;
   }
 }

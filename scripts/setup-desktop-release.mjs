@@ -50,7 +50,7 @@ if (!fs.existsSync(privateKeyPath) || !fs.existsSync(publicKeyPath) || !fs.exist
 
 const privateKey = fs.readFileSync(privateKeyPath, "utf8").trim();
 const publicKey = fs.readFileSync(publicKeyPath, "utf8").trim();
-const privateKeySecret = Buffer.from(privateKey, "utf8").toString("base64");
+const privateKeySecret = privateKey;
 
 fs.writeFileSync(privateKeySecretPath, `${privateKeySecret}\n`, "utf8");
 fs.writeFileSync(publicKeyValuePath, `${publicKey}\n`, "utf8");

@@ -18,7 +18,9 @@ const normalized = secret.replace(/\r/g, "");
 let keyText = "";
 
 if (normalized.includes("untrusted comment:")) {
-  keyText = normalized.trimEnd() + "\n";
+  // Some UIs or past workflows may store the decoded minisign secret key.
+  // Tauri expects the encoded single-line form that `tauri signer generate` writes to disk.
+  keyText = Buffer.from(normalized.trimEnd() + "\n", "utf8").toString("base64");
 } else {
   const compact = normalized.replace(/\s+/g, "");
   let decoded = "";
@@ -32,7 +34,7 @@ if (normalized.includes("untrusted comment:")) {
     console.error("Decoded signing key does not look like a minisign secret key.");
     process.exit(1);
   }
-  keyText = decoded.replace(/\r/g, "").trimEnd() + "\n";
+  keyText = compact;
 }
 
 fs.mkdirSync(path.dirname(outputPath), { recursive: true });

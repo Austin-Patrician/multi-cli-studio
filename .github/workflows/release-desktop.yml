@@ -43,6 +43,9 @@ jobs:
       - name: Validate release prerequisites
         run: node ./scripts/release-preflight.mjs --github-repo ${{ github.repository }} --require-secrets
 
+      - name: Validate Tauri signing secret format
+        run: node ./scripts/materialize-tauri-signing-key.mjs "$RUNNER_TEMP/multi-cli-studio.key"
+
   build_macos:
     name: macOS (${{ matrix.arch }})
     runs-on: ${{ matrix.platform }}
