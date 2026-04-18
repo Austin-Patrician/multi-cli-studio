@@ -301,17 +301,17 @@ jobs:
           RELEASE_NAME="${{ inputs.release_name != '' && inputs.release_name || format('v{0}', inputs.version) }}"
           NOTES_FILE="release-artifacts/release-notes.md"
 
-          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" --title "$RELEASE_NAME" --notes-file "$NOTES_FILE"
+          if gh release view "$RELEASE_TAG" -R "$RELEASE_REPOSITORY" > /dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" -R "$RELEASE_REPOSITORY" --title "$RELEASE_NAME" --notes-file "$NOTES_FILE"
           else
-            gh release create "$RELEASE_TAG" --title "$RELEASE_NAME" --target "$GITHUB_SHA" --notes-file "$NOTES_FILE"
+            gh release create "$RELEASE_TAG" -R "$RELEASE_REPOSITORY" --title "$RELEASE_NAME" --target "$GITHUB_SHA" --notes-file "$NOTES_FILE"
           fi
 
       - name: Upload release assets
         run: |
           set -euo pipefail
           RELEASE_TAG="v${{ inputs.version }}"
-          gh release upload "$RELEASE_TAG" \
+          gh release upload "$RELEASE_TAG" -R "$RELEASE_REPOSITORY" \
             release-artifacts/multi-cli-studio_*_aarch64.dmg \
             release-artifacts/multi-cli-studio_*_x86_64.dmg \
             release-artifacts/multi-cli-studio_aarch64.app.tar.gz \
