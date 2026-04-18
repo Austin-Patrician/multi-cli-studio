@@ -362,6 +362,8 @@ struct AppSettings {
     project_root: String,
     max_turns_per_agent: usize,
     max_output_chars_per_turn: usize,
+    #[serde(default = "default_model_chat_context_turn_limit")]
+    model_chat_context_turn_limit: usize,
     process_timeout_ms: u64,
     #[serde(default)]
     notify_on_terminal_completion: bool,
@@ -596,6 +598,10 @@ fn default_smtp_port() -> u16 {
     587
 }
 
+fn default_model_chat_context_turn_limit() -> usize {
+    4
+}
+
 fn is_likely_email(value: &str) -> bool {
     let trimmed = value.trim();
     let parts = trimmed.split('@').collect::<Vec<_>>();
@@ -724,6 +730,7 @@ fn normalize_provider_entries(providers: &mut Vec<ModelProviderConfig>, service_
 }
 
 fn normalize_settings_providers(settings: &mut AppSettings) {
+    settings.model_chat_context_turn_limit = settings.model_chat_context_turn_limit.max(1);
     normalize_provider_entries(&mut settings.openai_compatible_providers, "openaiCompatible");
     normalize_provider_entries(&mut settings.claude_providers, "claude");
     normalize_provider_entries(&mut settings.gemini_providers, "gemini");
@@ -2075,6 +2082,8 @@ struct ChatPromptRequest {
     effort_level: Option<String>,
     model_override: Option<String>,
     permission_override: Option<String>,
+    #[serde(default)]
+    image_attachments: Option<Vec<String>>,
     transport_session: Option<AgentTransportSession>,
     #[serde(default)]
     compacted_summaries: Option<Vec<CompactedSummary>>,
@@ -2341,6 +2350,13 @@ struct GeminiDiffEntry {
 struct WorkspacePickResult {
     name: String,
     root_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PickedChatAttachment {
+    file_name: String,
+    path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5610,6 +5626,7 @@ fn run_codex_app_server_turn(
     command_path: &str,
     project_root: &str,
     prompt: &str,
+    image_attachments: &[String],
     selected_skills: &[CliSkillItem],
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
@@ -5841,6 +5858,26 @@ fn run_codex_app_server_turn(
             })
         })
         .collect::<Vec<_>>();
+    for image_attachment in image_attachments {
+        let trimmed = image_attachment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("data:")
+            || trimmed.starts_with("http://")
+            || trimmed.starts_with("https://")
+        {
+            turn_input.push(json!({
+                "type": "image",
+                "url": trimmed,
+            }));
+        } else {
+            turn_input.push(json!({
+                "type": "localImage",
+                "path": trimmed,
+            }));
+        }
+    }
     if !prompt.trim().is_empty() || turn_input.is_empty() {
         turn_input.push(json!({
             "type": "text",
@@ -8443,6 +8480,7 @@ fn append_workflow_log_message(
                 content_format: Some("log".to_string()),
                 transport_kind: None,
                 blocks: None,
+                attachments: Vec::new(),
                 is_streaming: false,
                 duration_ms: None,
                 exit_code: None,
@@ -8480,6 +8518,7 @@ fn append_automation_turn_seed(
                     content_format: Some("plain".to_string()),
                     transport_kind: None,
                     blocks: None,
+                    attachments: Vec::new(),
                     is_streaming: false,
                     duration_ms: None,
                     exit_code: None,
@@ -8497,6 +8536,7 @@ fn append_automation_turn_seed(
                     content_format: Some("log".to_string()),
                     transport_kind: Some(transport_kind_for_cli(owner_cli)),
                     blocks: None,
+                    attachments: Vec::new(),
                     is_streaming: true,
                     duration_ms: None,
                     exit_code: None,
@@ -10283,6 +10323,7 @@ fn send_chat_message(
     let cli_id = request.cli_id.clone();
     let terminal_tab_id = request.terminal_tab_id.clone();
     let prompt = request.prompt.clone();
+    let image_attachments = request.image_attachments.clone().unwrap_or_default();
     let project_root = request.project_root.clone();
     let workspace_id = request.workspace_id.clone();
     let project_name = request.project_name.clone();
@@ -10313,6 +10354,10 @@ fn send_chat_message(
         request_session
             .permission_mode
             .insert(cli_id.clone(), permission);
+    }
+
+    if cli_id != "codex" && !image_attachments.is_empty() {
+        return Err("Only Codex currently supports image attachments.".to_string());
     }
 
     // Look up CLI runtime
@@ -10427,6 +10472,7 @@ fn send_chat_message(
         let codex_recent_turns = recent_turns_for_thread.clone();
         let codex_live_turn = live_turn.clone();
         let codex_live_chat_turns = live_chat_turns.clone();
+        let codex_image_attachments = image_attachments.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -10435,6 +10481,7 @@ fn send_chat_message(
                 &codex_wrapper_path,
                 &codex_project_root,
                 &composed_prompt,
+                &codex_image_attachments,
                 &selected_codex_skills_for_thread,
                 &request_session_for_thread,
                 codex_requested_transport_session.clone(),
@@ -11450,6 +11497,7 @@ fn run_auto_orchestration(
                     &wrapper_path,
                     &request_for_thread.project_root,
                     &worker_prompt,
+                    &[],
                     &[],
                     &worker_session,
                     None,
@@ -13820,6 +13868,264 @@ fn get_git_file_diff(project_root: String, path: String) -> Result<GitFileDiff, 
 }
 
 #[tauri::command]
+fn open_workspace_in(
+    path: String,
+    app: Option<String>,
+    args: Vec<String>,
+    command: Option<String>,
+) -> Result<(), String> {
+    let trimmed_path = path.trim();
+    if trimmed_path.is_empty() {
+        return Err("Workspace path is required.".to_string());
+    }
+
+    let absolute_path = PathBuf::from(trimmed_path);
+    if !absolute_path.exists() {
+        return Err("Workspace does not exist.".to_string());
+    }
+
+    let normalized_command = normalize_open_target_value(command);
+    let normalized_app = normalize_open_target_value(app);
+    let path_string = absolute_path.to_string_lossy().to_string();
+    let target_label = normalized_command
+        .as_ref()
+        .map(|value| format!("command `{value}`"))
+        .or_else(|| normalized_app.as_ref().map(|value| format!("app `{value}`")))
+        .unwrap_or_else(|| "default opener".to_string());
+
+    let status = if let Some(command_name) = normalized_command {
+        let resolved_command = resolve_command_path(&command_name).unwrap_or(command_name);
+        let mut command_args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        command_args.push(path_string.as_str());
+        batch_aware_command(&resolved_command, &command_args)
+            .status()
+            .map_err(|error| format!("Failed to open workspace ({target_label}): {error}"))?
+    } else if let Some(app_name) = normalized_app {
+        #[cfg(target_os = "macos")]
+        let status = {
+            let mut command = Command::new("open");
+            command.arg("-a").arg(&app_name).arg(&absolute_path);
+            if !args.is_empty() {
+                command.arg("--args").args(&args);
+            }
+            apply_runtime_environment(&mut command);
+            command
+                .status()
+                .map_err(|error| format!("Failed to open workspace ({target_label}): {error}"))?
+        };
+
+        #[cfg(not(target_os = "macos"))]
+        let status =
+            open_workspace_with_non_macos_app(&app_name, &args, &path_string, &target_label)?;
+
+        status
+    } else {
+        open_workspace_with_default_app(&absolute_path)?
+    };
+
+    if status.success() {
+        return Ok(());
+    }
+
+    let exit_detail = status
+        .code()
+        .map(|code| format!("exit code {code}"))
+        .unwrap_or_else(|| "terminated by signal".to_string());
+    Err(format!(
+        "Failed to open workspace ({target_label} returned {exit_detail})."
+    ))
+}
+
+fn normalize_open_target_value(value: Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .map(|trimmed| {
+            if trimmed.len() >= 2 {
+                let wrapped_with_double_quotes = trimmed.starts_with('"') && trimmed.ends_with('"');
+                let wrapped_with_single_quotes =
+                    trimmed.starts_with('\'') && trimmed.ends_with('\'');
+                if wrapped_with_double_quotes || wrapped_with_single_quotes {
+                    return trimmed[1..trimmed.len() - 1].trim();
+                }
+            }
+            trimmed
+        })
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn push_open_app_candidate(candidates: &mut Vec<String>, candidate: impl Into<String>) {
+    let candidate = candidate.into();
+    if candidate.is_empty()
+        || candidates
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&candidate))
+    {
+        return;
+    }
+    candidates.push(candidate);
+}
+
+#[cfg(target_os = "windows")]
+fn push_windows_install_candidate(
+    candidates: &mut Vec<String>,
+    base_dir: Option<OsString>,
+    relative_path: &str,
+) {
+    let Some(base_dir) = base_dir else {
+        return;
+    };
+    let candidate = PathBuf::from(base_dir).join(relative_path);
+    if candidate.is_file() {
+        push_open_app_candidate(candidates, candidate.to_string_lossy().to_string());
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_app_command_candidates(app: &str) -> Vec<String> {
+    let trimmed = app.trim();
+    let normalized = trimmed.to_ascii_lowercase();
+    let mut candidates = Vec::new();
+    push_open_app_candidate(&mut candidates, trimmed.to_string());
+
+    match normalized.as_str() {
+        "visual studio code" | "vs code" | "vscode" => {
+            push_open_app_candidate(&mut candidates, "code");
+            push_open_app_candidate(&mut candidates, "code-insiders");
+            #[cfg(target_os = "windows")]
+            {
+                push_windows_install_candidate(
+                    &mut candidates,
+                    std::env::var_os("LOCALAPPDATA"),
+                    "Programs\\Microsoft VS Code\\Code.exe",
+                );
+                push_windows_install_candidate(
+                    &mut candidates,
+                    std::env::var_os("PROGRAMFILES"),
+                    "Microsoft VS Code\\Code.exe",
+                );
+                push_windows_install_candidate(
+                    &mut candidates,
+                    std::env::var_os("PROGRAMFILES(X86)"),
+                    "Microsoft VS Code\\Code.exe",
+                );
+            }
+        }
+        "cursor" => {
+            push_open_app_candidate(&mut candidates, "cursor");
+            #[cfg(target_os = "windows")]
+            {
+                push_windows_install_candidate(
+                    &mut candidates,
+                    std::env::var_os("LOCALAPPDATA"),
+                    "Programs\\Cursor\\Cursor.exe",
+                );
+                push_windows_install_candidate(
+                    &mut candidates,
+                    std::env::var_os("PROGRAMFILES"),
+                    "Cursor\\Cursor.exe",
+                );
+            }
+        }
+        "zed" => {
+            push_open_app_candidate(&mut candidates, "zed");
+            #[cfg(target_os = "windows")]
+            {
+                push_windows_install_candidate(
+                    &mut candidates,
+                    std::env::var_os("LOCALAPPDATA"),
+                    "Programs\\Zed\\Zed.exe",
+                );
+            }
+        }
+        "ghostty" => {
+            push_open_app_candidate(&mut candidates, "ghostty");
+        }
+        "antigravity" => {
+            push_open_app_candidate(&mut candidates, "antigravity");
+        }
+        "windsurf" => {
+            push_open_app_candidate(&mut candidates, "windsurf");
+            #[cfg(target_os = "windows")]
+            {
+                push_windows_install_candidate(
+                    &mut candidates,
+                    std::env::var_os("LOCALAPPDATA"),
+                    "Programs\\Windsurf\\Windsurf.exe",
+                );
+            }
+        }
+        _ => {}
+    }
+
+    candidates
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_workspace_with_non_macos_app(
+    app: &str,
+    args: &[String],
+    path: &str,
+    target_label: &str,
+) -> Result<std::process::ExitStatus, String> {
+    let mut last_not_found_error: Option<std::io::Error> = None;
+
+    for candidate in open_app_command_candidates(app) {
+        let resolved_candidate = resolve_command_path(&candidate).unwrap_or(candidate);
+        let mut command_args = args.iter().map(String::as_str).collect::<Vec<_>>();
+        command_args.push(path);
+        match batch_aware_command(&resolved_candidate, &command_args).status() {
+            Ok(status) => return Ok(status),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found_error = Some(error);
+            }
+            Err(error) => {
+                return Err(format!("Failed to open workspace ({target_label}): {error}"));
+            }
+        }
+    }
+
+    if let Some(error) = last_not_found_error {
+        return Err(format!("Failed to open workspace ({target_label}): {error}"));
+    }
+
+    Err(format!(
+        "Failed to open workspace ({target_label}): no launch candidate succeeded."
+    ))
+}
+
+fn open_workspace_with_default_app(path: &Path) -> Result<std::process::ExitStatus, String> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer");
+        command.arg(path);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    };
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
+
+    apply_runtime_environment(&mut command);
+    command
+        .status()
+        .map_err(|error| format!("Failed to open workspace (default opener): {error}"))
+}
+
+#[tauri::command]
 fn open_workspace_file(
     project_root: String,
     path: String,
@@ -14024,6 +14330,11 @@ fn best_git_diff_for_path(project_root: &str, path: &str, status: &str) -> Strin
 #[tauri::command]
 fn pick_workspace_folder() -> Result<Option<WorkspacePickResult>, String> {
     pick_workspace_folder_impl()
+}
+
+#[tauri::command]
+fn pick_chat_attachments() -> Result<Vec<PickedChatAttachment>, String> {
+    pick_chat_attachments_impl()
 }
 
 #[tauri::command]
@@ -17068,6 +17379,7 @@ fn append_automation_validation_message(
                         format: "plain".to_string(),
                     },
                 ]),
+                attachments: Vec::new(),
                 is_streaming: false,
                 duration_ms: None,
                 exit_code: None,
@@ -17230,6 +17542,7 @@ fn execute_auto_mode_goal(
                 &wrapper_path,
                 &request.project_root,
                 &worker_prompt,
+                &[],
                 &[],
                 &worker_session,
                 None,
@@ -18528,6 +18841,7 @@ fn execute_automation_goal(
             &wrapper_path,
             &run.project_root,
             &composed_prompt,
+            &[],
             &selected_codex_skills,
             &session,
             previous_transport_session.clone(),
@@ -21502,6 +21816,28 @@ fn collect_workspace_files(
     Ok(())
 }
 
+fn parse_selected_paths_output(output: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .collect()
+}
+
+fn to_picked_chat_attachments(paths: Vec<String>) -> Vec<PickedChatAttachment> {
+    paths
+        .into_iter()
+        .map(|path| PickedChatAttachment {
+            file_name: Path::new(&path)
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone()),
+            path,
+        })
+        .collect()
+}
+
 #[cfg(target_os = "windows")]
 fn pick_workspace_folder_impl() -> Result<Option<WorkspacePickResult>, String> {
     let script = r#"
@@ -21536,6 +21872,34 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         name,
         root_path: selected,
     }))
+}
+
+#[cfg(target_os = "windows")]
+fn pick_chat_attachments_impl() -> Result<Vec<PickedChatAttachment>, String> {
+    let script = r#"
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = "Choose attachments"
+$dialog.Multiselect = $true
+$dialog.CheckFileExists = $true
+$dialog.Filter = "All files (*.*)|*.*"
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  $dialog.FileNames
+}
+"#;
+
+    let output = Command::new("powershell.exe")
+        .args(["-NoLogo", "-NoProfile", "-STA", "-Command", script])
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    Ok(to_picked_chat_attachments(parse_selected_paths_output(
+        &output.stdout,
+    )))
 }
 
 #[cfg(target_os = "macos")]
@@ -21575,9 +21939,42 @@ end try"#,
     }))
 }
 
+#[cfg(target_os = "macos")]
+fn pick_chat_attachments_impl() -> Result<Vec<PickedChatAttachment>, String> {
+    let output = Command::new("osascript")
+        .args([
+            "-e",
+            r#"try
+set pickedFiles to choose file with prompt "Choose attachments" with multiple selections allowed
+set outputText to ""
+repeat with pickedFile in pickedFiles
+  set outputText to outputText & POSIX path of pickedFile & linefeed
+end repeat
+return outputText
+on error number -128
+return ""
+end try"#,
+        ])
+        .output()
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    Ok(to_picked_chat_attachments(parse_selected_paths_output(
+        &output.stdout,
+    )))
+}
+
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn pick_workspace_folder_impl() -> Result<Option<WorkspacePickResult>, String> {
     Err("Workspace picking is not implemented on this platform yet.".to_string())
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn pick_chat_attachments_impl() -> Result<Vec<PickedChatAttachment>, String> {
+    Err("Attachment picking is not implemented on this platform yet.".to_string())
 }
 
 fn schedule_automation_workflow_run_with_handles(
@@ -22348,6 +22745,7 @@ fn seed_settings(project_root: &str) -> AppSettings {
         project_root: project_root.to_string(),
         max_turns_per_agent: DEFAULT_MAX_TURNS,
         max_output_chars_per_turn: DEFAULT_MAX_OUTPUT_CHARS,
+        model_chat_context_turn_limit: default_model_chat_context_turn_limit(),
         process_timeout_ms: DEFAULT_TIMEOUT_MS,
         notify_on_terminal_completion: false,
         notification_config: NotificationConfig {
@@ -22959,8 +23357,10 @@ pub fn run() {
             unstage_git_file,
             discard_git_file,
             commit_git_changes,
+            open_workspace_in,
             open_workspace_file,
             pick_workspace_folder,
+            pick_chat_attachments,
             get_cli_skills,
             detect_engines,
             get_claude_settings_path,

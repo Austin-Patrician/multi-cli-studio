@@ -63,6 +63,19 @@ pub struct PersistedCliContextBoundary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PersistedChatAttachment {
+    pub id: String,
+    pub kind: String,
+    pub file_name: String,
+    #[serde(default)]
+    pub media_type: Option<String>,
+    pub source: String,
+    #[serde(default)]
+    pub display_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PersistedTerminalTab {
     pub id: String,
     pub title: String,
@@ -77,6 +90,8 @@ pub struct PersistedTerminalTab {
     #[serde(default)]
     pub context_boundaries_by_cli: BTreeMap<String, PersistedCliContextBoundary>,
     pub draft_prompt: String,
+    #[serde(default)]
+    pub draft_attachments: Vec<PersistedChatAttachment>,
     pub status: String,
     pub last_active_at: String,
 }
@@ -116,6 +131,8 @@ pub struct PersistedChatMessage {
     pub content_format: Option<String>,
     pub transport_kind: Option<String>,
     pub blocks: Option<Vec<ChatMessageBlock>>,
+    #[serde(default)]
+    pub attachments: Vec<PersistedChatAttachment>,
     pub is_streaming: bool,
     pub duration_ms: Option<u64>,
     pub exit_code: Option<i32>,
@@ -1490,8 +1507,9 @@ impl TerminalStorage {
                 "INSERT INTO terminal_tabs (
                     id, title, workspace_id, selected_cli, plan_mode, fast_mode, effort_level,
                     model_overrides_json, permission_overrides_json, transport_sessions_json,
-                    context_boundaries_by_cli_json, draft_prompt, status, last_active_at, tab_order
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    context_boundaries_by_cli_json, draft_prompt, draft_attachments_json,
+                    status, last_active_at, tab_order
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     tab.id,
                     tab.title,
@@ -1505,6 +1523,7 @@ impl TerminalStorage {
                     to_json(&tab.transport_sessions)?,
                     to_json(&tab.context_boundaries_by_cli)?,
                     tab.draft_prompt,
+                    to_json(&tab.draft_attachments)?,
                     tab.status,
                     tab.last_active_at,
                     tab_order as i64,
@@ -1567,6 +1586,7 @@ impl TerminalStorage {
                 transport_sessions_json TEXT NOT NULL,
                 context_boundaries_by_cli_json TEXT NOT NULL DEFAULT '{}',
                 draft_prompt TEXT NOT NULL,
+                draft_attachments_json TEXT NOT NULL DEFAULT '[]',
                 status TEXT NOT NULL,
                 last_active_at TEXT NOT NULL,
                 tab_order INTEGER NOT NULL
@@ -1600,6 +1620,7 @@ impl TerminalStorage {
                 content_format TEXT,
                 transport_kind TEXT,
                 blocks_json TEXT,
+                attachments_json TEXT NOT NULL DEFAULT '[]',
                 is_streaming INTEGER NOT NULL,
                 duration_ms INTEGER,
                 exit_code INTEGER
@@ -1871,6 +1892,18 @@ impl TerminalStorage {
             "context_boundaries_by_cli_json",
             "TEXT NOT NULL DEFAULT '{}'",
         )?;
+        ensure_column_exists(
+            conn,
+            "terminal_tabs",
+            "draft_attachments_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column_exists(
+            conn,
+            "chat_messages",
+            "attachments_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
         ensure_column_exists(conn, "handoff_events", "payload_json", "TEXT")?;
         ensure_column_exists(
             conn,
@@ -1982,7 +2015,8 @@ impl TerminalStorage {
             .prepare(
                 "SELECT id, title, workspace_id, selected_cli, plan_mode, fast_mode, effort_level,
                         model_overrides_json, permission_overrides_json, transport_sessions_json,
-                        context_boundaries_by_cli_json, draft_prompt, status, last_active_at
+                        context_boundaries_by_cli_json, draft_prompt, draft_attachments_json,
+                        status, last_active_at
                  FROM terminal_tabs
                  ORDER BY tab_order ASC",
             )
@@ -2002,8 +2036,9 @@ impl TerminalStorage {
                     transport_sessions: parse_json_default(row.get::<_, String>(9)?),
                     context_boundaries_by_cli: parse_json_default(row.get::<_, String>(10)?),
                     draft_prompt: row.get(11)?,
-                    status: row.get(12)?,
-                    last_active_at: row.get(13)?,
+                    draft_attachments: parse_json_default(row.get::<_, String>(12)?),
+                    status: row.get(13)?,
+                    last_active_at: row.get(14)?,
                 })
             })
             .map_err(|err| err.to_string())?;
@@ -2058,7 +2093,7 @@ impl TerminalStorage {
             .prepare(
                 "SELECT id, role, cli_id, automation_run_id, workflow_run_id, workflow_node_id,
                         timestamp, content, raw_content, content_format,
-                        transport_kind, blocks_json, is_streaming, duration_ms, exit_code
+                        transport_kind, blocks_json, attachments_json, is_streaming, duration_ms, exit_code
                  FROM chat_messages
                  WHERE session_id = ?1
                  ORDER BY message_order ASC",
@@ -2067,6 +2102,7 @@ impl TerminalStorage {
         let rows = stmt
             .query_map([session_id], |row| {
                 let blocks_json = row.get::<_, Option<String>>(11)?;
+                let attachments_json = row.get::<_, String>(12)?;
                 Ok(PersistedChatMessage {
                     id: row.get(0)?,
                     role: row.get(1)?,
@@ -2082,9 +2118,10 @@ impl TerminalStorage {
                     blocks: blocks_json
                         .as_deref()
                         .and_then(|raw| serde_json::from_str::<Vec<ChatMessageBlock>>(raw).ok()),
-                    is_streaming: row.get(12)?,
-                    duration_ms: row.get::<_, Option<i64>>(13)?.map(|value| value as u64),
-                    exit_code: row.get(14)?,
+                    attachments: parse_json_default(attachments_json),
+                    is_streaming: row.get(13)?,
+                    duration_ms: row.get::<_, Option<i64>>(14)?.map(|value| value as u64),
+                    exit_code: row.get(15)?,
                 })
             })
             .map_err(|err| err.to_string())?;
@@ -2803,8 +2840,8 @@ impl TerminalStorage {
                     id, session_id, terminal_tab_id, message_order, role, cli_id,
                     automation_run_id, workflow_run_id, workflow_node_id, timestamp,
                     content, raw_content, content_format, transport_kind, blocks_json,
-                    is_streaming, duration_ms, exit_code
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                    attachments_json, is_streaming, duration_ms, exit_code
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     message.id,
                     session_id,
@@ -2821,6 +2858,7 @@ impl TerminalStorage {
                     message.content_format,
                     message.transport_kind,
                     option_to_json(&message.blocks)?,
+                    to_json(&message.attachments)?,
                     message.is_streaming,
                     message.duration_ms.map(|value| value as i64),
                     message.exit_code,

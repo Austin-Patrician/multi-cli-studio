@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useDeferredValue,
   useEffect,
   useLayoutEffect,
@@ -8,13 +9,16 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
+import { ChevronsUp, Flag } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import {
   AgentId,
   AssistantApprovalDecision,
   AutoRouteAction,
+  ChatAttachment,
   TerminalCliId,
 } from "../../lib/models";
+import { formatAttachmentSummary } from "../../lib/chatAttachments";
 import { useStore } from "../../lib/store";
 import { CliBubble } from "./CliBubble";
 import { CLI_OPTIONS } from "./CliSelector";
@@ -258,8 +262,13 @@ function focusSearchInput(
   }
 }
 
-function formatQueuedPromptPreview(value: string) {
-  return value.replace(/\s+/g, " ").trim();
+function formatQueuedPromptPreview(value: string, attachments?: ChatAttachment[] | null) {
+  const text = value.replace(/\s+/g, " ").trim();
+  const attachmentSummary = formatAttachmentSummary(attachments);
+  if (text && attachmentSummary) {
+    return `${text} · ${attachmentSummary}`;
+  }
+  return text || attachmentSummary;
 }
 
 function QueuedIcon() {
@@ -364,6 +373,52 @@ function QueuedCliBadge({ cliId }: { cliId: TerminalCliId }) {
   );
 }
 
+function formatFinalMessageTimestamp(timestamp: string | null | undefined) {
+  if (!timestamp) {
+    return null;
+  }
+
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function FinalMessageBoundary({ timestamp }: { timestamp?: string | null }) {
+  const metaText = formatFinalMessageTimestamp(timestamp);
+
+  return (
+    <div
+      className="my-1 flex w-full items-center gap-3 py-1 text-[12px] text-slate-500"
+      role="separator"
+    >
+      <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-300/80 to-slate-300/90" />
+      <span className="inline-flex items-center gap-2 rounded-full border border-slate-200/90 bg-white/92 px-3 py-1 font-semibold text-slate-600 shadow-[0_8px_22px_rgba(15,23,42,0.05)]">
+        <span className="inline-flex items-center gap-1.5">
+          <Flag size={13} aria-hidden className="text-slate-500" />
+          <span>最终消息</span>
+        </span>
+        {metaText ? (
+          <span className="border-l border-slate-200/90 pl-2 text-[11px] font-medium text-slate-500">
+            {metaText}
+          </span>
+        ) : null}
+      </span>
+      <div className="h-px flex-1 bg-gradient-to-l from-transparent via-slate-300/80 to-slate-300/90" />
+    </div>
+  );
+}
+
 export function ChatConversation() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -449,6 +504,7 @@ export function ChatConversation() {
   }, [allMessages, shouldShowAllMessages, visibleMessageCount]);
   const hasHiddenMessages =
     !shouldShowAllMessages && allMessages.length > visibleMessages.length;
+  const hiddenMessageCount = Math.max(0, allMessages.length - visibleMessages.length);
 
   useEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -678,7 +734,7 @@ export function ChatConversation() {
   const activeMatchNumber =
     matchCount === 0 ? 0 : Math.min(currentMatchIndex + 1, matchCount);
   const queuedPromptPreview = useMemo(
-    () => (queuedPrompt ? formatQueuedPromptPreview(queuedPrompt.text) : ""),
+    () => (queuedPrompt ? formatQueuedPromptPreview(queuedPrompt.text, queuedPrompt.attachments) : ""),
     [queuedPrompt]
   );
 
@@ -724,12 +780,18 @@ export function ChatConversation() {
     return copyTextToClipboard(prompt);
   }
 
-  function handleRegeneratePrompt(prompt: string, cliId: AgentId | null) {
+  function handleRegeneratePrompt(
+    prompt: string,
+    cliId: AgentId | null,
+    attachments?: ChatAttachment[] | null
+  ) {
     if (!activeTab || activeTab.status === "streaming") return;
     if (cliId && cliId !== activeTab.selectedCli) {
       setTabSelectedCli(activeTab.id, cliId);
     }
-    void sendChatMessage(activeTab.id, prompt);
+    void sendChatMessage(activeTab.id, prompt, { attachmentsOverride: attachments ?? null }).catch(
+      () => {}
+    );
   }
 
   function handleDeleteMessage(messageId: string) {
@@ -851,14 +913,17 @@ export function ChatConversation() {
           </div>
 
           {hasHiddenMessages && showLoadOlderHint && (
-            <div className="sticky top-0 z-10 flex justify-center px-2">
+            <div className="sticky top-2 z-10 flex justify-center px-2">
               <button
                 type="button"
                 onClick={loadOlderMessages}
-                className="inline-flex items-center gap-1 rounded-full border border-slate-200/80 bg-white/88 px-3 py-1 text-[11px] font-medium text-slate-500 shadow-[0_8px_20px_rgba(15,23,42,0.04)] backdrop-blur transition-colors hover:border-slate-300 hover:bg-white hover:text-slate-800"
+                aria-label={`加载更早消息，还有 ${hiddenMessageCount} 条历史记录`}
+                className="group inline-flex items-center gap-2 rounded-full border border-[#e6ddd0] bg-white/92 px-3.5 py-1.5 text-[12px] font-medium text-slate-600 shadow-[0_10px_24px_rgba(15,23,42,0.06)] ring-1 ring-white/75 backdrop-blur-md transition-all hover:-translate-y-[1px] hover:border-[#d8cfbf] hover:bg-white hover:text-slate-900 hover:shadow-[0_14px_30px_rgba(15,23,42,0.1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d7cdbd]"
               >
-                <span className="text-slate-400">↑</span>
-                加载更早消息
+                <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#f4efe6] text-[#8b7b63] transition-colors group-hover:bg-[#eee6d8] group-hover:text-slate-800">
+                  <ChevronsUp size={12} aria-hidden />
+                </span>
+                <span>加载更早消息</span>
               </button>
             </div>
           )}
@@ -870,60 +935,82 @@ export function ChatConversation() {
           )}
 
           {(() => {
-            let lastUserPrompt: { content: string; cliId: AgentId | null } | null = null;
+            let lastUserPrompt:
+              | { content: string; cliId: AgentId | null; attachments?: ChatAttachment[] | null }
+              | null = null;
 
-            return visibleMessages.map((msg) => {
+            return visibleMessages.map((msg, index) => {
+              const isLastVisibleMessage = index === visibleMessages.length - 1;
+
               if (msg.role === "system") {
                 const systemTone =
                   msg.exitCode != null && msg.exitCode !== 0
                     ? "border-rose-200 bg-rose-50 text-rose-700"
                     : "border-border bg-white text-secondary";
                 return (
-                  <div key={msg.id} className="flex justify-center">
-                    <span
-                      data-chat-search-ignore="true"
-                      className={`rounded-full border px-3 py-1 text-xs ${systemTone}`}
-                    >
-                      {msg.content}
-                    </span>
-                  </div>
+                  <Fragment key={msg.id}>
+                    <div className="flex justify-center">
+                      <span
+                        data-chat-search-ignore="true"
+                        className={`rounded-full border px-3 py-1 text-xs ${systemTone}`}
+                      >
+                        {msg.content}
+                      </span>
+                    </div>
+                    {isLastVisibleMessage ? (
+                      <FinalMessageBoundary timestamp={msg.timestamp} />
+                    ) : null}
+                  </Fragment>
                 );
               }
 
               if (msg.role === "user") {
-                lastUserPrompt = { content: msg.content, cliId: msg.cliId };
+                lastUserPrompt = {
+                  content: msg.content,
+                  cliId: msg.cliId,
+                  attachments: msg.attachments ?? null,
+                };
                 return (
-                  <UserBubble
-                    key={msg.id}
-                    message={msg}
-                    onCopy={handleCopyPrompt}
-                    onDelete={handleDeleteMessage}
-                    deleteDisabled={activeTab.status === "streaming"}
-                  />
+                  <Fragment key={msg.id}>
+                    <UserBubble
+                      message={msg}
+                      onCopy={handleCopyPrompt}
+                      onDelete={handleDeleteMessage}
+                      deleteDisabled={activeTab.status === "streaming"}
+                    />
+                    {isLastVisibleMessage ? (
+                      <FinalMessageBoundary timestamp={msg.timestamp} />
+                    ) : null}
+                  </Fragment>
                 );
               }
 
               const regeneratePrompt = lastUserPrompt;
 
               return (
-                <CliBubble
-                  key={msg.id}
-                  message={msg}
-                  workspaceRoot={workspace?.rootPath ?? null}
-                  onRegenerate={
-                    !msg.isStreaming && regeneratePrompt
-                      ? () =>
-                          handleRegeneratePrompt(
-                            regeneratePrompt.content,
-                            regeneratePrompt.cliId
-                          )
-                      : null
-                  }
-                  onDelete={!msg.isStreaming ? handleDeleteMessage : null}
-                  actionsDisabled={activeTab.status === "streaming" || msg.isStreaming}
-                  onApprovalDecision={handleAssistantApproval}
-                  onAutoRouteAction={handleAutoRoute}
-                />
+                <Fragment key={msg.id}>
+                  <CliBubble
+                    message={msg}
+                    workspaceRoot={workspace?.rootPath ?? null}
+                    onRegenerate={
+                      !msg.isStreaming && regeneratePrompt
+                        ? () =>
+                            handleRegeneratePrompt(
+                              regeneratePrompt.content,
+                              regeneratePrompt.cliId,
+                              regeneratePrompt.attachments
+                            )
+                        : null
+                    }
+                    onDelete={!msg.isStreaming ? handleDeleteMessage : null}
+                    actionsDisabled={activeTab.status === "streaming" || msg.isStreaming}
+                    onApprovalDecision={handleAssistantApproval}
+                    onAutoRouteAction={handleAutoRoute}
+                  />
+                  {isLastVisibleMessage ? (
+                    <FinalMessageBoundary timestamp={msg.timestamp} />
+                  ) : null}
+                </Fragment>
               );
             });
           })()}
@@ -946,9 +1033,9 @@ export function ChatConversation() {
                 </div>
                 <div
                   className="max-w-full rounded-2xl rounded-br-md border border-sky-200/90 bg-sky-50/90 px-3.5 py-2.5 text-sm whitespace-pre-wrap text-sky-950 shadow-[0_14px_34px_rgba(14,116,144,0.08)]"
-                  title={queuedPrompt.text}
+                  title={queuedPromptPreview || queuedPrompt.text}
                 >
-                  {queuedPromptPreview || queuedPrompt.text}
+                  {queuedPromptPreview || "Queued attachment message"}
                 </div>
                 <div className="flex items-center justify-end gap-1 pr-1">
                   <QueuedIconButton

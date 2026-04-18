@@ -26,6 +26,7 @@ import {
   ChatMessageStreamUpdateRequest,
   ChatInterruptResult,
   ChatPromptRequest,
+  PickedChatAttachment,
   AssistantApprovalDecision,
   CliHandoffRequest,
   ContextStore,
@@ -245,9 +246,18 @@ export interface RuntimeBridge {
     message: string,
     options?: { stageAll?: boolean }
   ) => Promise<{ commitSha: string | null }>;
+  openWorkspaceIn: (
+    path: string,
+    options?: {
+      appName?: string | null;
+      command?: string | null;
+      args?: string[];
+    }
+  ) => Promise<void>;
   openWorkspaceFile: (projectRoot: string, path: string) => Promise<boolean>;
   onStream: (listener: (event: StreamEvent) => void) => Promise<Unlisten>;
   pickWorkspaceFolder: () => Promise<WorkspacePickResult | null>;
+  pickChatAttachments: () => Promise<PickedChatAttachment[]>;
   searchWorkspaceFiles: (projectRoot: string, query: string) => Promise<FileMentionCandidate[]>;
   searchWorkspaceText: (
     projectRoot: string,
@@ -739,6 +749,15 @@ const tauriRuntime: RuntimeBridge = {
       stageAll: options?.stageAll ?? false,
     });
   },
+  async openWorkspaceIn(path, options) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("open_workspace_in", {
+      path,
+      app: options?.appName ?? null,
+      command: options?.command ?? null,
+      args: options?.args ?? [],
+    });
+  },
   async openWorkspaceFile(projectRoot, path) {
     const { invoke } = await import("@tauri-apps/api/core");
     const result = await invoke<{ opened: boolean }>("open_workspace_file", { projectRoot, path });
@@ -754,6 +773,10 @@ const tauriRuntime: RuntimeBridge = {
   async pickWorkspaceFolder() {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<WorkspacePickResult | null>("pick_workspace_folder");
+  },
+  async pickChatAttachments() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<PickedChatAttachment[]>("pick_chat_attachments");
   },
   async searchWorkspaceFiles(projectRoot, query) {
     const { invoke } = await import("@tauri-apps/api/core");

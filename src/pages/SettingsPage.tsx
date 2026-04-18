@@ -1185,6 +1185,42 @@ export function SettingsPage({
           </div>
 
           <div style={stageStyle(mounted, 175)}>
+            <Panel title="模型对话" description="配置模型对话页发给 AI 的上下文窗口大小。" icon={<CpuIcon />}>
+              <div className="p-8 space-y-6">
+                <div className="grid gap-6 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
+                  <div className="rounded-[12px] border border-slate-200 bg-white px-5 py-5 shadow-sm">
+                    <FieldLabel>上下文保留轮数</FieldLabel>
+                    <input
+                      type="number"
+                      min={1}
+                      className={INPUT_CLASS}
+                      value={local.modelChatContextTurnLimit}
+                      onChange={(e) =>
+                        setLocal({
+                          ...local,
+                          modelChatContextTurnLimit: Math.max(1, parseInt(e.target.value, 10) || 4),
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div className="rounded-[12px] border border-slate-200 bg-slate-50 px-5 py-5 text-sm text-slate-600">
+                    <div className="text-sm font-semibold text-slate-900">当前行为</div>
+                    <div className="mt-2 leading-relaxed">
+                      模型对话页会始终保留所有 system 消息，并额外附带最近{" "}
+                      <span className="font-semibold text-slate-900">{local.modelChatContextTurnLimit}</span>{" "}
+                      轮 user / assistant 对话作为上下文。
+                    </div>
+                    <div className="mt-3 leading-relaxed text-slate-500">
+                      数值越小，响应越省 token、越稳定；数值越大，模型对更早对话的记忆更完整。
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Panel>
+          </div>
+
+          <div style={stageStyle(mounted, 185)}>
             <Panel title="邮件通知" description="供自动化任务在启用完成邮件时使用的 SMTP 配置。" icon={<MailIcon />}>
               <div className="p-8 space-y-8">
                 <div className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">

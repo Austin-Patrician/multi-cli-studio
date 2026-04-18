@@ -1533,7 +1533,10 @@ export function DesktopGitSection({
   const [pushPreviewSelectedSha, setPushPreviewSelectedSha] = useState<string | null>(null);
   const [syncRemoteDraft, setSyncRemoteDraft] = useState("origin");
   const [syncTargetBranchDraft, setSyncTargetBranchDraft] = useState("");
-  const [fetchRemoteDraft, setFetchRemoteDraft] = useState("all");
+  const [syncPreviewLoading, setSyncPreviewLoading] = useState(false);
+  const [syncPreviewError, setSyncPreviewError] = useState<string | null>(null);
+  const [syncPreviewCommits, setSyncPreviewCommits] = useState<GitHistoryCommit[]>([]);
+  const [syncPreviewTargetFound, setSyncPreviewTargetFound] = useState(true);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -1565,6 +1568,7 @@ export function DesktopGitSection({
   const detailRequestSeqRef = useRef(0);
   const pushPreviewLoadSeqRef = useRef(0);
   const pushPreviewDetailsLoadSeqRef = useRef(0);
+  const syncPreviewLoadSeqRef = useRef(0);
   const pushRemotePickerRef = useRef<HTMLDivElement | null>(null);
   const pushTargetBranchPickerRef = useRef<HTMLDivElement | null>(null);
   const pushTargetBranchFieldRef = useRef<HTMLLabelElement | null>(null);
@@ -1638,10 +1642,6 @@ export function DesktopGitSection({
     () => buildRemoteBranchList(branches?.remoteBranches, pullRemoteDraft || currentUpstreamRef.remote),
     [branches?.remoteBranches, pullRemoteDraft, currentUpstreamRef.remote]
   );
-  const syncBranchOptions = useMemo(
-    () => buildRemoteBranchList(branches?.remoteBranches, syncRemoteDraft || currentUpstreamRef.remote),
-    [branches?.remoteBranches, syncRemoteDraft, currentUpstreamRef.remote]
-  );
   const toolbarBranchLabel = currentBranch ?? gitPanel?.branch ?? activeWorkspace?.branch ?? activeWorkspace?.name ?? "HEAD";
   const toolbarCommitCount = history?.total ?? 0;
   const toolbarActionDisabled =
@@ -1654,10 +1654,13 @@ export function DesktopGitSection({
     fetchLoading ||
     refreshLoading;
   const pushDialogOpen = activeToolbarDialog === "push";
+  const syncDialogOpen = activeToolbarDialog === "sync";
+  const fetchDialogOpen = activeToolbarDialog === "fetch";
   const pushSubmitting = pushLoading;
+  const syncSubmitting = syncLoading;
+  const fetchSubmitting = fetchLoading;
   const normalizedPullRemote = pullRemoteDraft.trim() || currentUpstreamRef.remote || remoteOptions[0] || "origin";
   const normalizedSyncRemote = syncRemoteDraft.trim() || currentUpstreamRef.remote || remoteOptions[0] || "origin";
-  const normalizedFetchRemote = fetchRemoteDraft.trim() || "all";
   const normalizedPullTargetBranch = pullTargetBranchDraft.trim() || currentUpstreamRef.branch || currentBranch || "main";
   const normalizedSyncTargetBranch = syncTargetBranchDraft.trim() || currentUpstreamRef.branch || currentBranch || "main";
   const pushRemoteTrimmed = pushRemoteDraft.trim();
@@ -1743,19 +1746,10 @@ export function DesktopGitSection({
   ]
     .filter(Boolean)
     .join(" ");
-  const pushCommandPreview = [
-    "git push",
-    pushForceWithLease ? "--force-with-lease" : null,
-    !pushRunHooks ? "--no-verify" : null,
-    pushTags ? "--tags" : null,
-    pushRemoteTrimmed || "origin",
-    pushRefSpec,
-  ]
-    .filter(Boolean)
-    .join(" ");
-  const syncCommandPreview = `${pullCommandPreview} && ${pushCommandPreview}`;
-  const fetchCommandPreview =
-    normalizedFetchRemote === "all" ? "git fetch --all --prune" : `git fetch ${normalizedFetchRemote} --prune`;
+  const syncPullCommandPreview = ["git pull", normalizedSyncRemote, normalizedSyncTargetBranch, "--no-edit"].filter(Boolean).join(" ");
+  const syncPushCommandPreview = ["git push", normalizedSyncRemote, `HEAD:${normalizedSyncTargetBranch}`].filter(Boolean).join(" ");
+  const syncCommandPreview = `${syncPullCommandPreview} && ${syncPushCommandPreview}`;
+  const fetchCommandPreview = "git fetch --all";
   const detailTree = useMemo(
     () => (details ? buildDiffTree(details.files, "commit-details") : null),
     [details]
@@ -2047,11 +2041,14 @@ export function DesktopGitSection({
     const defaults = resolveDefaultRemoteBranch();
     setSyncRemoteDraft(defaults.remote);
     setSyncTargetBranchDraft(defaults.branch);
+    setSyncPreviewLoading(false);
+    setSyncPreviewError(null);
+    setSyncPreviewCommits([]);
+    setSyncPreviewTargetFound(true);
     setActiveToolbarDialog("sync");
   }
 
   function openFetchDialog() {
-    setFetchRemoteDraft("all");
     setActiveToolbarDialog("fetch");
   }
 
@@ -2096,6 +2093,11 @@ export function DesktopGitSection({
     setPushPreviewExpandedDirs(new Set());
     setPushPreviewSelectedFileKey(null);
     setPushPreviewSelectedSha(null);
+    syncPreviewLoadSeqRef.current += 1;
+    setSyncPreviewLoading(false);
+    setSyncPreviewError(null);
+    setSyncPreviewCommits([]);
+    setSyncPreviewTargetFound(true);
     setActiveToolbarDialog(null);
     void refreshAll();
   }, [projectRoot]);
@@ -2318,6 +2320,56 @@ export function DesktopGitSection({
         }
       });
   }, [projectRoot, pushDialogOpen, pushPreviewSelectedSha]);
+
+  useEffect(() => {
+    if (!syncDialogOpen) {
+      syncPreviewLoadSeqRef.current += 1;
+      setSyncPreviewLoading(false);
+      return;
+    }
+    if (!projectRoot || !normalizedSyncRemote || !normalizedSyncTargetBranch) {
+      syncPreviewLoadSeqRef.current += 1;
+      setSyncPreviewLoading(false);
+      setSyncPreviewError(null);
+      setSyncPreviewCommits([]);
+      setSyncPreviewTargetFound(true);
+      return;
+    }
+    const requestSeq = ++syncPreviewLoadSeqRef.current;
+    const id = window.setTimeout(() => {
+      setSyncPreviewLoading(true);
+      setSyncPreviewError(null);
+      void bridge
+        .getGitPushPreview(projectRoot, {
+          remote: normalizedSyncRemote,
+          branch: normalizedSyncTargetBranch,
+          limit: 5,
+        })
+        .then((response) => {
+          if (syncPreviewLoadSeqRef.current !== requestSeq) {
+            return;
+          }
+          setSyncPreviewTargetFound(response.targetFound);
+          setSyncPreviewCommits(response.commits);
+        })
+        .catch((error) => {
+          if (syncPreviewLoadSeqRef.current !== requestSeq) {
+            return;
+          }
+          setSyncPreviewTargetFound(true);
+          setSyncPreviewCommits([]);
+          setSyncPreviewError(error instanceof Error ? error.message : String(error));
+        })
+        .finally(() => {
+          if (syncPreviewLoadSeqRef.current === requestSeq) {
+            setSyncPreviewLoading(false);
+          }
+        });
+    }, 180);
+    return () => {
+      window.clearTimeout(id);
+    };
+  }, [normalizedSyncRemote, normalizedSyncTargetBranch, projectRoot, syncDialogOpen]);
 
   useEffect(() => {
     if (!projectRoot || !selectedCommitSha) return;
@@ -2809,22 +2861,18 @@ export function DesktopGitSection({
   }
 
   async function confirmSyncDialog() {
-    const ok = await syncChanges({
+    setActiveToolbarDialog(null);
+    await syncChanges({
       remote: normalizedSyncRemote,
       targetBranch: normalizedSyncTargetBranch,
     });
-    if (ok) {
-      setActiveToolbarDialog(null);
-    }
   }
 
   async function confirmFetchDialog() {
-    const ok = await fetchChanges({
-      remote: normalizedFetchRemote === "all" ? null : normalizedFetchRemote,
+    setActiveToolbarDialog(null);
+    await fetchChanges({
+      remote: null,
     });
-    if (ok) {
-      setActiveToolbarDialog(null);
-    }
   }
 
   useEffect(() => {
@@ -3732,8 +3780,8 @@ export function DesktopGitSection({
                           pushPreviewFileTreeItems.map((item) => {
                             const treeIndentPx = item.depth * 14;
                             const treeRowStyle = {
-                              paddingLeft: `${treeIndentPx}px`,
-                              ["--git-tree-indent-x" as string]: `${Math.max(treeIndentPx - 7, 0)}px`,
+                              ["--git-tree-row-indent" as string]: `${treeIndentPx}px`,
+                              ["--git-tree-indent-x" as string]: `calc(${treeIndentPx}px + var(--git-filetree-row-pad-x, 8px) - 7px)`,
                               ["--git-tree-line-opacity" as string]: getTreeLineOpacity(item.depth > 0 ? 1 : 0),
                             } as CSSProperties;
 
@@ -4093,112 +4141,179 @@ export function DesktopGitSection({
         </div>
       ) : null}
 
-      {activeToolbarDialog === "sync" ? (
-        <GitToolbarConfirmDialog
-          title="同步分支"
-          icon={<Repeat size={14} />}
-          heroSource={toolbarBranchLabel}
-          heroTarget={`${normalizedSyncRemote}:${normalizedSyncTargetBranch}`}
-          command={syncCommandPreview}
-          fields={
-            <>
-              <label className="git-history-toolbar-confirm-field">
-                <span>远端</span>
-                <select
-                  value={normalizedSyncRemote}
-                  disabled={syncLoading}
-                  onChange={(event) => {
-                    const nextRemote = event.target.value;
-                    const nextBranches = buildRemoteBranchList(branches?.remoteBranches, nextRemote);
-                    setSyncRemoteDraft(nextRemote);
-                    setSyncTargetBranchDraft((current) =>
-                      current && nextBranches.includes(current) ? current : nextBranches[0] ?? currentBranch ?? "main"
-                    );
-                  }}
-                >
-                  {remoteOptions.map((remote) => (
-                    <option key={`sync-remote-${remote}`} value={remote}>
-                      {remote}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="git-history-toolbar-confirm-field">
-                <span>目标远端分支</span>
-                <input
-                  list="git-sync-target-branches"
-                  value={syncTargetBranchDraft}
-                  disabled={syncLoading}
-                  onChange={(event) => setSyncTargetBranchDraft(event.target.value)}
-                  placeholder={currentBranch ?? "main"}
-                />
-                <datalist id="git-sync-target-branches">
-                  {syncBranchOptions.map((branch) => (
-                    <option key={`sync-branch-${branch}`} value={branch} />
-                  ))}
-                </datalist>
-              </label>
-            </>
-          }
-          preflight={
-            <>
-              <div>领先 {commitsAhead} / 落后 {commitsBehind}</div>
-              <div>会先拉取远端，再推送本地提交。</div>
-            </>
-          }
-          facts={[
-            { label: "操作意图", value: "将当前分支与目标远端分支同步。" },
-            { label: "将会发生", value: "会按所选远端、目标分支依次执行 pull 和 push。" },
-            { label: "不会发生", value: "不会执行额外的分支切换或修改其它 Git 选项。" },
-          ]}
-          confirmLabel="同步"
-          loading={syncLoading}
-          onClose={() => setActiveToolbarDialog(null)}
-          onConfirm={() => {
-            void confirmSyncDialog();
+      {syncDialogOpen ? (
+        <div
+          className="git-history-dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !syncSubmitting) {
+              setActiveToolbarDialog(null);
+            }
           }}
-        />
+        >
+          <div
+            className="git-history-toolbar-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="同步分支"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="git-history-create-branch-title git-history-push-title">
+              <Repeat size={14} />
+              <span>同步分支</span>
+            </div>
+
+            <div className="git-history-toolbar-confirm-hero">
+              <div className="git-history-toolbar-confirm-hero-line">
+                <span>{currentBranch || "HEAD"}</span>
+                <span aria-hidden>{"->"}</span>
+                <span>{`${normalizedSyncRemote}:${normalizedSyncTargetBranch}`}</span>
+              </div>
+              <code>{syncCommandPreview}</code>
+            </div>
+
+            <div className="git-history-toolbar-confirm-preflight">
+              <div>
+                将当前分支 {currentBranch || "HEAD"} 与 {normalizedSyncRemote}:{normalizedSyncTargetBranch} 同步。
+              </div>
+              <div>
+                领先 {commitsAhead} / 落后 {commitsBehind}
+              </div>
+              {syncPreviewLoading ? <div>正在加载同步预览…</div> : null}
+              {syncPreviewError ? <div className="git-history-error">{syncPreviewError}</div> : null}
+              {!syncPreviewLoading && !syncPreviewError ? (
+                <div className="git-history-toolbar-confirm-commit-list">
+                  {syncPreviewCommits.slice(0, 5).map((entry) => (
+                    <div key={entry.sha} className="git-history-toolbar-confirm-commit-item">
+                      <code>{entry.shortSha}</code>
+                      <span>{entry.summary || "(no message)"}</span>
+                    </div>
+                  ))}
+                  {!syncPreviewCommits.length && syncPreviewTargetFound ? (
+                    <div className="git-history-toolbar-confirm-note">当前没有待同步的领先提交。</div>
+                  ) : null}
+                  {!syncPreviewTargetFound ? (
+                    <div className="git-history-toolbar-confirm-note">远端还没有这个目标分支，首次同步时会创建它。</div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            <dl className="git-history-toolbar-confirm-facts">
+              <div className="git-history-toolbar-confirm-fact">
+                <dt>操作意图</dt>
+                <dd>将当前分支与上游远端分支同步。</dd>
+              </div>
+              <div className="git-history-toolbar-confirm-fact">
+                <dt>将会发生</dt>
+                <dd>会先拉取远端最新提交，再把本地领先提交推送到目标分支。</dd>
+              </div>
+              <div className="git-history-toolbar-confirm-fact">
+                <dt>不会发生</dt>
+                <dd>不会切换分支，也不会附带额外的 pull 策略或 push 扩展参数。</dd>
+              </div>
+            </dl>
+
+            <div className="git-history-toolbar-confirm-command">
+              <span>示例命令</span>
+              <code>{syncCommandPreview}</code>
+            </div>
+
+            <div className="git-history-create-branch-actions">
+              <button
+                type="button"
+                className="git-history-create-branch-btn is-cancel"
+                disabled={syncSubmitting}
+                onClick={() => setActiveToolbarDialog(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="git-history-create-branch-btn"
+                disabled={syncSubmitting}
+                onClick={() => {
+                  void confirmSyncDialog();
+                }}
+              >
+                {syncSubmitting ? "执行中…" : "同步"}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
-      {activeToolbarDialog === "fetch" ? (
-        <GitToolbarConfirmDialog
-          title="获取远端更新"
-          icon={<Cloud size={14} />}
-          heroSource={normalizedFetchRemote === "all" ? "全部远端" : normalizedFetchRemote}
-          heroTarget="远端 refs"
-          command={fetchCommandPreview}
-          fieldsSingle
-          fields={
-            <label className="git-history-toolbar-confirm-field">
-              <span>远端</span>
-              <select value={normalizedFetchRemote} disabled={fetchLoading} onChange={(event) => setFetchRemoteDraft(event.target.value)}>
-                <option value="all">全部远端</option>
-                {remoteOptions.map((remote) => (
-                  <option key={`fetch-remote-${remote}`} value={remote}>
-                    {remote}
-                  </option>
-                ))}
-              </select>
-            </label>
-          }
-          preflight={
-            <>
-              <div>当前分支：{toolbarBranchLabel}</div>
-              <div>{normalizedFetchRemote === "all" ? "将更新全部远端引用信息。" : `将更新 ${normalizedFetchRemote} 的远端引用信息。`}</div>
-            </>
-          }
-          facts={[
-            { label: "操作意图", value: "更新远端引用信息用于比对。" },
-            { label: "将会发生", value: "会从所选远端获取最新 refs，并刷新当前 Git 面板。" },
-            { label: "不会发生", value: "不会把远端变更合并到当前分支。" },
-          ]}
-          confirmLabel="获取"
-          loading={fetchLoading}
-          onClose={() => setActiveToolbarDialog(null)}
-          onConfirm={() => {
-            void confirmFetchDialog();
+      {fetchDialogOpen ? (
+        <div
+          className="git-history-dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !fetchSubmitting) {
+              setActiveToolbarDialog(null);
+            }
           }}
-        />
+        >
+          <div
+            className="git-history-toolbar-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="获取远端更新"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="git-history-create-branch-title git-history-push-title">
+              <Cloud size={14} />
+              <span>获取远端更新</span>
+            </div>
+
+            <div className="git-history-toolbar-confirm-hero">
+              <div className="git-history-toolbar-confirm-hero-line">
+                <span>全部远端</span>
+                <span aria-hidden>{"->"}</span>
+                <span>远端 refs</span>
+              </div>
+              <code>{fetchCommandPreview}</code>
+            </div>
+
+            <dl className="git-history-toolbar-confirm-facts">
+              <div className="git-history-toolbar-confirm-fact">
+                <dt>操作意图</dt>
+                <dd>从全部远端获取最新 refs 和对象信息。</dd>
+              </div>
+              <div className="git-history-toolbar-confirm-fact">
+                <dt>将会发生</dt>
+                <dd>会把远端最新分支、标签以及提交元数据同步到本地仓库。</dd>
+              </div>
+              <div className="git-history-toolbar-confirm-fact">
+                <dt>不会发生</dt>
+                <dd>不会切换分支、不会自动 pull，也不会修改当前工作区文件。</dd>
+              </div>
+            </dl>
+
+            <div className="git-history-toolbar-confirm-command">
+              <span>示例命令</span>
+              <code>{fetchCommandPreview}</code>
+            </div>
+
+            <div className="git-history-create-branch-actions">
+              <button
+                type="button"
+                className="git-history-create-branch-btn is-cancel"
+                disabled={fetchSubmitting}
+                onClick={() => setActiveToolbarDialog(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="git-history-create-branch-btn"
+                disabled={fetchSubmitting}
+                onClick={() => {
+                  void confirmFetchDialog();
+                }}
+              >
+                {fetchSubmitting ? "执行中…" : "获取"}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {createDialogOpen ? (

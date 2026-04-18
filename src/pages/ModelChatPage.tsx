@@ -36,6 +36,7 @@ import type {
 } from "../lib/models";
 
 const STORAGE_KEY = "multi-cli-studio::api-chat-sessions";
+const DEFAULT_MODEL_CHAT_CONTEXT_TURN_LIMIT = 4;
 
 type PersistedChatState = {
   activeSessionId: string | null;
@@ -370,8 +371,11 @@ function getSessionPreview(session: ApiChatSession, settings: AppSettings) {
     : "等待第一条消息";
 }
 
-function buildReplayHistory(messages: ApiChatMessage[]) {
-  return messages
+function buildReplayHistory(
+  messages: ApiChatMessage[],
+  turnLimit = DEFAULT_MODEL_CHAT_CONTEXT_TURN_LIMIT
+) {
+  const normalizedMessages = messages
     .map((message) => {
       const normalized = normalizeApiChatMessage(message);
       if (normalized.error) return null;
@@ -385,6 +389,34 @@ function buildReplayHistory(messages: ApiChatMessage[]) {
       } satisfies ApiChatMessage;
     })
     .filter(Boolean) as ApiChatMessage[];
+
+  const systemMessages = normalizedMessages.filter((message) => message.role === "system");
+  const conversationMessages = normalizedMessages.filter((message) => message.role !== "system");
+  const normalizedTurnLimit =
+    Number.isFinite(turnLimit) && turnLimit > 0 ? Math.floor(turnLimit) : DEFAULT_MODEL_CHAT_CONTEXT_TURN_LIMIT;
+
+  if (conversationMessages.length === 0) {
+    return systemMessages;
+  }
+
+  let userTurnCount = 0;
+  let startIndex = 0;
+
+  for (let index = conversationMessages.length - 1; index >= 0; index -= 1) {
+    if (conversationMessages[index].role !== "user") continue;
+    userTurnCount += 1;
+    if (userTurnCount === normalizedTurnLimit) {
+      startIndex = index;
+      break;
+    }
+  }
+
+  const trimmedConversation =
+    userTurnCount < normalizedTurnLimit
+      ? conversationMessages
+      : conversationMessages.slice(startIndex);
+
+  return [...systemMessages, ...trimmedConversation];
 }
 
 function SidebarPrimaryButton({
@@ -1487,7 +1519,10 @@ export function ModelChatPage() {
     };
 
     const nextMessages = [...activeSession.messages, userMessage];
-    const requestMessages = buildReplayHistory(nextMessages);
+    const requestMessages = buildReplayHistory(
+      nextMessages,
+      settings.modelChatContextTurnLimit
+    );
     const nextTitle =
       activeSession.messages.length === 0 && activeSession.title === "New Chat"
         ? deriveTitleFromMessages(nextMessages)
@@ -1528,7 +1563,10 @@ export function ModelChatPage() {
     }
     const option = settings ? resolveModelOption(settings, selection) : null;
     const previousMessages = session.messages.slice(0, index);
-    const requestMessages = buildReplayHistory(previousMessages);
+    const requestMessages = buildReplayHistory(
+      previousMessages,
+      settings?.modelChatContextTurnLimit
+    );
     const origin: ApiChatGenerationMeta = {
       ...selection,
       providerName:

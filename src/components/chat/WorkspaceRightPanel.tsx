@@ -1432,7 +1432,11 @@ function WorkspaceFilesPanel({
   );
 }
 
-export function WorkspaceRightPanel() {
+export function WorkspaceRightPanel({
+  statusPanelCollapsed = false,
+}: {
+  statusPanelCollapsed?: boolean;
+}) {
   const activeTabId = useStore((state) => state.activeTerminalTabId);
   const terminalTabs = useStore((state) => state.terminalTabs);
   const workspaces = useStore((state) => state.workspaces);
@@ -1592,10 +1596,12 @@ export function WorkspaceRightPanel() {
             )}
           </div>
 
-          <WorkspaceTaskRail
-            tabTitle={activeTab?.title || workspace.name}
-            tasks={taskNodes}
-          />
+          {!statusPanelCollapsed ? (
+            <WorkspaceTaskRail
+              tabTitle={activeTab?.title || workspace.name}
+              tasks={taskNodes}
+            />
+          ) : null}
         </div>
       </div>
     </aside>

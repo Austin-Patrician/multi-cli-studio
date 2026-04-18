@@ -6,6 +6,7 @@ import { AppUpdateProvider } from "./features/update/AppUpdateProvider";
 import "./styles/globals.css";
 import "./styles/runtime-console.css";
 import "./styles/settings-desktop.css";
+import "./styles/terminal-chat-prompt.css";
 import "./styles/terminal-dock.css";
 import "./styles/workspace-right-panel.css";
 

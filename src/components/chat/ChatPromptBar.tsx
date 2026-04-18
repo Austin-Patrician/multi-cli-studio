@@ -1,4 +1,30 @@
-import { KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  KeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
+import {
+  Brain,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Cpu,
+  FileText,
+  LoaderCircle,
+  Paperclip,
+  Image as ImageIcon,
+  SendHorizontal,
+  Settings2,
+  Shield,
+  Square,
+  X,
+  Zap,
+} from "lucide-react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   ACP_COMMANDS,
   AcpCliCapabilities,
@@ -13,13 +39,17 @@ import {
 } from "../../lib/acp";
 import {
   AgentId,
+  ChatAttachment,
   CliSkillItem,
   FileMentionCandidate,
   TerminalTab,
   TerminalCliId,
 } from "../../lib/models";
+import { bridge } from "../../lib/bridge";
+import { createChatAttachment } from "../../lib/chatAttachments";
+import { estimateSessionTokens, FULL_COMPACT_THRESHOLD } from "../../lib/tokenEstimation";
 import { useStore } from "../../lib/store";
-import { CliSelector } from "./CliSelector";
+import { CLI_OPTIONS } from "./CliSelector";
 import { PromptOverlay, PromptOverlayItem, PromptOverlaySection } from "./PromptOverlay";
 
 type InteractiveOverlayEntry =
@@ -36,6 +66,27 @@ interface SkillOverlayState {
   sections: PromptOverlaySection[];
   entries: InteractiveOverlayEntry[];
 }
+
+interface ChatPromptBarProps {
+  statusPanelExpanded?: boolean;
+  onToggleStatusPanel?: () => void;
+}
+
+type FooterMenuId = "config" | "shortcuts" | "provider" | "mode" | "model" | "reasoning";
+
+type FooterReasoningOption = {
+  id: "low" | "medium" | "high" | "max";
+  label: string;
+  description: string;
+};
+
+type FooterProviderItem = {
+  id: TerminalCliId;
+  label: string;
+  icon?: string;
+  installed: boolean;
+  unavailable: boolean;
+};
 
 type CommandOverlayState =
   | {
@@ -106,6 +157,171 @@ function parseSkillSlashQuery(value: string) {
 function titleCaseCli(cliId: TerminalCliId) {
   if (cliId === "auto") return "Auto";
   return cliId.charAt(0).toUpperCase() + cliId.slice(1);
+}
+
+function attachmentLabel(attachment: ChatAttachment) {
+  return attachment.fileName;
+}
+
+function attachmentPreviewSrc(attachment: ChatAttachment) {
+  if (attachment.source.startsWith("data:")) {
+    return attachment.source;
+  }
+  if (attachment.source.startsWith("http://") || attachment.source.startsWith("https://")) {
+    return attachment.source;
+  }
+  if (attachment.kind !== "image") {
+    return "";
+  }
+  try {
+    return convertFileSrc(attachment.source);
+  } catch {
+    return "";
+  }
+}
+
+const FOOTER_REASONING_OPTIONS: FooterReasoningOption[] = [
+  { id: "low", label: "低", description: "更快响应，较少推理" },
+  { id: "medium", label: "中", description: "平衡速度与推理深度" },
+  { id: "high", label: "高", description: "更深入的推理与分析" },
+  { id: "max", label: "最大", description: "最深推理，耗时更长" },
+];
+
+function footerModeLabel(value: string) {
+  switch (value) {
+    case "workspace-write":
+      return "工作区写入";
+    case "read-only":
+      return "只读";
+    case "acceptEdits":
+      return "接受编辑";
+    case "bypassPermissions":
+      return "自动通过";
+    case "auto_edit":
+      return "自动编辑";
+    case "default":
+      return "默认";
+    default:
+      return value
+        .replace(/[_-]+/g, " ")
+        .replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+}
+
+function footerEffortLabel(value: string | null | undefined) {
+  switch (value) {
+    case "low":
+      return "低";
+    case "medium":
+      return "中";
+    case "high":
+      return "高";
+    case "max":
+      return "最大";
+    default:
+      return "默认";
+  }
+}
+
+function findOptionLabel(options: AcpOptionDef[] | null | undefined, value: string | null | undefined) {
+  if (!value) return null;
+  return options?.find((option) => option.value === value)?.label ?? null;
+}
+
+function footerOptionDescription(option: AcpOptionDef) {
+  return option.description?.trim() || (
+    option.source === "runtime"
+      ? "从当前 CLI 能力中检测"
+      : option.source === "fallback"
+        ? "内置预设"
+        : "手动输入值"
+  );
+}
+
+function FooterMenuSection({
+  title,
+  children,
+}: {
+  title?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="footer-menu-section">
+      {title ? <div className="selector-dropdown-title">{title}</div> : null}
+      {children}
+    </div>
+  );
+}
+
+function FooterMenuItem({
+  label,
+  description,
+  onClick,
+  disabled = false,
+  selected = false,
+  leading,
+  trailing,
+  title,
+  className,
+}: {
+  label: string;
+  description?: string;
+  onClick?: () => void;
+  disabled?: boolean;
+  selected?: boolean;
+  leading?: ReactNode;
+  trailing?: ReactNode;
+  title?: string;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`selector-option selector-option-button${selected ? " selected" : ""}${disabled ? " disabled" : ""}${className ? ` ${className}` : ""}`}
+    >
+      {leading ? <span className="footer-option-leading">{leading}</span> : null}
+      <span className="footer-option-copy">
+        <span className="footer-option-label">{label}</span>
+        {description ? (
+          <span className="footer-option-description model-description">{description}</span>
+        ) : null}
+      </span>
+      {trailing ?? (selected ? <Check className="selector-option-check" size={14} aria-hidden /> : null)}
+    </button>
+  );
+}
+
+function StatusPanelToggleIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+      <path
+        d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-13Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+      <path d="M15 4v16" stroke="currentColor" strokeWidth="1.5" />
+      {collapsed ? (
+        <path
+          d="M11 9l3 3-3 3"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ) : (
+        <path
+          d="M13 9l-3 3 3 3"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      )}
+    </svg>
+  );
 }
 
 function resolveConcreteCli(activeTab: TerminalTab | null, fallback: AgentId | undefined): AgentId {
@@ -563,9 +779,12 @@ function buildSkillCommandOverlay(
   };
 }
 
-export function ChatPromptBar() {
+export function ChatPromptBar({
+  statusPanelExpanded = false,
+  onToggleStatusPanel,
+}: ChatPromptBarProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const actionMenuRef = useRef<HTMLDivElement>(null);
+  const footerMenuRef = useRef<HTMLDivElement>(null);
   const promptHistoryStateRef = useRef<{ index: number | null; draft: string }>({
     index: null,
     draft: "",
@@ -574,12 +793,13 @@ export function ChatPromptBar() {
   const [mentionItems, setMentionItems] = useState<FileMentionCandidate[]>([]);
   const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
   const [dismissedSkillKey, setDismissedSkillKey] = useState<string | null>(null);
-  const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
+  const [openFooterMenu, setOpenFooterMenu] = useState<FooterMenuId | null>(null);
   const [queueFeedback, setQueueFeedback] = useState<string | null>(null);
 
   const terminalTabs = useStore((s) => s.terminalTabs);
   const workspaces = useStore((s) => s.workspaces);
   const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
+  const appState = useStore((s) => s.appState);
   const busyAction = useStore((s) => s.busyAction);
   const activeSession = useStore((s) =>
     s.activeTerminalTabId ? s.chatSessions[s.activeTerminalTabId] ?? null : null
@@ -592,6 +812,7 @@ export function ChatPromptBar() {
   const cliSkillsByContext = useStore((s) => s.cliSkillsByContext);
   const cliSkillStatusByContext = useStore((s) => s.cliSkillStatusByContext);
   const setTabDraftPrompt = useStore((s) => s.setTabDraftPrompt);
+  const setTabSelectedCli = useStore((s) => s.setTabSelectedCli);
   const sendChatMessage = useStore((s) => s.sendChatMessage);
   const executeAcpCommand = useStore((s) => s.executeAcpCommand);
   const snapshotWorkspace = useStore((s) => s.snapshotWorkspace);
@@ -604,11 +825,14 @@ export function ChatPromptBar() {
   const queueChatMessage = useStore((s) => s.queueChatMessage);
   const editQueuedChatMessage = useStore((s) => s.editQueuedChatMessage);
   const interruptChatTurn = useStore((s) => s.interruptChatTurn);
+  const addDraftChatAttachments = useStore((s) => s.addDraftChatAttachments);
+  const removeDraftChatAttachment = useStore((s) => s.removeDraftChatAttachment);
 
   const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
   const workspace = workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null;
   const effectiveCli = resolveConcreteCli(activeTab, workspace?.activeAgent);
   const prompt = activeTab?.draftPrompt ?? "";
+  const draftAttachments = activeTab?.draftAttachments ?? [];
   const isStreaming = activeTab?.status === "streaming";
   const isBusy = busyAction === "checks" || busyAction?.startsWith("review-") || false;
   const cliSkillCacheKey = workspace ? `${effectiveCli}:${workspace.id}` : null;
@@ -624,7 +848,11 @@ export function ChatPromptBar() {
     return parseSkillSlashQuery(rawSlashPrompt);
   }, [activeTab, rawSlashPrompt]);
   const promptHistory = useMemo(
-    () => activeSession?.messages.filter((message) => message.role === "user").map((message) => message.content) ?? [],
+    () =>
+      activeSession?.messages
+        .filter((message) => message.role === "user")
+        .map((message) => message.content)
+        .filter((value) => value.trim().length > 0) ?? [],
     [activeSession?.messages]
   );
 
@@ -642,6 +870,10 @@ export function ChatPromptBar() {
 
   useEffect(() => {
     setQueueFeedback(null);
+  }, [activeTab?.id]);
+
+  useEffect(() => {
+    setOpenFooterMenu(null);
   }, [activeTab?.id]);
 
   const mentionToken = useMemo(() => {
@@ -819,19 +1051,19 @@ export function ChatPromptBar() {
 
   useEffect(() => {
     function handlePointerDown(event: MouseEvent) {
-      if (!actionMenuRef.current?.contains(event.target as Node)) {
-        setIsActionMenuOpen(false);
+      if (!footerMenuRef.current?.contains(event.target as Node)) {
+        setOpenFooterMenu(null);
       }
     }
 
-    if (isActionMenuOpen) {
+    if (openFooterMenu) {
       window.addEventListener("mousedown", handlePointerDown);
     }
 
     return () => {
       window.removeEventListener("mousedown", handlePointerDown);
     };
-  }, [isActionMenuOpen]);
+  }, [openFooterMenu]);
 
   useEffect(() => {
     function handleFocusQueuedEdit() {
@@ -879,6 +1111,52 @@ export function ChatPromptBar() {
     });
   }
 
+  async function handlePickAttachments() {
+    if (!activeTab || !workspace || isStreaming) return;
+    closeFooterMenus();
+
+    try {
+      const picked = await bridge.pickChatAttachments();
+      if (picked.length === 0) return;
+
+      const prepared = picked
+        .map((item) => createChatAttachment(item, workspace.rootPath))
+        .filter((item): item is ChatAttachment => Boolean(item));
+      const imageCount = prepared.filter((attachment) => attachment.kind === "image").length;
+      const allowImages = activeTab.selectedCli === "codex";
+      const allowedPicked = allowImages
+        ? picked
+        : picked.filter((item) => {
+            const attachment = createChatAttachment(item, workspace.rootPath);
+            return attachment?.kind !== "image";
+          });
+
+      const result = addDraftChatAttachments(activeTab.id, workspace.rootPath, allowedPicked);
+      if (!allowImages && imageCount > 0) {
+        setQueueFeedback("当前仅 Codex 支持图片附件，图片已忽略。");
+      } else if (result.added === 0) {
+        setQueueFeedback("没有可添加的新附件。");
+      } else {
+        setQueueFeedback(null);
+      }
+      focusPromptAtEnd();
+    } catch (error) {
+      const detail =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "Attachment picker failed.";
+      setQueueFeedback(detail);
+    }
+  }
+
+  function handleRemoveDraftAttachment(attachmentId: string) {
+    if (!activeTab) return;
+    removeDraftChatAttachment(activeTab.id, attachmentId);
+    focusPromptAtEnd();
+  }
+
   function navigatePromptHistory(direction: -1 | 1) {
     if (!activeTab || promptHistory.length === 0) return;
 
@@ -919,7 +1197,11 @@ export function ChatPromptBar() {
 
   function handleSend() {
     if (!activeTab) return;
-    setIsActionMenuOpen(false);
+    closeFooterMenus();
+    if (draftAttachments.some((attachment) => attachment.kind === "image") && activeTab.selectedCli !== "codex") {
+      setQueueFeedback("当前仅 Codex 支持图片附件，请切换到 Codex 后发送。");
+      return;
+    }
 
     if (commandOverlay) {
       if (commandOverlay.kind === "command-help" || commandOverlay.kind === "skill-command") {
@@ -961,13 +1243,23 @@ export function ChatPromptBar() {
       const result = queueChatMessage(activeTab.id, prompt, activeTab.selectedCli);
       if (result === "full") {
         setQueueFeedback("Only one queued message is allowed. Press Ctrl+B to edit it.");
+      } else if (result === "unsupportedAttachments") {
+        setQueueFeedback("当前仅 Codex 支持图片附件，请切换到 Codex 后再排队。");
       } else if (result === "queued") {
         setQueueFeedback(null);
       }
       return;
     }
 
-    void sendChatMessage(activeTab.id);
+    void sendChatMessage(activeTab.id).catch((error) => {
+      const detail =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "发送失败";
+      setQueueFeedback(detail);
+    });
   }
 
   function handleEditQueuedMessage() {
@@ -1109,8 +1401,8 @@ export function ChatPromptBar() {
       return;
     }
 
-    if (isActionMenuOpen) {
-      setIsActionMenuOpen(false);
+    if (openFooterMenu) {
+      closeFooterMenus();
     }
   }
 
@@ -1164,7 +1456,7 @@ export function ChatPromptBar() {
       }
     }
 
-    if (!commandOverlay && !showSkillOverlay && !showMentionOverlay && !isActionMenuOpen) {
+    if (!commandOverlay && !showSkillOverlay && !showMentionOverlay && !openFooterMenu) {
       if (event.key === "ArrowUp" && atPromptStart) {
         event.preventDefault();
         navigatePromptHistory(-1);
@@ -1177,7 +1469,7 @@ export function ChatPromptBar() {
       }
     }
 
-    if (event.key === "Escape" && (commandOverlay || showSkillOverlay || showMentionOverlay || isActionMenuOpen)) {
+    if (event.key === "Escape" && (commandOverlay || showSkillOverlay || showMentionOverlay || openFooterMenu)) {
       event.preventDefault();
       handleEscape();
       return;
@@ -1196,13 +1488,177 @@ export function ChatPromptBar() {
   }
 
   if (!activeTab || !workspace) return null;
-  const cliLabel = titleCaseCli(activeTab.selectedCli);
   const isAutoMode = activeTab.selectedCli === "auto";
+  const promptPlaceholder = isStreaming
+    ? queuedPrompt
+      ? "响应中，队列已满 · Ctrl+B 编辑队列 · Shift+Enter 换行 · ↑↓ 历史"
+      : "响应中，可继续输入 · Enter 加入队列 · Shift+Enter 换行 · ↑↓ 历史"
+    : isAutoMode
+      ? "/指令中心 · @引用文件 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
+      : "/指令中心 · @引用文件 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
+  const estimatedUsageTokens =
+    activeSession?.estimatedTokens && activeSession.estimatedTokens > 0
+      ? activeSession.estimatedTokens
+      : activeSession
+        ? estimateSessionTokens(activeSession)
+        : 0;
+  const usagePercent = Math.min(100, (estimatedUsageTokens / FULL_COMPACT_THRESHOLD) * 100);
+  const usagePercentLabel = `${Math.round(usagePercent)}%`;
+  const messageCount = activeSession?.messages.length ?? 0;
+  const compactedSummaryCount = activeSession?.compactedSummaries.length ?? 0;
+  const usageTooltip = `本地估算 ${estimatedUsageTokens.toLocaleString()} tokens，占压缩阈值 ${FULL_COMPACT_THRESHOLD.toLocaleString()} 的 ${usagePercentLabel}。`;
+  const capabilities = acpCapabilitiesByCli[effectiveCli] ?? null;
+  const capabilityStatus = acpCapabilityStatusByCli[effectiveCli] ?? "idle";
+  const providerItems: FooterProviderItem[] = CLI_OPTIONS.map((option) => {
+    if (option.id === "auto") {
+      return {
+        id: option.id,
+        label: option.label,
+        icon: option.icon,
+        installed: true,
+        unavailable: false,
+      };
+    }
+
+    const runtime = appState?.agents.find((agent) => agent.id === option.id)?.runtime;
+    const installed = runtime?.installed ?? true;
+    return {
+      id: option.id,
+      label: option.label,
+      icon: option.icon,
+      installed,
+      unavailable: runtime != null ? !runtime.installed : false,
+    };
+  });
+  const currentProviderItem =
+    providerItems.find((item) => item.id === activeTab.selectedCli) ??
+    providerItems[0];
+  const permissionOptions = capabilities?.permissions.options ?? [];
+  const modelOptions = capabilities?.model.options ?? [];
+  const currentPermissionValue = currentPermissionLabel(activeTab);
+  const currentModelValue = activeTab.modelOverrides[effectiveCli] ?? "";
+  const currentPermissionDisplay =
+    findOptionLabel(permissionOptions, currentPermissionValue) ?? footerModeLabel(currentPermissionValue);
+  const currentModelDisplay =
+    findOptionLabel(modelOptions, currentModelValue) ??
+    (currentModelValue.trim() ? currentModelValue : "默认模型");
+  const currentReasoningDisplay = footerEffortLabel(activeTab.effortLevel);
+  const supportsReasoning = effectiveCli === "codex" || effectiveCli === "claude";
+  const footerSelectorsLocked = isStreaming;
+  const selectorLockTitle = isStreaming ? "响应进行中，当前不可修改会话配置" : undefined;
+  const autoSelectorTitle = "Auto 路由下不可直接指定，先切换到具体 CLI";
+  const reasoningSelectorTitle = !supportsReasoning
+    ? `${titleCaseCli(effectiveCli)} 当前不支持思考深度选择`
+    : undefined;
+  const modeMenuLoading =
+    !isAutoMode &&
+    (capabilityStatus === "idle" || capabilityStatus === "loading") &&
+    !capabilities?.permissions;
+  const modelMenuLoading =
+    !isAutoMode &&
+    (capabilityStatus === "idle" || capabilityStatus === "loading") &&
+    !capabilities?.model;
+  const sendDisabled = !isStreaming && prompt.trim().length === 0 && draftAttachments.length === 0;
+
+  function handleToggleFooterMenu(menu: FooterMenuId, disabled = false) {
+    if (disabled) return;
+    if ((menu === "mode" || menu === "model") && !isAutoMode) {
+      void loadAcpCapabilities(effectiveCli);
+    }
+    setOpenFooterMenu((current) => (current === menu ? null : menu));
+  }
+
+  function closeFooterMenus() {
+    setOpenFooterMenu(null);
+  }
+
+  function handleProviderSelect(cliId: TerminalCliId, unavailable: boolean) {
+    if (!activeTab || unavailable) return;
+    setTabSelectedCli(activeTab.id, cliId);
+    closeFooterMenus();
+    if (cliId !== "auto") {
+      void loadAcpCapabilities(cliId);
+    }
+    focusPromptAtEnd();
+  }
+
+  function handlePermissionSelect(value: string) {
+    if (!activeTab || isAutoMode) return;
+    closeFooterMenus();
+    void executeAcpCommand(
+      {
+        kind: "permissions",
+        args: [value],
+        rawInput: `/permissions ${value}`,
+      },
+      activeTab.id
+    );
+    focusPromptAtEnd();
+  }
+
+  function handleModelSelect(value: string) {
+    if (!activeTab || isAutoMode) return;
+    closeFooterMenus();
+    void executeAcpCommand(
+      {
+        kind: "model",
+        args: [value],
+        rawInput: `/model ${value}`,
+      },
+      activeTab.id
+    );
+    focusPromptAtEnd();
+  }
+
+  function handleReasoningSelect(value: FooterReasoningOption["id"]) {
+    if (!activeTab || isAutoMode || !supportsReasoning) return;
+    closeFooterMenus();
+    void executeAcpCommand(
+      {
+        kind: "effort",
+        args: [value],
+        rawInput: `/effort ${value}`,
+      },
+      activeTab.id
+    );
+    focusPromptAtEnd();
+  }
+
+  function handlePlanToggle() {
+    if (!activeTab || footerSelectorsLocked) return;
+    togglePlanMode(activeTab.id);
+    closeFooterMenus();
+    focusPromptAtEnd();
+  }
+
+  function handleFastToggle() {
+    if (!activeTab || footerSelectorsLocked || activeTab.selectedCli !== "claude") return;
+    closeFooterMenus();
+    void executeAcpCommand(
+      {
+        kind: "fast",
+        args: [],
+        rawInput: "/fast",
+      },
+      activeTab.id
+    );
+    focusPromptAtEnd();
+  }
+
+  function handleShortcutAction(action: "snapshot" | "checks") {
+    closeFooterMenus();
+    if (action === "snapshot") {
+      void snapshotWorkspace();
+    } else {
+      void runChecks();
+    }
+    focusPromptAtEnd();
+  }
 
   return (
     <div
       data-chat-prompt-surface="true"
-      className="border-t border-border bg-[radial-gradient(circle_at_top,#f8fbff_0%,#ffffff_48%)] px-5 py-4"
+      className="terminal-chat-prompt px-5 py-2.5"
     >
       <div className="mx-auto max-w-5xl">
         <div className="relative overflow-visible">
@@ -1231,158 +1687,429 @@ export function ChatPromptBar() {
             />
           )}
 
-          <div className="rounded-[28px] border border-[#d7e0eb] bg-[linear-gradient(180deg,#ffffff_0%,#f8fbff_100%)] px-4 pt-3 pb-3.5 shadow-[0_18px_54px_rgba(15,23,42,0.08)] transition-colors focus-within:border-accent/40 focus-within:shadow-[0_22px_64px_rgba(59,130,246,0.09)]">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <CliSelector />
+          <div className="terminal-chat-prompt-shell">
+            <div className="terminal-chat-input-box">
+              <div className="terminal-chat-input-area">
+                {draftAttachments.length > 0 ? (
+                  <div className="terminal-chat-attachments" data-chat-search-ignore="true">
+                    {draftAttachments.map((attachment) => {
+                      const previewSrc = attachmentPreviewSrc(attachment);
+                      const label = attachmentLabel(attachment);
+                      return (
+                        <div
+                          key={attachment.id}
+                          className={`terminal-chat-attachment-chip terminal-chat-attachment-chip--${attachment.kind}`}
+                          title={label}
+                        >
+                          {attachment.kind === "image" && previewSrc ? (
+                            <span className="terminal-chat-attachment-thumb" aria-hidden="true">
+                              <img src={previewSrc} alt="" />
+                            </span>
+                          ) : (
+                            <span className="terminal-chat-attachment-icon" aria-hidden="true">
+                              {attachment.kind === "image" ? (
+                                <ImageIcon size={13} />
+                              ) : (
+                                <FileText size={13} />
+                              )}
+                            </span>
+                          )}
+                          <span className="terminal-chat-attachment-name">{label}</span>
+                          <button
+                            type="button"
+                            className="terminal-chat-attachment-remove"
+                            onClick={() => handleRemoveDraftAttachment(attachment.id)}
+                            aria-label={`移除 ${label}`}
+                          >
+                            <X size={12} aria-hidden="true" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+
+                <textarea
+                  ref={textareaRef}
+                  rows={1}
+                  value={prompt}
+                  onChange={(event) => handlePromptChange(event.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder={promptPlaceholder}
+                  className="terminal-chat-textarea"
+                />
+
+                {queueFeedback ? (
+                  <div className="terminal-chat-queue-feedback">{queueFeedback}</div>
+                ) : null}
               </div>
 
-              <div ref={actionMenuRef} className="relative shrink-0">
+              <div
+                ref={footerMenuRef}
+                className="button-area"
+                data-provider={currentProviderItem.id}
+              >
+                <div className="button-area-left">
+                  <div className="terminal-chat-footer-control">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleFooterMenu("config", footerSelectorsLocked)}
+                      disabled={footerSelectorsLocked}
+                      title={selectorLockTitle ?? "会话配置"}
+                      className="selector-button config-button"
+                    >
+                      <Settings2 size={14} />
+                    </button>
+
+                    {openFooterMenu === "config" ? (
+                      <div className="selector-dropdown terminal-chat-dropdown--config">
+                        <FooterMenuSection title="会话开关">
+                          <FooterMenuItem
+                            label="Plan Mode"
+                            description="Shift+Tab 也可以快速切换"
+                            onClick={handlePlanToggle}
+                            trailing={
+                              <span className={`footer-option-state ${activeTab.planMode ? "is-active" : ""}`}>
+                                {activeTab.planMode ? "ON" : "OFF"}
+                              </span>
+                            }
+                          />
+
+                          {activeTab.selectedCli === "claude" ? (
+                            <FooterMenuItem
+                              label="Fast Mode"
+                              description="Claude 专用的快速输出模式"
+                              onClick={handleFastToggle}
+                              trailing={
+                                <span className={`footer-option-state ${activeTab.fastMode ? "is-active" : ""}`}>
+                                  {activeTab.fastMode ? "ON" : "OFF"}
+                                </span>
+                              }
+                            />
+                          ) : null}
+                        </FooterMenuSection>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="terminal-chat-footer-control">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleFooterMenu("shortcuts", isStreaming || isBusy)}
+                      disabled={isStreaming || isBusy}
+                      title={isStreaming || isBusy ? "当前不可执行快捷动作" : "快捷动作"}
+                      className="selector-button selector-shortcut-button"
+                    >
+                      <Zap size={14} />
+                    </button>
+
+                    {openFooterMenu === "shortcuts" ? (
+                      <div className="selector-dropdown terminal-chat-dropdown--shortcuts">
+                        <FooterMenuSection title="快捷动作">
+                          <FooterMenuItem
+                            label="Snapshot"
+                            description="标记当前工作区可交接状态"
+                            onClick={() => handleShortcutAction("snapshot")}
+                            leading={<Settings2 size={14} />}
+                          />
+                          <FooterMenuItem
+                            label="Run Checks"
+                            description="运行当前工作区默认校验命令"
+                            onClick={() => handleShortcutAction("checks")}
+                            leading={isBusy ? <LoaderCircle className="animate-spin" size={14} /> : <Shield size={14} />}
+                          />
+                        </FooterMenuSection>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="terminal-chat-footer-control">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleFooterMenu("provider", footerSelectorsLocked)}
+                      disabled={footerSelectorsLocked}
+                      title={selectorLockTitle ?? `切换路由目标：${currentProviderItem.label}`}
+                      className="selector-button selector-provider-button"
+                    >
+                      {currentProviderItem.id === "auto" ? (
+                        <span className="footer-provider-auto-mark">A</span>
+                      ) : (
+                        <img
+                          src={currentProviderItem.icon}
+                          alt=""
+                          aria-hidden="true"
+                          className="footer-provider-icon"
+                          style={{ opacity: currentProviderItem.unavailable ? 0.45 : 1 }}
+                        />
+                      )}
+                    </button>
+
+                    {openFooterMenu === "provider" ? (
+                      <div className="selector-dropdown terminal-chat-dropdown--provider">
+                        <FooterMenuSection title="路由目标">
+                          {providerItems.map((item) => {
+                            const isSelected = item.id === activeTab.selectedCli;
+                            return (
+                              <FooterMenuItem
+                                key={item.id}
+                                label={item.label}
+                                description={
+                                  item.id === "auto"
+                                    ? "按任务自动路由"
+                                    : item.unavailable
+                                      ? "当前 CLI 未安装"
+                                      : "直接发送到该 CLI"
+                                }
+                                onClick={() => handleProviderSelect(item.id, item.unavailable)}
+                                disabled={item.unavailable}
+                                selected={isSelected}
+                                leading={
+                                  item.id === "auto" ? (
+                                    <span className="footer-provider-auto-mark">A</span>
+                                  ) : (
+                                    <img
+                                      src={item.icon}
+                                      alt=""
+                                      aria-hidden="true"
+                                      className="footer-provider-icon"
+                                      style={{ opacity: item.unavailable ? 0.45 : 1 }}
+                                    />
+                                  )
+                                }
+                              />
+                            );
+                          })}
+                        </FooterMenuSection>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="terminal-chat-footer-control">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleFooterMenu("mode", isAutoMode || footerSelectorsLocked)}
+                      disabled={isAutoMode || footerSelectorsLocked}
+                      title={selectorLockTitle ?? (isAutoMode ? autoSelectorTitle : "规则模式")}
+                      className="selector-button"
+                    >
+                      <Shield size={14} />
+                      <span className="selector-button-text">{currentPermissionDisplay}</span>
+                      {openFooterMenu === "mode" ? (
+                        <ChevronUp className="selector-button-chevron" size={12} />
+                      ) : (
+                        <ChevronDown className="selector-button-chevron" size={12} />
+                      )}
+                    </button>
+
+                    {openFooterMenu === "mode" ? (
+                      <div className="selector-dropdown selector-dropdown--mode">
+                        {modeMenuLoading ? (
+                          <div className="selector-option disabled">
+                            <LoaderCircle className="animate-spin" size={14} />
+                            <span>正在加载该 CLI 的规则模式…</span>
+                          </div>
+                        ) : permissionOptions.length > 0 ? (
+                          <FooterMenuSection title="规则模式">
+                            {permissionOptions.map((option) => (
+                              <FooterMenuItem
+                                key={option.value}
+                                label={option.label || footerModeLabel(option.value)}
+                                description={footerOptionDescription(option)}
+                                onClick={() => handlePermissionSelect(option.value)}
+                                selected={option.value === currentPermissionValue}
+                              />
+                            ))}
+                          </FooterMenuSection>
+                        ) : (
+                          <div className="selector-option disabled">当前 CLI 没有暴露可选的规则模式。</div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="terminal-chat-footer-control">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleFooterMenu("model", isAutoMode || footerSelectorsLocked)}
+                      disabled={isAutoMode || footerSelectorsLocked}
+                      title={selectorLockTitle ?? (isAutoMode ? autoSelectorTitle : `当前模型：${currentModelDisplay}`)}
+                      className="selector-button"
+                    >
+                      <Cpu size={14} />
+                      <span className="selector-button-text">{currentModelDisplay}</span>
+                      {openFooterMenu === "model" ? (
+                        <ChevronUp className="selector-button-chevron" size={12} />
+                      ) : (
+                        <ChevronDown className="selector-button-chevron" size={12} />
+                      )}
+                    </button>
+
+                    {openFooterMenu === "model" ? (
+                      <div className="selector-dropdown selector-dropdown--model">
+                        {modelMenuLoading ? (
+                          <div className="selector-option disabled">
+                            <LoaderCircle className="animate-spin" size={14} />
+                            <span>正在加载该 CLI 的模型列表…</span>
+                          </div>
+                        ) : modelOptions.length > 0 ? (
+                          <FooterMenuSection title="模型选择">
+                            {modelOptions.map((option) => (
+                              <FooterMenuItem
+                                key={option.value}
+                                label={option.label || option.value}
+                                description={footerOptionDescription(option)}
+                                onClick={() => handleModelSelect(option.value)}
+                                selected={option.value === currentModelValue}
+                              />
+                            ))}
+                          </FooterMenuSection>
+                        ) : (
+                          <div className="selector-option disabled">当前 CLI 没有返回可选模型列表。</div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="terminal-chat-footer-control">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleFooterMenu(
+                        "reasoning",
+                        isAutoMode || footerSelectorsLocked || !supportsReasoning
+                      )}
+                      disabled={isAutoMode || footerSelectorsLocked || !supportsReasoning}
+                      title={selectorLockTitle ?? (isAutoMode ? autoSelectorTitle : reasoningSelectorTitle ?? "思考深度")}
+                      className="selector-button"
+                    >
+                      <Brain size={14} />
+                      <span className="selector-button-text">{currentReasoningDisplay}</span>
+                      {openFooterMenu === "reasoning" ? (
+                        <ChevronUp className="selector-button-chevron" size={12} />
+                      ) : (
+                        <ChevronDown className="selector-button-chevron" size={12} />
+                      )}
+                    </button>
+
+                    {openFooterMenu === "reasoning" ? (
+                      <div className="selector-dropdown terminal-chat-dropdown--reasoning">
+                        <FooterMenuSection title="思考深度">
+                          {FOOTER_REASONING_OPTIONS.map((option) => (
+                            <FooterMenuItem
+                              key={option.id}
+                              label={option.label}
+                              description={option.description}
+                              onClick={() => handleReasoningSelect(option.id)}
+                              selected={option.id === activeTab.effortLevel}
+                            />
+                          ))}
+                        </FooterMenuSection>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="button-area-right">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isStreaming && activeTab) {
+                        void interruptChatTurn(activeTab.id);
+                        return;
+                      }
+                      handleSend();
+                    }}
+                    disabled={sendDisabled}
+                    title={isStreaming ? "停止生成" : "发送消息"}
+                    className={`submit-button${isStreaming ? " stop-button" : ""}`}
+                  >
+                    {isStreaming ? <Square size={14} fill="currentColor" /> : <SendHorizontal size={14} />}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="context-bar">
+              <div className="context-tools">
                 <button
                   type="button"
-                  onClick={() => {
-                    setDismissedMentionKey(null);
-                    setDismissedSkillKey(null);
-                    setIsActionMenuOpen((current) => !current);
-                  }}
-                  disabled={isStreaming || isBusy}
-                  className="flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 bg-white/90 text-slate-400 transition-all hover:border-indigo-300 hover:text-indigo-600 active:scale-95 shadow-sm disabled:cursor-not-allowed disabled:opacity-40"
-                  title="快捷操作"
+                  onClick={() => void handlePickAttachments()}
+                  disabled={isStreaming}
+                  className="context-tool-btn context-tool-btn--labeled"
+                  title={isStreaming ? "响应进行中，暂时无法添加附件" : "添加附件"}
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className={`w-4 h-4 transition-transform duration-300 ${isActionMenuOpen ? 'rotate-45 text-indigo-600' : ''}`}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                  </svg>
+                  <span className="terminal-chat-status-icon">
+                    <Paperclip size={14} />
+                  </span>
+                  <span className="context-tool-label">
+                    附件{draftAttachments.length > 0 ? ` ${draftAttachments.length}` : ""}
+                  </span>
                 </button>
 
-                {isActionMenuOpen && (
-                  <div className="absolute bottom-full right-0 z-20 mb-3 w-[210px] overflow-hidden rounded-[18px] border border-[#dce4ef] bg-white shadow-[0_24px_70px_rgba(15,23,42,0.14)]">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsActionMenuOpen(false);
-                        void snapshotWorkspace();
-                      }}
-                      disabled={isStreaming || isBusy}
-                      className="flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors hover:bg-[#f7f9fc] disabled:cursor-not-allowed disabled:opacity-45"
-                      title="Mark this workspace as ready for handoff"
+                <div className="context-dual-usage">
+                  <button
+                    type="button"
+                    aria-label={usageTooltip}
+                    className="context-tool-btn context-tool-btn--labeled"
+                  >
+                    <span
+                      className="context-dual-usage-ring"
+                      style={{ "--dual-usage-percent": usagePercentLabel } as CSSProperties}
+                      aria-hidden="true"
                     >
-                      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-2xl bg-[#eef4ff] text-accent">
-                        <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                          <path d="M10 3v9m0 0l3-3m-3 3L7 9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                          <path d="M4 13.5v1A1.5 1.5 0 005.5 16h9A1.5 1.5 0 0016 14.5v-1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                        </svg>
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-[13px] font-semibold text-text">Snapshot</div>
-                        <div className="mt-0.5 text-[11px] leading-5 text-secondary">
-                          Mark handoff
-                        </div>
-                      </div>
-                    </button>
+                      <span className="context-dual-usage-ring-inner" />
+                    </span>
+                    <span className="context-dual-usage-percent">{usagePercentLabel}</span>
+                  </button>
 
-                    <div className="border-t border-border" />
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsActionMenuOpen(false);
-                        void runChecks();
-                      }}
-                      disabled={isStreaming || isBusy}
-                      className="flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors hover:bg-[#f7f9fc] disabled:cursor-not-allowed disabled:opacity-45"
-                      title="Run the default validation command for this workspace"
-                    >
-                      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-2xl bg-[#f4f7fb] text-[#334155]">
-                        <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                          <path d="M4.5 10.5l3 3L15.5 5.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
+                  <div className="context-dual-tooltip">
+                    <div className="context-dual-tooltip-title">总消耗窗口</div>
+                    <div className="context-dual-tooltip-grid">
+                      <div className="context-dual-tooltip-kv">
+                        <span className="context-dual-tooltip-key">当前消耗</span>
+                        <span className="context-dual-tooltip-value">
+                          {estimatedUsageTokens.toLocaleString()}
+                        </span>
                       </div>
-                      <div className="min-w-0">
-                        <div className="text-[13px] font-semibold text-text">Run Checks</div>
-                        <div className="mt-0.5 text-[11px] leading-5 text-secondary">
-                          Validate
-                        </div>
+                      <div className="context-dual-tooltip-kv">
+                        <span className="context-dual-tooltip-key">压缩阈值</span>
+                        <span className="context-dual-tooltip-value">
+                          {FULL_COMPACT_THRESHOLD.toLocaleString()}
+                        </span>
                       </div>
-                    </button>
-
-                    <div className="border-t border-border bg-[#fbfcfe] px-3.5 py-2 text-[10px] text-muted">
-                      Shift+Tab toggles plan mode.
+                      <div className="context-dual-tooltip-kv">
+                        <span className="context-dual-tooltip-key">消息数量</span>
+                        <span className="context-dual-tooltip-value">{messageCount}</span>
+                      </div>
+                      <div className="context-dual-tooltip-kv">
+                        <span className="context-dual-tooltip-key">摘要数量</span>
+                        <span className="context-dual-tooltip-value">{compactedSummaryCount}</span>
+                      </div>
+                    </div>
+                    <div className="context-dual-tooltip-divider" />
+                    <div className="context-dual-tooltip-foot">
+                      <div className="context-dual-tooltip-note">
+                        本地估算，依据当前会话消息与摘要内容计算。
+                      </div>
                     </div>
                   </div>
-                )}
-              </div>
-            </div>
-
-            <textarea
-              ref={textareaRef}
-              rows={1}
-              value={prompt}
-              onChange={(event) => handlePromptChange(event.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={
-                isStreaming
-                  ? queuedPrompt
-                    ? "Response in progress. One queued message is waiting."
-                    : "Response in progress. Keep typing and press Enter to queue one message."
-                  : isAutoMode
-                    ? "Describe the task and Auto will let Claude plan and route the work"
-                    : `Message ${cliLabel}`
-              }
-              className="min-h-[3.5rem] w-full resize-none bg-transparent px-0 py-0 text-[15px] leading-8 text-text placeholder:text-secondary/65 focus:outline-none"
-            />
-
-            {queueFeedback && (
-              <div className="mt-2 text-[11px] font-medium text-amber-600">
-                {queueFeedback}
-              </div>
-            )}
-          </div>
-
-          <div className="mt-4 flex flex-col gap-4 border-t border-slate-100 pt-4 text-[10px] font-medium text-slate-400 select-none md:flex-row md:items-center md:justify-between">
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-              <div className="flex items-center gap-2">
-                <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">/</kbd>
-                <span className="tracking-tight">指令中心</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">@</kbd>
-                <span className="tracking-tight">引用文件</span>
-              </div>
-              {!isAutoMode && (
-                <div className="flex items-center gap-2">
-                  <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">$</kbd>
-                  <span className="tracking-tight">调用技能</span>
                 </div>
-              )}
-              {isAutoMode && (
-                <div className="flex items-center gap-2 text-indigo-500/80">
-                  <div className="h-1 w-1 rounded-full bg-indigo-400 animate-pulse" />
-                  <span className="font-semibold tracking-tight">Auto 模式已激活</span>
+              </div>
+
+              {onToggleStatusPanel ? (
+                <div className="context-tools-right">
+                  <button
+                    type="button"
+                    onClick={onToggleStatusPanel}
+                    className={`context-tool-btn context-tool-btn--labeled status-panel-toggle ${statusPanelExpanded ? "expanded" : "collapsed"}`}
+                    title={statusPanelExpanded ? "收起状态面板" : "展开状态面板"}
+                  >
+                    <span className="terminal-chat-status-icon">
+                      <StatusPanelToggleIcon collapsed={!statusPanelExpanded} />
+                    </span>
+                    <span className="context-tool-label">状态面板</span>
+                  </button>
                 </div>
-              )}
-            </div>
-            
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-slate-100 md:border-l md:pl-5">
-              <div className="flex items-center gap-2">
-                <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">ENTER</kbd>
-                <span className="tracking-tight">
-                  {isStreaming ? (queuedPrompt ? "队列已满" : "加入队列") : "发送"}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">SHIFT + ↵</kbd>
-                <span className="tracking-tight">换行</span>
-              </div>
-              {queuedPrompt && (
-                <div className="flex items-center gap-2">
-                  <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">CTRL + B</kbd>
-                  <span className="tracking-tight">编辑队列</span>
-                </div>
-              )}
-              <div className="flex items-center gap-2">
-                <kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[9px] font-bold text-slate-500 shadow-sm">↑ ↓</kbd>
-                <span className="tracking-tight">历史记录</span>
-              </div>
+              ) : null}
             </div>
           </div>
         </div>

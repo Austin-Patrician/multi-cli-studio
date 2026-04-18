@@ -2,6 +2,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useStore } from "../../lib/store";
 import { Construction, FolderOpen, TerminalSquare } from "lucide-react";
 import { LaunchScriptButton } from "./LaunchScriptButton";
+import { OpenWorkspaceMenu } from "./OpenWorkspaceMenu";
 import { Select, SelectItem, SelectPopup, SelectTrigger } from "../ui/select";
 
 function RightPanelToggleIcon({ collapsed }: { collapsed: boolean }) {
@@ -82,6 +83,7 @@ export function ProjectBar({
         ? {
             id: item.id,
             name: item.name,
+            rootPath: item.rootPath,
           }
         : null;
     })
@@ -160,6 +162,7 @@ export function ProjectBar({
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
+            <OpenWorkspaceMenu path={workspace.rootPath} />
             <LaunchScriptButton
               launchScript={launchScript}
               editorOpen={launchScriptEditorOpen}

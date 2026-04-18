@@ -57,6 +57,7 @@ import {
   EnrichedHandoff,
   ChatPromptRequest,
   FileMentionCandidate,
+  PickedChatAttachment,
   LocalUsageStatistics,
   WorkspaceTextSearchResponse,
   GitFileDiff,
@@ -360,6 +361,7 @@ function defaultSettings(): AppSettings {
     projectRoot: state?.workspace?.projectRoot ?? "C:\\Users\\admin\\source\\repos\\multi-cli-studio",
     maxTurnsPerAgent: 50,
     maxOutputCharsPerTurn: 100000,
+    modelChatContextTurnLimit: 4,
     processTimeoutMs: 300000,
     notifyOnTerminalCompletion: false,
     notificationConfig: {
@@ -444,6 +446,10 @@ function normalizeSettings(value: unknown): AppSettings {
         : defaults.projectRoot,
     maxTurnsPerAgent: parsePositiveNumber(raw.maxTurnsPerAgent, defaults.maxTurnsPerAgent),
     maxOutputCharsPerTurn: parsePositiveNumber(raw.maxOutputCharsPerTurn, defaults.maxOutputCharsPerTurn),
+    modelChatContextTurnLimit: parsePositiveNumber(
+      raw.modelChatContextTurnLimit,
+      defaults.modelChatContextTurnLimit
+    ),
     processTimeoutMs: parsePositiveNumber(raw.processTimeoutMs, defaults.processTimeoutMs),
     notifyOnTerminalCompletion: raw.notifyOnTerminalCompletion === true,
     notificationConfig: normalizeNotificationConfig(raw.notificationConfig, defaults.notificationConfig),
@@ -953,6 +959,84 @@ function basename(path: string) {
   const normalized = path.replace(/[\\/]+$/, "");
   const parts = normalized.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? path;
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function pickBrowserChatAttachments(): Promise<PickedChatAttachment[]> {
+  if (typeof document === "undefined") {
+    return [];
+  }
+
+  return new Promise<PickedChatAttachment[]>((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    input.style.pointerEvents = "none";
+    document.body.appendChild(input);
+    let settled = false;
+
+    const cleanup = () => {
+      input.value = "";
+      input.remove();
+    };
+
+    const settle = (value: PickedChatAttachment[]) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
+    input.addEventListener(
+      "change",
+      () => {
+        const files = Array.from(input.files ?? []);
+        void Promise.all(
+          files.map(async (file) => {
+            const mediaType = file.type || null;
+            if (mediaType?.startsWith("image/")) {
+              return {
+                fileName: file.name,
+                mediaType,
+                source: await readFileAsDataUrl(file),
+              } satisfies PickedChatAttachment;
+            }
+            return {
+              fileName: file.name,
+                mediaType,
+                source: file.name,
+              } satisfies PickedChatAttachment;
+          })
+        )
+          .then((items) => settle(items))
+          .catch(() => settle([]));
+      },
+      { once: true }
+    );
+
+    window.addEventListener(
+      "focus",
+      () => {
+        window.setTimeout(() => {
+          if (settled) return;
+          settle([]);
+        }, 0);
+      },
+      { once: true }
+    );
+
+    input.click();
+  });
 }
 
 function pushAutomationEvent(
@@ -2876,6 +2960,10 @@ export const browserRuntime = {
     };
   },
 
+  async pickChatAttachments(): Promise<PickedChatAttachment[]> {
+    return pickBrowserChatAttachments();
+  },
+
   async searchWorkspaceFiles(_projectRoot: string, query: string): Promise<FileMentionCandidate[]> {
     const lower = query.toLowerCase();
     return MOCK_WORKSPACE_FILE_PATHS
@@ -3553,6 +3641,17 @@ rename to src/components/chat/GitPanel.tsx`,
     _options?: { stageAll?: boolean }
   ): Promise<{ commitSha: string | null }> {
     return { commitSha: "browser-fallback-commit" };
+  },
+
+  async openWorkspaceIn(
+    path: string,
+    _options?: {
+      appName?: string | null;
+      command?: string | null;
+      args?: string[];
+    }
+  ): Promise<void> {
+    window.alert(`Open workspace is only available in the desktop runtime.\n\n${path}`);
   },
 
   async openWorkspaceFile(_projectRoot: string, path: string): Promise<boolean> {

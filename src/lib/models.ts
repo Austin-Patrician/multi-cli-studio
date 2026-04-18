@@ -146,6 +146,7 @@ export interface TerminalTab {
   transportSessions: Partial<Record<AgentId, AgentTransportSession>>;
   contextBoundariesByCli: Partial<Record<AgentId, TerminalCliContextBoundary>>;
   draftPrompt: string;
+  draftAttachments: ChatAttachment[];
   status: "idle" | "streaming";
   lastActiveAt: string;
 }
@@ -332,6 +333,7 @@ export interface AppSettings {
   projectRoot: string;
   maxTurnsPerAgent: number;
   maxOutputCharsPerTurn: number;
+  modelChatContextTurnLimit: number;
   processTimeoutMs: number;
   notifyOnTerminalCompletion: boolean;
   notificationConfig: NotificationConfig;
@@ -788,6 +790,24 @@ export interface AutomationValidationResult {
 // ── New chat types ──────────────────────────────────────────────────────
 
 /** A single chat message in the unified conversation */
+export type ChatAttachmentKind = "image" | "fileReference";
+
+export interface ChatAttachment {
+  id: string;
+  kind: ChatAttachmentKind;
+  fileName: string;
+  mediaType?: string | null;
+  source: string;
+  displayPath?: string | null;
+}
+
+export interface PickedChatAttachment {
+  fileName: string;
+  mediaType?: string | null;
+  path?: string | null;
+  source?: string | null;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -801,6 +821,7 @@ export interface ChatMessage {
   contentFormat?: "markdown" | "plain" | "log" | null;
   transportKind?: AgentTransportKind | null;
   blocks?: ChatMessageBlock[] | null;
+  attachments?: ChatAttachment[] | null;
   isStreaming: boolean;
   durationMs: number | null;
   exitCode: number | null;
@@ -1108,6 +1129,7 @@ export interface ChatPromptRequest {
   effortLevel: string | null;
   modelOverride?: string | null;
   permissionOverride?: string | null;
+  imageAttachments?: string[] | null;
   transportSession?: AgentTransportSession | null;
   /** Compacted history from this tab's earlier conversation segments */
   compactedSummaries?: CompactedSummary[] | null;

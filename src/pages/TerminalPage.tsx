@@ -16,6 +16,7 @@ const WorkspaceRightPanel = lazy(async () =>
 );
 
 const RIGHT_PANEL_STORAGE_KEY = "multi-cli-studio::terminal-right-panel-collapsed";
+const STATUS_PANEL_STORAGE_KEY = "multi-cli-studio::terminal-status-panel-collapsed";
 
 export function TerminalPage() {
   const activeTerminalTabId = useStore((state) => state.activeTerminalTabId);
@@ -32,6 +33,11 @@ export function TerminalPage() {
     if (typeof window === "undefined") return true;
     const raw = window.localStorage.getItem(RIGHT_PANEL_STORAGE_KEY);
     return raw == null ? true : raw === "true";
+  });
+  const [statusPanelCollapsed, setStatusPanelCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const raw = window.localStorage.getItem(STATUS_PANEL_STORAGE_KEY);
+    return raw == null ? false : raw === "true";
   });
   const runtimeRunState = useRuntimeLogSession({ activeWorkspace });
   const launchScriptState = useWorkspaceLaunchScript({
@@ -59,6 +65,16 @@ export function TerminalPage() {
       const next = !current;
       if (typeof window !== "undefined") {
         window.localStorage.setItem(RIGHT_PANEL_STORAGE_KEY, String(next));
+      }
+      return next;
+    });
+  }
+
+  function toggleStatusPanel() {
+    setStatusPanelCollapsed((current) => {
+      const next = !current;
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(STATUS_PANEL_STORAGE_KEY, String(next));
       }
       return next;
     });
@@ -110,7 +126,10 @@ export function TerminalPage() {
         <div className="flex min-h-0 flex-1">
           <div className="flex-1 flex flex-col min-w-0">
             <ChatConversation />
-            <ChatPromptBar />
+            <ChatPromptBar
+              statusPanelExpanded={!statusPanelCollapsed}
+              onToggleStatusPanel={toggleStatusPanel}
+            />
           </div>
           {!rightPanelCollapsed ? (
             <Suspense
@@ -122,7 +141,7 @@ export function TerminalPage() {
                 </aside>
               }
             >
-              <WorkspaceRightPanel />
+              <WorkspaceRightPanel statusPanelCollapsed={statusPanelCollapsed} />
             </Suspense>
           ) : null}
         </div>

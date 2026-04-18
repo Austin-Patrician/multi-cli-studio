@@ -1,4 +1,6 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useState, type ReactNode } from "react";
+import { FileText, Image as ImageIcon } from "lucide-react";
 import { ChatMessage } from "../../lib/models";
 
 const CLI_COLORS: Record<string, string> = {
@@ -47,6 +49,20 @@ function DeleteIcon() {
       />
     </svg>
   );
+}
+
+function attachmentLabel(messagePath: string | null | undefined, fallback: string) {
+  return messagePath?.trim() || fallback;
+}
+
+function attachmentPreviewSrc(source: string) {
+  if (source.startsWith("data:")) return source;
+  if (source.startsWith("http://") || source.startsWith("https://")) return source;
+  try {
+    return convertFileSrc(source);
+  } catch {
+    return "";
+  }
 }
 
 function ActionIconButton({
@@ -99,6 +115,8 @@ export function UserBubble({
     minute: "2-digit",
     hour12: false,
   });
+  const attachments = message.attachments ?? [];
+  const hasTextContent = message.content.trim().length > 0;
 
   useEffect(() => {
     if (!copied) return;
@@ -126,17 +144,64 @@ export function UserBubble({
       </div>
 
       <div className="flex w-fit max-w-[75%] flex-col items-end gap-1.5">
-        <div
-          data-chat-searchable-content="true"
-          data-chat-search-message-id={message.id}
-          className="max-w-full rounded-2xl rounded-br-md bg-accent px-3.5 py-2.5 text-sm whitespace-pre-wrap text-white"
-        >
-          {message.content}
-        </div>
+        {attachments.length > 0 && (
+          <div className="flex max-w-full flex-wrap justify-end gap-2">
+            {attachments.map((attachment) => {
+              const label = attachmentLabel(attachment.displayPath, attachment.fileName);
+              if (attachment.kind === "image") {
+                const previewSrc = attachmentPreviewSrc(attachment.source);
+                return (
+                  <div
+                    key={attachment.id}
+                    className="group overflow-hidden rounded-[18px] border border-slate-200/85 bg-white/96 shadow-[0_14px_28px_rgba(15,23,42,0.08)]"
+                    title={label}
+                  >
+                    {previewSrc ? (
+                      <img
+                        src={previewSrc}
+                        alt={attachment.fileName}
+                        className="h-24 w-24 object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-24 w-24 items-center justify-center bg-slate-100 text-slate-500">
+                        <ImageIcon size={16} aria-hidden="true" />
+                      </div>
+                    )}
+                    <div className="flex items-center gap-1.5 px-2.5 py-2 text-[11px] text-slate-600">
+                      <ImageIcon size={12} aria-hidden="true" />
+                      <span className="max-w-[96px] truncate">{label}</span>
+                    </div>
+                  </div>
+                );
+              }
 
-        {(onCopy || onDelete) && (
+              return (
+                <div
+                  key={attachment.id}
+                  className="inline-flex max-w-[280px] items-center gap-2 rounded-[18px] border border-slate-200/85 bg-white/96 px-3 py-2 text-xs text-slate-700 shadow-[0_14px_28px_rgba(15,23,42,0.06)]"
+                  title={label}
+                >
+                  <FileText size={13} aria-hidden="true" className="shrink-0 text-slate-500" />
+                  <span className="truncate">{label}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {hasTextContent && (
+          <div
+            data-chat-searchable-content="true"
+            data-chat-search-message-id={message.id}
+            className="max-w-full rounded-2xl rounded-br-md bg-accent px-3.5 py-2.5 text-sm whitespace-pre-wrap text-white"
+          >
+            {message.content}
+          </div>
+        )}
+
+        {((onCopy && hasTextContent) || onDelete) && (
           <div className="flex items-center justify-end gap-1 pr-1">
-            {onCopy && (
+            {onCopy && hasTextContent && (
               <ActionIconButton
                 label={copied ? "Copied" : "Copy"}
                 icon={<CopyIcon copied={copied} />}

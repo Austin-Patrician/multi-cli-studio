@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { bridge } from "./bridge";
 import {
   AgentId,
+  ChatAttachment,
   AgentTransportKind,
   AgentTransportSession,
   AutoRouteAction,
@@ -19,6 +20,7 @@ import {
   GitPanelData,
   GitFileStatus,
   PersistedTerminalState,
+  PickedChatAttachment,
   SharedContextEntry,
   TerminalCliId,
   TerminalLine,
@@ -40,6 +42,11 @@ import {
   recallSearch,
   diffWorkingMemory,
 } from "./compaction";
+import {
+  buildPromptWithAttachments,
+  cloneChatAttachments,
+  createChatAttachment,
+} from "./chatAttachments";
 import { estimateSessionTokens } from "./tokenEstimation";
 import { ACP_COMMANDS, AcpCliCapabilities, AcpCommand } from "./acp";
 import {
@@ -55,17 +62,20 @@ const STREAM_RUNTIME_STALE_MIN_MS = 60000;
 const STREAM_STALE_CHECK_MS = 3000;
 const INTERRUPTED_STREAM_TEXT = "Response interrupted before completion. You can retry this prompt.";
 const PARTIAL_STREAM_TEXT = "Streaming stopped before completion. This response may be partial.";
+const UNSUPPORTED_IMAGE_ATTACHMENT_MESSAGE = "当前仅 Codex 支持图片附件，请切换到 Codex 后发送。";
 
 type PersistenceScope = "terminalState" | "chatMessages";
 
 interface QueuedChatMessage {
   text: string;
+  attachments: ChatAttachment[];
   cliId: TerminalCliId;
   queuedAt: string;
 }
 
 interface SendChatMessageOptions {
   cliIdOverride?: TerminalCliId;
+  attachmentsOverride?: ChatAttachment[] | null;
 }
 
 function createId(prefix: string) {
@@ -84,6 +94,34 @@ function basename(path: string) {
 
 function samePath(left: string, right: string) {
   return left.replace(/\//g, "\\").toLowerCase() === right.replace(/\//g, "\\").toLowerCase();
+}
+
+function attachmentKey(attachment: ChatAttachment) {
+  const normalizedSource = attachment.source.startsWith("data:")
+    ? attachment.source
+    : attachment.source.toLowerCase();
+  return `${attachment.kind}:${normalizedSource}`;
+}
+
+function mergeChatAttachments(
+  current: ChatAttachment[] | null | undefined,
+  additions: ChatAttachment[] | null | undefined
+) {
+  const merged: ChatAttachment[] = [];
+  const seen = new Set<string>();
+
+  [...(current ?? []), ...(additions ?? [])].forEach((attachment) => {
+    const key = attachmentKey(attachment);
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(attachment);
+  });
+
+  return merged;
+}
+
+function hasImageAttachments(attachments: ChatAttachment[] | null | undefined) {
+  return attachments?.some((attachment) => attachment.kind === "image") ?? false;
 }
 
 function defaultTransportKind(cliId: AgentId): AgentTransportKind {
@@ -209,6 +247,7 @@ function createTerminalTab(
     transportSessions: normalizeTransportSessions(partial ?? {}),
     contextBoundariesByCli: normalizeContextBoundariesByCli(partial ?? {}),
     draftPrompt: partial?.draftPrompt ?? "",
+    draftAttachments: cloneChatAttachments(partial?.draftAttachments) ?? [],
     status: partial?.status ?? "idle",
     lastActiveAt: partial?.lastActiveAt ?? nowIso(),
   };
@@ -307,6 +346,7 @@ function cloneConversationMessages(messages: ChatMessage[]) {
       ...message,
       id: createId("msg"),
       blocks: cloneChatBlocks(message.blocks),
+      attachments: cloneChatAttachments(message.attachments),
       isStreaming: false,
     }));
 }
@@ -925,12 +965,18 @@ interface StoreState {
   setActiveTerminalTab: (tabId: string) => void;
   setTabSelectedCli: (tabId: string, cliId: TerminalCliId) => void;
   setTabDraftPrompt: (tabId: string, prompt: string) => void;
+  addDraftChatAttachments: (
+    tabId: string,
+    workspaceRoot: string,
+    picked: PickedChatAttachment[]
+  ) => { added: number; rejected: number };
+  removeDraftChatAttachment: (tabId: string, attachmentId: string) => void;
   togglePlanMode: (tabId?: string) => void;
   queueChatMessage: (
     tabId: string,
     prompt?: string,
     cliIdOverride?: TerminalCliId
-  ) => "queued" | "full" | "empty" | "unavailable";
+  ) => "queued" | "full" | "empty" | "unavailable" | "unsupportedAttachments";
   clearQueuedChatMessage: (tabId: string) => void;
   editQueuedChatMessage: (tabId: string) => boolean;
   interruptChatTurn: (tabId?: string) => Promise<boolean>;
@@ -994,7 +1040,10 @@ export const useStore = create<StoreState>((set, get) => {
     });
 
     queueMicrotask(() => {
-      void get().sendChatMessage(tabId, queued.text, { cliIdOverride: queued.cliId });
+      void get().sendChatMessage(tabId, queued.text, {
+        cliIdOverride: queued.cliId,
+        attachmentsOverride: queued.attachments,
+      });
     });
   };
 
@@ -1610,6 +1659,7 @@ export const useStore = create<StoreState>((set, get) => {
       transportSessions: {},
       contextBoundariesByCli: {},
       draftPrompt: "",
+      draftAttachments: [],
       status: "idle",
     });
     const session = createConversationSession(tab, workspace, {
@@ -1826,20 +1876,97 @@ export const useStore = create<StoreState>((set, get) => {
     });
   },
 
+  addDraftChatAttachments: (tabId, workspaceRoot, picked) => {
+    const nextAttachments = picked
+      .map((item) => createChatAttachment(item, workspaceRoot))
+      .filter((item): item is ChatAttachment => Boolean(item));
+
+    if (nextAttachments.length === 0) {
+      return { added: 0, rejected: picked.length };
+    }
+
+    let added = 0;
+    set((state) => {
+      const currentTab = state.terminalTabs.find((tab) => tab.id === tabId) ?? null;
+      if (!currentTab) return {};
+      const mergedAttachments = mergeChatAttachments(
+        currentTab.draftAttachments,
+        nextAttachments
+      );
+      added = mergedAttachments.length - currentTab.draftAttachments.length;
+      if (added <= 0) return {};
+      const terminalTabs = state.terminalTabs.map((tab) =>
+        tab.id === tabId ? { ...tab, draftAttachments: mergedAttachments } : tab
+      );
+      return { terminalTabs };
+    });
+
+    if (added > 0) {
+      scheduleDraftPromptPersistence(() => {
+        const state = get();
+        return {
+          workspaces: state.workspaces,
+          terminalTabs: state.terminalTabs,
+          activeTerminalTabId: state.activeTerminalTabId,
+          chatSessions: state.chatSessions,
+        };
+      });
+    }
+
+    return {
+      added,
+      rejected: Math.max(0, picked.length - added),
+    };
+  },
+
+  removeDraftChatAttachment: (tabId, attachmentId) => {
+    let changed = false;
+    set((state) => {
+      const currentTab = state.terminalTabs.find((tab) => tab.id === tabId) ?? null;
+      if (!currentTab) return {};
+      const draftAttachments = currentTab.draftAttachments.filter(
+        (attachment) => attachment.id !== attachmentId
+      );
+      changed = draftAttachments.length !== currentTab.draftAttachments.length;
+      if (!changed) return {};
+      const terminalTabs = state.terminalTabs.map((tab) =>
+        tab.id === tabId ? { ...tab, draftAttachments } : tab
+      );
+      return { terminalTabs };
+    });
+
+    if (changed) {
+      scheduleDraftPromptPersistence(() => {
+        const state = get();
+        return {
+          workspaces: state.workspaces,
+          terminalTabs: state.terminalTabs,
+          activeTerminalTabId: state.activeTerminalTabId,
+          chatSessions: state.chatSessions,
+        };
+      });
+    }
+  },
+
   queueChatMessage: (tabId, prompt, cliIdOverride) => {
     const state = get();
     const tab = state.terminalTabs.find((item) => item.id === tabId) ?? null;
     if (!tab) return "unavailable";
 
     const text = (prompt ?? tab.draftPrompt).trim();
-    if (!text) return "empty";
+    const attachments = cloneChatAttachments(tab.draftAttachments) ?? [];
+    const targetCli = cliIdOverride ?? tab.selectedCli;
+    if (!text && attachments.length === 0) return "empty";
+    if (hasImageAttachments(attachments) && targetCli !== "codex") {
+      return "unsupportedAttachments";
+    }
     if (state.queuedChatByTab[tabId]) return "full";
 
     set((current) => {
       const currentTab = current.terminalTabs.find((item) => item.id === tabId) ?? null;
       if (!currentTab) return {};
       const terminalTabs = current.terminalTabs.map((item) =>
-        item.id === tabId ? { ...item, draftPrompt: "" } : item
+        item.id === tabId ? { ...item, draftPrompt: "", draftAttachments: [] } : item
       );
       return {
         terminalTabs,
@@ -1847,6 +1974,7 @@ export const useStore = create<StoreState>((set, get) => {
           ...current.queuedChatByTab,
           [tabId]: {
             text,
+            attachments,
             cliId: cliIdOverride ?? currentTab.selectedCli,
             queuedAt: nowIso(),
           },
@@ -1884,7 +2012,13 @@ export const useStore = create<StoreState>((set, get) => {
       const currentTab = state.terminalTabs.find((item) => item.id === tabId) ?? null;
       if (!currentTab) return {};
       const terminalTabs = state.terminalTabs.map((item) =>
-        item.id === tabId ? { ...item, draftPrompt: queued.text } : item
+        item.id === tabId
+          ? {
+              ...item,
+              draftPrompt: queued.text,
+              draftAttachments: cloneChatAttachments(queued.attachments) ?? [],
+            }
+          : item
       );
       const queuedChatByTab = { ...state.queuedChatByTab };
       delete queuedChatByTab[tabId];
@@ -2075,9 +2209,18 @@ export const useStore = create<StoreState>((set, get) => {
     const selectedCliForSend = options?.cliIdOverride ?? tab.selectedCli;
     const effectiveCli = resolveTerminalCliId(selectedCliForSend, workspace.activeAgent);
     const shouldClearDraft = prompt == null;
-
+    const draftAttachments = cloneChatAttachments(
+      options?.attachmentsOverride ?? tab.draftAttachments
+    ) ?? [];
     const text = (prompt ?? tab.draftPrompt).trim();
-    if (!text || tab.status === "streaming") return;
+    const composedPrompt = buildPromptWithAttachments(text, draftAttachments);
+    const imageAttachments = draftAttachments
+      .filter((attachment) => attachment.kind === "image")
+      .map((attachment) => attachment.source);
+    if ((!text && draftAttachments.length === 0) || tab.status === "streaming") return;
+    if (imageAttachments.length > 0 && selectedCliForSend !== "codex") {
+      throw new Error(UNSUPPORTED_IMAGE_ATTACHMENT_MESSAGE);
+    }
 
     if (selectedCliForSend === "auto") {
       const userMessage: ChatMessage = {
@@ -2085,9 +2228,10 @@ export const useStore = create<StoreState>((set, get) => {
         role: "user",
         cliId: null,
         timestamp: nowIso(),
-        content: text,
+        content: composedPrompt,
         transportKind: null,
         blocks: null,
+        attachments: cloneChatAttachments(draftAttachments),
         isStreaming: false,
         durationMs: null,
         exitCode: null,
@@ -2105,7 +2249,7 @@ export const useStore = create<StoreState>((set, get) => {
           {
             kind: "orchestrationPlan",
             title: "Auto orchestration by Claude",
-            goal: text,
+            goal: composedPrompt,
             summary: "Preparing the execution plan.",
             status: "planning",
           },
@@ -2121,6 +2265,7 @@ export const useStore = create<StoreState>((set, get) => {
             ? {
                 ...item,
                 draftPrompt: shouldClearDraft ? "" : item.draftPrompt,
+                draftAttachments: shouldClearDraft ? [] : item.draftAttachments,
                 status: "streaming" as const,
               }
             : item
@@ -2175,7 +2320,7 @@ export const useStore = create<StoreState>((set, get) => {
           terminalTabId: tab.id,
           workspaceId: workspace.id,
           assistantMessageId: pendingMessage.id,
-          prompt: text,
+          prompt: composedPrompt,
           projectRoot: workspace.rootPath,
           projectName: workspace.name,
           recentTurns: buildRecentTabContextTurns(session.messages, "claude"),
@@ -2286,9 +2431,10 @@ export const useStore = create<StoreState>((set, get) => {
         role: "user",
         cliId: effectiveCli,
         timestamp: nowIso(),
-        content: text,
+        content: composedPrompt,
         transportKind: tab.transportSessions[effectiveCli]?.kind ?? defaultTransportKind(effectiveCli),
         blocks: null,
+        attachments: cloneChatAttachments(draftAttachments),
         isStreaming: false,
         durationMs: null,
         exitCode: null,
@@ -2314,6 +2460,7 @@ export const useStore = create<StoreState>((set, get) => {
           ? {
               ...item,
               draftPrompt: shouldClearDraft ? "" : item.draftPrompt,
+              draftAttachments: shouldClearDraft ? [] : item.draftAttachments,
               status: "streaming" as const,
             }
           : item
@@ -2418,7 +2565,7 @@ export const useStore = create<StoreState>((set, get) => {
         terminalTabId: tab.id,
         workspaceId: workspace.id,
         assistantMessageId: pendingMessage.id,
-        prompt: text,
+        prompt: composedPrompt,
         projectRoot: workspace.rootPath,
         projectName: workspace.name,
         recentTurns,
@@ -2428,6 +2575,7 @@ export const useStore = create<StoreState>((set, get) => {
         effortLevel: tab.effortLevel,
         modelOverride: tab.modelOverrides[effectiveCli] ?? null,
         permissionOverride: tab.permissionOverrides[effectiveCli] ?? null,
+        imageAttachments: imageAttachments.length > 0 ? imageAttachments : null,
         compactedSummaries: session.compactedSummaries.length > 0 ? session.compactedSummaries : null,
         crossTabContext: crossTabContextEntries.length > 0 ? crossTabContextEntries : null,
         workingMemory: workingMemory.modifiedFiles.length > 0 || workingMemory.activeErrors.length > 0

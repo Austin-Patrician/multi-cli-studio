@@ -387,6 +387,10 @@ export function DesktopSettingsPage() {
                       <span>进程超时</span>
                       <strong>{settings?.processTimeoutMs ?? 0} ms</strong>
                     </div>
+                    <div className="dcc-detail-row">
+                      <span>模型对话上下文轮数</span>
+                      <strong>{settings?.modelChatContextTurnLimit ?? 0}</strong>
+                    </div>
                   </div>
                   <div className="dcc-detail-panel">
                     <div className="dcc-panel-title">快捷设置</div>
