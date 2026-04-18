@@ -368,7 +368,7 @@ function CommandSurface({
   );
 
   return (
-    <div className={`overflow-hidden rounded-[18px] border ${toneClass}`}>
+    <div className={`overflow-hidden rounded-[12px] border ${toneClass}`}>
       {collapsible ? (
         <button
           type="button"
@@ -431,7 +431,7 @@ function CommandCard({
   );
 
   return (
-    <div className="rounded-[24px] border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(248,250,252,0.98)_100%)] px-4 py-4 shadow-[0_16px_36px_rgba(15,23,42,0.05)]">
+    <div className="rounded-[12px] border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(248,250,252,0.98)_100%)] px-4 py-4 shadow-[0_16px_36px_rgba(15,23,42,0.05)]">
       <div className="flex items-start gap-3">
         <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[16px] border border-slate-200 bg-white text-slate-700 shadow-[0_10px_18px_rgba(15,23,42,0.06)]">
           <CommandIcon />
@@ -492,7 +492,7 @@ function CommandBlock({
 
 function EditBlock({ block }: { block: Extract<AssistantDisplayBlock, { kind: "edit" }> }) {
   return (
-    <div className="rounded-[20px] border border-slate-200 bg-white px-4 py-3 shadow-[0_8px_24px_rgba(15,23,42,0.04)]">
+    <div className="rounded-[12px] border border-slate-200 bg-white px-4 py-3 shadow-[0_8px_24px_rgba(15,23,42,0.04)]">
       <div className="flex items-start gap-3">
         <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl bg-[#eaf2ff] text-[#2563eb]">
           <EditIcon />
@@ -527,7 +527,7 @@ function StatusBlock({ block }: { block: Extract<AssistantDisplayBlock, { kind: 
   const isWarning = block.level === "warning";
   return (
     <div
-      className={`rounded-[20px] border px-4 py-3 ${
+      className={`rounded-[12px] border px-4 py-3 ${
         isWarning
           ? "border-amber-200 bg-amber-50 text-amber-900"
           : "border-rose-200 bg-rose-50 text-rose-900"
@@ -561,7 +561,7 @@ function LogBlock({ block }: { block: Extract<AssistantDisplayBlock, { kind: "lo
   const shouldCollapse = lines.length > 4 || block.text.length > 220;
 
   return (
-    <div className="overflow-hidden rounded-[20px] border border-[#172033] bg-[#0f172a]">
+    <div className="overflow-hidden rounded-[12px] border border-[#172033] bg-[#0f172a]">
       <div className="flex items-center justify-between border-b border-white/8 px-4 py-3">
         <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">
           Log output
@@ -651,7 +651,7 @@ function RuntimeStreamingMarker({
   }
 
   return (
-    <div className="rounded-[14px] border border-dashed border-slate-200 bg-slate-50/70 px-3 py-2.5 text-[12px] font-medium text-slate-500">
+    <div className="rounded-[12px] border border-dashed border-slate-200 bg-slate-50/70 px-3 py-2.5 text-[12px] font-medium text-slate-500">
       {label}...
       <span className="ml-1 inline-block h-3.5 w-1.5 rounded-full bg-accent align-[-2px] animate-pulse" />
     </div>
@@ -668,7 +668,7 @@ function RuntimeReasoningBlock({
   const showToggle = preview.truncated;
 
   return (
-    <div className="rounded-[20px] border border-violet-200 bg-violet-50/80 px-4 py-3">
+    <div className="rounded-[12px] border border-violet-200 bg-violet-50/80 px-4 py-3">
       <div className="flex items-center justify-between gap-3">
         <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-violet-700">
           Reasoning Summary
@@ -722,7 +722,7 @@ function RuntimeFileChangeBlock({
   const hasCounts = patch.additions > 0 || patch.deletions > 0;
 
   return (
-    <div className="rounded-[22px] border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(248,250,252,0.98)_100%)] px-4 py-3.5 shadow-[0_10px_28px_rgba(15,23,42,0.05)]">
+    <div className="rounded-[12px] border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(248,250,252,0.98)_100%)] px-4 py-3.5 shadow-[0_10px_28px_rgba(15,23,42,0.05)]">
       <div className="flex items-start gap-3">
         <div
           className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl ${changeTone.icon}`}
@@ -766,7 +766,7 @@ function RuntimeFileChangeBlock({
         />
       </div>
       {expanded && (
-        <div className="mt-3 overflow-hidden rounded-[18px] border border-slate-200 bg-white">
+        <div className="mt-3 overflow-hidden rounded-[12px] border border-slate-200 bg-white">
           {patch.hasRenderablePatch ? (
             <div className="max-h-[320px] overflow-y-auto px-2 py-2">
               {patch.rows.map((row, index) => {
@@ -831,7 +831,7 @@ function RuntimeToolBlock({
   const showToggle = preview.truncated;
 
   return (
-    <div className="rounded-[20px] border border-[#dbe4ef] bg-[#f8fbff] px-4 py-3">
+    <div className="rounded-[12px] border border-[#dbe4ef] bg-[#f8fbff] px-4 py-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -913,7 +913,7 @@ function RuntimeApprovalRequestBlock({
           : "Awaiting approval";
 
   return (
-    <div className="rounded-[20px] border border-amber-200 bg-amber-50/80 px-4 py-3">
+    <div className="rounded-[12px] border border-amber-200 bg-amber-50/80 px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-700">
           Tool approval
@@ -966,7 +966,7 @@ function RuntimePlanBlock({
   block: Extract<ChatMessageBlock, { kind: "plan" }>;
 }) {
   return (
-    <div className="rounded-[20px] border border-sky-200 bg-sky-50/70 px-4 py-3">
+    <div className="rounded-[12px] border border-sky-200 bg-sky-50/70 px-4 py-3">
       <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-700">
         Plan
       </div>
@@ -1001,7 +1001,7 @@ function RuntimeOrchestrationPlanBlock({
   block: Extract<ChatMessageBlock, { kind: "orchestrationPlan" }>;
 }) {
   return (
-    <div className="rounded-[20px] border border-slate-200 bg-slate-50/85 px-4 py-3">
+    <div className="rounded-[12px] border border-slate-200 bg-slate-50/85 px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-600">
           Orchestration
@@ -1029,7 +1029,7 @@ function RuntimeOrchestrationStepBlock({
   block: Extract<ChatMessageBlock, { kind: "orchestrationStep" }>;
 }) {
   return (
-    <div className="rounded-[20px] border border-[#dbe4ef] bg-white px-4 py-3">
+    <div className="rounded-[12px] border border-[#dbe4ef] bg-white px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
           {orchestrationOwnerLabel(block.owner)}
@@ -1045,7 +1045,7 @@ function RuntimeOrchestrationStepBlock({
         </div>
       )}
       {block.result && (
-        <div className="mt-2 whitespace-pre-wrap break-words rounded-[14px] bg-slate-50 px-3 py-2 text-[12px] leading-6 text-slate-600">
+        <div className="mt-2 whitespace-pre-wrap break-words rounded-[12px] bg-slate-50 px-3 py-2 text-[12px] leading-6 text-slate-600">
           {block.result}
         </div>
       )}
@@ -1071,7 +1071,7 @@ function RuntimeAutoRouteBlock({
           : "Pending";
 
   return (
-    <div className="rounded-[20px] border border-sky-200 bg-sky-50/70 px-4 py-3">
+    <div className="rounded-[12px] border border-sky-200 bg-sky-50/70 px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-700">
           Auto routing
@@ -1111,7 +1111,7 @@ function RuntimeStatusBlock({
         : "border-slate-200 bg-slate-50 text-slate-900";
 
   return (
-    <div className={`rounded-[20px] border px-4 py-3 ${tone}`}>
+    <div className={`rounded-[12px] border px-4 py-3 ${tone}`}>
       <div className="text-xs font-semibold uppercase tracking-[0.16em]">
         {block.level}
       </div>
@@ -1329,7 +1329,7 @@ export function CliBubble({
         <div
           data-chat-searchable-content="true"
           data-chat-search-message-id={message.id}
-          className="overflow-hidden rounded-[26px] rounded-bl-lg border border-[#dce4f2] bg-white/96 px-4 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-sm"
+          className="overflow-hidden rounded-[12px] border border-[#dce4f2] bg-white/96 px-4 py-4 shadow-[0_18px_48px_rgba(15,23,42,0.06)] backdrop-blur-sm"
         >
           {renderMode === "raw" ? (
             <AssistantMessageContent

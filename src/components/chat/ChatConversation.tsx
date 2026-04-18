@@ -895,7 +895,7 @@ export function ChatConversation() {
         className="h-full overflow-y-auto px-5 py-5"
       >
         <div className="mx-auto flex max-w-6xl flex-col gap-4">
-          <div className="flex items-center justify-between rounded-[22px] border border-border bg-white/85 px-4 py-3 backdrop-blur">
+          <div className="flex items-center justify-between rounded-[12px] border border-border bg-white/85 px-4 py-3 backdrop-blur">
             <div>
               <div className="text-base font-bold text-text">
                 Active Terminal
@@ -1032,7 +1032,7 @@ export function ChatConversation() {
                   <QueuedCliBadge cliId={queuedPrompt.cliId} />
                 </div>
                 <div
-                  className="max-w-full rounded-2xl rounded-br-md border border-sky-200/90 bg-sky-50/90 px-3.5 py-2.5 text-sm whitespace-pre-wrap text-sky-950 shadow-[0_14px_34px_rgba(14,116,144,0.08)]"
+                  className="max-w-full rounded-[12px] border border-sky-200/90 bg-sky-50/90 px-3.5 py-2.5 text-sm whitespace-pre-wrap text-sky-950 shadow-[0_14px_34px_rgba(14,116,144,0.08)]"
                   title={queuedPromptPreview || queuedPrompt.text}
                 >
                   {queuedPromptPreview || "Queued attachment message"}

@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { bridge } from "../../lib/bridge";
-import antigravityIcon from "../../../desktop-cc-gui/src/assets/app-icons/antigravity.png";
-import cursorIcon from "../../../desktop-cc-gui/src/assets/app-icons/cursor.png";
-import finderIcon from "../../../desktop-cc-gui/src/assets/app-icons/finder.png";
-import ghosttyIcon from "../../../desktop-cc-gui/src/assets/app-icons/ghostty.png";
-import vscodeIcon from "../../../desktop-cc-gui/src/assets/app-icons/vscode.png";
-import zedIcon from "../../../desktop-cc-gui/src/assets/app-icons/zed.png";
+import antigravityIcon from "../../assets/app-icons/antigravity.png";
+import cursorIcon from "../../assets/app-icons/cursor.png";
+import finderIcon from "../../assets/app-icons/finder.png";
+import ghosttyIcon from "../../assets/app-icons/ghostty.png";
+import vscodeIcon from "../../assets/app-icons/vscode.png";
+import zedIcon from "../../assets/app-icons/zed.png";
 
 const OPEN_WORKSPACE_STORAGE_KEY = "multi-cli-studio::open-workspace-app";
 const DEFAULT_OPEN_WORKSPACE_ID = "vscode";
@@ -238,7 +238,7 @@ export function OpenWorkspaceMenu({ path }: { path: string }) {
             src={selectedTarget.icon}
             alt=""
             aria-hidden="true"
-            className="h-4 w-4 shrink-0 rounded-[4px] object-contain"
+            className="h-[19px] w-[19px] shrink-0 rounded-[3px] object-contain"
           />
         </button>
         <button
@@ -254,7 +254,7 @@ export function OpenWorkspaceMenu({ path }: { path: string }) {
           className="inline-flex h-8 w-8 items-center justify-center border-l border-slate-200 text-slate-500 transition-all hover:bg-slate-50 hover:text-slate-900"
         >
           <ChevronDown
-            className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`}
+            className={`h-[14px] w-[14px] transition-transform ${menuOpen ? "rotate-180" : ""}`}
             aria-hidden="true"
           />
         </button>
@@ -262,13 +262,12 @@ export function OpenWorkspaceMenu({ path }: { path: string }) {
 
       {menuOpen ? (
         <div
-          className="absolute left-1/2 top-[calc(100%+8px)] z-30 -translate-x-1/2 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-[0_22px_48px_rgba(15,23,42,0.14)]"
+          className="absolute left-1/2 top-[calc(100%+6px)] z-30 -translate-x-1/2 rounded-[10px] border border-slate-200 bg-white p-1 shadow-[0_22px_48px_rgba(15,23,42,0.14)]"
           role="menu"
         >
           <div className="flex items-center gap-1">
             {OPEN_WORKSPACE_TARGETS.map((target) => {
               const isActive = target.id === selectedTarget.id;
-              const isOpening = target.id === openingTargetId;
 
               return (
                 <button
@@ -281,7 +280,7 @@ export function OpenWorkspaceMenu({ path }: { path: string }) {
                   disabled={openingTargetId !== null}
                   title={target.label}
                   aria-label={target.label}
-                  className={`relative inline-flex h-9 w-9 items-center justify-center rounded-xl border transition-all ${
+                  className={`inline-flex h-6 w-6 items-center justify-center rounded-[7px] border transition-all ${
                     isActive
                       ? "border-sky-200 bg-sky-50 text-sky-700 shadow-[inset_0_0_0_1px_rgba(125,211,252,0.35)]"
                       : "border-transparent text-slate-600 hover:border-slate-200 hover:bg-slate-50 hover:text-slate-900"
@@ -291,13 +290,8 @@ export function OpenWorkspaceMenu({ path }: { path: string }) {
                     src={target.icon}
                     alt=""
                     aria-hidden="true"
-                    className={`object-contain ${target.id === "finder" ? "h-[15px] w-[15px]" : "h-4 w-4"}`}
+                    className="h-[18px] w-[18px] rounded-[3px] object-contain"
                   />
-                  {isOpening ? (
-                    <span className="absolute -bottom-1 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full bg-amber-400" />
-                  ) : isActive ? (
-                    <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-sky-500" />
-                  ) : null}
                 </button>
               );
             })}
