@@ -122,7 +122,7 @@ jobs:
           COPYFILE_DISABLE=1 tar -czf "$APP_TARBALL" \
             -C "src-tauri/target/release/bundle/macos" "Multi CLI Studio.app"
 
-          npm run tauri -- signer sign -- \
+          node ./scripts/run-tauri.mjs signer sign \
             -f "$HOME/.tauri/multi-cli-studio.key" \
             -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
             "$APP_TARBALL"
