@@ -8,6 +8,7 @@ import {
   CircleCheckBig,
   Cloud,
   Download,
+  FileText,
   Folder,
   FolderOpen,
   FolderTree,
@@ -39,6 +40,7 @@ import type {
   GitCommitFileChange,
   GitFileDiff,
   GitFileStatus,
+  GitHistoryCommit,
   GitHistoryResponse,
   GitPanelData,
   WorkspaceRef,
@@ -100,6 +102,29 @@ type RemoteBranchRef = {
   remote: string | null;
   branch: string | null;
 };
+type PopoverPlacement = "down" | "up";
+type PushTargetBranchGroup = {
+  scope: string;
+  label: string;
+  items: string[];
+};
+type PushPreviewTreeItem =
+  | {
+      id: string;
+      type: "dir";
+      label: string;
+      path: string;
+      depth: number;
+      expanded: boolean;
+    }
+  | {
+      id: string;
+      type: "file";
+      label: string;
+      path: string;
+      depth: number;
+      change: GitCommitFileChange;
+    };
 
 const GIT_OVERVIEW_MIN_WIDTH = 170;
 const GIT_BRANCHES_MIN_WIDTH = 220;
@@ -108,6 +133,11 @@ const GIT_DETAILS_MIN_WIDTH = 260;
 const GIT_COLUMN_MIN_WIDTHS = [GIT_OVERVIEW_MIN_WIDTH, GIT_BRANCHES_MIN_WIDTH, GIT_COMMITS_MIN_WIDTH] as const;
 const GIT_RESIZER_TOTAL_WIDTH = 24;
 const TREE_INDENT_STEP = 10;
+const FILE_TREE_ROOT_PATH = "__repo_root__";
+const PUSH_TARGET_MENU_VIEWPORT_PADDING = 16;
+const PUSH_TARGET_MENU_MIN_HEIGHT = 148;
+const PUSH_TARGET_MENU_MAX_HEIGHT = 320;
+const PUSH_TARGET_MENU_ESTIMATED_ROW_HEIGHT = 31;
 const PULL_DIALOG_OPTIONS: Array<{
   id: PullDialogOption;
   label: string;
@@ -387,8 +417,20 @@ function formatRelativeTime(timestamp: number) {
   return `${Math.max(1, Math.round(delta / day))}d ago`;
 }
 
-function buildFileKey(path: string, oldPath?: string | null) {
-  return `${oldPath ?? ""}::${path}`;
+function buildFileKey(
+  pathOrFile:
+    | string
+    | {
+        path: string;
+        oldPath?: string | null;
+        previousPath?: string | null;
+      },
+  oldPath?: string | null
+) {
+  if (typeof pathOrFile === "string") {
+    return `${oldPath ?? ""}::${pathOrFile}`;
+  }
+  return `${pathOrFile.oldPath ?? pathOrFile.previousPath ?? ""}::${pathOrFile.path}`;
 }
 
 function splitPath(path: string) {
@@ -603,6 +645,129 @@ function buildDiffTree<T extends { path: string }>(files: T[], scopeKey: string)
   }
 
   return root;
+}
+
+function collectDirPaths(files: GitCommitFileChange[]) {
+  const paths = new Set<string>([FILE_TREE_ROOT_PATH]);
+  for (const file of files) {
+    const parts = file.path.split("/").filter(Boolean);
+    let current = "";
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      const part = parts[index] ?? "";
+      current = current ? `${current}/${part}` : part;
+      paths.add(current);
+    }
+  }
+  return paths;
+}
+
+function pickSelectedPushPreviewFileKey(previousKey: string | null, files: GitCommitFileChange[]) {
+  if (!files.length) {
+    return null;
+  }
+  if (previousKey && files.some((entry) => buildFileKey(entry) === previousKey)) {
+    return previousKey;
+  }
+  return buildFileKey(files[0]);
+}
+
+function buildPushPreviewFileTreeItems(
+  files: GitCommitFileChange[],
+  expandedDirs: Set<string>,
+  rootLabel?: string
+): PushPreviewTreeItem[] {
+  type FileTreeNode = {
+    name: string;
+    path: string;
+    dirs: Map<string, FileTreeNode>;
+    files: GitCommitFileChange[];
+  };
+
+  const root: FileTreeNode = {
+    name: "",
+    path: "",
+    dirs: new Map(),
+    files: [],
+  };
+
+  for (const file of files) {
+    const parts = file.path.split("/").filter(Boolean);
+    if (!parts.length) {
+      root.files.push(file);
+      continue;
+    }
+
+    let node = root;
+    let currentPath = "";
+    for (let index = 0; index < parts.length - 1; index += 1) {
+      const part = parts[index] ?? "";
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      let child = node.dirs.get(part);
+      if (!child) {
+        child = {
+          name: part,
+          path: currentPath,
+          dirs: new Map(),
+          files: [],
+        };
+        node.dirs.set(part, child);
+      }
+      node = child;
+    }
+    node.files.push(file);
+  }
+
+  const items: PushPreviewTreeItem[] = [];
+
+  const walk = (node: FileTreeNode, depth: number) => {
+    const dirs = Array.from(node.dirs.values()).sort((left, right) => left.name.localeCompare(right.name));
+    for (const dir of dirs) {
+      const expanded = expandedDirs.has(dir.path);
+      items.push({
+        id: `dir:${dir.path}`,
+        type: "dir",
+        label: dir.name,
+        path: dir.path,
+        depth,
+        expanded,
+      });
+      if (expanded) {
+        walk(dir, depth + 1);
+      }
+    }
+
+    const leafFiles = node.files.slice().sort((left, right) => left.path.localeCompare(right.path));
+    for (const file of leafFiles) {
+      const segments = file.path.split("/").filter(Boolean);
+      items.push({
+        id: `file:${buildFileKey(file)}`,
+        type: "file",
+        label: segments[segments.length - 1] ?? file.path,
+        path: file.path,
+        depth,
+        change: file,
+      });
+    }
+  };
+
+  if (rootLabel?.trim()) {
+    const rootExpanded = expandedDirs.has(FILE_TREE_ROOT_PATH);
+    items.push({
+      id: `dir:${FILE_TREE_ROOT_PATH}`,
+      type: "dir",
+      label: rootLabel,
+      path: FILE_TREE_ROOT_PATH,
+      depth: 0,
+      expanded: rootExpanded,
+    });
+    if (rootExpanded) {
+      walk(root, 1);
+    }
+    return items;
+  }
+
+  walk(root, 0);
+  return items;
 }
 
 function getTreeLineOpacity(depth: number) {
@@ -1349,6 +1514,22 @@ export function DesktopGitSection({
   const [pushTopic, setPushTopic] = useState("");
   const [pushReviewers, setPushReviewers] = useState("");
   const [pushCc, setPushCc] = useState("");
+  const [pushRemoteMenuOpen, setPushRemoteMenuOpen] = useState(false);
+  const [pushRemoteMenuPlacement, setPushRemoteMenuPlacement] = useState<PopoverPlacement>("up");
+  const [pushTargetBranchMenuOpen, setPushTargetBranchMenuOpen] = useState(false);
+  const [pushTargetBranchMenuPlacement, setPushTargetBranchMenuPlacement] = useState<PopoverPlacement>("down");
+  const [pushTargetBranchQuery, setPushTargetBranchQuery] = useState("");
+  const [pushTargetBranchActiveScopeTab, setPushTargetBranchActiveScopeTab] = useState<string | null>(null);
+  const [pushPreviewLoading, setPushPreviewLoading] = useState(false);
+  const [pushPreviewError, setPushPreviewError] = useState<string | null>(null);
+  const [pushPreviewHasMore, setPushPreviewHasMore] = useState(false);
+  const [pushPreviewTargetFound, setPushPreviewTargetFound] = useState(true);
+  const [pushPreviewCommits, setPushPreviewCommits] = useState<GitHistoryCommit[]>([]);
+  const [pushPreviewDetails, setPushPreviewDetails] = useState<GitCommitDetails | null>(null);
+  const [pushPreviewDetailsLoading, setPushPreviewDetailsLoading] = useState(false);
+  const [pushPreviewDetailsError, setPushPreviewDetailsError] = useState<string | null>(null);
+  const [pushPreviewExpandedDirs, setPushPreviewExpandedDirs] = useState<Set<string>>(new Set());
+  const [pushPreviewSelectedFileKey, setPushPreviewSelectedFileKey] = useState<string | null>(null);
   const [pushPreviewSelectedSha, setPushPreviewSelectedSha] = useState<string | null>(null);
   const [syncRemoteDraft, setSyncRemoteDraft] = useState("origin");
   const [syncTargetBranchDraft, setSyncTargetBranchDraft] = useState("");
@@ -1382,6 +1563,12 @@ export function DesktopGitSection({
   const workbenchRef = useRef<HTMLDivElement | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const detailRequestSeqRef = useRef(0);
+  const pushPreviewLoadSeqRef = useRef(0);
+  const pushPreviewDetailsLoadSeqRef = useRef(0);
+  const pushRemotePickerRef = useRef<HTMLDivElement | null>(null);
+  const pushTargetBranchPickerRef = useRef<HTMLDivElement | null>(null);
+  const pushTargetBranchFieldRef = useRef<HTMLLabelElement | null>(null);
+  const pushTargetBranchMenuRef = useRef<HTMLDivElement | null>(null);
 
   const stagedFiles = gitPanel?.stagedFiles ?? [];
   const unstagedFiles = gitPanel?.unstagedFiles ?? [];
@@ -1451,10 +1638,6 @@ export function DesktopGitSection({
     () => buildRemoteBranchList(branches?.remoteBranches, pullRemoteDraft || currentUpstreamRef.remote),
     [branches?.remoteBranches, pullRemoteDraft, currentUpstreamRef.remote]
   );
-  const pushBranchOptions = useMemo(
-    () => buildRemoteBranchList(branches?.remoteBranches, pushRemoteDraft || currentUpstreamRef.remote),
-    [branches?.remoteBranches, pushRemoteDraft, currentUpstreamRef.remote]
-  );
   const syncBranchOptions = useMemo(
     () => buildRemoteBranchList(branches?.remoteBranches, syncRemoteDraft || currentUpstreamRef.remote),
     [branches?.remoteBranches, syncRemoteDraft, currentUpstreamRef.remote]
@@ -1470,28 +1653,66 @@ export function DesktopGitSection({
     syncLoading ||
     fetchLoading ||
     refreshLoading;
+  const pushDialogOpen = activeToolbarDialog === "push";
+  const pushSubmitting = pushLoading;
   const normalizedPullRemote = pullRemoteDraft.trim() || currentUpstreamRef.remote || remoteOptions[0] || "origin";
-  const normalizedPushRemote = pushRemoteDraft.trim() || currentUpstreamRef.remote || remoteOptions[0] || "origin";
   const normalizedSyncRemote = syncRemoteDraft.trim() || currentUpstreamRef.remote || remoteOptions[0] || "origin";
   const normalizedFetchRemote = fetchRemoteDraft.trim() || "all";
   const normalizedPullTargetBranch = pullTargetBranchDraft.trim() || currentUpstreamRef.branch || currentBranch || "main";
-  const normalizedPushTargetBranch = pushTargetBranchDraft.trim() || currentUpstreamRef.branch || currentBranch || "main";
   const normalizedSyncTargetBranch = syncTargetBranchDraft.trim() || currentUpstreamRef.branch || currentBranch || "main";
-  const pushTargetSummaryBranch = normalizedPushTargetBranch || currentBranch || "main";
-  const pushIsNewBranchTarget = !pushBranchOptions.includes(pushTargetSummaryBranch);
-  const pushHasOutgoingCommits = commitsAhead > 0;
-  const pushPreviewCommits = useMemo(() => {
-    if (!history?.commits.length || commitsAhead <= 0) {
-      return [];
+  const pushRemoteTrimmed = pushRemoteDraft.trim();
+  const pushTargetBranchTrimmed = pushTargetBranchDraft.trim();
+  const pushTargetBranchQueryTrimmed = pushTargetBranchQuery.trim();
+  const pushTargetBranchOptions = useMemo(
+    () => buildRemoteBranchList(branches?.remoteBranches, pushRemoteTrimmed || currentUpstreamRef.remote),
+    [branches?.remoteBranches, currentUpstreamRef.remote, pushRemoteTrimmed]
+  );
+  const filteredPushTargetBranchOptions = useMemo(() => {
+    const keyword = pushTargetBranchQueryTrimmed.toLowerCase();
+    if (!keyword) {
+      return pushTargetBranchOptions;
     }
-    return history.commits.slice(0, Math.min(commitsAhead, 20));
-  }, [commitsAhead, history?.commits]);
+    const matched = pushTargetBranchOptions.filter((branchName) => branchName.toLowerCase().includes(keyword));
+    return matched.length > 0 ? matched : pushTargetBranchOptions;
+  }, [pushTargetBranchOptions, pushTargetBranchQueryTrimmed]);
+  const pushTargetBranchGroups = useMemo<PushTargetBranchGroup[]>(() => {
+    const grouped = new Map<string, string[]>();
+    for (const branchName of filteredPushTargetBranchOptions) {
+      const scope = getBranchScope(branchName);
+      const bucket = grouped.get(scope) ?? [];
+      bucket.push(branchName);
+      grouped.set(scope, bucket);
+    }
+    const scopes = Array.from(grouped.keys()).sort((left, right) => {
+      if (left === "__root__") return -1;
+      if (right === "__root__") return 1;
+      return left.localeCompare(right);
+    });
+    return scopes.map((scope) => ({
+      scope,
+      label: scope === "__root__" ? "根分组" : scope,
+      items: (grouped.get(scope) ?? []).sort((left, right) => left.localeCompare(right)),
+    }));
+  }, [filteredPushTargetBranchOptions]);
+  const visiblePushTargetBranchGroups = useMemo(() => {
+    if (pushTargetBranchGroups.length <= 1) {
+      return pushTargetBranchGroups;
+    }
+    const activeScope = pushTargetBranchActiveScopeTab ?? pushTargetBranchGroups[0]?.scope ?? null;
+    return pushTargetBranchGroups.filter((group) => group.scope === activeScope);
+  }, [pushTargetBranchActiveScopeTab, pushTargetBranchGroups]);
+  const pushTargetSummaryBranch = pushTargetBranchTrimmed || currentBranch || "main";
+  const pushHasOutgoingCommits = pushPreviewCommits.length > 0;
+  const pushIsNewBranchTarget = Boolean(
+    activeToolbarDialog === "push" && !pushPreviewLoading && !pushPreviewError && !pushPreviewTargetFound
+  );
   const pushPreviewSelectedCommit = useMemo(
-    () =>
-      pushPreviewCommits.find((entry) => entry.sha === pushPreviewSelectedSha) ??
-      pushPreviewCommits[0] ??
-      null,
+    () => pushPreviewCommits.find((entry) => entry.sha === pushPreviewSelectedSha) ?? null,
     [pushPreviewCommits, pushPreviewSelectedSha]
+  );
+  const pushPreviewFileTreeItems = useMemo(
+    () => (pushPreviewDetails ? buildPushPreviewFileTreeItems(pushPreviewDetails.files, pushPreviewExpandedDirs, repositoryRootName) : []),
+    [pushPreviewDetails, pushPreviewExpandedDirs, repositoryRootName]
   );
   const pushReviewerList = useMemo(() => splitCommaSeparated(pushReviewers), [pushReviewers]);
   const pushCcList = useMemo(() => splitCommaSeparated(pushCc), [pushCc]);
@@ -1503,7 +1724,15 @@ export function DesktopGitSection({
         cc: pushCcList,
       })
     : `HEAD:${pushTargetSummaryBranch}`;
-  const pushCanConfirm = !pushLoading && (pushHasOutgoingCommits || pushIsNewBranchTarget || pushTags);
+  const pushCanConfirm = Boolean(
+    projectRoot &&
+      !pushSubmitting &&
+      pushRemoteTrimmed &&
+      pushTargetBranchTrimmed &&
+      !pushPreviewLoading &&
+      !pushPreviewError &&
+      pushHasOutgoingCommits
+  );
   const selectedPullOption = PULL_DIALOG_OPTIONS.find((option) => option.id === pullOptionDraft) ?? PULL_DIALOG_OPTIONS[0];
   const pullCommandPreview = [
     "git pull",
@@ -1519,7 +1748,7 @@ export function DesktopGitSection({
     pushForceWithLease ? "--force-with-lease" : null,
     !pushRunHooks ? "--no-verify" : null,
     pushTags ? "--tags" : null,
-    normalizedPushRemote,
+    pushRemoteTrimmed || "origin",
     pushRefSpec,
   ]
     .filter(Boolean)
@@ -1612,6 +1841,60 @@ export function DesktopGitSection({
     }
   }
 
+  async function loadPushPreview(remoteName: string, targetBranchName: string) {
+    if (!projectRoot) {
+      return;
+    }
+    const requestSeq = ++pushPreviewLoadSeqRef.current;
+    setPushPreviewLoading(true);
+    setPushPreviewError(null);
+    try {
+      const response = await bridge.getGitPushPreview(projectRoot, {
+        remote: remoteName,
+        branch: targetBranchName,
+        limit: 120,
+      });
+      if (pushPreviewLoadSeqRef.current !== requestSeq) {
+        return;
+      }
+      setPushPreviewTargetFound(response.targetFound);
+      setPushPreviewHasMore(response.hasMore);
+      setPushPreviewCommits(response.commits);
+      setPushPreviewSelectedSha((current) => {
+        if (!response.targetFound) {
+          return null;
+        }
+        if (current && response.commits.some((entry) => entry.sha === current)) {
+          return current;
+        }
+        return response.commits[0]?.sha ?? null;
+      });
+      if (!response.targetFound || !response.commits.length) {
+        pushPreviewDetailsLoadSeqRef.current += 1;
+        setPushPreviewDetails(null);
+        setPushPreviewDetailsError(null);
+        setPushPreviewDetailsLoading(false);
+      }
+    } catch (error) {
+      if (pushPreviewLoadSeqRef.current !== requestSeq) {
+        return;
+      }
+      pushPreviewDetailsLoadSeqRef.current += 1;
+      setPushPreviewTargetFound(true);
+      setPushPreviewHasMore(false);
+      setPushPreviewCommits([]);
+      setPushPreviewSelectedSha(null);
+      setPushPreviewDetails(null);
+      setPushPreviewDetailsLoading(false);
+      setPushPreviewDetailsError(null);
+      setPushPreviewError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (pushPreviewLoadSeqRef.current === requestSeq) {
+        setPushPreviewLoading(false);
+      }
+    }
+  }
+
   async function refreshAll() {
     await Promise.all([refreshChanges(), refreshBranches()]);
   }
@@ -1648,9 +1931,16 @@ export function DesktopGitSection({
   }
 
   function openPushDialog() {
-    const defaults = resolveDefaultRemoteBranch();
-    setPushRemoteDraft(defaults.remote);
-    setPushTargetBranchDraft(defaults.branch);
+    const defaultRemote = remoteOptions.includes("origin") ? "origin" : remoteOptions[0] ?? resolveDefaultRemoteBranch().remote;
+    const defaultTargetOptions = buildRemoteBranchList(branches?.remoteBranches, defaultRemote);
+    const defaultTargetBranch =
+      (currentBranch && defaultTargetOptions.includes(currentBranch) ? currentBranch : null) ??
+      currentUpstreamRef.branch ??
+      defaultTargetOptions[0] ??
+      currentBranch ??
+      "";
+    setPushRemoteDraft(defaultRemote);
+    setPushTargetBranchDraft(defaultTargetBranch);
     setPushTags(false);
     setPushRunHooks(true);
     setPushForceWithLease(false);
@@ -1658,8 +1948,99 @@ export function DesktopGitSection({
     setPushTopic("");
     setPushReviewers("");
     setPushCc("");
+    setPushError(null);
+    setPushRemoteMenuOpen(false);
+    setPushRemoteMenuPlacement("up");
+    setPushTargetBranchMenuOpen(false);
+    setPushTargetBranchMenuPlacement("down");
+    setPushTargetBranchQuery("");
+    setPushTargetBranchActiveScopeTab(null);
+    setPushPreviewLoading(false);
+    setPushPreviewError(null);
+    setPushPreviewHasMore(false);
+    setPushPreviewTargetFound(true);
+    setPushPreviewCommits([]);
+    setPushPreviewDetails(null);
+    setPushPreviewDetailsLoading(false);
+    setPushPreviewDetailsError(null);
+    setPushPreviewExpandedDirs(new Set());
+    setPushPreviewSelectedFileKey(null);
     setPushPreviewSelectedSha(null);
     setActiveToolbarDialog("push");
+  }
+
+  function updatePushRemoteMenuPlacement() {
+    setPushRemoteMenuPlacement("up");
+  }
+
+  function updatePushTargetBranchMenuPlacement() {
+    if (typeof window === "undefined") {
+      setPushTargetBranchMenuPlacement("down");
+      return;
+    }
+    const anchorElement = pushTargetBranchPickerRef.current;
+    if (!anchorElement) {
+      setPushTargetBranchMenuPlacement("down");
+      return;
+    }
+    const anchorRect = anchorElement.getBoundingClientRect();
+    const spaceAbove = anchorRect.top - PUSH_TARGET_MENU_VIEWPORT_PADDING;
+    const spaceBelow = window.innerHeight - anchorRect.bottom - PUSH_TARGET_MENU_VIEWPORT_PADDING;
+    const estimatedRowCount = pushTargetBranchGroups.reduce((total, group) => total + group.items.length + 1, 0);
+    const estimatedMenuHeight = Math.max(
+      PUSH_TARGET_MENU_MIN_HEIGHT,
+      Math.min(PUSH_TARGET_MENU_MAX_HEIGHT, estimatedRowCount * PUSH_TARGET_MENU_ESTIMATED_ROW_HEIGHT + 28)
+    );
+    const shouldOpenUpward =
+      spaceBelow < estimatedMenuHeight &&
+      spaceAbove > spaceBelow &&
+      spaceAbove > PUSH_TARGET_MENU_MIN_HEIGHT;
+    setPushTargetBranchMenuPlacement(shouldOpenUpward ? "up" : "down");
+  }
+
+  function openPushTargetBranchMenu(resetQuery: boolean) {
+    if (pushSubmitting) {
+      return;
+    }
+    setPushRemoteMenuOpen(false);
+    if (resetQuery) {
+      setPushTargetBranchQuery("");
+    }
+    updatePushTargetBranchMenuPlacement();
+    setPushTargetBranchMenuOpen(true);
+  }
+
+  function handleSelectPushRemote(remoteName: string) {
+    const normalizedRemote = remoteName.trim();
+    const targetOptions = buildRemoteBranchList(branches?.remoteBranches, normalizedRemote);
+    const nextTarget =
+      (currentBranch && targetOptions.includes(currentBranch) ? currentBranch : null) ??
+      (pushTargetBranchTrimmed && targetOptions.includes(pushTargetBranchTrimmed) ? pushTargetBranchTrimmed : null) ??
+      targetOptions[0] ??
+      currentBranch ??
+      "";
+    setPushRemoteDraft(normalizedRemote);
+    setPushTargetBranchDraft(nextTarget);
+    setPushTargetBranchQuery("");
+    setPushRemoteMenuOpen(false);
+  }
+
+  function handleSelectPushTargetBranch(branchName: string) {
+    setPushTargetBranchDraft(branchName);
+    setPushTargetBranchQuery("");
+    setPushTargetBranchMenuOpen(false);
+  }
+
+  function handlePushPreviewDirToggle(path: string) {
+    setPushPreviewExpandedDirs((current) => {
+      const next = new Set(current);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
   }
 
   function openSyncDialog() {
@@ -1677,6 +2058,8 @@ export function DesktopGitSection({
   useLayoutEffect(() => {
     if (!projectRoot) return;
     detailRequestSeqRef.current += 1;
+    pushPreviewLoadSeqRef.current += 1;
+    pushPreviewDetailsLoadSeqRef.current += 1;
     setGitPanel(null);
     setBranches(null);
     setHistory(null);
@@ -1703,6 +2086,16 @@ export function DesktopGitSection({
     setCommitMessage("");
     setCommitError(null);
     setPushError(null);
+    setPushPreviewError(null);
+    setPushPreviewHasMore(false);
+    setPushPreviewTargetFound(true);
+    setPushPreviewCommits([]);
+    setPushPreviewDetails(null);
+    setPushPreviewDetailsError(null);
+    setPushPreviewDetailsLoading(false);
+    setPushPreviewExpandedDirs(new Set());
+    setPushPreviewSelectedFileKey(null);
+    setPushPreviewSelectedSha(null);
     setActiveToolbarDialog(null);
     void refreshAll();
   }, [projectRoot]);
@@ -1758,12 +2151,108 @@ export function DesktopGitSection({
   }, [groupedRemoteBranches, selectedBranchItem]);
 
   useEffect(() => {
-    if (activeToolbarDialog !== "push") {
+    if (!pushDialogOpen || (!pushRemoteMenuOpen && !pushTargetBranchMenuOpen)) {
       return;
     }
-    const nextSelected = pushPreviewCommits[0]?.sha ?? null;
-    setPushPreviewSelectedSha((current) => current ?? nextSelected);
-  }, [activeToolbarDialog, pushPreviewCommits]);
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (pushRemotePickerRef.current?.contains(target)) {
+        return;
+      }
+      if (pushTargetBranchFieldRef.current?.contains(target)) {
+        return;
+      }
+      setPushRemoteMenuOpen(false);
+      setPushTargetBranchMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [pushDialogOpen, pushRemoteMenuOpen, pushTargetBranchMenuOpen]);
+
+  useEffect(() => {
+    if (!pushDialogOpen) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      if (pushRemoteMenuOpen || pushTargetBranchMenuOpen) {
+        setPushRemoteMenuOpen(false);
+        setPushTargetBranchMenuOpen(false);
+        return;
+      }
+      if (!pushSubmitting) {
+        setActiveToolbarDialog(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [pushDialogOpen, pushRemoteMenuOpen, pushSubmitting, pushTargetBranchMenuOpen]);
+
+  useEffect(() => {
+    if (!pushDialogOpen || !pushRemoteMenuOpen) {
+      return;
+    }
+    const handleLayoutChange = () => updatePushRemoteMenuPlacement();
+    handleLayoutChange();
+    window.addEventListener("resize", handleLayoutChange);
+    window.addEventListener("scroll", handleLayoutChange, true);
+    return () => {
+      window.removeEventListener("resize", handleLayoutChange);
+      window.removeEventListener("scroll", handleLayoutChange, true);
+    };
+  }, [pushDialogOpen, pushRemoteMenuOpen]);
+
+  useEffect(() => {
+    if (!pushDialogOpen || !pushTargetBranchMenuOpen) {
+      return;
+    }
+    const handleLayoutChange = () => updatePushTargetBranchMenuPlacement();
+    handleLayoutChange();
+    window.addEventListener("resize", handleLayoutChange);
+    window.addEventListener("scroll", handleLayoutChange, true);
+    return () => {
+      window.removeEventListener("resize", handleLayoutChange);
+      window.removeEventListener("scroll", handleLayoutChange, true);
+    };
+  }, [pushDialogOpen, pushTargetBranchGroups, pushTargetBranchMenuOpen]);
+
+  useEffect(() => {
+    if (!pushTargetBranchMenuOpen) {
+      return;
+    }
+    const availableScopes = pushTargetBranchGroups.map((group) => group.scope);
+    const currentBranchScope = currentBranch ? getBranchScope(currentBranch) : null;
+    const selectedScope = pushTargetBranchTrimmed ? getBranchScope(pushTargetBranchTrimmed) : null;
+    setPushTargetBranchActiveScopeTab((current) => {
+      if (currentBranchScope && availableScopes.includes(currentBranchScope)) {
+        return currentBranchScope;
+      }
+      if (selectedScope && availableScopes.includes(selectedScope)) {
+        return selectedScope;
+      }
+      if (current && availableScopes.includes(current)) {
+        return current;
+      }
+      return availableScopes[0] ?? null;
+    });
+  }, [currentBranch, pushTargetBranchGroups, pushTargetBranchMenuOpen, pushTargetBranchTrimmed]);
+
+  useEffect(() => {
+    if (!pushTargetBranchMenuOpen) {
+      return;
+    }
+    pushTargetBranchMenuRef.current?.scrollTo({ top: 0 });
+  }, [pushTargetBranchActiveScopeTab, pushTargetBranchMenuOpen]);
 
   useEffect(() => {
     if (!projectRoot || !selectedBranch) return;
@@ -1772,6 +2261,63 @@ export function DesktopGitSection({
     }, 180);
     return () => window.clearTimeout(id);
   }, [projectRoot, selectedBranch, commitQuery]);
+
+  useEffect(() => {
+    if (!pushDialogOpen) {
+      return;
+    }
+    if (!projectRoot || !pushRemoteTrimmed || !pushTargetBranchTrimmed) {
+      pushPreviewLoadSeqRef.current += 1;
+      pushPreviewDetailsLoadSeqRef.current += 1;
+      setPushPreviewLoading(false);
+      setPushPreviewError(null);
+      setPushPreviewTargetFound(true);
+      setPushPreviewHasMore(false);
+      setPushPreviewCommits([]);
+      setPushPreviewSelectedSha(null);
+      setPushPreviewDetails(null);
+      setPushPreviewDetailsLoading(false);
+      setPushPreviewDetailsError(null);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      void loadPushPreview(pushRemoteTrimmed, pushTargetBranchTrimmed);
+    }, 180);
+    return () => window.clearTimeout(id);
+  }, [projectRoot, pushDialogOpen, pushRemoteTrimmed, pushTargetBranchTrimmed]);
+
+  useEffect(() => {
+    if (!pushDialogOpen || !projectRoot || !pushPreviewSelectedSha) {
+      pushPreviewDetailsLoadSeqRef.current += 1;
+      setPushPreviewDetails(null);
+      setPushPreviewDetailsLoading(false);
+      setPushPreviewDetailsError(null);
+      return;
+    }
+    const requestSeq = ++pushPreviewDetailsLoadSeqRef.current;
+    setPushPreviewDetailsLoading(true);
+    setPushPreviewDetailsError(null);
+    void bridge
+      .getGitCommitDetails(projectRoot, pushPreviewSelectedSha)
+      .then((next) => {
+        if (pushPreviewDetailsLoadSeqRef.current !== requestSeq) {
+          return;
+        }
+        setPushPreviewDetails(next);
+      })
+      .catch((error) => {
+        if (pushPreviewDetailsLoadSeqRef.current !== requestSeq) {
+          return;
+        }
+        setPushPreviewDetails(null);
+        setPushPreviewDetailsError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (pushPreviewDetailsLoadSeqRef.current === requestSeq) {
+          setPushPreviewDetailsLoading(false);
+        }
+      });
+  }, [projectRoot, pushDialogOpen, pushPreviewSelectedSha]);
 
   useEffect(() => {
     if (!projectRoot || !selectedCommitSha) return;
@@ -1791,8 +2337,20 @@ export function DesktopGitSection({
 
   useEffect(() => {
     setDetailsCollapsedFolders(new Set());
-    setSelectedDetailFileKey(details?.files[0] ? buildFileKey(details.files[0].path, details.files[0].oldPath) : null);
+    setSelectedDetailFileKey(details?.files[0] ? buildFileKey(details.files[0]) : null);
   }, [details?.sha]);
+
+  useEffect(() => {
+    if (!pushPreviewDetails) {
+      setPushPreviewExpandedDirs(new Set());
+      setPushPreviewSelectedFileKey(null);
+      setDiffModal((current) => (current?.source === "commit" ? null : current));
+      return;
+    }
+    setPushPreviewExpandedDirs(collectDirPaths(pushPreviewDetails.files));
+    setPushPreviewSelectedFileKey((current) => pickSelectedPushPreviewFileKey(current, pushPreviewDetails.files));
+    setDiffModal((current) => (current?.source === "commit" ? null : current));
+  }, [pushPreviewDetails]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2231,8 +2789,14 @@ export function DesktopGitSection({
   }
 
   async function confirmPushDialog() {
-    const ok = await pushChanges({
-      remote: normalizedPushRemote,
+    if (!pushCanConfirm) {
+      return;
+    }
+    setPushRemoteMenuOpen(false);
+    setPushTargetBranchMenuOpen(false);
+    setActiveToolbarDialog(null);
+    await pushChanges({
+      remote: pushRemoteTrimmed,
       targetBranch: pushTargetSummaryBranch,
       pushTags,
       noVerify: !pushRunHooks,
@@ -2242,9 +2806,6 @@ export function DesktopGitSection({
       reviewers: pushReviewers.trim() || null,
       cc: pushCc.trim() || null,
     });
-    if (ok) {
-      setActiveToolbarDialog(null);
-    }
   }
 
   async function confirmSyncDialog() {
@@ -3050,11 +3611,11 @@ export function DesktopGitSection({
         />
       ) : null}
 
-      {activeToolbarDialog === "push" ? (
+      {pushDialogOpen ? (
         <div
           className="git-history-dialog-backdrop"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !pushLoading) {
+            if (event.target === event.currentTarget && !pushSubmitting) {
               setActiveToolbarDialog(null);
             }
           }}
@@ -3067,39 +3628,19 @@ export function DesktopGitSection({
             onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="git-history-push-hero">
-              <div className="git-history-push-head">
-                <div className="git-history-dialog-title git-history-push-title">
-                  <span className="git-history-toolbar-confirm-icon">
-                    <Upload size={14} />
-                  </span>
-                  <div className="git-history-toolbar-confirm-title-copy">
-                    <span>推送变更</span>
-                    <small>先确认目标分支、推送选项，再执行 push。</small>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  className="git-history-toolbar-confirm-close"
-                  onClick={() => setActiveToolbarDialog(null)}
-                  disabled={pushLoading}
-                  aria-label="关闭"
-                  title="关闭"
-                >
-                  <X size={14} />
-                </button>
+              <div className="git-history-create-branch-title git-history-push-title">
+                <Upload size={14} />
+                <span>推送变更</span>
               </div>
-
               <div className="git-history-push-summary-row">
                 <div className="git-history-push-target-wrap">
                   <div className="git-history-push-target">
-                    将 <strong>{toolbarBranchLabel}</strong> 推送到{" "}
-                    <strong>
-                      {normalizedPushRemote}:{pushTargetSummaryBranch}
-                    </strong>
+                    将 <strong>{currentBranch || "HEAD"}</strong> 推送到{" "}
+                    <strong>{pushRemoteTrimmed || "origin"}:{pushTargetSummaryBranch}</strong>
                   </div>
                   {pushIsNewBranchTarget ? <span className="git-history-push-target-badge">(新分支)</span> : null}
                 </div>
-                <code className="git-history-push-readonly">{toolbarBranchLabel}</code>
+                <code className="git-history-push-readonly">{currentBranch || "HEAD"}</code>
               </div>
             </div>
 
@@ -3111,18 +3652,21 @@ export function DesktopGitSection({
                       <GitCommitHorizontal size={12} />
                       待推送提交
                     </span>
-                    <strong>{pushPreviewCommits.length}</strong>
+                    <strong>{pushIsNewBranchTarget ? "新分支" : pushPreviewCommits.length}</strong>
                   </div>
-                  {pushError ? <div className="git-history-push-preview-error">{pushError}</div> : null}
-                  {!pushError && !pushHasOutgoingCommits ? (
+                  {!pushIsNewBranchTarget && !pushPreviewError && pushPreviewLoading ? (
                     <div className="git-history-push-preview-empty">
-                      当前分支没有领先提交。可继续用于推送 tags 或创建远端新分支。
+                      正在加载推送预览提交…
                     </div>
                   ) : null}
-                  {!pushError && pushHasOutgoingCommits ? (
+                  {pushPreviewError ? <div className="git-history-push-preview-error">{pushPreviewError}</div> : null}
+                  {!pushIsNewBranchTarget && !pushPreviewError && !pushPreviewLoading && !pushHasOutgoingCommits ? (
+                    <div className="git-history-push-preview-empty">当前分支没有可推送的领先提交。</div>
+                  ) : null}
+                  {!pushIsNewBranchTarget && !pushPreviewError && !pushPreviewLoading && pushHasOutgoingCommits ? (
                     <div className="git-history-push-preview-commit-list">
                       {pushPreviewCommits.map((entry) => {
-                        const active = entry.sha === pushPreviewSelectedCommit?.sha;
+                        const active = entry.sha === pushPreviewSelectedSha;
                         return (
                           <button
                             key={entry.sha}
@@ -3134,87 +3678,298 @@ export function DesktopGitSection({
                             <span className="git-history-push-preview-commit-meta">
                               <code>{entry.shortSha}</code>
                               <em>{entry.author || "unknown"}</em>
-                              <time>{formatRelativeTime(entry.timestamp)}</time>
+                              <time>{formatRelativeTime(entry.timestamp * 1000)}</time>
                             </span>
                           </button>
                         );
                       })}
                     </div>
                   ) : null}
-                  {!pushError && pushHasOutgoingCommits && commitsAhead > pushPreviewCommits.length ? (
+                  {!pushIsNewBranchTarget && !pushPreviewError && pushPreviewHasMore ? (
                     <div className="git-history-push-preview-hint">仅展示最近 {pushPreviewCommits.length} 条提交。</div>
+                  ) : null}
+                  {pushIsNewBranchTarget ? (
+                    <>
+                      <div className="git-history-push-preview-empty">目标远端分支不存在，将创建一个新的远端分支。</div>
+                      <div className="git-history-push-preview-hint">
+                        将推送到 <code>{pushRemoteTrimmed || "origin"}/{pushTargetBranchTrimmed || "main"}</code>。
+                      </div>
+                    </>
                   ) : null}
                 </div>
 
                 <div className="git-history-push-preview-pane is-details">
                   <div className="git-history-push-preview-head">
                     <span className="git-history-push-preview-title">
-                      <FolderTree size={12} />
+                      <FileText size={12} />
                       提交详情
                     </span>
                   </div>
-                  {!pushPreviewSelectedCommit ? (
+                  {!pushIsNewBranchTarget && !pushPreviewError && pushPreviewDetailsLoading ? (
+                    <div className="git-history-push-preview-empty">正在加载提交详情…</div>
+                  ) : null}
+                  {pushPreviewDetailsError ? <div className="git-history-push-preview-error">{pushPreviewDetailsError}</div> : null}
+                  {!pushIsNewBranchTarget && !pushPreviewDetailsLoading && !pushPreviewDetailsError && !pushPreviewSelectedCommit ? (
                     <div className="git-history-push-preview-empty">选择左侧提交可查看详情。</div>
-                  ) : (
-                    <div className="git-history-push-preview-metadata">
-                      <strong>{pushPreviewSelectedCommit.summary || "(no message)"}</strong>
-                      <span className="git-history-push-preview-metadata-row">
-                        <code>{pushPreviewSelectedCommit.sha}</code>
-                        <em>{pushPreviewSelectedCommit.author || "unknown"}</em>
-                        <time>{new Date(pushPreviewSelectedCommit.timestamp).toLocaleString()}</time>
-                      </span>
-                      <div className="git-history-push-preview-message">
-                        {pushPreviewSelectedCommit.message || pushPreviewSelectedCommit.summary || "(empty)"}
+                  ) : null}
+                  {pushPreviewDetails && !pushPreviewDetailsLoading && !pushPreviewDetailsError ? (
+                    <div className="git-history-push-preview-details">
+                      <div className="git-history-push-preview-metadata">
+                        <strong>{pushPreviewDetails.summary || "(no message)"}</strong>
+                        <span className="git-history-push-preview-metadata-row">
+                          <code>{pushPreviewDetails.sha}</code>
+                          <em>{pushPreviewDetails.author || "unknown"}</em>
+                          <time>{new Date(pushPreviewDetails.commitTime * 1000).toLocaleString()}</time>
+                        </span>
+                      </div>
+                      <div className="git-history-push-preview-file-head git-filetree-section-header">
+                        <FolderTree size={12} />
+                        <span>变更文件</span>
+                        <i>{pushPreviewDetails.files.length}</i>
+                      </div>
+                      <div className="git-history-push-preview-file-tree git-filetree-list git-filetree-list--tree">
+                        {pushPreviewFileTreeItems.length > 0 ? (
+                          pushPreviewFileTreeItems.map((item) => {
+                            const treeIndentPx = item.depth * 14;
+                            const treeRowStyle = {
+                              paddingLeft: `${treeIndentPx}px`,
+                              ["--git-tree-indent-x" as string]: `${Math.max(treeIndentPx - 7, 0)}px`,
+                              ["--git-tree-line-opacity" as string]: getTreeLineOpacity(item.depth > 0 ? 1 : 0),
+                            } as CSSProperties;
+
+                            if (item.type === "dir") {
+                              return (
+                                <button
+                                  key={`push-preview-${item.id}`}
+                                  type="button"
+                                  className="git-history-tree-item git-history-tree-dir git-filetree-folder-row"
+                                  style={treeRowStyle}
+                                  onClick={() => handlePushPreviewDirToggle(item.path)}
+                                >
+                                  <span className="git-history-tree-caret" aria-hidden>
+                                    {item.expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                  </span>
+                                  <span className="git-history-tree-icon" aria-hidden>
+                                    <FileIcon filePath={item.path} isFolder isOpen={item.expanded} />
+                                  </span>
+                                  <span className="git-history-tree-label">{item.label}</span>
+                                </button>
+                              );
+                            }
+
+                            const file = item.change;
+                            const fileKey = buildFileKey(file);
+                            const active = pushPreviewSelectedFileKey === fileKey;
+                            return (
+                              <button
+                                key={`push-preview-${item.id}`}
+                                type="button"
+                                className={`git-history-tree-item git-history-file-item git-filetree-row${active ? " is-active" : ""}`}
+                                style={treeRowStyle}
+                                title={file.path}
+                                onClick={() => {
+                                  setPushPreviewSelectedFileKey(fileKey);
+                                  openCommitDiff(file);
+                                }}
+                              >
+                                <span className={`git-history-file-status ${statusToneClass(file.status)}`}>{normalizeStatus(file.status)}</span>
+                                <span className="git-history-tree-icon is-file" aria-hidden>
+                                  <FileIcon filePath={file.path} />
+                                </span>
+                                <span className="git-history-file-path">{item.label}</span>
+                                <span className="git-history-file-stats git-filetree-badge">
+                                  <span className="is-add">+{file.additions}</span>
+                                  <span className="is-sep">/</span>
+                                  <span className="is-del">-{file.deletions}</span>
+                                </span>
+                              </button>
+                            );
+                          })
+                        ) : (
+                          <div className="git-history-push-preview-empty">这个提交没有文件变更。</div>
+                        )}
                       </div>
                     </div>
-                  )}
+                  ) : null}
+                  {pushIsNewBranchTarget ? <div className="git-history-push-preview-empty">新分支预览不显示已有远端对比详情。</div> : null}
                 </div>
               </div>
             </div>
 
             <div className="git-history-push-section git-history-push-section-controls">
               <div className="git-history-push-grid">
-                <label className="git-history-toolbar-confirm-field">
+                <div className="git-history-create-branch-field">
                   <span className="git-history-push-field-label">
                     <Cloud size={12} />
                     远端
                   </span>
-                  <select
-                    value={normalizedPushRemote}
-                    disabled={pushLoading}
-                    onChange={(event) => {
-                      const nextRemote = event.target.value;
-                      const nextBranches = buildRemoteBranchList(branches?.remoteBranches, nextRemote);
-                      setPushRemoteDraft(nextRemote);
-                      setPushTargetBranchDraft((current) =>
-                        current && nextBranches.includes(current) ? current : nextBranches[0] ?? currentBranch ?? "main"
-                      );
-                    }}
+                  <div
+                    className={`git-history-push-picker${pushRemoteMenuOpen ? " is-open" : ""}`}
+                    ref={pushRemotePickerRef}
                   >
-                    {remoteOptions.map((remote) => (
-                      <option key={`push-remote-${remote}`} value={remote}>
-                        {remote}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="git-history-toolbar-confirm-field">
+                    <button
+                      type="button"
+                      className="git-history-push-picker-trigger"
+                      aria-label="远端"
+                      aria-haspopup="listbox"
+                      aria-expanded={pushRemoteMenuOpen}
+                      disabled={pushSubmitting}
+                      onClick={() => {
+                        if (pushSubmitting) {
+                          return;
+                        }
+                        setPushTargetBranchMenuOpen(false);
+                        setPushRemoteMenuOpen((current) => {
+                          const nextOpen = !current;
+                          if (nextOpen) {
+                            updatePushRemoteMenuPlacement();
+                          }
+                          return nextOpen;
+                        });
+                      }}
+                    >
+                      <Cloud size={12} className="git-history-push-picker-leading-icon" />
+                      <span className="git-history-push-picker-value">{pushRemoteTrimmed || "origin"}</span>
+                      <ChevronDown size={13} className="git-history-push-picker-caret" />
+                    </button>
+                    {pushRemoteMenuOpen ? (
+                      <div
+                        className={`git-history-push-picker-menu${pushRemoteMenuPlacement === "up" ? " is-upward" : ""}`}
+                        role="listbox"
+                        aria-label="远端"
+                      >
+                        {remoteOptions.map((remoteName) => (
+                          <button
+                            key={remoteName}
+                            type="button"
+                            className={`git-history-push-picker-item${remoteName === pushRemoteTrimmed ? " is-active" : ""}`}
+                            role="option"
+                            aria-selected={remoteName === pushRemoteTrimmed}
+                            onClick={() => handleSelectPushRemote(remoteName)}
+                          >
+                            <Cloud size={12} className="git-history-push-picker-item-icon" />
+                            <span className="git-history-push-picker-item-content">{remoteName}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                <label className="git-history-create-branch-field git-history-push-target-field" ref={pushTargetBranchFieldRef}>
                   <span className="git-history-push-field-label">
                     <GitBranch size={12} />
                     目标远端分支
                   </span>
-                  <input
-                    list="git-push-target-branches"
-                    value={pushTargetBranchDraft}
-                    disabled={pushLoading}
-                    onChange={(event) => setPushTargetBranchDraft(event.target.value)}
-                    placeholder={currentBranch ?? "main"}
-                  />
-                  <datalist id="git-push-target-branches">
-                    {pushBranchOptions.map((branch) => (
-                      <option key={`push-branch-${branch}`} value={branch} />
-                    ))}
-                  </datalist>
+                  <div
+                    className={`git-history-push-combobox${pushTargetBranchMenuOpen ? " is-open" : ""}`}
+                    ref={pushTargetBranchPickerRef}
+                  >
+                    <input
+                      value={pushTargetBranchDraft}
+                      disabled={pushSubmitting}
+                      onChange={(event) => {
+                        setPushTargetBranchDraft(event.target.value);
+                        setPushTargetBranchQuery(event.target.value);
+                        if (!pushTargetBranchMenuOpen) {
+                          openPushTargetBranchMenu(false);
+                        }
+                      }}
+                      onFocus={() => openPushTargetBranchMenu(false)}
+                      aria-label="目标远端分支"
+                      placeholder={currentBranch ?? "main"}
+                    />
+                    <button
+                      type="button"
+                      className="git-history-push-combobox-toggle"
+                      aria-label="切换目标远端分支列表"
+                      aria-haspopup="listbox"
+                      aria-expanded={pushTargetBranchMenuOpen}
+                      disabled={pushSubmitting}
+                      onClick={() => {
+                        if (pushSubmitting) {
+                          return;
+                        }
+                        const nextOpen = !pushTargetBranchMenuOpen;
+                        if (nextOpen) {
+                          openPushTargetBranchMenu(true);
+                          return;
+                        }
+                        setPushTargetBranchMenuOpen(false);
+                      }}
+                    >
+                      <ChevronDown size={13} />
+                    </button>
+                  </div>
+                  {pushTargetBranchMenuOpen ? (
+                    <div
+                      className={`git-history-push-picker-menu git-history-push-target-menu${
+                        pushTargetBranchMenuPlacement === "up" ? " is-upward" : ""
+                      }`}
+                      ref={pushTargetBranchMenuRef}
+                      role="listbox"
+                      aria-label="目标远端分支"
+                    >
+                      {pushTargetBranchGroups.length > 0 ? (
+                        <>
+                          {pushTargetBranchGroups.length > 1 ? (
+                            <div className="git-history-push-picker-tabs" role="tablist">
+                              {pushTargetBranchGroups.map((group) => {
+                                const isActive = group.scope === pushTargetBranchActiveScopeTab;
+                                return (
+                                  <button
+                                    key={`push-target-tab-${group.scope}`}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={isActive}
+                                    className={`git-history-push-picker-tab${isActive ? " is-active" : ""}`}
+                                    onClick={() => setPushTargetBranchActiveScopeTab(group.scope)}
+                                  >
+                                    <span>{group.label}</span>
+                                    <i>{group.items.length}</i>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          ) : null}
+                          {visiblePushTargetBranchGroups.map((group) => (
+                            <div key={group.scope} className="git-history-push-picker-group">
+                              {pushTargetBranchGroups.length <= 1 ? (
+                                <div className="git-history-push-picker-group-label">
+                                  <FolderTree size={11} />
+                                  <span>{group.label}</span>
+                                  <i>{group.items.length}</i>
+                                </div>
+                              ) : null}
+                              {group.items.map((branchName) => (
+                                <button
+                                  key={branchName}
+                                  type="button"
+                                  className={`git-history-push-picker-item${branchName === pushTargetBranchTrimmed ? " is-active" : ""}`}
+                                  role="option"
+                                  aria-selected={branchName === pushTargetBranchTrimmed}
+                                  title={branchName}
+                                  onClick={() => handleSelectPushTargetBranch(branchName)}
+                                >
+                                  <GitBranch size={12} className="git-history-push-picker-item-icon" />
+                                  <span className="git-history-push-picker-item-content">
+                                    <span className="git-history-push-picker-item-title">{getBranchLeafName(branchName)}</span>
+                                    {getBranchScope(branchName) !== "__root__" ? (
+                                      <>
+                                        <span className="git-history-push-picker-item-separator"> · </span>
+                                        <span className="git-history-push-picker-item-subtitle">{branchName}</span>
+                                      </>
+                                    ) : null}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          ))}
+                        </>
+                      ) : (
+                        <div className="git-history-push-picker-empty">当前远端没有可选分支。</div>
+                      )}
+                    </div>
+                  ) : null}
                 </label>
               </div>
 
@@ -3222,7 +3977,7 @@ export function DesktopGitSection({
                 type="button"
                 className={`git-history-push-toggle${pushToGerrit ? " is-active" : ""}`}
                 aria-pressed={pushToGerrit}
-                disabled={pushLoading}
+                disabled={pushSubmitting}
                 onClick={() => setPushToGerrit((previous) => !previous)}
               >
                 <span className="git-history-push-toggle-indicator" aria-hidden>
@@ -3238,29 +3993,28 @@ export function DesktopGitSection({
                     将使用 <code>refs/for/{pushTargetSummaryBranch}</code> 推送，并附带 topic/reviewers/cc 参数。
                   </div>
                   <div className="git-history-push-grid">
-                    <label className="git-history-toolbar-confirm-field">
+                    <label className="git-history-create-branch-field">
                       <span>Topic</span>
                       <input
                         value={pushTopic}
-                        disabled={pushLoading}
+                        disabled={pushSubmitting}
                         onChange={(event) => setPushTopic(event.target.value)}
-                        placeholder="feature-sync"
                       />
                     </label>
-                    <label className="git-history-toolbar-confirm-field">
+                    <label className="git-history-create-branch-field">
                       <span>Reviewers</span>
                       <input
                         value={pushReviewers}
-                        disabled={pushLoading}
+                        disabled={pushSubmitting}
                         onChange={(event) => setPushReviewers(event.target.value)}
                         placeholder="alice@corp.com,bob@corp.com"
                       />
                     </label>
-                    <label className="git-history-toolbar-confirm-field">
+                    <label className="git-history-create-branch-field">
                       <span>CC</span>
                       <input
                         value={pushCc}
-                        disabled={pushLoading}
+                        disabled={pushSubmitting}
                         onChange={(event) => setPushCc(event.target.value)}
                         placeholder="team@corp.com"
                       />
@@ -3268,10 +4022,6 @@ export function DesktopGitSection({
                   </div>
                 </>
               ) : null}
-
-              <div className="git-history-toolbar-confirm-command">
-                <code>{pushCommandPreview}</code>
-              </div>
             </div>
 
             <div className="git-history-push-footer">
@@ -3280,7 +4030,7 @@ export function DesktopGitSection({
                   type="button"
                   className={`git-history-push-toggle${pushTags ? " is-active" : ""}`}
                   aria-pressed={pushTags}
-                  disabled={pushLoading}
+                  disabled={pushSubmitting}
                   onClick={() => setPushTags((previous) => !previous)}
                 >
                   <span className="git-history-push-toggle-indicator" aria-hidden>
@@ -3293,7 +4043,7 @@ export function DesktopGitSection({
                   type="button"
                   className={`git-history-push-toggle${pushRunHooks ? " is-active" : ""}`}
                   aria-pressed={pushRunHooks}
-                  disabled={pushLoading}
+                  disabled={pushSubmitting}
                   onClick={() => setPushRunHooks((previous) => !previous)}
                 >
                   <span className="git-history-push-toggle-indicator" aria-hidden>
@@ -3306,7 +4056,7 @@ export function DesktopGitSection({
                   type="button"
                   className={`git-history-push-toggle${pushForceWithLease ? " is-active" : ""}`}
                   aria-pressed={pushForceWithLease}
-                  disabled={pushLoading}
+                  disabled={pushSubmitting}
                   onClick={() => setPushForceWithLease((previous) => !previous)}
                 >
                   <span className="git-history-push-toggle-indicator" aria-hidden>
@@ -3317,25 +4067,25 @@ export function DesktopGitSection({
                 </button>
               </div>
 
-              <div className="git-history-push-actions">
+              <div className="git-history-create-branch-actions">
                 <button
                   type="button"
-                  className="dcc-action-button secondary"
+                  className="git-history-create-branch-btn is-cancel"
                   onClick={() => setActiveToolbarDialog(null)}
-                  disabled={pushLoading}
+                  disabled={pushSubmitting}
                 >
                   取消
                 </button>
                 <button
                   type="button"
-                  className="dcc-action-button"
+                  className="git-history-create-branch-btn is-confirm"
                   disabled={!pushCanConfirm}
-                  title={!pushCanConfirm ? "当前没有可推送提交，可开启“推送 Tags”或切换目标分支。" : undefined}
+                  title={!pushCanConfirm && !pushPreviewLoading && !pushHasOutgoingCommits ? "当前没有可推送的领先提交。" : undefined}
                   onClick={() => {
                     void confirmPushDialog();
                   }}
                 >
-                  {pushLoading ? "执行中…" : "推送"}
+                  {pushSubmitting ? "执行中…" : "推送"}
                 </button>
               </div>
             </div>

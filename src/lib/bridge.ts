@@ -45,6 +45,7 @@ import {
   GitHubIssuesResponse,
   GitHubPullRequestsResponse,
   GitHistoryResponse,
+  GitPushPreviewResponse,
   GitLogResponse,
   GitFileStatus,
   GitPanelData,
@@ -188,6 +189,14 @@ export interface RuntimeBridge {
       snapshotId?: string | null;
     }
   ) => Promise<GitHistoryResponse>;
+  getGitPushPreview: (
+    projectRoot: string,
+    options: {
+      remote: string;
+      branch: string;
+      limit?: number;
+    }
+  ) => Promise<GitPushPreviewResponse>;
   getGitCommitDetails: (
     projectRoot: string,
     commitHash: string,
@@ -617,6 +626,15 @@ const tauriRuntime: RuntimeBridge = {
       offset: options?.offset ?? 0,
       limit: options?.limit ?? 100,
       snapshotId: options?.snapshotId ?? null,
+    });
+  },
+  async getGitPushPreview(projectRoot, options) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<GitPushPreviewResponse>("get_git_push_preview", {
+      projectRoot,
+      remote: options.remote,
+      branch: options.branch,
+      limit: options.limit ?? 120,
     });
   },
   async getGitCommitDetails(projectRoot, commitHash, maxDiffLines) {

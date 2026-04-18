@@ -1355,6 +1355,16 @@ export interface GitHistoryResponse {
   commits: GitHistoryCommit[];
 }
 
+export interface GitPushPreviewResponse {
+  sourceBranch: string;
+  targetRemote: string;
+  targetBranch: string;
+  targetRef: string;
+  targetFound: boolean;
+  hasMore: boolean;
+  commits: GitHistoryCommit[];
+}
+
 export interface GitCommitFileChange {
   path: string;
   oldPath?: string | null;

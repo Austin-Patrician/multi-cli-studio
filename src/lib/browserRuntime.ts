@@ -62,7 +62,9 @@ import {
   GitFileDiff,
   GitBranchListResponse,
   GitCommitDetails,
+  GitHistoryCommit,
   GitHistoryResponse,
+  GitPushPreviewResponse,
   GitHubIssue,
   GitHubIssuesResponse,
   GitHubPullRequest,
@@ -3155,6 +3157,62 @@ export const browserRuntime = {
       limit,
       hasMore: offset + commits.length < all.length,
       commits,
+    };
+  },
+  async getGitPushPreview(
+    _projectRoot: string,
+    options: {
+      remote: string;
+      branch: string;
+      limit?: number;
+    }
+  ): Promise<GitPushPreviewResponse> {
+    const allCommits: GitHistoryCommit[] = [
+      {
+        sha: "9f8e7d6c5b4a3210fedcba987654321001234567",
+        shortSha: "9f8e7d6",
+        summary: "Refine desktop settings shell spacing",
+        message: "Refine desktop settings shell spacing\n\nTighten the top gutter in the desktop settings workspace.",
+        author: "Codex",
+        authorEmail: "codex@example.com",
+        timestamp: Math.floor((Date.now() - 1000 * 60 * 20) / 1000),
+        parents: ["8e7d6c5b4a3210fedcba98765432100123456789a"],
+        refs: [],
+      },
+      {
+        sha: "8e7d6c5b4a3210fedcba98765432100123456789a",
+        shortSha: "8e7d6c5",
+        summary: "Match provider settings menu with desktop-cc-gui",
+        message: "Match provider settings menu with desktop-cc-gui",
+        author: "Codex",
+        authorEmail: "codex@example.com",
+        timestamp: Math.floor((Date.now() - 1000 * 60 * 55) / 1000),
+        parents: ["7d6c5b4a3210fedcba98765432100123456789ab"],
+        refs: [],
+      },
+      {
+        sha: "7d6c5b4a3210fedcba98765432100123456789ab",
+        shortSha: "7d6c5b4",
+        summary: "Move model management into desktop settings shell",
+        message: "Move model management into desktop settings shell",
+        author: "Codex",
+        authorEmail: "codex@example.com",
+        timestamp: Math.floor((Date.now() - 1000 * 60 * 110) / 1000),
+        parents: [],
+        refs: [],
+      },
+    ];
+    const targetRemote = options.remote.trim() || "origin";
+    const targetBranch = options.branch.trim() || "main";
+    const maxItems = Math.max(1, Math.min(options.limit ?? 120, allCommits.length));
+    return {
+      sourceBranch: "feature/git-panel",
+      targetRemote,
+      targetBranch,
+      targetRef: `refs/remotes/${targetRemote}/${targetBranch}`,
+      targetFound: targetBranch !== "new-branch",
+      hasMore: allCommits.length > maxItems,
+      commits: allCommits.slice(0, maxItems),
     };
   },
   async getGitCommitDetails(_projectRoot: string, commitHash: string): Promise<GitCommitDetails> {

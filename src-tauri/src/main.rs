@@ -2562,6 +2562,18 @@ struct GitHistoryResponse {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct GitPushPreviewResponse {
+    source_branch: String,
+    target_remote: String,
+    target_branch: String,
+    target_ref: String,
+    target_found: bool,
+    has_more: bool,
+    commits: Vec<GitHistoryCommit>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GitCommitFileChange {
     path: String,
     old_path: Option<String>,
@@ -12743,6 +12755,91 @@ fn parse_git_history_commits(project_root: &str, revision: Option<&str>) -> Vec<
         .collect()
 }
 
+fn normalize_remote_target_branch(remote_name: &str, branch_name: &str) -> String {
+    let remote_trimmed = remote_name.trim();
+    let branch_trimmed = branch_name.trim();
+    if branch_trimmed.is_empty() {
+        return String::new();
+    }
+    let remote_ref_prefix = format!("refs/remotes/{remote_trimmed}/");
+    if let Some(stripped) = branch_trimmed.strip_prefix(&remote_ref_prefix) {
+        return stripped.trim().to_string();
+    }
+    let remote_prefix = format!("{remote_trimmed}/");
+    if let Some(stripped) = branch_trimmed.strip_prefix(&remote_prefix) {
+        return stripped.trim().to_string();
+    }
+    branch_trimmed.to_string()
+}
+
+fn parse_git_history_commits_with_args(
+    project_root: &str,
+    revisions: &[String],
+    max_count: Option<usize>,
+) -> Result<Vec<GitHistoryCommit>, String> {
+    let mut command = Command::new("git");
+    command.current_dir(project_root);
+    command.arg("log");
+    command.args([
+        "--decorate=short",
+        "--topo-order",
+        "--date-order",
+        "--pretty=format:%H%x1f%h%x1f%s%x1f%B%x1f%an%x1f%ae%x1f%ct%x1f%P%x1f%D%x1e",
+    ]);
+    if let Some(limit) = max_count {
+        command.arg(format!("--max-count={limit}"));
+    }
+    for revision in revisions {
+        if !revision.trim().is_empty() {
+            command.arg(revision);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\u{1e}')
+        .filter_map(|chunk| {
+            let trimmed = chunk.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let parts = trimmed.split('\u{1f}').collect::<Vec<_>>();
+            if parts.len() < 9 {
+                return None;
+            }
+            let sha = parts[0].trim().to_string();
+            if sha.is_empty() {
+                return None;
+            }
+            let refs = parts[8]
+                .split(',')
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            Some(GitHistoryCommit {
+                sha,
+                short_sha: parts[1].trim().to_string(),
+                summary: parts[2].trim().to_string(),
+                message: parts[3].trim().to_string(),
+                author: parts[4].trim().to_string(),
+                author_email: parts[5].trim().to_string(),
+                timestamp: parts[6].trim().parse::<i64>().unwrap_or(0),
+                parents: parts[7]
+                    .split_whitespace()
+                    .map(|value| value.to_string())
+                    .collect(),
+                refs,
+            })
+        })
+        .collect())
+}
+
 fn git_history_query_matches(commit: &GitHistoryCommit, query: &str) -> bool {
     if query.trim().is_empty() {
         return true;
@@ -13246,6 +13343,51 @@ fn get_git_commit_history(
         offset,
         limit,
         has_more: offset + commits.len() < filtered.len(),
+        commits,
+    })
+}
+
+#[tauri::command]
+fn get_git_push_preview(
+    project_root: String,
+    remote: String,
+    branch: String,
+    limit: Option<usize>,
+) -> Result<GitPushPreviewResponse, String> {
+    let target_remote = remote.trim();
+    if target_remote.is_empty() {
+        return Err("Remote is required for push preview.".to_string());
+    }
+
+    let normalized_target_branch = normalize_remote_target_branch(target_remote, &branch);
+    if normalized_target_branch.is_empty() {
+        return Err("Target branch is required for push preview.".to_string());
+    }
+
+    let source_branch =
+        git_output(&project_root, &["branch", "--show-current"]).unwrap_or_else(|| "HEAD".to_string());
+    let target_ref = format!("refs/remotes/{target_remote}/{normalized_target_branch}");
+    let target_found = git_output_allow_empty(&project_root, &["rev-parse", "--verify", &target_ref]).is_some();
+    let max_items = limit.unwrap_or(120).clamp(1, 500);
+
+    let mut revisions = vec!["HEAD".to_string()];
+    if target_found {
+        revisions.push(format!("^{target_ref}"));
+    }
+
+    let mut commits = parse_git_history_commits_with_args(&project_root, &revisions, Some(max_items + 1))?;
+    let has_more = commits.len() > max_items;
+    if has_more {
+        commits.truncate(max_items);
+    }
+
+    Ok(GitPushPreviewResponse {
+        source_branch,
+        target_remote: target_remote.to_string(),
+        target_branch: normalized_target_branch,
+        target_ref,
+        target_found,
+        has_more,
         commits,
     })
 }
@@ -22799,6 +22941,7 @@ pub fn run() {
             get_git_file_diff,
             get_git_log,
             get_git_commit_history,
+            get_git_push_preview,
             get_git_commit_details,
             list_git_branches,
             checkout_git_branch,
