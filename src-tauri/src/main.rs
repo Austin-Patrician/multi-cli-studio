@@ -551,6 +551,21 @@ struct ApiChatMessage {
     timestamp: String,
     #[serde(default)]
     error: Option<bool>,
+    #[serde(default)]
+    attachments: Option<Vec<ApiChatAttachment>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiChatAttachment {
+    id: String,
+    kind: String,
+    file_name: String,
+    #[serde(default)]
+    media_type: Option<String>,
+    source: String,
+    #[serde(default)]
+    display_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1099,6 +1114,263 @@ fn collapse_chat_messages(
         collapsed.push((role.to_string(), content.to_string()));
     }
     collapsed
+}
+
+fn guess_api_image_media_type(path_like: &str) -> Option<&'static str> {
+    let extension = Path::new(path_like)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())?;
+    match extension.as_str() {
+        "apng" => Some("image/apng"),
+        "avif" => Some("image/avif"),
+        "bmp" => Some("image/bmp"),
+        "gif" => Some("image/gif"),
+        "heic" => Some("image/heic"),
+        "heif" => Some("image/heif"),
+        "ico" => Some("image/x-icon"),
+        "jpeg" | "jpg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "svg" => Some("image/svg+xml"),
+        "tif" | "tiff" => Some("image/tiff"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut index = 0;
+    while index < bytes.len() {
+        let b0 = bytes[index];
+        let b1 = *bytes.get(index + 1).unwrap_or(&0);
+        let b2 = *bytes.get(index + 2).unwrap_or(&0);
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | b2 as u32;
+        encoded.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        encoded.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if index + 1 < bytes.len() {
+            encoded.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if index + 2 < bytes.len() {
+            encoded.push(TABLE[(n & 0x3f) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        index += 3;
+    }
+    encoded
+}
+
+fn decode_api_image_data_url(source: &str) -> Result<(String, String), String> {
+    let (meta, data) = source
+        .split_once(',')
+        .ok_or_else(|| "Invalid image data URL.".to_string())?;
+    if !meta.starts_with("data:") || !meta.contains(";base64") {
+        return Err("Only base64 image data URLs are supported.".to_string());
+    }
+    let media_type = meta
+        .trim_start_matches("data:")
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if !media_type.starts_with("image/") {
+        return Err("Only image data URLs are supported.".to_string());
+    }
+    let base64_data = data.trim().to_string();
+    if base64_data.is_empty() {
+        return Err("Image data URL is empty.".to_string());
+    }
+    Ok((media_type, base64_data))
+}
+
+fn api_attachment_image_payload(
+    attachment: &ApiChatAttachment,
+) -> Result<(String, String, String), String> {
+    let source = attachment.source.trim();
+    if source.is_empty() {
+        return Err("Image attachment source is empty.".to_string());
+    }
+
+    if source.starts_with("data:") {
+        let (media_type, base64_data) = decode_api_image_data_url(source)?;
+        return Ok((
+            media_type.clone(),
+            base64_data.clone(),
+            format!("data:{};base64,{}", media_type, base64_data),
+        ));
+    }
+
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return Ok((String::new(), String::new(), source.to_string()));
+    }
+
+    let bytes = fs::read(source)
+        .map_err(|err| format!("Failed to read image attachment `{}`: {}", source, err))?;
+    let media_type = attachment
+        .media_type
+        .clone()
+        .filter(|value| value.starts_with("image/"))
+        .or_else(|| guess_api_image_media_type(&attachment.file_name).map(str::to_string))
+        .or_else(|| guess_api_image_media_type(source).map(str::to_string))
+        .ok_or_else(|| format!("Could not determine media type for `{}`.", attachment.file_name))?;
+    let base64_data = encode_base64(&bytes);
+    let data_url = format!("data:{};base64,{}", media_type, base64_data);
+    Ok((media_type, base64_data, data_url))
+}
+
+fn build_openai_api_chat_messages(messages: &[ApiChatMessage]) -> Result<Vec<Value>, String> {
+    let mut payload = Vec::new();
+    for message in messages {
+        let role = match message.role.as_str() {
+            "user" => "user",
+            "assistant" => "assistant",
+            _ => continue,
+        };
+        let content = message.content.trim();
+        let image_attachments = message
+            .attachments
+            .as_ref()
+            .map(|attachments| {
+                attachments
+                    .iter()
+                    .filter(|attachment| attachment.kind == "image")
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if content.is_empty() && image_attachments.is_empty() {
+            continue;
+        }
+        if image_attachments.is_empty() {
+            payload.push(json!({ "role": role, "content": content }));
+            continue;
+        }
+        let mut parts = Vec::new();
+        if !content.is_empty() {
+            parts.push(json!({ "type": "text", "text": content }));
+        }
+        for attachment in image_attachments {
+            let (_, _, data_url) = api_attachment_image_payload(attachment)?;
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": { "url": data_url }
+            }));
+        }
+        payload.push(json!({ "role": role, "content": parts }));
+    }
+    Ok(payload)
+}
+
+fn build_claude_api_chat_messages(messages: &[ApiChatMessage]) -> Result<Vec<Value>, String> {
+    let mut payload = Vec::new();
+    for message in messages {
+        let role = match message.role.as_str() {
+            "user" => "user",
+            "assistant" => "assistant",
+            _ => continue,
+        };
+        let content = message.content.trim();
+        let image_attachments = message
+            .attachments
+            .as_ref()
+            .map(|attachments| {
+                attachments
+                    .iter()
+                    .filter(|attachment| attachment.kind == "image")
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if content.is_empty() && image_attachments.is_empty() {
+            continue;
+        }
+        if image_attachments.is_empty() {
+            payload.push(json!({ "role": role, "content": content }));
+            continue;
+        }
+        let mut parts = Vec::new();
+        for attachment in image_attachments {
+            let (media_type, base64_data, data_url) = api_attachment_image_payload(attachment)?;
+            if data_url.starts_with("http://") || data_url.starts_with("https://") {
+                parts.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "url",
+                        "url": data_url
+                    }
+                }));
+                continue;
+            }
+            if media_type.is_empty() || base64_data.is_empty() {
+                return Err(format!(
+                    "Claude Messages API requires valid image data for `{}`.",
+                    attachment.file_name
+                ));
+            }
+            parts.push(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": base64_data
+                }
+            }));
+        }
+        if !content.is_empty() {
+            parts.push(json!({ "type": "text", "text": content }));
+        }
+        payload.push(json!({ "role": role, "content": parts }));
+    }
+    Ok(payload)
+}
+
+fn build_gemini_api_chat_contents(messages: &[ApiChatMessage]) -> Result<Vec<Value>, String> {
+    let mut payload = Vec::new();
+    for message in messages {
+        let role = match message.role.as_str() {
+            "user" => "user",
+            "assistant" => "model",
+            _ => continue,
+        };
+        let content = message.content.trim();
+        let image_attachments = message
+            .attachments
+            .as_ref()
+            .map(|attachments| {
+                attachments
+                    .iter()
+                    .filter(|attachment| attachment.kind == "image")
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if content.is_empty() && image_attachments.is_empty() {
+            continue;
+        }
+        let mut parts = Vec::new();
+        if !content.is_empty() {
+            parts.push(json!({ "text": content }));
+        }
+        for attachment in image_attachments {
+            let (media_type, base64_data, data_url) = api_attachment_image_payload(attachment)?;
+            if media_type.is_empty() || base64_data.is_empty() || data_url.starts_with("http") {
+                return Err(format!(
+                    "Gemini generateContent requires local/base64 image data for `{}`.",
+                    attachment.file_name
+                ));
+            }
+            parts.push(json!({
+                "inline_data": {
+                    "mime_type": media_type,
+                    "data": base64_data
+                }
+            }));
+        }
+        payload.push(json!({ "role": role, "parts": parts }));
+    }
+    Ok(payload)
 }
 
 fn value_text_parts(value: &Value) -> Vec<String> {
@@ -1779,10 +2051,7 @@ fn stream_openai_provider_chat(
     let started_at = Instant::now();
     let requested_at = now_rfc3339();
     let client = api_http_client(90)?;
-    let mut messages = collapse_chat_messages(&request.messages, "assistant")
-        .into_iter()
-        .map(|(role, content)| json!({ "role": role, "content": content }))
-        .collect::<Vec<_>>();
+    let mut messages = build_openai_api_chat_messages(&request.messages)?;
     if let Some(system_prompt) = collect_system_prompt(&request.messages) {
         messages.insert(0, json!({ "role": "system", "content": system_prompt }));
     }
@@ -1890,10 +2159,7 @@ fn stream_claude_provider_chat(
     let started_at = Instant::now();
     let requested_at = now_rfc3339();
     let client = api_http_client(90)?;
-    let messages = collapse_chat_messages(&request.messages, "assistant")
-        .into_iter()
-        .map(|(role, content)| json!({ "role": role, "content": content }))
-        .collect::<Vec<_>>();
+    let messages = build_claude_api_chat_messages(&request.messages)?;
     let mut payload = json!({
         "model": request.selection.model_id,
         "max_tokens": 4096,
@@ -2018,15 +2284,7 @@ fn stream_gemini_provider_chat(
     let started_at = Instant::now();
     let requested_at = now_rfc3339();
     let client = api_http_client(90)?;
-    let contents = collapse_chat_messages(&request.messages, "model")
-        .into_iter()
-        .map(|(role, content)| {
-            json!({
-                "role": role,
-                "parts": [{ "text": content }],
-            })
-        })
-        .collect::<Vec<_>>();
+    let contents = build_gemini_api_chat_contents(&request.messages)?;
     let mut payload = json!({
         "contents": contents,
     });

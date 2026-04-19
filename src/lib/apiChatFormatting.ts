@@ -3,6 +3,7 @@ import {
   ApiChatGenerationMeta,
   ApiChatMessage,
   ApiChatSelection,
+  ChatAttachment,
   ChatMessageBlock,
   ModelProviderServiceType,
 } from "./models";
@@ -10,12 +11,48 @@ import {
   detectAssistantContentFormat,
   normalizeAssistantContent,
 } from "./messageFormatting";
+import { cloneChatAttachments, isImageMediaType } from "./chatAttachments";
 
 const THINK_OPEN = "<think>";
 const THINK_CLOSE = "</think>";
 
 function isServiceType(value: unknown): value is ModelProviderServiceType {
   return value === "openaiCompatible" || value === "claude" || value === "gemini";
+}
+
+function normalizeApiChatAttachment(value: unknown): ChatAttachment | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<ChatAttachment>;
+  const kind = raw.kind === "image" || raw.kind === "fileReference" ? raw.kind : null;
+  const fileName = typeof raw.fileName === "string" ? raw.fileName.trim() : "";
+  const source = typeof raw.source === "string" ? raw.source.trim() : "";
+  if (!kind || !fileName || !source) return null;
+  const mediaType =
+    typeof raw.mediaType === "string" && raw.mediaType.trim() ? raw.mediaType.trim() : null;
+  const displayPath =
+    typeof raw.displayPath === "string" && raw.displayPath.trim() ? raw.displayPath.trim() : null;
+  return {
+    id:
+      typeof raw.id === "string" && raw.id.trim()
+        ? raw.id.trim()
+        : `${kind}-${fileName}-${source}`,
+    kind:
+      kind === "image" || isImageMediaType(mediaType) || source.startsWith("data:image/")
+        ? "image"
+        : "fileReference",
+    fileName,
+    mediaType,
+    source,
+    displayPath,
+  };
+}
+
+export function normalizeApiChatAttachments(value: unknown): ChatAttachment[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const normalized = value
+    .map((item) => normalizeApiChatAttachment(item))
+    .filter(Boolean) as ChatAttachment[];
+  return normalized.length > 0 ? normalized : null;
 }
 
 export interface ParsedApiAssistantContent {
@@ -125,6 +162,7 @@ export function normalizeApiChatMessage(message: ApiChatMessage): ApiChatMessage
     return {
       ...message,
       generationMeta: normalizeApiChatGenerationMeta(message.generationMeta),
+      attachments: cloneChatAttachments(normalizeApiChatAttachments(message.attachments)),
       rawContent: message.rawContent ?? message.content,
       contentFormat: message.contentFormat ?? null,
       blocks: message.blocks ?? null,
@@ -139,6 +177,7 @@ export function normalizeApiChatMessage(message: ApiChatMessage): ApiChatMessage
   return {
     ...message,
     generationMeta: normalizeApiChatGenerationMeta(message.generationMeta),
+    attachments: cloneChatAttachments(normalizeApiChatAttachments(message.attachments)),
     rawContent: parsed.rawContent,
     content: parsed.content,
     contentFormat: message.contentFormat ?? parsed.contentFormat,

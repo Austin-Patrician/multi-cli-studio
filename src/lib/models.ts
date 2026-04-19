@@ -336,6 +336,7 @@ export interface ApiChatMessage {
   content: string;
   timestamp: string;
   error?: boolean;
+  attachments?: ChatAttachment[] | null;
   generationMeta?: ApiChatGenerationMeta | null;
   rawContent?: string | null;
   contentFormat?: AssistantContentFormat | null;

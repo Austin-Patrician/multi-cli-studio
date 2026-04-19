@@ -7,16 +7,22 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { flushSync } from "react-dom";
 import { Link } from "react-router-dom";
 import { AssistantMessageContent } from "../components/chat/AssistantMessageContent";
 import { SERVICE_ICONS } from "../components/modelProviders/ui";
 import { bridge } from "../lib/bridge";
 import {
+  normalizeApiChatAttachments,
   normalizeApiChatGenerationMeta,
   normalizeApiChatMessage,
   normalizeApiChatSelection,
 } from "../lib/apiChatFormatting";
+import {
+  createChatAttachment,
+  formatAttachmentSummary,
+} from "../lib/chatAttachments";
 import {
   getEnabledProviderForServiceType,
   MODEL_PROVIDER_META,
@@ -29,6 +35,7 @@ import type {
   ApiChatSelection,
   ApiChatSession,
   AppSettings,
+  ChatAttachment,
   ChatMessageBlock,
   ModelProviderConfig,
   ModelProviderModel,
@@ -85,8 +92,12 @@ function selectionKey(selection: ApiChatSelection) {
 }
 
 function deriveTitleFromMessages(messages: ApiChatMessage[]) {
-  const firstUserMessage = messages.find((message) => message.role === "user")?.content ?? "";
-  return firstUserMessage.trim() ? truncate(firstUserMessage, 30) : "New Chat";
+  const firstUserMessage = messages.find((message) => message.role === "user") ?? null;
+  const firstUserText = firstUserMessage?.content ?? "";
+  if (firstUserText.trim()) {
+    return truncate(firstUserText, 30);
+  }
+  return formatAttachmentSummary(firstUserMessage?.attachments) || "New Chat";
 }
 
 function buildFallbackGenerationMeta(
@@ -226,6 +237,7 @@ function normalizePersistedMessage(
         ? raw.timestamp
         : new Date().toISOString(),
     error: raw.error === true,
+    attachments: normalizeApiChatAttachments((raw as { attachments?: unknown }).attachments),
     generationMeta:
       normalizeApiChatGenerationMeta(raw.generationMeta) ??
       buildFallbackGenerationMeta(fallbackSelection),
@@ -361,9 +373,17 @@ function getSessionAnchorMeta(session: ApiChatSession) {
 function getSessionPreview(session: ApiChatSession, settings: AppSettings) {
   const previewMessage = [...session.messages]
     .reverse()
-    .find((message) => message.role !== "system" && normalizeApiChatMessage(message).content.trim());
+    .find((message) => {
+      if (message.role === "system") return false;
+      const normalized = normalizeApiChatMessage(message);
+      return normalized.content.trim().length > 0 || (normalized.attachments?.length ?? 0) > 0;
+    });
   if (previewMessage) {
-    return truncate(normalizeApiChatMessage(previewMessage).content.replace(/\s+/g, " "), 58);
+    const normalized = normalizeApiChatMessage(previewMessage);
+    if (normalized.content.trim()) {
+      return truncate(normalized.content.replace(/\s+/g, " "), 58);
+    }
+    return formatAttachmentSummary(normalized.attachments) || "等待第一条消息";
   }
   const origin = hydrateGenerationMeta(settings, getSessionAnchorMeta(session));
   return origin
@@ -380,11 +400,13 @@ function buildReplayHistory(
       const normalized = normalizeApiChatMessage(message);
       if (normalized.error) return null;
       const content = normalized.content.trim();
-      if (!content) return null;
+      const attachments = normalized.attachments ?? null;
+      if (!content && !attachments?.length) return null;
       return {
         id: normalized.id,
         role: normalized.role,
         content,
+        attachments,
         timestamp: normalized.timestamp,
       } satisfies ApiChatMessage;
     })
@@ -675,6 +697,47 @@ function formatTokenUsage(message: ApiChatMessage) {
     display: `${display} tok`,
     title,
   };
+}
+
+function attachmentLabel(attachment: ChatAttachment) {
+  return attachment.displayPath?.trim() || attachment.fileName;
+}
+
+function attachmentPreviewSrc(attachment: ChatAttachment) {
+  if (attachment.source.startsWith("data:")) return attachment.source;
+  if (attachment.source.startsWith("http://") || attachment.source.startsWith("https://")) {
+    return attachment.source;
+  }
+  if (attachment.kind !== "image") return "";
+  try {
+    return convertFileSrc(attachment.source);
+  } catch {
+    return "";
+  }
+}
+
+function describeUiError(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  if (error && typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) {
+      return message;
+    }
+    try {
+      const serialized = JSON.stringify(error);
+      if (serialized && serialized !== "{}") {
+        return serialized;
+      }
+    } catch {
+      // ignore stringify failure
+    }
+  }
+  return fallback;
 }
 
 function MessageMetaPill({
@@ -988,6 +1051,9 @@ function UserMessageBubble({
   onCopy?: () => void;
   onDelete?: () => void;
 }) {
+  const attachments = message.attachments ?? [];
+  const hasText = message.content.trim().length > 0;
+
   return (
     <div className="flex justify-end">
       <div className="flex max-w-[78%] flex-col items-end">
@@ -996,12 +1062,73 @@ function UserMessageBubble({
             <MessageOriginPill origin={origin} />
           </div>
         ) : null}
-        <div className="inline-block max-w-full rounded-[12px] bg-white px-4 py-2.5 text-[15px] leading-6 text-slate-800 shadow-[0_10px_32px_rgba(15,23,42,0.06)] ring-1 ring-black/5 whitespace-pre-wrap break-words">
-          {message.content}
-        </div>
+        {attachments.length > 0 ? (
+          <div className="mb-3 flex max-w-full flex-wrap justify-end gap-2">
+            {attachments.map((attachment) => {
+              const label = attachmentLabel(attachment);
+              if (attachment.kind === "image") {
+                const previewSrc = attachmentPreviewSrc(attachment);
+                return (
+                  <div
+                    key={attachment.id}
+                    className="overflow-hidden rounded-[16px] border border-slate-200/85 bg-white shadow-[0_14px_28px_rgba(15,23,42,0.08)]"
+                    title={label}
+                  >
+                    {previewSrc ? (
+                      <img
+                        src={previewSrc}
+                        alt={attachment.fileName}
+                        className="h-28 w-28 object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-28 w-28 items-center justify-center bg-slate-100 text-slate-400">
+                        <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden="true">
+                          <path d="M5 7.5A2.5 2.5 0 017.5 5h9A2.5 2.5 0 0119 7.5v9a2.5 2.5 0 01-2.5 2.5h-9A2.5 2.5 0 015 16.5v-9z" stroke="currentColor" strokeWidth="1.6" />
+                          <path d="M8 15l2.6-2.8a1 1 0 011.5.04L14 14l1.1-1.2a1 1 0 011.47-.02L18 14.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                          <circle cx="9" cy="9" r="1.2" fill="currentColor" />
+                        </svg>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-1.5 px-2.5 py-2 text-[11px] text-slate-600">
+                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-slate-100 text-slate-500">
+                        <svg viewBox="0 0 24 24" fill="none" className="h-3 w-3" aria-hidden="true">
+                          <path d="M5 7.5A2.5 2.5 0 017.5 5h9A2.5 2.5 0 0119 7.5v9a2.5 2.5 0 01-2.5 2.5h-9A2.5 2.5 0 015 16.5v-9z" stroke="currentColor" strokeWidth="1.6" />
+                          <path d="M8 15l2.6-2.8a1 1 0 011.5.04L14 14l1.1-1.2a1 1 0 011.47-.02L18 14.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                          <circle cx="9" cy="9" r="1.2" fill="currentColor" />
+                        </svg>
+                      </span>
+                      <span className="max-w-[108px] truncate">{label}</span>
+                    </div>
+                  </div>
+                );
+              }
+
+              return (
+                <div
+                  key={attachment.id}
+                  className="inline-flex max-w-[280px] items-center gap-2 rounded-[16px] border border-slate-200/85 bg-white px-3 py-2 text-xs text-slate-700 shadow-[0_14px_28px_rgba(15,23,42,0.06)]"
+                  title={label}
+                >
+                  <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[10px] bg-slate-100 text-slate-500">
+                    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                      <path d="M8 4.5h6l4 4v10A1.5 1.5 0 0116.5 20h-9A1.5 1.5 0 016 18.5v-12A2 2 0 018 4.5z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                      <path d="M14 4.5V9h4" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                    </svg>
+                  </span>
+                  <span className="truncate">{label}</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+        {hasText ? (
+          <div className="inline-block max-w-full rounded-[12px] bg-white px-4 py-2.5 text-[15px] leading-6 text-slate-800 shadow-[0_10px_32px_rgba(15,23,42,0.06)] ring-1 ring-black/5 whitespace-pre-wrap break-words">
+            {message.content}
+          </div>
+        ) : null}
         {onCopy || onDelete ? (
           <div className="flex flex-wrap items-center gap-2 pt-2">
-            {onCopy ? (
+            {onCopy && hasText ? (
               <MessageActionIconButton title="复制消息" onClick={onCopy}>
                 <CopyIcon />
               </MessageActionIconButton>
@@ -1148,6 +1275,7 @@ export function ModelChatPage() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>({});
+  const [composerAttachments, setComposerAttachments] = useState<Record<string, ChatAttachment[]>>({});
   const [loading, setLoading] = useState(false);
   const [liveStream, setLiveStream] = useState<LiveApiStream | null>(null);
   const [loadingSettings, setLoadingSettings] = useState(true);
@@ -1168,7 +1296,7 @@ export function ModelChatPage() {
         setActiveSessionId(persisted.activeSessionId);
       } catch (error) {
         if (cancelled) return;
-        setErrorText(error instanceof Error ? error.message : "加载模型对话配置失败。");
+        setErrorText(describeUiError(error, "加载模型对话配置失败。"));
       } finally {
         if (!cancelled) {
           setLoadingSettings(false);
@@ -1254,6 +1382,7 @@ export function ModelChatPage() {
     [availableOptions]
   );
   const activeDraft = activeSession ? composerDrafts[activeSession.id] ?? "" : "";
+  const activeAttachments = activeSession ? composerAttachments[activeSession.id] ?? [] : [];
   const activeSelection =
     settings && activeSession
       ? syncSelectionWithSettings(activeSession.defaultSelection, settings)
@@ -1314,7 +1443,7 @@ export function ModelChatPage() {
       setStatusText("消息已复制。");
       setErrorText(null);
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : "复制消息失败。");
+      setErrorText(describeUiError(error, "复制消息失败。"));
     }
   }
 
@@ -1351,8 +1480,57 @@ export function ModelChatPage() {
       );
       setStatusText("已同步最新 provider 配置。");
     } catch (error) {
-      setErrorText(error instanceof Error ? error.message : "刷新 provider 配置失败。");
+      setErrorText(describeUiError(error, "刷新 provider 配置失败。"));
     }
+  }
+
+  async function pickComposerAttachments() {
+    if (!activeSession || loading) return;
+    setErrorText(null);
+    setStatusText(null);
+    try {
+      const picked = await bridge.pickChatAttachments();
+      const prepared = picked
+        .map((item) => createChatAttachment(item, null))
+        .filter(Boolean) as ChatAttachment[];
+      if (prepared.length === 0) {
+        return;
+      }
+      const images = prepared.filter((attachment) => attachment.kind === "image");
+      if (images.length === 0) {
+        setErrorText("Model Chat 当前先只支持图片附件。");
+        return;
+      }
+      if (images.length !== prepared.length) {
+        setStatusText("已忽略非图片附件，仅保留图片。");
+      }
+      setComposerAttachments((current) => {
+        const existing = current[activeSession.id] ?? [];
+        const seen = new Set(existing.map((attachment) => attachment.source));
+        const merged = [...existing];
+        images.forEach((attachment) => {
+          if (seen.has(attachment.source)) return;
+          seen.add(attachment.source);
+          merged.push(attachment);
+        });
+        return {
+          ...current,
+          [activeSession.id]: merged,
+        };
+      });
+    } catch (error) {
+      setErrorText(describeUiError(error, "选择附件失败。"));
+    }
+  }
+
+  function removeComposerAttachment(attachmentId: string) {
+    if (!activeSession) return;
+    setComposerAttachments((current) => ({
+      ...current,
+      [activeSession.id]: (current[activeSession.id] ?? []).filter(
+        (attachment) => attachment.id !== attachmentId
+      ),
+    }));
   }
 
   function createChatSession() {
@@ -1382,6 +1560,11 @@ export function ModelChatPage() {
       const nextDrafts = { ...current };
       delete nextDrafts[sessionId];
       return nextDrafts;
+    });
+    setComposerAttachments((current) => {
+      const nextAttachments = { ...current };
+      delete nextAttachments[sessionId];
+      return nextAttachments;
     });
     setLiveStream((current) => (current?.sessionId === sessionId ? null : current));
   }
@@ -1469,7 +1652,7 @@ export function ModelChatPage() {
       }
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "模型响应失败，请检查 provider 配置。";
+        describeUiError(error, "模型响应失败，请检查 provider 配置。");
       const errorMessage = normalizeApiChatMessage({
         id: createId("api-error"),
         role: "assistant",
@@ -1499,7 +1682,8 @@ export function ModelChatPage() {
   async function sendMessage() {
     if (!settings || !activeSession || !activeSelection || !activeSelectionOption || loading) return;
     const content = activeDraft.trim();
-    if (!content) return;
+    const attachments = activeAttachments;
+    if (!content && attachments.length === 0) return;
     const requestedAt = new Date().toISOString();
 
     const origin: ApiChatGenerationMeta = {
@@ -1514,6 +1698,7 @@ export function ModelChatPage() {
       id: createId("api-user"),
       role: "user",
       content,
+      attachments,
       timestamp: requestedAt,
       generationMeta: origin,
     };
@@ -1529,6 +1714,7 @@ export function ModelChatPage() {
         : activeSession.title;
 
     setComposerDrafts((current) => ({ ...current, [activeSession.id]: "" }));
+    setComposerAttachments((current) => ({ ...current, [activeSession.id]: [] }));
     await requestAssistantResponse({
       session: activeSession,
       selection: activeSelection,
@@ -1935,7 +2121,9 @@ export function ModelChatPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         {activeSelectionOrigin ? <MessageOriginPill origin={activeSelectionOrigin} /> : null}
                       </div>
-                      <div className="text-[11px] text-slate-400">Enter 发送 · Shift + Enter 换行</div>
+                      <div className="text-[11px] text-slate-400">
+                        图片多模态已启用 · Enter 发送 · Shift + Enter 换行
+                      </div>
                     </div>
 
                     <ModelSelectionControl
@@ -1947,34 +2135,96 @@ export function ModelChatPage() {
                       className="mb-3 lg:hidden"
                     />
 
-                    <div className="flex items-center gap-3 rounded-[12px] border border-[#ece7dc] bg-[#fcfbf8] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]">
-                      <div className="flex min-h-[44px] flex-1 items-center">
-                      <textarea
-                        ref={composerRef}
-                        value={activeDraft}
-                        onChange={(event) =>
-                          setComposerDrafts((current) => ({
-                            ...current,
-                            [activeSession.id]: event.target.value,
-                          }))
-                        }
-                        onKeyDown={handleComposerKeyDown}
-                        rows={1}
-                        placeholder="有问题，尽管问"
-                        className="max-h-[180px] min-h-[30px] w-full resize-none overflow-y-auto bg-transparent px-1 py-2 text-[15px] leading-7 text-slate-900 outline-none placeholder:text-slate-400"
-                      />
-                      </div>
+                    <div className="rounded-[12px] border border-[#ece7dc] bg-[#fcfbf8] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]">
+                      {activeAttachments.length > 0 ? (
+                        <div className="mb-3 flex flex-wrap gap-2">
+                          {activeAttachments.map((attachment) => {
+                            const label = attachmentLabel(attachment);
+                            const previewSrc = attachmentPreviewSrc(attachment);
+                            return (
+                              <div
+                                key={attachment.id}
+                                className="inline-flex max-w-full items-center gap-2 rounded-[14px] border border-[#e6dfd3] bg-white px-2 py-2 shadow-sm"
+                                title={label}
+                              >
+                                {previewSrc ? (
+                                  <img
+                                    src={previewSrc}
+                                    alt={attachment.fileName}
+                                    className="h-10 w-10 rounded-[10px] object-cover"
+                                  />
+                                ) : (
+                                  <div className="flex h-10 w-10 items-center justify-center rounded-[10px] bg-slate-100 text-slate-400">
+                                    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                                      <path d="M5 7.5A2.5 2.5 0 017.5 5h9A2.5 2.5 0 0119 7.5v9a2.5 2.5 0 01-2.5 2.5h-9A2.5 2.5 0 015 16.5v-9z" stroke="currentColor" strokeWidth="1.6" />
+                                      <path d="M8 15l2.6-2.8a1 1 0 011.5.04L14 14l1.1-1.2a1 1 0 011.47-.02L18 14.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                                      <circle cx="9" cy="9" r="1.2" fill="currentColor" />
+                                    </svg>
+                                  </div>
+                                )}
+                                <span className="max-w-[180px] truncate text-[12px] font-medium text-slate-700">
+                                  {label}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => removeComposerAttachment(attachment.id)}
+                                  className="inline-flex h-7 w-7 items-center justify-center rounded-[10px] text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                                  title="移除图片"
+                                  aria-label="移除图片"
+                                >
+                                  <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                                    <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                  </svg>
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : null}
 
-                      <button
-                        type="button"
-                        onClick={() => void sendMessage()}
-                        disabled={loading || !activeSelectionOption || !activeDraft.trim()}
-                        className="inline-flex h-11 w-11 shrink-0 items-center justify-center self-end rounded-[12px] bg-[#111111] text-white transition-all hover:-translate-y-[1px] hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
-                        title={loading ? "等待响应" : "发送"}
-                        aria-label={loading ? "等待响应" : "发送"}
-                      >
-                        <SendIcon />
-                      </button>
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => void pickComposerAttachments()}
+                          disabled={loading}
+                          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] border border-[#e1dbcf] bg-white text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d4cbbb] hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-45"
+                          title="添加图片"
+                          aria-label="添加图片"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                            <path d="M8 7.5V6.8A2.8 2.8 0 0110.8 4h2.4A2.8 2.8 0 0116 6.8v.7h1.2A2.8 2.8 0 0120 10.3v6.9a2.8 2.8 0 01-2.8 2.8H6.8A2.8 2.8 0 014 17.2v-6.9a2.8 2.8 0 012.8-2.8H8z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                            <path d="M12 10v4m-2-2h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                          </svg>
+                        </button>
+
+                        <div className="flex min-h-[44px] flex-1 items-center">
+                          <textarea
+                            ref={composerRef}
+                            value={activeDraft}
+                            onChange={(event) =>
+                              setComposerDrafts((current) => ({
+                                ...current,
+                                [activeSession.id]: event.target.value,
+                              }))
+                            }
+                            onKeyDown={handleComposerKeyDown}
+                            rows={1}
+                            placeholder="有问题，尽管问，也可以直接附图"
+                            className="max-h-[180px] min-h-[30px] w-full resize-none overflow-y-auto bg-transparent px-1 py-2 text-[15px] leading-7 text-slate-900 outline-none placeholder:text-slate-400"
+                          />
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => void sendMessage()}
+                          disabled={loading || !activeSelectionOption || (!activeDraft.trim() && activeAttachments.length === 0)}
+                          className="inline-flex h-11 w-11 shrink-0 items-center justify-center self-end rounded-[12px] bg-[#111111] text-white transition-all hover:-translate-y-[1px] hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
+                          title={loading ? "等待响应" : "发送"}
+                          aria-label={loading ? "等待响应" : "发送"}
+                        >
+                          <SendIcon />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
