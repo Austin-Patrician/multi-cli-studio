@@ -2059,7 +2059,9 @@ export const useStore = create<StoreState>((set, get) => {
       const currentTab = current.terminalTabs.find((item) => item.id === tabId) ?? null;
       if (!currentTab) return {};
       const terminalTabs = current.terminalTabs.map((item) =>
-        item.id === tabId ? { ...item, draftPrompt: "", draftAttachments: [] } : item
+        item.id === tabId
+          ? { ...item, draftPrompt: "", draftAttachments: [], selectedAgent: null }
+          : item
       );
       return {
         terminalTabs,
@@ -2369,6 +2371,7 @@ export const useStore = create<StoreState>((set, get) => {
                 ...item,
                 draftPrompt: shouldClearDraft ? "" : item.draftPrompt,
                 draftAttachments: shouldClearDraft ? [] : item.draftAttachments,
+                selectedAgent: shouldClearDraft ? null : item.selectedAgent,
                 status: "streaming" as const,
               }
             : item
@@ -2566,6 +2569,7 @@ export const useStore = create<StoreState>((set, get) => {
               ...item,
               draftPrompt: shouldClearDraft ? "" : item.draftPrompt,
               draftAttachments: shouldClearDraft ? [] : item.draftAttachments,
+              selectedAgent: shouldClearDraft ? null : item.selectedAgent,
               status: "streaming" as const,
             }
           : item
