@@ -111,10 +111,51 @@ export interface EnvironmentState {
   notes: string[];
 }
 
+export type WorkspaceLocationKind = "local" | "ssh";
+export type SshConnectionAuthMode = "agent" | "identityFile" | "password";
+
+export interface CliPathsDetection {
+  codex: string | null;
+  claude: string | null;
+  gemini: string | null;
+}
+
+export interface SshConnectionConfig {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authMode: SshConnectionAuthMode;
+  identityFile: string;
+  password: string;
+  proxyJump: string;
+  remoteShell: string;
+  labels: string[];
+  createdAt: string;
+  updatedAt: string;
+  lastValidatedAt?: string | null;
+  detectedCliPaths?: CliPathsDetection;
+}
+
+export interface SshConnectionTestResult {
+  reachable: boolean;
+  authOk: boolean;
+  pythonOk: boolean;
+  shell: string | null;
+  platform: string | null;
+  detectedCliPaths: CliPathsDetection;
+  errors: string[];
+}
+
 export interface WorkspaceRef {
   id: string;
   name: string;
   rootPath: string;
+  locationKind: WorkspaceLocationKind;
+  connectionId?: string | null;
+  remotePath?: string | null;
+  locationLabel?: string | null;
   branch: string;
   currentWriter: AgentId;
   activeAgent: AgentId;
@@ -330,6 +371,7 @@ export interface ApiChatStreamEvent {
 
 export interface AppSettings {
   cliPaths: { codex: string; claude: string; gemini: string };
+  sshConnections: SshConnectionConfig[];
   projectRoot: string;
   maxTurnsPerAgent: number;
   maxOutputCharsPerTurn: number;
@@ -1251,6 +1293,11 @@ export interface WorkspaceTreeEntry {
   hasChildren: boolean;
 }
 
+export interface WorkspaceFileIndexResponse {
+  entriesByParent: Record<string, WorkspaceTreeEntry[]>;
+  files: FileMentionCandidate[];
+}
+
 export type SettingsEngineType = "claude" | "codex" | "gemini";
 
 export interface SettingsEngineStatus {
@@ -1354,6 +1401,11 @@ export interface GitLogResponse {
   aheadEntries: GitLogEntry[];
   behindEntries: GitLogEntry[];
   upstream: string | null;
+}
+
+export interface GitOverviewResponse {
+  panel: GitPanelData;
+  log: GitLogResponse;
 }
 
 export interface GitHistoryCommit {

@@ -17,6 +17,7 @@ import {
   LoaderCircle,
   Paperclip,
   Image as ImageIcon,
+  Route,
   SendHorizontal,
   Settings2,
   Shield,
@@ -42,6 +43,7 @@ import {
   ChatAttachment,
   CliSkillItem,
   FileMentionCandidate,
+  SshConnectionConfig,
   TerminalTab,
   TerminalCliId,
 } from "../../lib/models";
@@ -49,6 +51,7 @@ import { bridge } from "../../lib/bridge";
 import { createChatAttachment } from "../../lib/chatAttachments";
 import { estimateSessionTokens, FULL_COMPACT_THRESHOLD } from "../../lib/tokenEstimation";
 import { useStore } from "../../lib/store";
+import { loadWorkspaceFileIndex } from "../../lib/workspaceFileIndex";
 import { CLI_OPTIONS } from "./CliSelector";
 import { PromptOverlay, PromptOverlayItem, PromptOverlaySection } from "./PromptOverlay";
 
@@ -86,6 +89,7 @@ type FooterProviderItem = {
   icon?: string;
   installed: boolean;
   unavailable: boolean;
+  remoteValidationKnown?: boolean;
 };
 
 type CommandOverlayState =
@@ -157,6 +161,16 @@ function parseSkillSlashQuery(value: string) {
 function titleCaseCli(cliId: TerminalCliId) {
   if (cliId === "auto") return "Auto";
   return cliId.charAt(0).toUpperCase() + cliId.slice(1);
+}
+
+function hasRemoteCliDetection(connection: SshConnectionConfig | null | undefined) {
+  if (!connection) return false;
+  return Boolean(
+    connection.lastValidatedAt ||
+    connection.detectedCliPaths?.codex ||
+    connection.detectedCliPaths?.claude ||
+    connection.detectedCliPaths?.gemini
+  );
 }
 
 function attachmentLabel(attachment: ChatAttachment) {
@@ -801,6 +815,7 @@ export function ChatPromptBar({
   const activeTerminalTabId = useStore((s) => s.activeTerminalTabId);
   const appState = useStore((s) => s.appState);
   const busyAction = useStore((s) => s.busyAction);
+  const settings = useStore((s) => s.settings);
   const activeSession = useStore((s) =>
     s.activeTerminalTabId ? s.chatSessions[s.activeTerminalTabId] ?? null : null
   );
@@ -831,6 +846,14 @@ export function ChatPromptBar({
   const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
   const workspace = workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null;
   const effectiveCli = resolveConcreteCli(activeTab, workspace?.activeAgent);
+  const activeSshConnection = useMemo(
+    () =>
+      workspace?.locationKind === "ssh" && workspace.connectionId
+        ? settings?.sshConnections.find((item) => item.id === workspace.connectionId) ?? null
+        : null,
+    [settings?.sshConnections, workspace?.connectionId, workspace?.locationKind]
+  );
+  const remoteCliValidationKnown = hasRemoteCliDetection(activeSshConnection);
   const prompt = activeTab?.draftPrompt ?? "";
   const draftAttachments = activeTab?.draftAttachments ?? [];
   const isStreaming = activeTab?.status === "streaming";
@@ -913,6 +936,14 @@ export function ChatPromptBar({
     skillToken,
     workspace,
   ]);
+
+  useEffect(() => {
+    if (!workspace) return;
+    void loadWorkspaceFileIndex({
+      workspaceId: workspace.id,
+      projectRoot: workspace.rootPath,
+    });
+  }, [workspace]);
 
   useEffect(() => {
     if (!activeTab || !workspace || rawSlashPrompt.startsWith("/")) return;
@@ -1085,6 +1116,63 @@ export function ChatPromptBar({
       window.clearTimeout(timer);
     };
   }, [queueFeedback]);
+
+  const providerItems = useMemo<FooterProviderItem[]>(
+    () =>
+      CLI_OPTIONS.map((option) => {
+        if (option.id === "auto") {
+          return {
+            id: option.id,
+            label: option.label,
+            icon: option.icon,
+            installed: true,
+            unavailable: false,
+            remoteValidationKnown: false,
+          };
+        }
+
+        if (workspace?.locationKind === "ssh") {
+          const installed = remoteCliValidationKnown
+            ? Boolean(activeSshConnection?.detectedCliPaths?.[option.id])
+            : true;
+          return {
+            id: option.id,
+            label: option.label,
+            icon: option.icon,
+            installed,
+            unavailable: remoteCliValidationKnown ? !installed : false,
+            remoteValidationKnown: remoteCliValidationKnown,
+          };
+        }
+
+        const runtime = appState?.agents.find((agent) => agent.id === option.id)?.runtime;
+        const installed = runtime?.installed ?? true;
+        return {
+          id: option.id,
+          label: option.label,
+          icon: option.icon,
+          installed,
+          unavailable: runtime != null ? !runtime.installed : false,
+          remoteValidationKnown: false,
+        };
+      }),
+    [activeSshConnection, appState?.agents, remoteCliValidationKnown, workspace?.locationKind]
+  );
+
+  useEffect(() => {
+    if (!activeTab || workspace?.locationKind !== "ssh" || activeTab.selectedCli === "auto") {
+      return;
+    }
+    const currentItem = providerItems.find((item) => item.id === activeTab.selectedCli);
+    if (!currentItem?.unavailable) {
+      return;
+    }
+    const fallbackCli =
+      providerItems.find((item) => item.id !== "auto" && !item.unavailable)?.id ?? "auto";
+    if (fallbackCli !== activeTab.selectedCli) {
+      setTabSelectedCli(activeTab.id, fallbackCli);
+    }
+  }, [activeTab, providerItems, setTabSelectedCli, workspace?.locationKind]);
 
   function setPrompt(value: string) {
     if (!activeTab) return;
@@ -1509,27 +1597,6 @@ export function ChatPromptBar({
   const usageTooltip = `本地估算 ${estimatedUsageTokens.toLocaleString()} tokens，占压缩阈值 ${FULL_COMPACT_THRESHOLD.toLocaleString()} 的 ${usagePercentLabel}。`;
   const capabilities = acpCapabilitiesByCli[effectiveCli] ?? null;
   const capabilityStatus = acpCapabilityStatusByCli[effectiveCli] ?? "idle";
-  const providerItems: FooterProviderItem[] = CLI_OPTIONS.map((option) => {
-    if (option.id === "auto") {
-      return {
-        id: option.id,
-        label: option.label,
-        icon: option.icon,
-        installed: true,
-        unavailable: false,
-      };
-    }
-
-    const runtime = appState?.agents.find((agent) => agent.id === option.id)?.runtime;
-    const installed = runtime?.installed ?? true;
-    return {
-      id: option.id,
-      label: option.label,
-      icon: option.icon,
-      installed,
-      unavailable: runtime != null ? !runtime.installed : false,
-    };
-  });
   const currentProviderItem =
     providerItems.find((item) => item.id === activeTab.selectedCli) ??
     providerItems[0];
@@ -1832,7 +1899,7 @@ export function ChatPromptBar({
                       className="selector-button selector-provider-button"
                     >
                       {currentProviderItem.id === "auto" ? (
-                        <span className="footer-provider-auto-mark">A</span>
+                        <Route className="footer-provider-auto-mark" size={14} strokeWidth={1.9} aria-hidden />
                       ) : (
                         <img
                           src={currentProviderItem.icon}
@@ -1856,16 +1923,22 @@ export function ChatPromptBar({
                                 description={
                                   item.id === "auto"
                                     ? "按任务自动路由"
-                                    : item.unavailable
-                                      ? "当前 CLI 未安装"
-                                      : "直接发送到该 CLI"
+                                    : workspace?.locationKind === "ssh"
+                                      ? item.unavailable
+                                        ? "远程连接检测未发现该 CLI"
+                                        : item.remoteValidationKnown
+                                          ? "该 CLI 已在远程主机安装"
+                                          : "尚未运行连接检测，暂按可用处理"
+                                      : item.unavailable
+                                        ? "当前 CLI 未安装"
+                                        : "直接发送到该 CLI"
                                 }
                                 onClick={() => handleProviderSelect(item.id, item.unavailable)}
                                 disabled={item.unavailable}
                                 selected={isSelected}
                                 leading={
                                   item.id === "auto" ? (
-                                    <span className="footer-provider-auto-mark">A</span>
+                                    <Route className="footer-provider-auto-mark" size={14} strokeWidth={1.9} aria-hidden />
                                   ) : (
                                     <img
                                       src={item.icon}

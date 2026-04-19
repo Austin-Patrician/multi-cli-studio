@@ -8,10 +8,12 @@ import {
   ChevronRight,
   Cpu,
   FolderOpen,
+  Link2,
   Plus,
   Server,
   Settings,
 } from "lucide-react";
+import { DesktopConnectionsSection } from "../components/settings/DesktopConnectionsSection";
 import { DesktopMcpSection } from "../components/settings/DesktopMcpSection";
 import { DesktopSkillsSection } from "../components/settings/DesktopSkillsSection";
 import { DesktopUsageSection } from "../components/settings/DesktopUsageSection";
@@ -20,7 +22,15 @@ import { GlobalGitDrawer } from "../components/settings/GlobalGitDrawer";
 import { useStore } from "../lib/store";
 import type { AgentId, GitPanelData, TerminalTab, WorkspaceRef } from "../lib/models";
 
-type SettingsSection = "settings" | "models" | "vendors" | "projects" | "mcp" | "skills" | "usage";
+type SettingsSection =
+  | "settings"
+  | "models"
+  | "vendors"
+  | "projects"
+  | "connections"
+  | "mcp"
+  | "skills"
+  | "usage";
 type ProjectHealthTone = "clean" | "modified" | "attention" | "neutral";
 
 type SidebarNavItem = {
@@ -45,6 +55,7 @@ const NAV_ITEMS: SidebarNavItem[] = [
   { id: "models", label: "模型管理", icon: Cpu },
   { id: "vendors", label: "供应商", icon: Settings },
   { id: "projects", label: "项目", icon: FolderOpen },
+  { id: "connections", label: "连接", icon: Link2 },
   { id: "mcp", label: "MCP", icon: Server },
   { id: "skills", label: "技能", icon: BookOpen },
   { id: "usage", label: "使用统计", icon: BarChart3 },
@@ -54,6 +65,7 @@ function parseSettingsSection(value: string | null): SettingsSection {
   switch (value) {
     case "models":
     case "projects":
+    case "connections":
     case "mcp":
     case "skills":
     case "vendors":
@@ -421,10 +433,16 @@ export function DesktopSettingsPage() {
                       这里只保留项目状态和入口动作，方便从设置页快速回到正确的工作区。
                     </div>
                   </div>
-                  <button type="button" className="dcc-action-button" onClick={() => void openWorkspaceFolder()}>
-                    <Plus size={14} />
-                    添加项目
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button type="button" className="dcc-action-button secondary" onClick={() => openSection("connections")}>
+                      <Link2 size={14} />
+                      SSH 工作区
+                    </button>
+                    <button type="button" className="dcc-action-button" onClick={() => void openWorkspaceFolder()}>
+                      <Plus size={14} />
+                      添加项目
+                    </button>
+                  </div>
                 </div>
 
                 <div className="dcc-projects-summary-grid">
@@ -495,13 +513,18 @@ export function DesktopSettingsPage() {
                                   <span className="dcc-provider-name">{project.workspace.name}</span>
                                   {isCurrent ? <span className={badgeToneClass("success")}>当前</span> : null}
                                   {project.hasPlanModeSession ? <span className="dcc-badge">PLAN</span> : null}
+                                  {project.workspace.locationKind === "ssh" ? <span className="dcc-badge">SSH</span> : null}
                                 </div>
                                 <span className={cx("dcc-project-health-pill", `dcc-project-health-pill-${project.healthTone}`)}>
                                   {project.statusLabel}
                                 </span>
                               </div>
 
-                              <div className="dcc-provider-url">{project.workspace.rootPath}</div>
+                              <div className="dcc-provider-url">
+                                {project.workspace.locationKind === "ssh" && project.workspace.locationLabel
+                                  ? `${project.workspace.locationLabel} · ${project.workspace.rootPath}`
+                                  : project.workspace.rootPath}
+                              </div>
 
                               <div className="dcc-project-row-ledger">
                                 <div className="dcc-project-ledger-item">
@@ -547,6 +570,10 @@ export function DesktopSettingsPage() {
                   </div>
                 )}
               </section>
+            ) : null}
+
+            {!outlet && activeSection === "connections" ? (
+              <DesktopConnectionsSection settings={settings} />
             ) : null}
 
             {!outlet && activeSection === "mcp" ? (

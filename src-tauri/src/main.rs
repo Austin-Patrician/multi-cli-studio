@@ -59,6 +59,9 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_notification::NotificationExt;
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -74,6 +77,13 @@ const RUNTIME_LOG_TERMINAL_ID: &str = "runtime-console";
 const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
+const SSH_ASKPASS_PASSWORD_ENV: &str = "MULTI_CLI_STUDIO_SSH_PASSWORD";
+
+#[cfg(target_os = "windows")]
+const SSH_ASKPASS_HELPER_NAME: &str = "multi-cli-studio-ssh-askpass.cmd";
+
+#[cfg(not(target_os = "windows"))]
+const SSH_ASKPASS_HELPER_NAME: &str = "multi-cli-studio-ssh-askpass.sh";
 
 #[derive(Debug, Clone)]
 struct CliCommandOutput {
@@ -285,6 +295,7 @@ struct AgentPromptRequest {
 #[serde(rename_all = "camelCase")]
 struct PtyEnsureRequest {
     terminal_tab_id: String,
+    workspace_id: Option<String>,
     cwd: Option<String>,
     cols: u16,
     rows: u16,
@@ -359,6 +370,8 @@ struct ContextStore {
 #[serde(rename_all = "camelCase")]
 struct AppSettings {
     cli_paths: CliPaths,
+    #[serde(default)]
+    ssh_connections: Vec<SshConnectionConfig>,
     project_root: String,
     max_turns_per_agent: usize,
     max_output_chars_per_turn: usize,
@@ -385,6 +398,53 @@ struct CliPaths {
     codex: String,
     claude: String,
     gemini: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SshConnectionConfig {
+    id: String,
+    name: String,
+    host: String,
+    port: u16,
+    username: String,
+    auth_mode: String,
+    #[serde(default)]
+    identity_file: String,
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    proxy_jump: String,
+    #[serde(default = "default_remote_shell")]
+    remote_shell: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    created_at: String,
+    updated_at: String,
+    #[serde(default)]
+    last_validated_at: Option<String>,
+    #[serde(default)]
+    detected_cli_paths: CliPathsDetection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SshConnectionTestResult {
+    reachable: bool,
+    auth_ok: bool,
+    python_ok: bool,
+    shell: Option<String>,
+    platform: Option<String>,
+    detected_cli_paths: CliPathsDetection,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CliPathsDetection {
+    codex: Option<String>,
+    claude: Option<String>,
+    gemini: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -602,6 +662,10 @@ fn default_model_chat_context_turn_limit() -> usize {
     4
 }
 
+fn default_remote_shell() -> String {
+    "bash".to_string()
+}
+
 fn is_likely_email(value: &str) -> bool {
     let trimmed = value.trim();
     let parts = trimmed.split('@').collect::<Vec<_>>();
@@ -729,9 +793,90 @@ fn normalize_provider_entries(providers: &mut Vec<ModelProviderConfig>, service_
     }
 }
 
+fn normalize_ssh_connections(settings: &mut AppSettings) {
+    let mut normalized = Vec::new();
+    let mut seen = BTreeSet::new();
+    for mut connection in settings.ssh_connections.clone() {
+        let id = connection.id.trim().to_string();
+        let host = connection.host.trim().to_string();
+        let username = connection.username.trim().to_string();
+        if id.is_empty() || host.is_empty() || username.is_empty() {
+            continue;
+        }
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        connection.id = id;
+        connection.host = host;
+        connection.username = username;
+        connection.name = if connection.name.trim().is_empty() {
+            connection.host.clone()
+        } else {
+            connection.name.trim().to_string()
+        };
+        if connection.port == 0 {
+            connection.port = 22;
+        }
+        connection.auth_mode = if connection.auth_mode == "identityFile" {
+            "identityFile".to_string()
+        } else if connection.auth_mode == "password" {
+            "password".to_string()
+        } else {
+            "agent".to_string()
+        };
+        connection.identity_file = connection.identity_file.trim().to_string();
+        connection.password = connection.password.to_string();
+        connection.proxy_jump = connection.proxy_jump.trim().to_string();
+        connection.remote_shell = if connection.remote_shell.trim().is_empty() {
+            default_remote_shell()
+        } else {
+            connection.remote_shell.trim().to_string()
+        };
+        connection.labels = connection
+            .labels
+            .into_iter()
+            .map(|label| label.trim().to_string())
+            .filter(|label| !label.is_empty())
+            .collect();
+        if connection.created_at.trim().is_empty() {
+            connection.created_at = now_rfc3339();
+        }
+        if connection.updated_at.trim().is_empty() {
+            connection.updated_at = connection.created_at.clone();
+        }
+        connection.detected_cli_paths.codex = connection
+            .detected_cli_paths
+            .codex
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        connection.detected_cli_paths.claude = connection
+            .detected_cli_paths
+            .claude
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        connection.detected_cli_paths.gemini = connection
+            .detected_cli_paths
+            .gemini
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        normalized.push(connection);
+    }
+    settings.ssh_connections = normalized;
+}
+
 fn normalize_settings_providers(settings: &mut AppSettings) {
     settings.model_chat_context_turn_limit = settings.model_chat_context_turn_limit.max(1);
-    normalize_provider_entries(&mut settings.openai_compatible_providers, "openaiCompatible");
+    normalize_ssh_connections(settings);
+    normalize_provider_entries(
+        &mut settings.openai_compatible_providers,
+        "openaiCompatible",
+    );
     normalize_provider_entries(&mut settings.claude_providers, "claude");
     normalize_provider_entries(&mut settings.gemini_providers, "gemini");
 }
@@ -800,8 +945,18 @@ fn extract_api_error_message(value: &Value) -> Option<String> {
                 .or_else(|| entry.as_str().map(|message| message.to_string()))
                 .or_else(|| json_value_as_text(entry))
         })
-        .or_else(|| value.get("message").and_then(Value::as_str).map(|value| value.to_string()))
-        .or_else(|| value.get("detail").and_then(Value::as_str).map(|value| value.to_string()))
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(|value| value.to_string())
+        })
+        .or_else(|| {
+            value
+                .get("detail")
+                .and_then(Value::as_str)
+                .map(|value| value.to_string())
+        })
 }
 
 fn execute_json_request(builder: reqwest::blocking::RequestBuilder) -> Result<Value, String> {
@@ -822,8 +977,7 @@ fn execute_json_request(builder: reqwest::blocking::RequestBuilder) -> Result<Va
             });
         return Err(format!("{} {}", status.as_u16(), detail));
     }
-    serde_json::from_str(&body)
-        .map_err(|err| format!("Failed to decode JSON response: {}", err))
+    serde_json::from_str(&body).map_err(|err| format!("Failed to decode JSON response: {}", err))
 }
 
 fn normalize_remote_models(models: Vec<ModelProviderModel>) -> Vec<ModelProviderModel> {
@@ -904,10 +1058,7 @@ fn value_text_parts(value: &Value) -> Vec<String> {
                 vec![trimmed.to_string()]
             }
         }
-        Value::Array(items) => items
-            .iter()
-            .flat_map(value_text_parts)
-            .collect::<Vec<_>>(),
+        Value::Array(items) => items.iter().flat_map(value_text_parts).collect::<Vec<_>>(),
         Value::Object(map) => {
             if let Some(text) = map.get("text").and_then(Value::as_str) {
                 let trimmed = text.trim();
@@ -1025,7 +1176,9 @@ fn parse_gemini_models_response(value: &Value) -> Vec<ModelProviderModel> {
         .unwrap_or_default()
 }
 
-fn fetch_provider_models(provider: &ModelProviderConfig) -> Result<Vec<ModelProviderModel>, String> {
+fn fetch_provider_models(
+    provider: &ModelProviderConfig,
+) -> Result<Vec<ModelProviderModel>, String> {
     if provider.base_url.trim().is_empty() {
         return Err("Provider base URL is required.".to_string());
     }
@@ -1072,21 +1225,24 @@ fn fetch_provider_models(provider: &ModelProviderConfig) -> Result<Vec<ModelProv
 }
 
 fn parse_openai_response_text(value: &Value) -> Option<String> {
-    value.get("choices").and_then(Value::as_array).and_then(|choices| {
-        choices.first().and_then(|choice| {
-            choice
-                .get("message")
-                .and_then(|message| message.get("content"))
-                .map(value_text_parts)
-                .or_else(|| {
-                    choice
-                        .get("message")
-                        .and_then(|message| message.get("text"))
-                        .map(value_text_parts)
-                })
-                .map(|parts| parts.join("\n\n"))
+    value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| {
+            choices.first().and_then(|choice| {
+                choice
+                    .get("message")
+                    .and_then(|message| message.get("content"))
+                    .map(value_text_parts)
+                    .or_else(|| {
+                        choice
+                            .get("message")
+                            .and_then(|message| message.get("text"))
+                            .map(value_text_parts)
+                    })
+                    .map(|parts| parts.join("\n\n"))
+            })
         })
-    })
 }
 
 fn parse_claude_response_text(value: &Value) -> Option<String> {
@@ -1138,10 +1294,7 @@ fn execute_stream_request(
     Ok(response)
 }
 
-fn read_sse_events<F>(
-    response: reqwest::blocking::Response,
-    mut on_event: F,
-) -> Result<(), String>
+fn read_sse_events<F>(response: reqwest::blocking::Response, mut on_event: F) -> Result<(), String>
 where
     F: FnMut(Option<String>, String) -> Result<(), String>,
 {
@@ -1150,18 +1303,17 @@ where
     let mut data_lines: Vec<String> = Vec::new();
     let mut line = String::new();
 
-    let mut flush_event = |event_name: &mut Option<String>,
-                           data_lines: &mut Vec<String>|
-     -> Result<(), String> {
-        if data_lines.is_empty() {
-            *event_name = None;
-            return Ok(());
-        }
-        let data = data_lines.join("\n");
-        let next_event = event_name.take();
-        data_lines.clear();
-        on_event(next_event, data)
-    };
+    let mut flush_event =
+        |event_name: &mut Option<String>, data_lines: &mut Vec<String>| -> Result<(), String> {
+            if data_lines.is_empty() {
+                *event_name = None;
+                return Ok(());
+            }
+            let data = data_lines.join("\n");
+            let next_event = event_name.take();
+            data_lines.clear();
+            on_event(next_event, data)
+        };
 
     loop {
         line.clear();
@@ -1271,9 +1423,7 @@ fn detect_api_content_format(text: &str) -> String {
         .filter(|line| line.len() > 88 || line.contains("  "))
         .count();
 
-    if lines.len() >= 5
-        && (logish * 100 >= 28 * lines.len() || dense * 100 >= 55 * lines.len())
-    {
+    if lines.len() >= 5 && (logish * 100 >= 28 * lines.len() || dense * 100 >= 55 * lines.len()) {
         "log".to_string()
     } else {
         "plain".to_string()
@@ -1300,7 +1450,11 @@ fn trim_api_segment(text: &str) -> String {
 }
 
 fn render_api_chat_content(raw: &str) -> ApiChatRenderResult {
-    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n").trim_end().to_string();
+    let normalized = raw
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_end()
+        .to_string();
     let mut blocks = Vec::new();
     let mut visible = String::new();
     let mut cursor = 0usize;
@@ -1444,11 +1598,7 @@ fn merge_api_usage(target: &mut ApiUsage, next: ApiUsage) {
     }
 }
 
-fn fill_api_usage_estimate(
-    usage: &mut ApiUsage,
-    request: &ApiChatRequest,
-    raw_content: &str,
-) {
+fn fill_api_usage_estimate(usage: &mut ApiUsage, request: &ApiChatRequest, raw_content: &str) {
     if usage.prompt_tokens.is_none() {
         let prompt_chars = request
             .messages
@@ -1616,8 +1766,9 @@ fn stream_openai_provider_chat(
             .and_then(|choices| choices.first())
             .and_then(|choice| choice.get("delta"))
         {
-            if let Some(reasoning_value) =
-                delta.get("reasoning_content").or_else(|| delta.get("reasoning"))
+            if let Some(reasoning_value) = delta
+                .get("reasoning_content")
+                .or_else(|| delta.get("reasoning"))
             {
                 let chunk = value_delta_text(reasoning_value);
                 if !chunk.is_empty() {
@@ -1655,12 +1806,8 @@ fn stream_openai_provider_chat(
     }
     fill_api_usage_estimate(&mut usage, request, &raw_content);
     let duration_ms = started_at.elapsed().as_millis() as u64;
-    let generation_meta = build_api_chat_generation_meta(
-        provider,
-        request,
-        Some(requested_at),
-        Some(now_rfc3339()),
-    );
+    let generation_meta =
+        build_api_chat_generation_meta(provider, request, Some(requested_at), Some(now_rfc3339()));
     emit_api_chat_stream_snapshot(
         app,
         request.stream_id.as_deref(),
@@ -1787,12 +1934,8 @@ fn stream_claude_provider_chat(
     }
     fill_api_usage_estimate(&mut usage, request, &raw_content);
     let duration_ms = started_at.elapsed().as_millis() as u64;
-    let generation_meta = build_api_chat_generation_meta(
-        provider,
-        request,
-        Some(requested_at),
-        Some(now_rfc3339()),
-    );
+    let generation_meta =
+        build_api_chat_generation_meta(provider, request, Some(requested_at), Some(now_rfc3339()));
     emit_api_chat_stream_snapshot(
         app,
         request.stream_id.as_deref(),
@@ -1847,7 +1990,7 @@ fn stream_gemini_provider_chat(
                 &format!(
                     "models/{}:streamGenerateContent",
                     request.selection.model_id
-                )
+                ),
             ))
             .query(&[("alt", "sse"), ("key", provider.api_key.trim())])
             .json(&payload),
@@ -1879,7 +2022,11 @@ fn stream_gemini_provider_chat(
                 if chunk.is_empty() {
                     continue;
                 }
-                if part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
+                if part
+                    .get("thought")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
                     reasoning_candidate.push_str(chunk);
                 } else {
                     text_candidate.push_str(chunk);
@@ -1912,12 +2059,8 @@ fn stream_gemini_provider_chat(
     }
     fill_api_usage_estimate(&mut usage, request, &raw_content);
     let duration_ms = started_at.elapsed().as_millis() as u64;
-    let generation_meta = build_api_chat_generation_meta(
-        provider,
-        request,
-        Some(requested_at),
-        Some(now_rfc3339()),
-    );
+    let generation_meta =
+        build_api_chat_generation_meta(provider, request, Some(requested_at), Some(now_rfc3339()));
     emit_api_chat_stream_snapshot(
         app,
         request.stream_id.as_deref(),
@@ -2359,7 +2502,7 @@ struct PickedChatAttachment {
     path: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceTreeEntry {
     name: String,
@@ -2368,13 +2511,20 @@ struct WorkspaceTreeEntry {
     has_children: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFileIndexResponse {
+    entries_by_parent: HashMap<String, Vec<WorkspaceTreeEntry>>,
+    files: Vec<FileMentionCandidate>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OpenWorkspaceFileResult {
     opened: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FileMentionCandidate {
     id: String,
@@ -2383,7 +2533,7 @@ struct FileMentionCandidate {
     absolute_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceTextSearchMatch {
     line: usize,
@@ -2392,7 +2542,7 @@ struct WorkspaceTextSearchMatch {
     preview: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceTextSearchFileResult {
     path: String,
@@ -2400,7 +2550,7 @@ struct WorkspaceTextSearchFileResult {
     matches: Vec<WorkspaceTextSearchMatch>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceTextSearchResponse {
     files: Vec<WorkspaceTextSearchFileResult>,
@@ -2409,7 +2559,7 @@ struct WorkspaceTextSearchResponse {
     limit_hit: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CliSkillItem {
     name: String,
@@ -2530,7 +2680,7 @@ struct GitCommitResult {
     commit_sha: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitLogEntry {
     sha: String,
@@ -2539,7 +2689,7 @@ struct GitLogEntry {
     timestamp: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitLogResponse {
     total: usize,
@@ -2551,7 +2701,14 @@ struct GitLogResponse {
     upstream: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitOverviewResponse {
+    panel: GitPanelData,
+    log: GitLogResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitHistoryCommit {
     sha: String,
@@ -2565,7 +2722,7 @@ struct GitHistoryCommit {
     refs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitHistoryResponse {
     snapshot_id: String,
@@ -2588,7 +2745,7 @@ struct GitPushPreviewResponse {
     commits: Vec<GitHistoryCommit>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitCommitFileChange {
     path: String,
@@ -2603,7 +2760,7 @@ struct GitCommitFileChange {
     truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitCommitDetails {
     sha: String,
@@ -2621,7 +2778,7 @@ struct GitCommitDetails {
     total_deletions: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitBranchListItem {
     name: String,
@@ -2635,7 +2792,7 @@ struct GitBranchListItem {
     behind: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitBranchListResponse {
     local_branches: Vec<GitBranchListItem>,
@@ -3031,6 +3188,28 @@ fn resolve_codex_prompt_and_skills(
     (prompt.to_string(), Vec::new())
 }
 
+fn resolve_codex_prompt_and_skills_for_target(
+    app: &AppHandle,
+    command_path: &str,
+    target: &WorkspaceTarget,
+    prompt: &str,
+) -> (String, Vec<CliSkillItem>) {
+    let Some((skill_name, remainder)) = parse_leading_skill_reference(prompt) else {
+        return (prompt.to_string(), Vec::new());
+    };
+
+    let skills = list_codex_skills_for_target(app, command_path, target)
+        .unwrap_or_else(|_| list_codex_fallback_skills_for_target(target));
+    if let Some(skill) = skills
+        .into_iter()
+        .find(|item| item.name.eq_ignore_ascii_case(&skill_name))
+    {
+        return (remainder, vec![skill]);
+    }
+
+    (prompt.to_string(), Vec::new())
+}
+
 fn resolve_claude_prompt_and_skill(
     project_root: &str,
     prompt: &str,
@@ -3050,15 +3229,31 @@ fn resolve_claude_prompt_and_skill(
     (prompt.to_string(), None)
 }
 
-fn list_codex_skills_for_workspace(
+fn resolve_claude_prompt_and_skill_for_target(
+    target: &WorkspaceTarget,
+    prompt: &str,
+) -> (String, Option<CliSkillItem>) {
+    let Some((skill_name, remainder)) = parse_leading_skill_reference(prompt) else {
+        return (prompt.to_string(), None);
+    };
+
+    let skills = list_claude_skills_for_target(target);
+    if let Some(skill) = skills
+        .into_iter()
+        .find(|item| item.name.eq_ignore_ascii_case(&skill_name))
+    {
+        return (remainder, Some(skill));
+    }
+
+    (prompt.to_string(), None)
+}
+
+fn list_codex_skills_from_command(
     app: &AppHandle,
-    command_path: &str,
+    mut cmd: Command,
     project_root: &str,
 ) -> Result<Vec<CliSkillItem>, String> {
-    let resolved_command = resolve_direct_command_path(command_path);
-    let mut cmd = batch_aware_command(&resolved_command, &["app-server", "--listen", "stdio://"]);
-    cmd.current_dir(project_root)
-        .stdin(Stdio::piped())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -3162,6 +3357,38 @@ fn list_codex_skills_for_workspace(
             } else {
                 Err(format!("{}\n\nstderr:\n{}", err, trimmed_stderr))
             }
+        }
+    }
+}
+
+fn list_codex_skills_for_workspace(
+    app: &AppHandle,
+    command_path: &str,
+    project_root: &str,
+) -> Result<Vec<CliSkillItem>, String> {
+    let resolved_command = resolve_direct_command_path(command_path);
+    let mut cmd = batch_aware_command(&resolved_command, &["app-server", "--listen", "stdio://"]);
+    cmd.current_dir(project_root);
+    list_codex_skills_from_command(app, cmd, project_root)
+}
+
+fn list_codex_skills_for_target(
+    app: &AppHandle,
+    command_path: &str,
+    target: &WorkspaceTarget,
+) -> Result<Vec<CliSkillItem>, String> {
+    match target {
+        WorkspaceTarget::Local { project_root } => {
+            list_codex_skills_for_workspace(app, command_path, project_root)
+        }
+        WorkspaceTarget::Ssh { .. } => {
+            let args = vec![
+                "app-server".to_string(),
+                "--listen".to_string(),
+                "stdio://".to_string(),
+            ];
+            let command = spawn_workspace_command(target, command_path, &args, false)?;
+            list_codex_skills_from_command(app, command, workspace_target_project_root(target))
         }
     }
 }
@@ -3281,6 +3508,221 @@ fn list_claude_skills_for_workspace(project_root: &str) -> Vec<CliSkillItem> {
         .map(|(path, source, scope)| (path.as_path(), *source, *scope))
         .collect::<Vec<_>>();
     list_local_cli_skills(&root_refs, true)
+}
+
+fn list_remote_cli_skills(
+    target: &WorkspaceTarget,
+    root_specs: Vec<Value>,
+    user_invocable_only: bool,
+) -> Result<Vec<CliSkillItem>, String> {
+    let script = r##"
+import json
+import os
+import sys
+
+try:
+    root_specs = json.loads(sys.argv[1] if len(sys.argv) > 1 else "[]")
+except json.JSONDecodeError:
+    root_specs = []
+user_invocable_only = (sys.argv[2] if len(sys.argv) > 2 else "true").strip().lower() == "true"
+
+def trim_yaml_scalar(value):
+    trimmed = (value or "").strip()
+    if len(trimmed) >= 2 and ((trimmed[0] == '"' and trimmed[-1] == '"') or (trimmed[0] == "'" and trimmed[-1] == "'")):
+        return trimmed[1:-1].strip()
+    return trimmed
+
+def parse_skill_bool(value):
+    normalized = (value or "").strip().lower()
+    if normalized in ("true", "yes", "on"):
+        return True
+    if normalized in ("false", "no", "off"):
+        return False
+    return None
+
+def parse_manifest(raw):
+    manifest = {
+        "name": None,
+        "description": None,
+        "userInvocable": None,
+    }
+    lines = raw.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return manifest
+    for line in lines[1:]:
+        trimmed = line.strip()
+        if trimmed == "---":
+            break
+        if not trimmed or trimmed.startswith("#") or ":" not in trimmed:
+            continue
+        key, value = trimmed.split(":", 1)
+        normalized_key = key.strip().lower().replace("_", "-")
+        scalar = trim_yaml_scalar(value)
+        if normalized_key == "name" and scalar:
+            manifest["name"] = scalar
+        elif normalized_key == "description" and scalar:
+            manifest["description"] = scalar
+        elif normalized_key == "user-invocable":
+            manifest["userInvocable"] = parse_skill_bool(scalar)
+    return manifest
+
+def extract_summary(raw):
+    body = raw
+    if raw.lstrip().startswith("---"):
+        marker_count = 0
+        body_lines = []
+        for line in raw.splitlines():
+            if line.strip() == "---":
+                marker_count += 1
+                continue
+            if marker_count < 2:
+                continue
+            body_lines.append(line)
+        body = "\n".join(body_lines)
+    for line in body.splitlines():
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("#") or trimmed.startswith("-") or trimmed.startswith("*"):
+            continue
+        return trimmed
+    return None
+
+def find_skill_markdown_path(path, name):
+    candidates = [
+        os.path.join(path, "SKILL.md"),
+        os.path.join(path, f"{name}.md"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    try:
+        entries = sorted(os.listdir(path))
+    except OSError:
+        return None
+    for entry in entries:
+        child = os.path.join(path, entry)
+        if os.path.isfile(child) and entry.lower().endswith(".md"):
+            return child
+    return None
+
+def resolve_root_path(spec):
+    kind = (spec.get("kind") or "absolute").strip().lower()
+    raw_path = (spec.get("path") or "").strip()
+    if kind == "workspace":
+        return os.path.join(os.getcwd(), raw_path)
+    if kind == "home":
+        return os.path.join(os.path.expanduser("~"), raw_path)
+    return raw_path
+
+items = []
+for spec in root_specs:
+    root_path = resolve_root_path(spec)
+    if not root_path or not os.path.isdir(root_path):
+        continue
+    try:
+        entries = sorted(os.listdir(root_path))
+    except OSError:
+        continue
+    for entry_name in entries:
+        if entry_name.startswith("."):
+            continue
+        entry_path = os.path.join(root_path, entry_name)
+        if not os.path.isdir(entry_path):
+            continue
+        markdown_path = find_skill_markdown_path(entry_path, entry_name)
+        if not markdown_path:
+            continue
+        try:
+            with open(markdown_path, "r", encoding="utf-8", errors="replace") as handle:
+                raw = handle.read()
+        except OSError:
+            continue
+        manifest = parse_manifest(raw)
+        user_invocable = manifest["userInvocable"]
+        if user_invocable_only and user_invocable is False:
+            continue
+        name = (manifest["name"] or entry_name).strip() or entry_name
+        description = manifest["description"] or extract_summary(raw)
+        items.append({
+            "name": name,
+            "displayName": None,
+            "description": description,
+            "path": os.path.realpath(entry_path),
+            "scope": spec.get("scope"),
+            "source": spec.get("source"),
+        })
+
+print(json.dumps(items))
+"##;
+    let root_specs_json = serde_json::to_string(&root_specs)
+        .map_err(|err| format!("Failed to encode skill roots: {err}"))?;
+    let args = vec![
+        root_specs_json,
+        if user_invocable_only {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        },
+    ];
+    let value = run_workspace_python_json(target, script, &args)?;
+    let items = serde_json::from_value::<Vec<CliSkillItem>>(value)
+        .map_err(|err| format!("Failed to decode remote CLI skills: {err}"))?;
+    Ok(dedupe_cli_skill_items(items))
+}
+
+fn list_codex_fallback_skills_for_target(target: &WorkspaceTarget) -> Vec<CliSkillItem> {
+    match target {
+        WorkspaceTarget::Local { project_root } => list_codex_fallback_skills(project_root),
+        WorkspaceTarget::Ssh { .. } => list_remote_cli_skills(
+            target,
+            vec![
+                json!({
+                    "kind": "workspace",
+                    "path": ".codex/skills",
+                    "source": "project",
+                    "scope": "repo",
+                }),
+                json!({
+                    "kind": "home",
+                    "path": ".codex/skills",
+                    "source": "user",
+                    "scope": "user",
+                }),
+                json!({
+                    "kind": "home",
+                    "path": ".codex/skills/.system",
+                    "source": "built-in",
+                    "scope": "system",
+                }),
+            ],
+            true,
+        )
+        .unwrap_or_default(),
+    }
+}
+
+fn list_claude_skills_for_target(target: &WorkspaceTarget) -> Vec<CliSkillItem> {
+    match target {
+        WorkspaceTarget::Local { project_root } => list_claude_skills_for_workspace(project_root),
+        WorkspaceTarget::Ssh { .. } => list_remote_cli_skills(
+            target,
+            vec![
+                json!({
+                    "kind": "workspace",
+                    "path": ".claude/skills",
+                    "source": "project",
+                    "scope": "project",
+                }),
+                json!({
+                    "kind": "home",
+                    "path": ".claude/skills",
+                    "source": "user",
+                    "scope": "user",
+                }),
+            ],
+            true,
+        )
+        .unwrap_or_default(),
+    }
 }
 
 fn resolve_direct_command_path(command_path: &str) -> String {
@@ -5624,7 +6066,7 @@ fn handle_codex_notification(
 fn run_codex_app_server_turn(
     app: &AppHandle,
     command_path: &str,
-    project_root: &str,
+    workspace_target: &WorkspaceTarget,
     prompt: &str,
     image_attachments: &[String],
     selected_skills: &[CliSkillItem],
@@ -5637,11 +6079,18 @@ fn run_codex_app_server_turn(
     block_prefix: Vec<ChatMessageBlock>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<CodexTurnOutcome, String> {
-    let resolved_command = resolve_direct_command_path(command_path);
-    let mut cmd = batch_aware_command(&resolved_command, &["app-server", "--listen", "stdio://"]);
+    let mut cmd = spawn_workspace_command(
+        workspace_target,
+        command_path,
+        &[
+            "app-server".to_string(),
+            "--listen".to_string(),
+            "stdio://".to_string(),
+        ],
+        !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
+    )?;
 
-    cmd.current_dir(project_root)
-        .stdin(Stdio::piped())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -5684,6 +6133,7 @@ fn run_codex_app_server_turn(
     let sandbox_mode = codex_sandbox_mode(&permission_mode);
     let requested_model = session.model.get("codex").cloned();
     let effort_override = codex_reasoning_effort(session);
+    let project_root = workspace_target_project_root(workspace_target);
 
     if let Some(handle) = live_turn.as_ref() {
         set_live_chat_turn_target(
@@ -6780,7 +7230,7 @@ fn codex_build_approval_response(
 fn run_claude_headless_turn_once(
     app: &AppHandle,
     command_path: &str,
-    project_root: &str,
+    workspace_target: &WorkspaceTarget,
     prompt: &str,
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
@@ -6793,11 +7243,11 @@ fn run_claude_headless_turn_once(
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<ClaudeTurnOutcome, String> {
-    let resolved_command = resolve_direct_command_path(command_path);
     let requested_model = claude_requested_model(session, previous_transport_session.as_ref());
     let requested_effort = claude_reasoning_effort(session);
     let requested_permission =
         claude_permission_mode(session, write_mode, previous_transport_session.as_ref());
+    let project_root = workspace_target_project_root(workspace_target);
 
     let mut args = vec![
         "-p".to_string(),
@@ -6829,25 +7279,14 @@ fn run_claude_headless_turn_once(
         args.push(session_id);
     }
 
-    let mut cmd = if resolved_command.to_ascii_lowercase().ends_with(".cmd")
-        || resolved_command.to_ascii_lowercase().ends_with(".bat")
-    {
-        let mut command = Command::new("cmd.exe");
-        command
-            .arg("/C")
-            .arg("call")
-            .arg(&resolved_command)
-            .args(&args);
-        command
-    } else {
-        let mut command = Command::new(&resolved_command);
-        command.args(&args);
-        command
-    };
-    apply_runtime_environment(&mut cmd);
+    let mut cmd = spawn_workspace_command(
+        workspace_target,
+        command_path,
+        &args,
+        !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
+    )?;
 
-    cmd.current_dir(project_root)
-        .stdin(Stdio::piped())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -7068,7 +7507,7 @@ fn run_claude_headless_turn_once(
 fn run_claude_headless_turn(
     app: &AppHandle,
     command_path: &str,
-    project_root: &str,
+    workspace_target: &WorkspaceTarget,
     prompt: &str,
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
@@ -7087,7 +7526,7 @@ fn run_claude_headless_turn(
     match run_claude_headless_turn_once(
         app,
         command_path,
-        project_root,
+        workspace_target,
         prompt,
         session,
         previous_transport_session.clone(),
@@ -7109,7 +7548,7 @@ fn run_claude_headless_turn(
             run_claude_headless_turn_once(
                 app,
                 command_path,
-                project_root,
+                workspace_target,
                 prompt,
                 session,
                 fallback_transport_session,
@@ -7130,7 +7569,7 @@ fn run_claude_headless_turn(
 fn run_gemini_acp_turn(
     app: &AppHandle,
     command_path: &str,
-    project_root: &str,
+    workspace_target: &WorkspaceTarget,
     prompt: &str,
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
@@ -7141,11 +7580,15 @@ fn run_gemini_acp_turn(
     block_prefix: Vec<ChatMessageBlock>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
 ) -> Result<GeminiTurnOutcome, String> {
-    let resolved_command = resolve_direct_command_path(command_path);
-    let mut cmd = batch_aware_command(&resolved_command, &["--acp"]);
+    let project_root = workspace_target_project_root(workspace_target);
+    let mut cmd = spawn_workspace_command(
+        workspace_target,
+        command_path,
+        &["--acp".to_string()],
+        !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
+    )?;
 
-    cmd.current_dir(project_root)
-        .stdin(Stdio::piped())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -8055,6 +8498,113 @@ fn update_settings(
 }
 
 #[tauri::command]
+fn test_ssh_connection(
+    mut connection: SshConnectionConfig,
+) -> Result<SshConnectionTestResult, String> {
+    if connection.id.trim().is_empty() {
+        connection.id = format!("ssh-{}", Uuid::new_v4());
+    }
+    if connection.name.trim().is_empty() {
+        connection.name = connection.host.trim().to_string();
+    }
+    if connection.host.trim().is_empty() {
+        return Err("SSH host is required.".to_string());
+    }
+    if connection.username.trim().is_empty() {
+        return Err("SSH username is required.".to_string());
+    }
+    if connection.port == 0 {
+        connection.port = 22;
+    }
+    connection.auth_mode = if connection.auth_mode == "identityFile" {
+        "identityFile".to_string()
+    } else if connection.auth_mode == "password" {
+        "password".to_string()
+    } else {
+        "agent".to_string()
+    };
+    if connection.auth_mode == "identityFile" && connection.identity_file.trim().is_empty() {
+        return Err("SSH identity file is required for identity-file auth.".to_string());
+    }
+    if connection.auth_mode == "password" && connection.password.is_empty() {
+        return Err("SSH password is required for password auth.".to_string());
+    }
+    if connection.remote_shell.trim().is_empty() {
+        connection.remote_shell = default_remote_shell();
+    }
+
+    let probe = run_ssh_capture(
+        &connection,
+        "printf 'platform='; uname -s 2>/dev/null || printf unknown; \
+printf '\nshell='; command -v \"$SHELL\" 2>/dev/null || printf \"$SHELL\"; \
+printf '\npython='; command -v python3 2>/dev/null || true; \
+printf '\ncodex='; resolve_remote_command codex 2>/dev/null || true; \
+printf '\nclaude='; resolve_remote_command claude 2>/dev/null || true; \
+printf '\ngemini='; resolve_remote_command gemini 2>/dev/null || true",
+    )?;
+
+    let mut result = SshConnectionTestResult {
+        reachable: probe.success,
+        auth_ok: probe.success,
+        python_ok: false,
+        shell: None,
+        platform: None,
+        detected_cli_paths: CliPathsDetection::default(),
+        errors: Vec::new(),
+    };
+
+    if !probe.success {
+        let detail = probe.stderr.trim();
+        result.errors.push(if detail.is_empty() {
+            "SSH connection failed.".to_string()
+        } else {
+            detail.to_string()
+        });
+        return Ok(result);
+    }
+
+    for line in probe.stdout.lines() {
+        if let Some(value) = line.strip_prefix("platform=") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                result.platform = Some(trimmed.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("shell=") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                result.shell = Some(trimmed.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("python=") {
+            let trimmed = value.trim();
+            result.python_ok = !trimmed.is_empty();
+        } else if let Some(value) = line.strip_prefix("codex=") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                result.detected_cli_paths.codex = Some(trimmed.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("claude=") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                result.detected_cli_paths.claude = Some(trimmed.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("gemini=") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                result.detected_cli_paths.gemini = Some(trimmed.to_string());
+            }
+        }
+    }
+
+    if !result.python_ok {
+        result
+            .errors
+            .push("Remote host did not expose python3 in PATH.".to_string());
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
 fn refresh_provider_models(
     store: State<'_, AppStore>,
     service_type: String,
@@ -8111,10 +8661,7 @@ async fn send_api_chat_message(
     .await
     .map_err(|err| err.to_string())??;
 
-    Ok(ApiChatResponse {
-        selection,
-        message,
-    })
+    Ok(ApiChatResponse { selection, message })
 }
 
 #[tauri::command]
@@ -10327,6 +10874,10 @@ fn send_chat_message(
     let project_root = request.project_root.clone();
     let workspace_id = request.workspace_id.clone();
     let project_name = request.project_name.clone();
+    let workspace_target =
+        resolve_workspace_target(&store, Some(&workspace_id), Some(&project_root))?;
+    let effective_project_root = workspace_target_project_root(&workspace_target).to_string();
+    let remote_workspace = matches!(workspace_target, WorkspaceTarget::Ssh { .. });
     let recent_turns = request.recent_turns.clone();
     let write_mode = request.write_mode && !request.plan_mode;
     let requested_transport_session = request.transport_session.clone();
@@ -10360,28 +10911,38 @@ fn send_chat_message(
         return Err("Only Codex currently supports image attachments.".to_string());
     }
 
+    let shell = shell_path();
+
     // Look up CLI runtime
-    let (wrapper_path, shell, timeout_ms) = {
+    let (wrapper_path, timeout_ms) = {
         let state = store.state.lock().map_err(|e| e.to_string())?;
         let settings = store.settings.lock().map_err(|e| e.to_string())?;
 
-        let agent = state.agents.iter().find(|a| a.id == cli_id);
-        let wrapper = agent
-            .and_then(|a| a.runtime.command_path.clone())
-            .ok_or_else(|| format!("{} CLI not found", cli_id))?;
+        let wrapper = if remote_workspace {
+            remote_cli_command_name(&cli_id)
+        } else {
+            let agent = state.agents.iter().find(|a| a.id == cli_id);
+            agent
+                .and_then(|a| a.runtime.command_path.clone())
+                .ok_or_else(|| format!("{} CLI not found", cli_id))?
+        };
 
-        (wrapper, shell_path(), settings.process_timeout_ms)
+        (wrapper, settings.process_timeout_ms)
     };
 
     let (prompt_for_context, selected_codex_skills, selected_claude_skill) = match cli_id.as_str() {
         "codex" => {
-            let (runtime_prompt, selected_skills) =
-                resolve_codex_prompt_and_skills(&app, &wrapper_path, &project_root, &prompt);
+            let (runtime_prompt, selected_skills) = resolve_codex_prompt_and_skills_for_target(
+                &app,
+                &wrapper_path,
+                &workspace_target,
+                &prompt,
+            );
             (runtime_prompt, selected_skills, None)
         }
         "claude" => {
             let (runtime_prompt, selected_skill) =
-                resolve_claude_prompt_and_skill(&project_root, &prompt);
+                resolve_claude_prompt_and_skill_for_target(&workspace_target, &prompt);
             (runtime_prompt, Vec::new(), selected_skill)
         }
         _ => (prompt.clone(), Vec::new(), None),
@@ -10394,8 +10955,12 @@ fn send_chat_message(
         let mut state = store.state.lock().map_err(|e| e.to_string())?.clone();
         state.workspace.project_root = project_root.clone();
         state.workspace.project_name = project_name.clone();
-        state.workspace.branch = git_output(&project_root, &["branch", "--show-current"])
-            .unwrap_or_else(|| "workspace".to_string());
+        state.workspace.branch = if remote_workspace {
+            "workspace".to_string()
+        } else {
+            git_output(&effective_project_root, &["branch", "--show-current"])
+                .unwrap_or_else(|| "workspace".to_string())
+        };
         let is_resuming = effective_previous_transport_session
             .as_ref()
             .and_then(|s| s.thread_id.as_ref())
@@ -10416,7 +10981,7 @@ fn send_chat_message(
             &cli_id,
             &terminal_tab_id,
             &workspace_id,
-            &project_root,
+            &effective_project_root,
             &project_name,
             &prompt_for_context,
             &recent_turns,
@@ -10448,6 +11013,7 @@ fn send_chat_message(
     let selected_codex_skills_for_thread = selected_codex_skills.clone();
     let workspace_id_for_thread = workspace_id.clone();
     let project_name_for_thread = project_name.clone();
+    let workspace_target_for_thread = workspace_target.clone();
     let recent_turns_for_thread: Vec<TaskRecentTurn> = recent_turns
         .iter()
         .map(|turn| TaskRecentTurn {
@@ -10462,7 +11028,7 @@ fn send_chat_message(
 
     if cli_id == "codex" {
         let codex_wrapper_path = wrapper_path.clone();
-        let codex_project_root = project_root.clone();
+        let codex_project_root = effective_project_root.clone();
         let codex_requested_transport_session = effective_previous_transport_session.clone();
         let codex_transport_kind = transport_kind.clone();
         let codex_pending_approvals = store.codex_pending_approvals.clone();
@@ -10473,13 +11039,14 @@ fn send_chat_message(
         let codex_live_turn = live_turn.clone();
         let codex_live_chat_turns = live_chat_turns.clone();
         let codex_image_attachments = image_attachments.clone();
+        let codex_workspace_target = workspace_target_for_thread.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
             let outcome = run_codex_app_server_turn(
                 &app_handle,
                 &codex_wrapper_path,
-                &codex_project_root,
+                &codex_workspace_target,
                 &composed_prompt,
                 &codex_image_attachments,
                 &selected_codex_skills_for_thread,
@@ -10615,7 +11182,7 @@ fn send_chat_message(
 
     if cli_id == "gemini" {
         let gemini_wrapper_path = wrapper_path.clone();
-        let gemini_project_root = project_root.clone();
+        let gemini_project_root = effective_project_root.clone();
         let gemini_requested_transport_session = effective_previous_transport_session.clone();
         let gemini_transport_kind = transport_kind.clone();
         let gemini_terminal_storage = terminal_storage.clone();
@@ -10624,13 +11191,14 @@ fn send_chat_message(
         let gemini_recent_turns = recent_turns_for_thread.clone();
         let gemini_live_turn = live_turn.clone();
         let gemini_live_chat_turns = live_chat_turns.clone();
+        let gemini_workspace_target = workspace_target_for_thread.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
             let outcome = run_gemini_acp_turn(
                 &app_handle,
                 &gemini_wrapper_path,
-                &gemini_project_root,
+                &gemini_workspace_target,
                 &composed_prompt,
                 &request_session_for_thread,
                 gemini_requested_transport_session.clone(),
@@ -10767,7 +11335,7 @@ fn send_chat_message(
 
     if cli_id == "claude" {
         let claude_wrapper_path = wrapper_path.clone();
-        let claude_project_root = project_root.clone();
+        let claude_project_root = effective_project_root.clone();
         let claude_requested_transport_session = effective_previous_transport_session.clone();
         let claude_transport_kind = transport_kind.clone();
         let claude_approval_rules = store.claude_approval_rules.clone();
@@ -10778,13 +11346,14 @@ fn send_chat_message(
         let claude_recent_turns = recent_turns_for_thread.clone();
         let claude_live_turn = live_turn.clone();
         let claude_live_chat_turns = live_chat_turns.clone();
+        let claude_workspace_target = workspace_target_for_thread.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
             let outcome = run_claude_headless_turn(
                 &app_handle,
                 &claude_wrapper_path,
-                &claude_project_root,
+                &claude_workspace_target,
                 &composed_prompt,
                 &request_session_for_thread,
                 claude_requested_transport_session.clone(),
@@ -11250,6 +11819,9 @@ fn run_auto_orchestration(
 
     thread::spawn(move || {
         let started_at = Instant::now();
+        let workspace_target = WorkspaceTarget::Local {
+            project_root: request_for_thread.project_root.clone(),
+        };
         let mut step_states: Vec<AutoExecutionStepState> = Vec::new();
         let mut worker_trace_blocks: Vec<ChatMessageBlock> = Vec::new();
         let seed_plan = AutoPlan {
@@ -11495,7 +12067,7 @@ fn run_auto_orchestration(
                 match run_codex_app_server_turn(
                     &app_handle,
                     &wrapper_path,
-                    &request_for_thread.project_root,
+                    &workspace_target,
                     &worker_prompt,
                     &[],
                     &[],
@@ -11534,7 +12106,7 @@ fn run_auto_orchestration(
                 match run_gemini_acp_turn(
                     &app_handle,
                     &wrapper_path,
-                    &request_for_thread.project_root,
+                    &workspace_target,
                     &worker_prompt,
                     &worker_session,
                     None,
@@ -12557,9 +13129,13 @@ fn describe_runtime_option(cli_id: &str, kind: &str, value: &str) -> Option<&'st
         ("gemini", "permissions", "yolo") => Some("Auto-approve all tools"),
         ("gemini", "permissions", "plan") => Some("Read-only plan mode"),
         ("claude", "effort", "low") | ("codex", "effort", "low") => Some("Lower reasoning effort"),
-        ("claude", "effort", "medium") | ("codex", "effort", "medium") => Some("Balanced reasoning effort"),
+        ("claude", "effort", "medium") | ("codex", "effort", "medium") => {
+            Some("Balanced reasoning effort")
+        }
         ("claude", "effort", "high") | ("codex", "effort", "high") => Some("High reasoning effort"),
-        ("claude", "effort", "max") | ("codex", "effort", "max") => Some("Maximum reasoning effort"),
+        ("claude", "effort", "max") | ("codex", "effort", "max") => {
+            Some("Maximum reasoning effort")
+        }
         _ => None,
     }
 }
@@ -12707,6 +13283,44 @@ fn git_command_status(project_root: &str, args: &[&str]) -> Result<(), String> {
     Err(detail)
 }
 
+fn git_command_capture_for_target(
+    target: &WorkspaceTarget,
+    args: &[&str],
+) -> Result<CliCommandOutput, String> {
+    let owned_args = args
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    run_workspace_command_capture(target, "git", &owned_args, false)
+}
+
+fn git_command_status_for_target(target: &WorkspaceTarget, args: &[&str]) -> Result<(), String> {
+    let output = git_command_capture_for_target(target, args)?;
+    if output.success {
+        Ok(())
+    } else {
+        Err(command_output_detail(&output, "git command failed"))
+    }
+}
+
+fn git_output_allow_empty_for_target(target: &WorkspaceTarget, args: &[&str]) -> Option<String> {
+    let output = git_command_capture_for_target(target, args).ok()?;
+    if output.success {
+        Some(output.stdout)
+    } else {
+        None
+    }
+}
+
+fn git_output_for_target(target: &WorkspaceTarget, args: &[&str]) -> Option<String> {
+    let text = git_output_allow_empty_for_target(target, args)?;
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text.trim().to_string())
+    }
+}
+
 fn count_text_lines(bytes: &[u8]) -> u32 {
     if bytes.is_empty() {
         return 0;
@@ -12715,14 +13329,7 @@ fn count_text_lines(bytes: &[u8]) -> u32 {
     normalized.lines().count() as u32
 }
 
-fn parse_git_log_entries(project_root: &str, args: &[&str]) -> Vec<GitLogEntry> {
-    let Ok(output) = git_command_output(project_root, args) else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+fn parse_git_log_entries_from_stdout(stdout: &str) -> Vec<GitLogEntry> {
     stdout
         .lines()
         .filter_map(|line| {
@@ -12744,28 +13351,18 @@ fn parse_git_log_entries(project_root: &str, args: &[&str]) -> Vec<GitLogEntry> 
         .collect()
 }
 
-fn parse_git_history_commits(project_root: &str, revision: Option<&str>) -> Vec<GitHistoryCommit> {
-    let mut command = Command::new("git");
-    command.current_dir(project_root);
-    command.arg("log");
-    if let Some(revision) = revision.filter(|value| !value.trim().is_empty()) {
-        command.arg(revision);
-    }
-    command.args([
-        "--decorate=short",
-        "--date-order",
-        "--pretty=format:%H%x1f%h%x1f%s%x1f%B%x1f%an%x1f%ae%x1f%ct%x1f%P%x1f%D%x1e",
-    ]);
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let Ok(output) = command.output() else {
+fn parse_git_log_entries(project_root: &str, args: &[&str]) -> Vec<GitLogEntry> {
+    let Ok(output) = git_command_output(project_root, args) else {
         return Vec::new();
     };
     if !output.status.success() {
         return Vec::new();
     }
+    parse_git_log_entries_from_stdout(&String::from_utf8_lossy(&output.stdout))
+}
 
-    String::from_utf8_lossy(&output.stdout)
+fn parse_git_history_commits_from_stdout(stdout: &str) -> Vec<GitHistoryCommit> {
+    stdout
         .split('\u{1e}')
         .filter_map(|chunk| {
             let trimmed = chunk.trim();
@@ -12801,6 +13398,30 @@ fn parse_git_history_commits(project_root: &str, revision: Option<&str>) -> Vec<
             })
         })
         .collect()
+}
+
+fn parse_git_history_commits(project_root: &str, revision: Option<&str>) -> Vec<GitHistoryCommit> {
+    let mut command = Command::new("git");
+    command.current_dir(project_root);
+    command.arg("log");
+    if let Some(revision) = revision.filter(|value| !value.trim().is_empty()) {
+        command.arg(revision);
+    }
+    command.args([
+        "--decorate=short",
+        "--date-order",
+        "--pretty=format:%H%x1f%h%x1f%s%x1f%B%x1f%an%x1f%ae%x1f%ct%x1f%P%x1f%D%x1e",
+    ]);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    parse_git_history_commits_from_stdout(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn normalize_remote_target_branch(remote_name: &str, branch_name: &str) -> String {
@@ -12850,42 +13471,48 @@ fn parse_git_history_commits_with_args(
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .split('\u{1e}')
-        .filter_map(|chunk| {
-            let trimmed = chunk.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            let parts = trimmed.split('\u{1f}').collect::<Vec<_>>();
-            if parts.len() < 9 {
-                return None;
-            }
-            let sha = parts[0].trim().to_string();
-            if sha.is_empty() {
-                return None;
-            }
-            let refs = parts[8]
-                .split(',')
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>();
-            Some(GitHistoryCommit {
-                sha,
-                short_sha: parts[1].trim().to_string(),
-                summary: parts[2].trim().to_string(),
-                message: parts[3].trim().to_string(),
-                author: parts[4].trim().to_string(),
-                author_email: parts[5].trim().to_string(),
-                timestamp: parts[6].trim().parse::<i64>().unwrap_or(0),
-                parents: parts[7]
-                    .split_whitespace()
-                    .map(|value| value.to_string())
-                    .collect(),
-                refs,
-            })
-        })
-        .collect())
+    Ok(parse_git_history_commits_from_stdout(
+        &String::from_utf8_lossy(&output.stdout),
+    ))
+}
+
+fn parse_git_history_commits_with_args_for_target(
+    target: &WorkspaceTarget,
+    revisions: &[String],
+    max_count: Option<usize>,
+) -> Result<Vec<GitHistoryCommit>, String> {
+    let mut args = vec![
+        "log".to_string(),
+        "--decorate=short".to_string(),
+        "--topo-order".to_string(),
+        "--date-order".to_string(),
+        "--pretty=format:%H%x1f%h%x1f%s%x1f%B%x1f%an%x1f%ae%x1f%ct%x1f%P%x1f%D%x1e".to_string(),
+    ];
+    if let Some(limit) = max_count {
+        args.push(format!("--max-count={limit}"));
+    }
+    for revision in revisions {
+        if !revision.trim().is_empty() {
+            args.push(revision.clone());
+        }
+    }
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = git_command_capture_for_target(target, &arg_refs)?;
+    if !output.success {
+        return Err(command_output_detail(&output, "git log failed"));
+    }
+    Ok(parse_git_history_commits_from_stdout(&output.stdout))
+}
+
+fn parse_git_history_commits_for_target(
+    target: &WorkspaceTarget,
+    revision: Option<&str>,
+) -> Vec<GitHistoryCommit> {
+    let revisions = revision
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| vec![value.to_string()])
+        .unwrap_or_default();
+    parse_git_history_commits_with_args_for_target(target, &revisions, None).unwrap_or_default()
 }
 
 fn git_history_query_matches(commit: &GitHistoryCommit, query: &str) -> bool {
@@ -12906,8 +13533,234 @@ fn git_history_query_matches(commit: &GitHistoryCommit, query: &str) -> bool {
     .contains(&normalized)
 }
 
+fn build_remote_git_commit_history(
+    target: &WorkspaceTarget,
+    revision: Option<&str>,
+    query: &str,
+    offset: usize,
+    limit: usize,
+    snapshot_id: Option<&str>,
+) -> Result<GitHistoryResponse, String> {
+    let script = r#"
+import json
+import subprocess
+import sys
+import time
+
+LOG_FORMAT = "%H\x1f%h\x1f%s\x1f%B\x1f%an\x1f%ae\x1f%ct\x1f%P\x1f%D\x1e"
+
+revision = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
+query = (sys.argv[2] if len(sys.argv) > 2 else "").strip().lower()
+try:
+    offset = max(0, int(sys.argv[3] if len(sys.argv) > 3 else "0"))
+except ValueError:
+    offset = 0
+try:
+    limit = max(1, int(sys.argv[4] if len(sys.argv) > 4 else "100"))
+except ValueError:
+    limit = 100
+snapshot_override = (sys.argv[5] if len(sys.argv) > 5 else "").strip()
+
+def run_git(*args, allow_failure=False):
+    result = subprocess.run(
+        ["git", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if not allow_failure and result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "git command failed"
+        raise SystemExit(message)
+    return result
+
+def git_optional_stdout(*args):
+    result = run_git(*args, allow_failure=True)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+def parse_commits(stdout):
+    commits = []
+    for chunk in stdout.split("\x1e"):
+        trimmed = chunk.strip()
+        if not trimmed:
+            continue
+        parts = trimmed.split("\x1f")
+        if len(parts) < 9:
+            continue
+        sha = parts[0].strip()
+        if not sha:
+            continue
+        try:
+            timestamp = int(parts[6].strip() or "0")
+        except ValueError:
+            timestamp = 0
+        refs = [item.strip() for item in parts[8].split(",") if item.strip()]
+        commits.append({
+            "sha": sha,
+            "shortSha": parts[1].strip(),
+            "summary": parts[2].strip(),
+            "message": parts[3].strip(),
+            "author": parts[4].strip(),
+            "authorEmail": parts[5].strip(),
+            "timestamp": timestamp,
+            "parents": parts[7].split(),
+            "refs": refs,
+        })
+    return commits
+
+def commit_matches(commit, normalized_query):
+    if not normalized_query:
+        return True
+    haystack = " ".join([
+        commit["sha"],
+        commit["shortSha"],
+        commit["summary"],
+        commit["message"],
+        commit["author"],
+        " ".join(commit["refs"]),
+    ]).lower()
+    return normalized_query in haystack
+
+snapshot_id = snapshot_override or git_optional_stdout("rev-parse", "HEAD") or f"snapshot-{int(time.time() * 1000)}"
+
+if not git_optional_stdout("rev-parse", "--git-dir"):
+    print(json.dumps({
+        "snapshotId": snapshot_id,
+        "total": 0,
+        "offset": offset,
+        "limit": limit,
+        "hasMore": False,
+        "commits": [],
+    }))
+    raise SystemExit(0)
+
+revision_ref = revision or "HEAD"
+base_args = [
+    "log",
+    "--decorate=short",
+    "--topo-order",
+    "--date-order",
+    f"--pretty=format:{LOG_FORMAT}",
+]
+
+if not query:
+    count_output = git_optional_stdout("rev-list", "--count", revision_ref) or "0"
+    try:
+        total = int((count_output.splitlines()[-1] if count_output else "0").strip())
+    except ValueError:
+        total = 0
+    log_result = run_git(
+        *base_args,
+        f"--skip={offset}",
+        f"--max-count={limit + 1}",
+        revision_ref,
+        allow_failure=True,
+    )
+    commits = parse_commits(log_result.stdout if log_result.returncode == 0 else "")
+    has_more = len(commits) > limit
+    if has_more:
+        commits = commits[:limit]
+    print(json.dumps({
+        "snapshotId": snapshot_id,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "hasMore": has_more,
+        "commits": commits,
+    }))
+    raise SystemExit(0)
+
+log_result = run_git(*base_args, revision_ref, allow_failure=True)
+commits = parse_commits(log_result.stdout if log_result.returncode == 0 else "")
+total = 0
+page = []
+for commit in commits:
+    if not commit_matches(commit, query):
+        continue
+    if total >= offset and len(page) < limit + 1:
+        page.append(commit)
+    total += 1
+
+has_more = len(page) > limit
+if has_more:
+    page = page[:limit]
+
+print(json.dumps({
+    "snapshotId": snapshot_id,
+    "total": total,
+    "offset": offset,
+    "limit": limit,
+    "hasMore": has_more,
+    "commits": page,
+}))
+"#;
+    let args = vec![
+        revision.unwrap_or_default().to_string(),
+        query.to_string(),
+        offset.to_string(),
+        limit.to_string(),
+        snapshot_id.unwrap_or_default().to_string(),
+    ];
+    let value = run_workspace_python_json(target, script, &args)?;
+    serde_json::from_value(value)
+        .map_err(|err| format!("Failed to decode remote git history: {err}"))
+}
+
+fn build_git_commit_history_for_target(
+    target: &WorkspaceTarget,
+    revision: Option<&str>,
+    query: Option<&str>,
+    offset: usize,
+    limit: usize,
+    snapshot_id: Option<&str>,
+) -> Result<GitHistoryResponse, String> {
+    match target {
+        WorkspaceTarget::Local { .. } => {
+            let all_commits = parse_git_history_commits_for_target(target, revision);
+            let filtered = all_commits
+                .into_iter()
+                .filter(|commit| git_history_query_matches(commit, query.unwrap_or_default()))
+                .collect::<Vec<_>>();
+            let commits = filtered
+                .iter()
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect::<Vec<_>>();
+            Ok(GitHistoryResponse {
+                snapshot_id: snapshot_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| git_head_snapshot_id_for_target(target)),
+                total: filtered.len(),
+                offset,
+                limit,
+                has_more: offset + commits.len() < filtered.len(),
+                commits,
+            })
+        }
+        WorkspaceTarget::Ssh { .. } => build_remote_git_commit_history(
+            target,
+            revision,
+            query.unwrap_or_default(),
+            offset,
+            limit,
+            snapshot_id,
+        ),
+    }
+}
+
 fn git_head_snapshot_id(project_root: &str) -> String {
-    git_output(project_root, &["rev-parse", "HEAD"]).unwrap_or_else(|| format!("snapshot-{}", Local::now().timestamp_millis()))
+    git_output(project_root, &["rev-parse", "HEAD"])
+        .unwrap_or_else(|| format!("snapshot-{}", Local::now().timestamp_millis()))
+}
+
+fn git_head_snapshot_id_for_target(target: &WorkspaceTarget) -> String {
+    git_output_for_target(target, &["rev-parse", "HEAD"])
+        .unwrap_or_else(|| format!("snapshot-{}", Local::now().timestamp_millis()))
 }
 
 fn git_status_letter(status: &str) -> String {
@@ -12922,25 +13775,21 @@ fn git_status_letter(status: &str) -> String {
 
 fn is_image_path(path: &str) -> bool {
     let normalized = path.to_ascii_lowercase();
-    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg"]
-        .iter()
-        .any(|ext| normalized.ends_with(ext))
+    [
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg",
+    ]
+    .iter()
+    .any(|ext| normalized.ends_with(ext))
 }
 
-fn parse_git_diff_tree_name_status(project_root: &str, commit: &str) -> Vec<(String, Option<String>, String)> {
-    let mut command = Command::new("git");
-    command.current_dir(project_root);
-    command.args(["diff-tree", "--no-commit-id", "--name-status", "-r", "-M", commit]);
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let Ok(output) = command.output() else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
+fn git_diff_is_binary(diff: &str) -> bool {
+    diff.contains("Binary files") || diff.contains("GIT binary patch")
+}
 
-    String::from_utf8_lossy(&output.stdout)
+fn parse_git_diff_tree_name_status_from_stdout(
+    stdout: &str,
+) -> Vec<(String, Option<String>, String)> {
+    stdout
         .lines()
         .filter_map(|line| {
             let mut parts = line.split('\t');
@@ -12960,6 +13809,53 @@ fn parse_git_diff_tree_name_status(project_root: &str, commit: &str) -> Vec<(Str
         .collect()
 }
 
+fn parse_git_diff_tree_name_status(
+    project_root: &str,
+    commit: &str,
+) -> Vec<(String, Option<String>, String)> {
+    let mut command = Command::new("git");
+    command.current_dir(project_root);
+    command.args([
+        "diff-tree",
+        "--no-commit-id",
+        "--name-status",
+        "-r",
+        "-M",
+        "--root",
+        commit,
+    ]);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    parse_git_diff_tree_name_status_from_stdout(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_git_diff_tree_name_status_for_target(
+    target: &WorkspaceTarget,
+    commit: &str,
+) -> Vec<(String, Option<String>, String)> {
+    git_output_allow_empty_for_target(
+        target,
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            "-M",
+            "--root",
+            commit,
+        ],
+    )
+    .map(|stdout| parse_git_diff_tree_name_status_from_stdout(&stdout))
+    .unwrap_or_default()
+}
+
 fn parse_git_diff_tree_numstat(project_root: &str, commit: &str) -> HashMap<String, (u32, u32)> {
     let mut command = Command::new("git");
     command.current_dir(project_root);
@@ -12973,24 +13869,16 @@ fn parse_git_diff_tree_numstat(project_root: &str, commit: &str) -> HashMap<Stri
         return HashMap::new();
     }
 
-    let mut stats = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut parts = line.split('\t');
-        let additions_raw = parts.next().unwrap_or("").trim();
-        let deletions_raw = parts.next().unwrap_or("").trim();
-        let path_raw = parts.next().unwrap_or("").trim();
-        if path_raw.is_empty() {
-            continue;
-        }
-        let path = path_raw
-            .split_once(" -> ")
-            .map(|(_, after)| after.trim().replace('\\', "/"))
-            .unwrap_or_else(|| path_raw.replace('\\', "/"));
-        let additions = additions_raw.parse::<u32>().unwrap_or(0);
-        let deletions = deletions_raw.parse::<u32>().unwrap_or(0);
-        stats.insert(path, (additions, deletions));
-    }
-    stats
+    parse_numstat_output_from_stdout(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_git_diff_tree_numstat_for_target(
+    target: &WorkspaceTarget,
+    commit: &str,
+) -> HashMap<String, (u32, u32)> {
+    git_output_allow_empty_for_target(target, &["show", "--format=", "--numstat", "-M", commit])
+        .map(|stdout| parse_numstat_output_from_stdout(&stdout))
+        .unwrap_or_default()
 }
 
 fn git_commit_file_diff(project_root: &str, commit: &str, path: &str) -> String {
@@ -13000,13 +13888,388 @@ fn git_commit_file_diff(project_root: &str, commit: &str, path: &str) -> String 
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
     match command.output() {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).to_string(),
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).to_string()
+        }
         _ => String::new(),
     }
 }
 
+fn git_commit_file_diff_for_target(target: &WorkspaceTarget, commit: &str, path: &str) -> String {
+    git_output_allow_empty_for_target(target, &["show", "--format=", "-M", commit, "--", path])
+        .unwrap_or_default()
+}
+
+fn build_standard_git_commit_details_for_target(
+    target: &WorkspaceTarget,
+    commit_hash: &str,
+    max_lines: u32,
+) -> Result<GitCommitDetails, String> {
+    let metadata_output = git_command_capture_for_target(
+        target,
+        &[
+            "show",
+            "--quiet",
+            "--format=%H%x1f%s%x1f%B%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%at%x1f%ct%x1f%P",
+            commit_hash,
+        ],
+    )?;
+    if !metadata_output.success {
+        return Err(command_output_detail(
+            &metadata_output,
+            "Failed to load commit details.",
+        ));
+    }
+    let metadata = metadata_output.stdout;
+    let parts = metadata.trim().split('\u{1f}').collect::<Vec<_>>();
+    if parts.len() < 10 {
+        return Err("Failed to parse commit details.".to_string());
+    }
+
+    let name_status = parse_git_diff_tree_name_status_for_target(target, commit_hash);
+    let numstats = parse_git_diff_tree_numstat_for_target(target, commit_hash);
+    let mut total_additions = 0u32;
+    let mut total_deletions = 0u32;
+    let mut files = Vec::new();
+
+    for (path, old_path, status) in name_status {
+        let (additions, deletions) = numstats.get(&path).copied().unwrap_or((0, 0));
+        total_additions += additions;
+        total_deletions += deletions;
+        let is_image = is_image_path(&path);
+        let full_diff = git_commit_file_diff_for_target(target, commit_hash, &path);
+        let is_binary = git_diff_is_binary(&full_diff);
+        let line_count = full_diff.lines().count() as u32;
+        let truncated = line_count > max_lines;
+        let diff = if truncated {
+            full_diff
+                .lines()
+                .take(max_lines as usize)
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            full_diff
+        };
+        files.push(GitCommitFileChange {
+            path,
+            old_path,
+            status,
+            additions,
+            deletions,
+            is_binary,
+            is_image,
+            diff,
+            line_count,
+            truncated,
+        });
+    }
+
+    Ok(GitCommitDetails {
+        sha: parts[0].trim().to_string(),
+        summary: parts[1].trim().to_string(),
+        message: parts[2].trim().to_string(),
+        author: parts[3].trim().to_string(),
+        author_email: parts[4].trim().to_string(),
+        committer: parts[5].trim().to_string(),
+        committer_email: parts[6].trim().to_string(),
+        author_time: parts[7].trim().parse::<i64>().unwrap_or(0),
+        commit_time: parts[8].trim().parse::<i64>().unwrap_or(0),
+        parents: parts[9]
+            .split_whitespace()
+            .map(|value| value.to_string())
+            .collect(),
+        files,
+        total_additions,
+        total_deletions,
+    })
+}
+
+fn build_remote_git_commit_details(
+    target: &WorkspaceTarget,
+    commit_hash: &str,
+    max_lines: u32,
+) -> Result<GitCommitDetails, String> {
+    let script = r#"
+import json
+import shlex
+import subprocess
+import sys
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg")
+
+commit_hash = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
+try:
+    max_diff_lines = max(0, int(sys.argv[2] if len(sys.argv) > 2 else "10000"))
+except ValueError:
+    max_diff_lines = 10000
+
+def run_git(*args, allow_failure=False):
+    result = subprocess.run(
+        ["git", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if not allow_failure and result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "git command failed"
+        raise SystemExit(message)
+    return result
+
+def normalize_path(path):
+    return (path or "").strip().replace("\\", "/")
+
+def status_from_code(code):
+    normalized = (code or "M").strip()[:1] or "M"
+    if normalized == "A":
+        return "added"
+    if normalized == "D":
+        return "deleted"
+    if normalized == "R":
+        return "renamed"
+    return "modified"
+
+def parse_name_status(text):
+    entries = []
+    parts = text.split("\0")
+    index = 0
+    while index < len(parts):
+        status_raw = parts[index].strip()
+        index += 1
+        if not status_raw:
+            continue
+        code = status_raw[:1] or "M"
+        if code in ("R", "C"):
+            old_path = normalize_path(parts[index] if index < len(parts) else "")
+            index += 1
+            path = normalize_path(parts[index] if index < len(parts) else old_path)
+            index += 1
+            if not path:
+                continue
+            entries.append({
+                "path": path,
+                "oldPath": old_path or None,
+                "status": status_from_code(code),
+            })
+            continue
+        path = normalize_path(parts[index] if index < len(parts) else "")
+        index += 1
+        if not path:
+            continue
+        entries.append({
+            "path": path,
+            "oldPath": None,
+            "status": status_from_code(code),
+        })
+    return entries
+
+def parse_numstat(text):
+    stats = {}
+    parts = text.split("\0")
+    index = 0
+    while index < len(parts):
+        entry = parts[index]
+        index += 1
+        if not entry:
+            continue
+        raw_fields = entry.split("\t", 2)
+        if len(raw_fields) < 3:
+            continue
+        additions_raw, deletions_raw, path_field = raw_fields
+        try:
+            additions = int(additions_raw.strip())
+        except ValueError:
+            additions = 0
+        try:
+            deletions = int(deletions_raw.strip())
+        except ValueError:
+            deletions = 0
+        if path_field:
+            path = normalize_path(path_field)
+        else:
+            old_path = parts[index] if index < len(parts) else ""
+            index += 1
+            path = normalize_path(parts[index] if index < len(parts) else old_path)
+            index += 1
+        if not path:
+            continue
+        stats[path] = (additions, deletions)
+    return stats
+
+def split_patch_chunks(text):
+    chunks = []
+    current = []
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            if current:
+                chunks.append("\n".join(current))
+            current = [line]
+            continue
+        if current:
+            current.append(line)
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+def normalize_patch_header_path(value):
+    trimmed = (value or "").strip()
+    if trimmed.startswith("a/") or trimmed.startswith("b/"):
+        trimmed = trimmed[2:]
+    if trimmed == "/dev/null":
+        return None
+    return normalize_path(trimmed) or None
+
+def parse_patch_header_paths(chunk):
+    header = chunk.splitlines()[0] if chunk else ""
+    if not header.startswith("diff --git "):
+        return (None, None)
+    try:
+        parts = shlex.split(header[len("diff --git "):])
+    except ValueError:
+        return (None, None)
+    if len(parts) < 2:
+        return (None, None)
+    return (
+        normalize_patch_header_path(parts[0]),
+        normalize_patch_header_path(parts[1]),
+    )
+
+def truncate_diff(text):
+    lines = text.splitlines()
+    line_count = len(lines)
+    truncated = line_count > max_diff_lines
+    if truncated:
+        return ("\n".join(lines[:max_diff_lines]), line_count, True)
+    return (text, line_count, False)
+
+def is_binary_diff(text):
+    return "Binary files" in text or "GIT binary patch" in text
+
+metadata = run_git(
+    "show",
+    "--quiet",
+    "--format=%H%x1f%s%x1f%B%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%at%x1f%ct%x1f%P",
+    commit_hash,
+).stdout.strip()
+metadata_parts = metadata.split("\x1f")
+if len(metadata_parts) < 10:
+    raise SystemExit("Failed to parse commit details.")
+
+name_status = parse_name_status(
+    run_git(
+        "diff-tree",
+        "--no-commit-id",
+        "--name-status",
+        "-r",
+        "-M",
+        "--root",
+        "-z",
+        commit_hash,
+        allow_failure=True,
+    ).stdout
+)
+numstats = parse_numstat(
+    run_git("show", "--format=", "--numstat", "-M", "-z", commit_hash, allow_failure=True).stdout
+)
+patch_chunks = split_patch_chunks(
+    run_git(
+        "show",
+        "--format=",
+        "-M",
+        "--root",
+        "--binary",
+        "--no-color",
+        "--no-ext-diff",
+        commit_hash,
+        allow_failure=True,
+    ).stdout
+)
+
+patches_by_path = {}
+for chunk in patch_chunks:
+    old_header_path, new_header_path = parse_patch_header_paths(chunk)
+    if new_header_path and new_header_path not in patches_by_path:
+        patches_by_path[new_header_path] = chunk
+    if old_header_path and old_header_path not in patches_by_path:
+        patches_by_path[old_header_path] = chunk
+
+total_additions = 0
+total_deletions = 0
+files = []
+
+for index, entry in enumerate(name_status):
+    path = entry["path"]
+    additions, deletions = numstats.get(path, (0, 0))
+    total_additions += additions
+    total_deletions += deletions
+    full_diff = patches_by_path.get(path)
+    if not full_diff and entry.get("oldPath"):
+        full_diff = patches_by_path.get(entry["oldPath"])
+    if not full_diff and index < len(patch_chunks):
+        full_diff = patch_chunks[index]
+    full_diff = full_diff or ""
+    diff, line_count, truncated = truncate_diff(full_diff)
+    files.append({
+        "path": path,
+        "oldPath": entry.get("oldPath"),
+        "status": entry["status"],
+        "additions": additions,
+        "deletions": deletions,
+        "isBinary": is_binary_diff(full_diff),
+        "isImage": path.lower().endswith(IMAGE_EXTENSIONS),
+        "diff": diff,
+        "lineCount": line_count,
+        "truncated": truncated,
+    })
+
+print(json.dumps({
+    "sha": metadata_parts[0].strip(),
+    "summary": metadata_parts[1].strip(),
+    "message": metadata_parts[2].strip(),
+    "author": metadata_parts[3].strip(),
+    "authorEmail": metadata_parts[4].strip(),
+    "committer": metadata_parts[5].strip(),
+    "committerEmail": metadata_parts[6].strip(),
+    "authorTime": int(metadata_parts[7].strip() or "0"),
+    "commitTime": int(metadata_parts[8].strip() or "0"),
+    "parents": metadata_parts[9].split(),
+    "files": files,
+    "totalAdditions": total_additions,
+    "totalDeletions": total_deletions,
+}))
+"#;
+    let args = vec![commit_hash.to_string(), max_lines.to_string()];
+    let value = run_workspace_python_json(target, script, &args)?;
+    serde_json::from_value(value)
+        .map_err(|err| format!("Failed to decode remote git commit details: {err}"))
+}
+
+fn build_git_commit_details_for_target(
+    target: &WorkspaceTarget,
+    commit_hash: &str,
+    max_lines: u32,
+) -> Result<GitCommitDetails, String> {
+    match target {
+        WorkspaceTarget::Local { .. } => {
+            build_standard_git_commit_details_for_target(target, commit_hash, max_lines)
+        }
+        WorkspaceTarget::Ssh { .. } => {
+            build_remote_git_commit_details(target, commit_hash, max_lines)
+        }
+    }
+}
+
 fn get_git_upstream(project_root: &str) -> Option<String> {
-    git_output(project_root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+    git_output(
+        project_root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
 }
 
 fn parse_branch_ref_lines(
@@ -13074,13 +14337,222 @@ fn parse_branch_ref_lines(
         .collect()
 }
 
+fn parse_branch_ref_lines_for_target(
+    target: &WorkspaceTarget,
+    args: &[&str],
+    is_remote: bool,
+    current_branch: Option<&str>,
+) -> Vec<GitBranchListItem> {
+    git_output_allow_empty_for_target(target, args)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let parts = line.split('\t').collect::<Vec<_>>();
+            if parts.len() < 4 {
+                return None;
+            }
+            let name = parts[0].trim().to_string();
+            if name.is_empty() || name.ends_with("/HEAD") {
+                return None;
+            }
+            let upstream = parts[1].trim();
+            let head_sha = parts[2].trim();
+            let last_commit = parts[3].trim().parse::<i64>().unwrap_or(0);
+            let remote = if is_remote {
+                name.split_once('/').map(|(remote, _)| remote.to_string())
+            } else {
+                None
+            };
+            let (ahead, behind) = if !is_remote && !upstream.is_empty() {
+                parse_ahead_behind_counts_for_target(target, upstream)
+            } else {
+                (0, 0)
+            };
+            Some(GitBranchListItem {
+                is_current: current_branch.is_some_and(|current| current == name),
+                name,
+                is_remote,
+                remote,
+                upstream: if upstream.is_empty() {
+                    None
+                } else {
+                    Some(upstream.to_string())
+                },
+                last_commit,
+                head_sha: if head_sha.is_empty() {
+                    None
+                } else {
+                    Some(head_sha.to_string())
+                },
+                ahead,
+                behind,
+            })
+        })
+        .collect()
+}
+
+fn build_remote_git_branch_list(target: &WorkspaceTarget) -> Result<GitBranchListResponse, String> {
+    let script = r#"
+import json
+import subprocess
+
+def run_git(*args, allow_failure=False):
+    result = subprocess.run(
+        ["git", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if not allow_failure and result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "git command failed"
+        raise SystemExit(message)
+    return result
+
+def git_optional_stdout(*args):
+    result = run_git(*args, allow_failure=True)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+def parse_track(track):
+    ahead = 0
+    behind = 0
+    normalized = (track or "").strip().strip("[]")
+    if not normalized or normalized == "gone":
+        return ahead, behind
+    for part in normalized.split(","):
+        item = part.strip()
+        if item.startswith("ahead "):
+            try:
+                ahead = int(item[6:].strip())
+            except ValueError:
+                ahead = 0
+        elif item.startswith("behind "):
+            try:
+                behind = int(item[7:].strip())
+            except ValueError:
+                behind = 0
+    return ahead, behind
+
+def collect_refs(refspec, is_remote):
+    result = run_git(
+        "for-each-ref",
+        refspec,
+        "--format=%(HEAD)\t%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(objectname)\t%(committerdate:unix)",
+        allow_failure=True,
+    )
+    if result.returncode != 0:
+        return []
+    entries = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 6:
+            continue
+        head_marker, name, upstream, track, head_sha, last_commit_raw = parts[:6]
+        name = name.strip()
+        if not name or name.endswith("/HEAD"):
+            continue
+        try:
+            last_commit = int(last_commit_raw.strip() or "0")
+        except ValueError:
+            last_commit = 0
+        ahead, behind = parse_track(track) if (not is_remote and upstream.strip()) else (0, 0)
+        entries.append({
+            "name": name,
+            "isCurrent": head_marker.strip() == "*",
+            "isRemote": is_remote,
+            "remote": name.split("/", 1)[0] if is_remote and "/" in name else None,
+            "upstream": upstream.strip() or None,
+            "lastCommit": last_commit,
+            "headSha": head_sha.strip() or None,
+            "ahead": ahead,
+            "behind": behind,
+        })
+    return entries
+
+if not git_optional_stdout("rev-parse", "--git-dir"):
+    print(json.dumps({
+        "localBranches": [],
+        "remoteBranches": [],
+        "currentBranch": None,
+    }))
+    raise SystemExit(0)
+
+local_branches = collect_refs("refs/heads", False)
+remote_branches = collect_refs("refs/remotes", True)
+current_branch = git_optional_stdout("branch", "--show-current")
+
+print(json.dumps({
+    "localBranches": local_branches,
+    "remoteBranches": remote_branches,
+    "currentBranch": current_branch or None,
+}))
+"#;
+    let value = run_workspace_python_json(target, script, &[])?;
+    serde_json::from_value(value)
+        .map_err(|err| format!("Failed to decode remote git branch list: {err}"))
+}
+
+fn build_git_branch_list_for_target(
+    target: &WorkspaceTarget,
+) -> Result<GitBranchListResponse, String> {
+    match target {
+        WorkspaceTarget::Local { project_root } => {
+            let current_branch = git_output(project_root, &["branch", "--show-current"]);
+            let local_branches = parse_branch_ref_lines(
+                project_root,
+                &[
+                    "for-each-ref",
+                    "refs/heads",
+                    "--format=%(refname:short)\t%(upstream:short)\t%(objectname)\t%(committerdate:unix)",
+                ],
+                false,
+                current_branch.as_deref(),
+            );
+            let remote_branches = parse_branch_ref_lines(
+                project_root,
+                &[
+                    "for-each-ref",
+                    "refs/remotes",
+                    "--format=%(refname:short)\t\t%(objectname)\t%(committerdate:unix)",
+                ],
+                true,
+                None,
+            );
+            Ok(GitBranchListResponse {
+                local_branches,
+                remote_branches,
+                current_branch,
+            })
+        }
+        WorkspaceTarget::Ssh { .. } => build_remote_git_branch_list(target),
+    }
+}
+
 fn parse_ahead_behind_counts(project_root: &str, upstream: &str) -> (usize, usize) {
-    let Some(output) = git_output_allow_empty(project_root, &["rev-list", "--left-right", "--count", &format!("{upstream}...HEAD")]) else {
+    let Some(output) = git_output_allow_empty(
+        project_root,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{upstream}...HEAD"),
+        ],
+    ) else {
         return (0, 0);
     };
     let mut parts = output.split_whitespace();
-    let behind = parts.next().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
-    let ahead = parts.next().and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+    let behind = parts
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let ahead = parts
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
     (ahead, behind)
 }
 
@@ -13125,7 +14597,11 @@ fn parse_numstat_output(project_root: &str, args: &[&str]) -> HashMap<String, (u
     if !output.status.success() {
         return stats;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_numstat_output_from_stdout(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_numstat_output_from_stdout(stdout: &str) -> HashMap<String, (u32, u32)> {
+    let mut stats = HashMap::new();
     for line in stdout.lines() {
         let mut parts = line.split('\t');
         let additions_raw = parts.next().unwrap_or("").trim();
@@ -13145,46 +14621,68 @@ fn parse_numstat_output(project_root: &str, args: &[&str]) -> HashMap<String, (u
     stats
 }
 
-fn parse_porcelain_status_line(line: &str) -> Option<(char, char, Option<String>, String)> {
-    if line.trim().is_empty() {
-        return None;
-    }
-    let bytes = line.as_bytes();
-    let x = bytes.get(0).copied().unwrap_or(b' ') as char;
-    let y = bytes.get(1).copied().unwrap_or(b' ') as char;
-    let raw_path = line.get(3..).unwrap_or(line).trim();
-    if raw_path.is_empty() {
-        return None;
-    }
-    let (previous_path, path) = if let Some((before, after)) = raw_path.split_once(" -> ") {
-        (Some(before.trim().replace('\\', "/")), after.trim().replace('\\', "/"))
-    } else {
-        (None, raw_path.replace('\\', "/"))
+fn parse_ahead_behind_counts_for_target(
+    target: &WorkspaceTarget,
+    upstream: &str,
+) -> (usize, usize) {
+    let Some(output) = git_output_allow_empty_for_target(
+        target,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{upstream}...HEAD"),
+        ],
+    ) else {
+        return (0, 0);
     };
-    Some((x, y, previous_path, path))
+    let mut parts = output.split_whitespace();
+    let behind = parts
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let ahead = parts
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    (ahead, behind)
 }
 
-fn status_from_code(status_char: char) -> String {
-    match status_char {
-        'A' | '?' => "added",
-        'D' => "deleted",
-        'R' => "renamed",
-        _ => "modified",
-    }
-    .to_string()
+fn get_git_upstream_for_target(target: &WorkspaceTarget) -> Option<String> {
+    git_output_for_target(
+        target,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
 }
 
-fn build_git_file_statuses(project_root: &str) -> Result<(Vec<GitFileStatus>, Vec<GitFileStatus>), String> {
-    let status_output = git_output_allow_empty(project_root, &["status", "--porcelain"])
-        .unwrap_or_default();
-    let staged_numstats = parse_numstat_output(project_root, &["diff", "--cached", "--numstat", "--find-renames"]);
-    let unstaged_numstats = parse_numstat_output(project_root, &["diff", "--numstat", "--find-renames"]);
+fn build_git_file_statuses_for_target(
+    target: &WorkspaceTarget,
+) -> Result<(Vec<GitFileStatus>, Vec<GitFileStatus>), String> {
+    let status_output =
+        git_output_allow_empty_for_target(target, &["status", "--porcelain"]).unwrap_or_default();
+    let staged_numstats = git_output_allow_empty_for_target(
+        target,
+        &["diff", "--cached", "--numstat", "--find-renames"],
+    )
+    .map(|text| parse_numstat_output_from_stdout(&text))
+    .unwrap_or_default();
+    let unstaged_numstats =
+        git_output_allow_empty_for_target(target, &["diff", "--numstat", "--find-renames"])
+            .map(|text| parse_numstat_output_from_stdout(&text))
+            .unwrap_or_default();
 
     let mut staged_files = Vec::new();
     let mut unstaged_files = Vec::new();
 
     for line in status_output.lines() {
-        let Some((index_status, worktree_status, previous_path, path)) = parse_porcelain_status_line(line) else {
+        let Some((index_status, worktree_status, previous_path, path)) =
+            parse_porcelain_status_line(line)
+        else {
             continue;
         };
 
@@ -13201,7 +14699,100 @@ fn build_git_file_statuses(project_root: &str) -> Result<(Vec<GitFileStatus>, Ve
 
         let is_untracked = index_status == '?' || worktree_status == '?';
         if is_untracked || worktree_status != ' ' {
-            let (mut additions, deletions) = unstaged_numstats.get(&path).copied().unwrap_or((0, 0));
+            let (mut additions, deletions) =
+                unstaged_numstats.get(&path).copied().unwrap_or((0, 0));
+            if is_untracked && additions == 0 {
+                if let WorkspaceTarget::Local { project_root } = target {
+                    additions = read_workspace_file_bytes(project_root, &path)
+                        .map(|bytes| count_text_lines(&bytes))
+                        .unwrap_or(0);
+                }
+            }
+            unstaged_files.push(GitFileStatus {
+                path: path.clone(),
+                status: status_from_code(if is_untracked { '?' } else { worktree_status }),
+                previous_path: previous_path.clone(),
+                additions,
+                deletions,
+            });
+        }
+    }
+
+    staged_files.sort_by(|left, right| left.path.to_lowercase().cmp(&right.path.to_lowercase()));
+    unstaged_files.sort_by(|left, right| left.path.to_lowercase().cmp(&right.path.to_lowercase()));
+
+    Ok((staged_files, unstaged_files))
+}
+
+fn parse_porcelain_status_line(line: &str) -> Option<(char, char, Option<String>, String)> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let x = bytes.get(0).copied().unwrap_or(b' ') as char;
+    let y = bytes.get(1).copied().unwrap_or(b' ') as char;
+    let raw_path = line.get(3..).unwrap_or(line).trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+    let (previous_path, path) = if let Some((before, after)) = raw_path.split_once(" -> ") {
+        (
+            Some(before.trim().replace('\\', "/")),
+            after.trim().replace('\\', "/"),
+        )
+    } else {
+        (None, raw_path.replace('\\', "/"))
+    };
+    Some((x, y, previous_path, path))
+}
+
+fn status_from_code(status_char: char) -> String {
+    match status_char {
+        'A' | '?' => "added",
+        'D' => "deleted",
+        'R' => "renamed",
+        _ => "modified",
+    }
+    .to_string()
+}
+
+fn build_git_file_statuses(
+    project_root: &str,
+) -> Result<(Vec<GitFileStatus>, Vec<GitFileStatus>), String> {
+    let status_output =
+        git_output_allow_empty(project_root, &["status", "--porcelain"]).unwrap_or_default();
+    let staged_numstats = parse_numstat_output(
+        project_root,
+        &["diff", "--cached", "--numstat", "--find-renames"],
+    );
+    let unstaged_numstats =
+        parse_numstat_output(project_root, &["diff", "--numstat", "--find-renames"]);
+
+    let mut staged_files = Vec::new();
+    let mut unstaged_files = Vec::new();
+
+    for line in status_output.lines() {
+        let Some((index_status, worktree_status, previous_path, path)) =
+            parse_porcelain_status_line(line)
+        else {
+            continue;
+        };
+
+        if index_status != ' ' && index_status != '?' {
+            let (additions, deletions) = staged_numstats.get(&path).copied().unwrap_or((0, 0));
+            staged_files.push(GitFileStatus {
+                path: path.clone(),
+                status: status_from_code(index_status),
+                previous_path: previous_path.clone(),
+                additions,
+                deletions,
+            });
+        }
+
+        let is_untracked = index_status == '?' || worktree_status == '?';
+        if is_untracked || worktree_status != ' ' {
+            let (mut additions, deletions) =
+                unstaged_numstats.get(&path).copied().unwrap_or((0, 0));
             if is_untracked && additions == 0 {
                 additions = read_workspace_file_bytes(project_root, &path)
                     .map(|bytes| count_text_lines(&bytes))
@@ -13223,10 +14814,14 @@ fn build_git_file_statuses(project_root: &str) -> Result<(Vec<GitFileStatus>, Ve
     Ok((staged_files, unstaged_files))
 }
 
-#[tauri::command]
-fn get_git_panel(project_root: String) -> Result<GitPanelData, String> {
-    let git_dir = Path::new(&project_root).join(".git");
-    if !git_dir.exists() {
+fn build_git_panel_for_target(target: &WorkspaceTarget) -> Result<GitPanelData, String> {
+    let is_git_repo = match target {
+        WorkspaceTarget::Local { project_root } => Path::new(project_root).join(".git").exists(),
+        WorkspaceTarget::Ssh { .. } => {
+            git_output_allow_empty_for_target(target, &["rev-parse", "--git-dir"]).is_some()
+        }
+    };
+    if !is_git_repo {
         return Ok(GitPanelData {
             is_git_repo: false,
             branch: String::new(),
@@ -13237,9 +14832,9 @@ fn get_git_panel(project_root: String) -> Result<GitPanelData, String> {
         });
     }
 
-    let branch = git_output(&project_root, &["branch", "--show-current"])
+    let branch = git_output_for_target(target, &["branch", "--show-current"])
         .unwrap_or_else(|| "HEAD".to_string());
-    let (staged_files, unstaged_files) = build_git_file_statuses(&project_root)?;
+    let (staged_files, unstaged_files) = build_git_file_statuses_for_target(target)?;
     let recent_changes = staged_files
         .iter()
         .chain(unstaged_files.iter())
@@ -13270,87 +14865,52 @@ fn get_git_panel(project_root: String) -> Result<GitPanelData, String> {
     })
 }
 
-#[tauri::command]
-fn stage_git_file(project_root: String, path: String) -> Result<(), String> {
-    git_command_status(&project_root, &["add", "--", &path])
-}
-
-#[tauri::command]
-fn unstage_git_file(project_root: String, path: String) -> Result<(), String> {
-    let output = git_command_output(&project_root, &["reset", "HEAD", "--", &path])?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    if stderr.to_lowercase().contains("unknown revision")
-        || stderr.to_lowercase().contains("ambiguous argument 'head'")
-    {
-        return git_command_status(&project_root, &["rm", "--cached", "--", &path]);
-    }
-    Err(stderr.trim().to_string())
-}
-
-#[tauri::command]
-fn discard_git_file(project_root: String, path: String) -> Result<(), String> {
-    let output = git_command_output(&project_root, &["checkout", "--", &path])?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
-    if stderr.contains("pathspec") || stderr.contains("did not match any file") {
-        let absolute_path = Path::new(&project_root).join(&path);
-        if absolute_path.exists() {
-            fs::remove_file(&absolute_path).map_err(|err| err.to_string())?;
-            return Ok(());
-        }
-    }
-    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(if detail.is_empty() {
-        "Failed to discard file changes.".to_string()
-    } else {
-        detail
-    })
-}
-
-#[tauri::command]
-fn commit_git_changes(
-    project_root: String,
-    message: String,
-    stage_all: Option<bool>,
-) -> Result<GitCommitResult, String> {
-    let trimmed = message.trim();
-    if trimmed.is_empty() {
-        return Err("Commit message cannot be empty.".to_string());
-    }
-    if stage_all.unwrap_or(false) {
-        git_command_status(&project_root, &["add", "-A"])?;
-    }
-    git_command_status(&project_root, &["commit", "-m", trimmed])?;
-    let commit_sha = git_output(&project_root, &["rev-parse", "HEAD"]);
-    Ok(GitCommitResult { commit_sha })
-}
-
-#[tauri::command]
-fn get_git_log(project_root: String) -> Result<GitLogResponse, String> {
-    let entries = parse_git_log_entries(
-        &project_root,
+fn build_git_log_for_target(target: &WorkspaceTarget) -> GitLogResponse {
+    let entries = git_output_allow_empty_for_target(
+        target,
         &["log", "--pretty=format:%H\t%an\t%ct\t%s", "-n", "50"],
-    );
-    let upstream = get_git_upstream(&project_root);
+    )
+    .map(|text| parse_git_log_entries_from_stdout(&text))
+    .unwrap_or_default();
+    let upstream = get_git_upstream_for_target(target);
     let (ahead, behind) = upstream
         .as_deref()
-        .map(|value| parse_ahead_behind_counts(&project_root, value))
+        .map(|value| parse_ahead_behind_counts_for_target(target, value))
         .unwrap_or((0, 0));
     let ahead_entries = upstream
         .as_deref()
-        .map(|value| parse_git_log_entries(&project_root, &["log", "--pretty=format:%H\t%an\t%ct\t%s", "-n", "20", &format!("{value}..HEAD")]))
+        .and_then(|value| {
+            git_output_allow_empty_for_target(
+                target,
+                &[
+                    "log",
+                    "--pretty=format:%H\t%an\t%ct\t%s",
+                    "-n",
+                    "20",
+                    &format!("{value}..HEAD"),
+                ],
+            )
+        })
+        .map(|text| parse_git_log_entries_from_stdout(&text))
         .unwrap_or_default();
     let behind_entries = upstream
         .as_deref()
-        .map(|value| parse_git_log_entries(&project_root, &["log", "--pretty=format:%H\t%an\t%ct\t%s", "-n", "20", &format!("HEAD..{value}")]))
+        .and_then(|value| {
+            git_output_allow_empty_for_target(
+                target,
+                &[
+                    "log",
+                    "--pretty=format:%H\t%an\t%ct\t%s",
+                    "-n",
+                    "20",
+                    &format!("HEAD..{value}"),
+                ],
+            )
+        })
+        .map(|text| parse_git_log_entries_from_stdout(&text))
         .unwrap_or_default();
 
-    Ok(GitLogResponse {
+    GitLogResponse {
         total: entries.len(),
         entries,
         ahead,
@@ -13358,64 +14918,457 @@ fn get_git_log(project_root: String) -> Result<GitLogResponse, String> {
         ahead_entries,
         behind_entries,
         upstream,
-    })
+    }
+}
+
+fn build_remote_git_overview(target: &WorkspaceTarget) -> Result<GitOverviewResponse, String> {
+    let script = r#"
+import json
+import os
+import subprocess
+
+LOG_FORMAT = "%H\t%an\t%ct\t%s"
+
+def run_git(*args, allow_failure=False):
+    result = subprocess.run(
+        ["git", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if not allow_failure and result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "git command failed"
+        raise SystemExit(message)
+    return result
+
+def git_optional_stdout(*args):
+    result = run_git(*args, allow_failure=True)
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+def parse_log_entries(text):
+    entries = []
+    for line in text.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) < 4:
+            continue
+        sha = parts[0].strip()
+        author = parts[1].strip()
+        timestamp_raw = parts[2].strip()
+        summary = parts[3].strip()
+        if not sha or not summary:
+            continue
+        try:
+            timestamp = int(timestamp_raw)
+        except ValueError:
+            continue
+        entries.append({
+            "sha": sha,
+            "summary": summary,
+            "author": author,
+            "timestamp": timestamp,
+        })
+    return entries
+
+def parse_numstat(text):
+    stats = {}
+    for line in text.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        raw_path = parts[2].strip()
+        if not raw_path:
+            continue
+        try:
+            additions = int(parts[0].strip())
+        except ValueError:
+            additions = 0
+        try:
+            deletions = int(parts[1].strip())
+        except ValueError:
+            deletions = 0
+        path = raw_path.split(" -> ", 1)[1].strip() if " -> " in raw_path else raw_path
+        stats[path.replace("\\", "/")] = (additions, deletions)
+    return stats
+
+def parse_porcelain(line):
+    if not line.strip():
+        return None
+    index_status = line[0] if len(line) > 0 else " "
+    worktree_status = line[1] if len(line) > 1 else " "
+    raw_path = line[3:].strip() if len(line) > 3 else line.strip()
+    if not raw_path:
+        return None
+    if " -> " in raw_path:
+        previous_path, path = raw_path.split(" -> ", 1)
+        return (
+            index_status,
+            worktree_status,
+            previous_path.strip().replace("\\", "/"),
+            path.strip().replace("\\", "/"),
+        )
+    return (index_status, worktree_status, None, raw_path.replace("\\", "/"))
+
+def status_from_code(code):
+    if code in ("A", "?"):
+        return "added"
+    if code == "D":
+        return "deleted"
+    if code == "R":
+        return "renamed"
+    return "modified"
+
+def count_text_lines(path):
+    try:
+        with open(path, "rb") as handle:
+            content = handle.read()
+    except OSError:
+        return 0
+    if b"\0" in content:
+        return 0
+    return len(content.decode("utf-8", "ignore").replace("\r\n", "\n").splitlines())
+
+if not git_optional_stdout("rev-parse", "--git-dir"):
+    print(json.dumps({
+        "panel": {
+            "isGitRepo": False,
+            "branch": "",
+            "fileStatus": "No repository",
+            "stagedFiles": [],
+            "unstagedFiles": [],
+            "recentChanges": [],
+        },
+        "log": {
+            "total": 0,
+            "entries": [],
+            "ahead": 0,
+            "behind": 0,
+            "aheadEntries": [],
+            "behindEntries": [],
+            "upstream": None,
+        },
+    }))
+    raise SystemExit(0)
+
+branch = git_optional_stdout("branch", "--show-current") or "HEAD"
+status_output = git_optional_stdout("status", "--porcelain") or ""
+staged_numstats = parse_numstat(git_optional_stdout("diff", "--cached", "--numstat", "--find-renames") or "")
+unstaged_numstats = parse_numstat(git_optional_stdout("diff", "--numstat", "--find-renames") or "")
+
+staged_files = []
+unstaged_files = []
+workspace_root = os.getcwd()
+
+for line in status_output.splitlines():
+    parsed = parse_porcelain(line)
+    if not parsed:
+        continue
+    index_status, worktree_status, previous_path, path = parsed
+
+    if index_status not in (" ", "?"):
+        additions, deletions = staged_numstats.get(path, (0, 0))
+        staged_files.append({
+            "path": path,
+            "status": status_from_code(index_status),
+            "previousPath": previous_path,
+            "additions": additions,
+            "deletions": deletions,
+        })
+
+    is_untracked = index_status == "?" or worktree_status == "?"
+    if is_untracked or worktree_status != " ":
+        additions, deletions = unstaged_numstats.get(path, (0, 0))
+        if is_untracked and additions == 0:
+            additions = count_text_lines(os.path.join(workspace_root, path))
+        unstaged_files.append({
+            "path": path,
+            "status": status_from_code("?" if is_untracked else worktree_status),
+            "previousPath": previous_path,
+            "additions": additions,
+            "deletions": deletions,
+        })
+
+staged_files.sort(key=lambda item: item["path"].lower())
+unstaged_files.sort(key=lambda item: item["path"].lower())
+
+recent_changes = [
+    {
+        "path": item["path"],
+        "status": item["status"],
+        "previousPath": item.get("previousPath"),
+    }
+    for item in staged_files + unstaged_files
+]
+
+total_changes = len(staged_files) + len(unstaged_files)
+file_status = (
+    "No changes"
+    if total_changes == 0
+    else f"{total_changes} file{'' if total_changes == 1 else 's'} changed"
+)
+
+entries = parse_log_entries(git_optional_stdout("log", f"--pretty=format:{LOG_FORMAT}", "-n", "50") or "")
+upstream = git_optional_stdout("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+
+ahead = 0
+behind = 0
+ahead_entries = []
+behind_entries = []
+if upstream:
+    counts = (git_optional_stdout("rev-list", "--left-right", "--count", f"{upstream}...HEAD") or "").split()
+    if len(counts) >= 2:
+        try:
+            behind = int(counts[0])
+        except ValueError:
+            behind = 0
+        try:
+            ahead = int(counts[1])
+        except ValueError:
+            ahead = 0
+    ahead_entries = parse_log_entries(
+        git_optional_stdout("log", f"--pretty=format:{LOG_FORMAT}", "-n", "20", f"{upstream}..HEAD") or ""
+    )
+    behind_entries = parse_log_entries(
+        git_optional_stdout("log", f"--pretty=format:{LOG_FORMAT}", "-n", "20", f"HEAD..{upstream}") or ""
+    )
+
+print(json.dumps({
+    "panel": {
+        "isGitRepo": True,
+        "branch": branch,
+        "fileStatus": file_status,
+        "stagedFiles": staged_files,
+        "unstagedFiles": unstaged_files,
+        "recentChanges": recent_changes,
+    },
+    "log": {
+        "total": len(entries),
+        "entries": entries,
+        "ahead": ahead,
+        "behind": behind,
+        "aheadEntries": ahead_entries,
+        "behindEntries": behind_entries,
+        "upstream": upstream,
+    },
+}))
+"#;
+    let value = run_workspace_python_json(target, script, &[])?;
+    serde_json::from_value(value)
+        .map_err(|err| format!("Failed to decode remote git overview: {err}"))
+}
+
+fn get_git_overview_for_target(target: &WorkspaceTarget) -> Result<GitOverviewResponse, String> {
+    match target {
+        WorkspaceTarget::Local { .. } => Ok(GitOverviewResponse {
+            panel: build_git_panel_for_target(target)?,
+            log: build_git_log_for_target(target),
+        }),
+        WorkspaceTarget::Ssh { .. } => build_remote_git_overview(target),
+    }
+}
+
+#[tauri::command]
+fn get_git_panel(
+    store: State<'_, AppStore>,
+    project_root: String,
+    workspace_id: Option<String>,
+) -> Result<GitPanelData, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    build_git_panel_for_target(&workspace_target)
+}
+
+#[tauri::command]
+fn get_git_overview(
+    store: State<'_, AppStore>,
+    project_root: String,
+    workspace_id: Option<String>,
+) -> Result<GitOverviewResponse, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    get_git_overview_for_target(&workspace_target)
+}
+
+#[tauri::command]
+fn stage_git_file(
+    store: State<'_, AppStore>,
+    project_root: String,
+    path: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    git_command_status_for_target(&workspace_target, &["add", "--", &path])
+}
+
+#[tauri::command]
+fn unstage_git_file(
+    store: State<'_, AppStore>,
+    project_root: String,
+    path: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    let output =
+        git_command_capture_for_target(&workspace_target, &["reset", "HEAD", "--", &path])?;
+    if output.success {
+        return Ok(());
+    }
+    let stderr = output.stderr.to_lowercase();
+    if stderr.contains("unknown revision") || stderr.contains("ambiguous argument 'head'") {
+        return git_command_status_for_target(&workspace_target, &["rm", "--cached", "--", &path]);
+    }
+    Err(command_output_detail(&output, "Failed to unstage file."))
+}
+
+#[tauri::command]
+fn discard_git_file(
+    store: State<'_, AppStore>,
+    project_root: String,
+    path: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    let output = git_command_capture_for_target(&workspace_target, &["checkout", "--", &path])?;
+    if output.success {
+        return Ok(());
+    }
+    let stderr = output.stderr.to_lowercase();
+    if stderr.contains("pathspec") || stderr.contains("did not match any file") {
+        match &workspace_target {
+            WorkspaceTarget::Local { project_root } => {
+                let absolute_path = Path::new(project_root).join(&path);
+                if absolute_path.exists() {
+                    fs::remove_file(&absolute_path).map_err(|err| err.to_string())?;
+                    return Ok(());
+                }
+            }
+            remote_target @ WorkspaceTarget::Ssh { .. } => {
+                let script = r#"
+import os, shutil, sys
+
+root = os.path.realpath(os.getcwd())
+relative = (sys.argv[1] if len(sys.argv) > 1 else "").strip().replace("\\", "/").strip("/")
+target = os.path.realpath(os.path.join(root, relative))
+try:
+    if os.path.commonpath([root, target]) != root:
+        raise SystemExit("Requested path is outside the workspace root.")
+except ValueError:
+    raise SystemExit("Requested path is outside the workspace root.")
+
+if not os.path.exists(target):
+    raise SystemExit("Target does not exist.")
+
+if os.path.isdir(target):
+    shutil.rmtree(target)
+else:
+    os.remove(target)
+"#;
+                run_workspace_python_status(remote_target, script, &[path.clone()])?;
+                return Ok(());
+            }
+        }
+    }
+    Err(command_output_detail(
+        &output,
+        "Failed to discard file changes.",
+    ))
+}
+
+#[tauri::command]
+fn commit_git_changes(
+    store: State<'_, AppStore>,
+    project_root: String,
+    message: String,
+    stage_all: Option<bool>,
+    workspace_id: Option<String>,
+) -> Result<GitCommitResult, String> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return Err("Commit message cannot be empty.".to_string());
+    }
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    if stage_all.unwrap_or(false) {
+        git_command_status_for_target(&workspace_target, &["add", "-A"])?;
+    }
+    git_command_status_for_target(&workspace_target, &["commit", "-m", trimmed])?;
+    let commit_sha = git_output_for_target(&workspace_target, &["rev-parse", "HEAD"]);
+    Ok(GitCommitResult { commit_sha })
+}
+
+#[tauri::command]
+fn get_git_log(
+    store: State<'_, AppStore>,
+    project_root: String,
+    workspace_id: Option<String>,
+) -> Result<GitLogResponse, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    Ok(build_git_log_for_target(&workspace_target))
 }
 
 #[tauri::command]
 fn get_git_commit_history(
+    store: State<'_, AppStore>,
     project_root: String,
     branch: Option<String>,
     query: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
     snapshot_id: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<GitHistoryResponse, String> {
-    let revision = branch.as_deref();
-    let all_commits = parse_git_history_commits(&project_root, revision);
-    let filtered = all_commits
-        .into_iter()
-        .filter(|commit| git_history_query_matches(commit, query.as_deref().unwrap_or_default()))
-        .collect::<Vec<_>>();
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
     let offset = offset.unwrap_or(0);
     let limit = limit.unwrap_or(100);
-    let commits = filtered
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(GitHistoryResponse {
-        snapshot_id: snapshot_id.unwrap_or_else(|| git_head_snapshot_id(&project_root)),
-        total: filtered.len(),
+    build_git_commit_history_for_target(
+        &workspace_target,
+        branch.as_deref(),
+        query.as_deref(),
         offset,
         limit,
-        has_more: offset + commits.len() < filtered.len(),
-        commits,
-    })
+        snapshot_id.as_deref(),
+    )
 }
 
 #[tauri::command]
 fn get_git_push_preview(
+    store: State<'_, AppStore>,
     project_root: String,
     remote: String,
     branch: String,
     limit: Option<usize>,
+    workspace_id: Option<String>,
 ) -> Result<GitPushPreviewResponse, String> {
     let target_remote = remote.trim();
     if target_remote.is_empty() {
         return Err("Remote is required for push preview.".to_string());
     }
 
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+
     let normalized_target_branch = normalize_remote_target_branch(target_remote, &branch);
     if normalized_target_branch.is_empty() {
         return Err("Target branch is required for push preview.".to_string());
     }
 
-    let source_branch =
-        git_output(&project_root, &["branch", "--show-current"]).unwrap_or_else(|| "HEAD".to_string());
+    let source_branch = git_output_for_target(&workspace_target, &["branch", "--show-current"])
+        .unwrap_or_else(|| "HEAD".to_string());
     let target_ref = format!("refs/remotes/{target_remote}/{normalized_target_branch}");
-    let target_found = git_output_allow_empty(&project_root, &["rev-parse", "--verify", &target_ref]).is_some();
+    let target_found = git_output_allow_empty_for_target(
+        &workspace_target,
+        &["rev-parse", "--verify", &target_ref],
+    )
+    .is_some();
     let max_items = limit.unwrap_or(120).clamp(1, 500);
 
     let mut revisions = vec!["HEAD".to_string()];
@@ -13423,7 +15376,11 @@ fn get_git_push_preview(
         revisions.push(format!("^{target_ref}"));
     }
 
-    let mut commits = parse_git_history_commits_with_args(&project_root, &revisions, Some(max_items + 1))?;
+    let mut commits = parse_git_history_commits_with_args_for_target(
+        &workspace_target,
+        &revisions,
+        Some(max_items + 1),
+    )?;
     let has_more = commits.len() > max_items;
     if has_more {
         commits.truncate(max_items);
@@ -13441,169 +15398,117 @@ fn get_git_push_preview(
 }
 
 #[tauri::command]
-fn list_git_branches(project_root: String) -> Result<GitBranchListResponse, String> {
-    let current_branch = git_output(&project_root, &["branch", "--show-current"]);
-    let local_branches = parse_branch_ref_lines(
-        &project_root,
-        &[
-            "for-each-ref",
-            "refs/heads",
-            "--format=%(refname:short)\t%(upstream:short)\t%(objectname)\t%(committerdate:unix)",
-        ],
-        false,
-        current_branch.as_deref(),
-    );
-    let remote_branches = parse_branch_ref_lines(
-        &project_root,
-        &[
-            "for-each-ref",
-            "refs/remotes",
-            "--format=%(refname:short)\t\t%(objectname)\t%(committerdate:unix)",
-        ],
-        true,
-        None,
-    );
-
-    Ok(GitBranchListResponse {
-        local_branches,
-        remote_branches,
-        current_branch,
-    })
+fn list_git_branches(
+    store: State<'_, AppStore>,
+    project_root: String,
+    workspace_id: Option<String>,
+) -> Result<GitBranchListResponse, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    build_git_branch_list_for_target(&workspace_target)
 }
 
 #[tauri::command]
-fn checkout_git_branch(project_root: String, name: String) -> Result<(), String> {
-    git_command_status(&project_root, &["checkout", &name])
+fn checkout_git_branch(
+    store: State<'_, AppStore>,
+    project_root: String,
+    name: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    git_command_status_for_target(&workspace_target, &["checkout", &name])
 }
 
 #[tauri::command]
 fn create_git_branch(
+    store: State<'_, AppStore>,
     project_root: String,
     name: String,
     source_ref: Option<String>,
     checkout_after_create: Option<bool>,
+    workspace_id: Option<String>,
 ) -> Result<(), String> {
     let trimmed_name = name.trim();
     if trimmed_name.is_empty() {
         return Err("Branch name cannot be empty.".to_string());
     }
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
     let source = source_ref
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("HEAD");
     if checkout_after_create.unwrap_or(false) {
-        git_command_status(&project_root, &["checkout", "-b", trimmed_name, source])
+        git_command_status_for_target(&workspace_target, &["checkout", "-b", trimmed_name, source])
     } else {
-        git_command_status(&project_root, &["branch", trimmed_name, source])
+        git_command_status_for_target(&workspace_target, &["branch", trimmed_name, source])
     }
 }
 
 #[tauri::command]
-fn rename_git_branch(project_root: String, old_name: String, new_name: String) -> Result<(), String> {
+fn rename_git_branch(
+    store: State<'_, AppStore>,
+    project_root: String,
+    old_name: String,
+    new_name: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
     let trimmed_new = new_name.trim();
     if trimmed_new.is_empty() {
         return Err("New branch name cannot be empty.".to_string());
     }
-    git_command_status(&project_root, &["branch", "-m", &old_name, trimmed_new])
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    git_command_status_for_target(&workspace_target, &["branch", "-m", &old_name, trimmed_new])
 }
 
 #[tauri::command]
-fn delete_git_branch(project_root: String, name: String, force: Option<bool>) -> Result<(), String> {
+fn delete_git_branch(
+    store: State<'_, AppStore>,
+    project_root: String,
+    name: String,
+    force: Option<bool>,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
     let flag = if force.unwrap_or(false) { "-D" } else { "-d" };
-    git_command_status(&project_root, &["branch", flag, &name])
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    git_command_status_for_target(&workspace_target, &["branch", flag, &name])
 }
 
 #[tauri::command]
-fn merge_git_branch(project_root: String, source_branch: String) -> Result<(), String> {
-    git_command_status(&project_root, &["merge", &source_branch])
+fn merge_git_branch(
+    store: State<'_, AppStore>,
+    project_root: String,
+    source_branch: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    git_command_status_for_target(&workspace_target, &["merge", &source_branch])
 }
 
 #[tauri::command]
 fn get_git_commit_details(
+    store: State<'_, AppStore>,
     project_root: String,
     commit_hash: String,
     max_diff_lines: Option<u32>,
+    workspace_id: Option<String>,
 ) -> Result<GitCommitDetails, String> {
-    let mut metadata_command = Command::new("git");
-    metadata_command.current_dir(&project_root);
-    metadata_command.args([
-        "show",
-        "--quiet",
-        "--format=%H%x1f%s%x1f%B%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%at%x1f%ct%x1f%P",
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    build_git_commit_details_for_target(
+        &workspace_target,
         &commit_hash,
-    ]);
-    #[cfg(target_os = "windows")]
-    metadata_command.creation_flags(CREATE_NO_WINDOW);
-    let metadata_output = metadata_command.output().map_err(|err| err.to_string())?;
-    if !metadata_output.status.success() {
-        return Err(String::from_utf8_lossy(&metadata_output.stderr).trim().to_string());
-    }
-    let metadata = String::from_utf8_lossy(&metadata_output.stdout);
-    let parts = metadata.trim().split('\u{1f}').collect::<Vec<_>>();
-    if parts.len() < 10 {
-        return Err("Failed to parse commit details.".to_string());
-    }
-
-    let name_status = parse_git_diff_tree_name_status(&project_root, &commit_hash);
-    let numstats = parse_git_diff_tree_numstat(&project_root, &commit_hash);
-    let max_lines = max_diff_lines.unwrap_or(10_000);
-    let mut total_additions = 0u32;
-    let mut total_deletions = 0u32;
-    let mut files = Vec::new();
-
-    for (path, old_path, status) in name_status {
-        let (additions, deletions) = numstats.get(&path).copied().unwrap_or((0, 0));
-        total_additions += additions;
-        total_deletions += deletions;
-        let is_image = is_image_path(&path);
-        let full_diff = git_commit_file_diff(&project_root, &commit_hash, &path);
-        let line_count = full_diff.lines().count() as u32;
-        let truncated = line_count > max_lines;
-        let diff = if truncated {
-            full_diff
-                .lines()
-                .take(max_lines as usize)
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            full_diff
-        };
-        files.push(GitCommitFileChange {
-            path,
-            old_path,
-            status,
-            additions,
-            deletions,
-            is_binary: diff.contains("Binary files"),
-            is_image,
-            diff,
-            line_count,
-            truncated,
-        });
-    }
-
-    Ok(GitCommitDetails {
-        sha: parts[0].trim().to_string(),
-        summary: parts[1].trim().to_string(),
-        message: parts[2].trim().to_string(),
-        author: parts[3].trim().to_string(),
-        author_email: parts[4].trim().to_string(),
-        committer: parts[5].trim().to_string(),
-        committer_email: parts[6].trim().to_string(),
-        author_time: parts[7].trim().parse::<i64>().unwrap_or(0),
-        commit_time: parts[8].trim().parse::<i64>().unwrap_or(0),
-        parents: parts[9]
-            .split_whitespace()
-            .map(|value| value.to_string())
-            .collect(),
-        files,
-        total_additions,
-        total_deletions,
-    })
+        max_diff_lines.unwrap_or(10_000),
+    )
 }
 
 #[tauri::command]
 fn push_git(
+    store: State<'_, AppStore>,
     project_root: String,
     remote: Option<String>,
     target_branch: Option<String>,
@@ -13614,6 +15519,7 @@ fn push_git(
     topic: Option<String>,
     reviewers: Option<String>,
     cc: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<(), String> {
     fn parse_csv_people(value: Option<&str>) -> Vec<String> {
         value
@@ -13625,12 +15531,18 @@ fn push_git(
             .collect::<Vec<_>>()
     }
 
-    let remote_trimmed = remote.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let remote_trimmed = remote
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let branch_trimmed = target_branch
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let topic_trimmed = topic.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let topic_trimmed = topic
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let reviewer_items = parse_csv_people(reviewers.as_deref());
     let cc_items = parse_csv_people(cc.as_deref());
     let mut args = vec!["push".to_string()];
@@ -13670,28 +15582,45 @@ fn push_git(
             args.push(format!("HEAD:{branch_name}"));
         }
     }
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    git_command_status(&project_root, &refs)
+    git_command_status_for_target(&workspace_target, &refs)
 }
 
 #[tauri::command]
-fn fetch_git(project_root: String, remote: Option<String>) -> Result<(), String> {
-    let remote_trimmed = remote.as_deref().map(str::trim).filter(|value| !value.is_empty());
+fn fetch_git(
+    store: State<'_, AppStore>,
+    project_root: String,
+    remote: Option<String>,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let remote_trimmed = remote
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
     if let Some(remote_name) = remote_trimmed {
-        git_command_status(&project_root, &["fetch", remote_name, "--prune"])
+        git_command_status_for_target(&workspace_target, &["fetch", remote_name, "--prune"])
     } else {
-        git_command_status(&project_root, &["fetch", "--all", "--prune"])
+        git_command_status_for_target(&workspace_target, &["fetch", "--all", "--prune"])
     }
 }
 
 #[tauri::command]
 fn pull_git(
+    store: State<'_, AppStore>,
     project_root: String,
     remote: Option<String>,
     target_branch: Option<String>,
     pull_option: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<(), String> {
-    let remote_trimmed = remote.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let remote_trimmed = remote
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let branch_trimmed = target_branch
         .as_deref()
         .map(str::trim)
@@ -13711,18 +15640,30 @@ fn pull_git(
         args.push(option.to_string());
     }
     args.push("--no-edit".to_string());
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    git_command_status(&project_root, &refs)
+    git_command_status_for_target(&workspace_target, &refs)
 }
 
 #[tauri::command]
 fn sync_git(
+    store: State<'_, AppStore>,
     project_root: String,
     remote: Option<String>,
     target_branch: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<(), String> {
-    pull_git(project_root.clone(), remote.clone(), target_branch.clone(), None)?;
+    pull_git(
+        store.clone(),
+        project_root.clone(),
+        remote.clone(),
+        target_branch.clone(),
+        None,
+        workspace_id.clone(),
+    )?;
     push_git(
+        store,
         project_root,
         remote,
         target_branch,
@@ -13733,12 +15674,19 @@ fn sync_git(
         None,
         None,
         None,
+        workspace_id,
     )
 }
 
 #[tauri::command]
-fn get_github_issues(project_root: String) -> Result<GitHubIssuesResponse, String> {
-    let remote = git_output(&project_root, &["remote", "get-url", "origin"])
+fn get_github_issues(
+    store: State<'_, AppStore>,
+    project_root: String,
+    workspace_id: Option<String>,
+) -> Result<GitHubIssuesResponse, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    let remote = git_output_for_target(&workspace_target, &["remote", "get-url", "origin"])
         .ok_or_else(|| "No git remote configured.".to_string())?;
     let (owner, repo) = parse_github_repo_from_remote(&remote)
         .ok_or_else(|| "Git remote is not a GitHub repository.".to_string())?;
@@ -13751,9 +15699,20 @@ fn get_github_issues(project_root: String) -> Result<GitHubIssuesResponse, Strin
         .into_iter()
         .filter(|item| item.get("pull_request").is_none())
         .map(|item| GitHubIssue {
-            number: item.get("number").and_then(|value| value.as_u64()).unwrap_or(0),
-            title: item.get("title").and_then(|value| value.as_str()).unwrap_or("").to_string(),
-            url: item.get("html_url").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            number: item
+                .get("number")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            title: item
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            url: item
+                .get("html_url")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
             updated_at: item
                 .get("updated_at")
                 .and_then(|value| value.as_str())
@@ -13769,8 +15728,14 @@ fn get_github_issues(project_root: String) -> Result<GitHubIssuesResponse, Strin
 }
 
 #[tauri::command]
-fn get_github_pull_requests(project_root: String) -> Result<GitHubPullRequestsResponse, String> {
-    let remote = git_output(&project_root, &["remote", "get-url", "origin"])
+fn get_github_pull_requests(
+    store: State<'_, AppStore>,
+    project_root: String,
+    workspace_id: Option<String>,
+) -> Result<GitHubPullRequestsResponse, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    let remote = git_output_for_target(&workspace_target, &["remote", "get-url", "origin"])
         .ok_or_else(|| "No git remote configured.".to_string())?;
     let (owner, repo) = parse_github_repo_from_remote(&remote)
         .ok_or_else(|| "Git remote is not a GitHub repository.".to_string())?;
@@ -13782,9 +15747,20 @@ fn get_github_pull_requests(project_root: String) -> Result<GitHubPullRequestsRe
         .unwrap_or_default()
         .into_iter()
         .map(|item| GitHubPullRequest {
-            number: item.get("number").and_then(|value| value.as_u64()).unwrap_or(0),
-            title: item.get("title").and_then(|value| value.as_str()).unwrap_or("").to_string(),
-            url: item.get("html_url").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            number: item
+                .get("number")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            title: item
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            url: item
+                .get("html_url")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
             updated_at: item
                 .get("updated_at")
                 .and_then(|value| value.as_str())
@@ -13795,7 +15771,11 @@ fn get_github_pull_requests(project_root: String) -> Result<GitHubPullRequestsRe
                 .and_then(|value| value.as_str())
                 .unwrap_or("")
                 .to_string(),
-            body: item.get("body").and_then(|value| value.as_str()).unwrap_or("").to_string(),
+            body: item
+                .get("body")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
             head_ref_name: item
                 .get("head")
                 .and_then(|value| value.get("ref"))
@@ -13808,7 +15788,10 @@ fn get_github_pull_requests(project_root: String) -> Result<GitHubPullRequestsRe
                 .and_then(|value| value.as_str())
                 .unwrap_or("")
                 .to_string(),
-            is_draft: item.get("draft").and_then(|value| value.as_bool()).unwrap_or(false),
+            is_draft: item
+                .get("draft")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
             author: item
                 .get("user")
                 .and_then(|value| value.get("login"))
@@ -13826,34 +15809,75 @@ fn get_github_pull_requests(project_root: String) -> Result<GitHubPullRequestsRe
 }
 
 #[tauri::command]
-fn get_git_file_diff(project_root: String, path: String) -> Result<GitFileDiff, String> {
-    let git_dir = Path::new(&project_root).join(".git");
-    if !git_dir.exists() {
+fn get_git_file_diff(
+    store: State<'_, AppStore>,
+    project_root: String,
+    path: String,
+    workspace_id: Option<String>,
+) -> Result<GitFileDiff, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    let panel = get_git_panel(store, project_root.clone(), workspace_id.clone())?;
+    if !panel.is_git_repo {
         return Err("Workspace is not a Git repository.".to_string());
     }
-
-    let panel = get_git_panel(project_root.clone())?;
     let change = panel
         .recent_changes
         .into_iter()
         .find(|entry| entry.path == path)
         .ok_or_else(|| "File is no longer changed.".to_string())?;
 
-    let diff = best_git_diff_for_path(&project_root, &path, &change.status);
+    let diff = match &workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            best_git_diff_for_path(project_root, &path, &change.status)
+        }
+        WorkspaceTarget::Ssh { .. } => {
+            let mut candidates: Vec<Vec<&str>> = vec![
+                vec!["diff", "HEAD", "--", &path],
+                vec!["diff", "--cached", "--", &path],
+                vec!["diff", "--", &path],
+            ];
+            if change.status == "added" {
+                candidates.insert(0, vec!["diff", "--cached", "--", &path]);
+            }
+            let mut found = String::new();
+            for args in candidates {
+                if let Some(output) = git_output_allow_empty_for_target(&workspace_target, &args) {
+                    if !output.trim().is_empty() {
+                        found = output;
+                        break;
+                    }
+                }
+            }
+            found
+        }
+    };
     let final_diff = if diff.trim().is_empty() {
-        match change.status.as_str() {
-            "added" => build_untracked_file_diff(&project_root, &path),
-            _ => "No diff available for this file.".to_string(),
+        if change.status == "added" {
+            match &workspace_target {
+                WorkspaceTarget::Local { project_root } => {
+                    build_untracked_file_diff(project_root, &path)
+                }
+                WorkspaceTarget::Ssh { .. } => {
+                    "No diff available for this remote file.".to_string()
+                }
+            }
+        } else {
+            "No diff available for this file.".to_string()
         }
     } else {
         diff
     };
-    let original_path = change
-        .previous_path
-        .as_deref()
-        .unwrap_or(change.path.as_str());
-    let (original_content, modified_content, is_binary) =
-        git_diff_editor_contents(&project_root, original_path, &change.path, &change.status);
+    let (original_content, modified_content, is_binary) = match &workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            let original_path = change
+                .previous_path
+                .as_deref()
+                .unwrap_or(change.path.as_str());
+            git_diff_editor_contents(project_root, original_path, &change.path, &change.status)
+        }
+        WorkspaceTarget::Ssh { .. } => (None, None, final_diff.contains("Binary files")),
+    };
 
     Ok(GitFileDiff {
         path: change.path,
@@ -13890,7 +15914,11 @@ fn open_workspace_in(
     let target_label = normalized_command
         .as_ref()
         .map(|value| format!("command `{value}`"))
-        .or_else(|| normalized_app.as_ref().map(|value| format!("app `{value}`")))
+        .or_else(|| {
+            normalized_app
+                .as_ref()
+                .map(|value| format!("app `{value}`"))
+        })
         .unwrap_or_else(|| "default opener".to_string());
 
     let status = if let Some(command_name) = normalized_command {
@@ -14082,13 +16110,17 @@ fn open_workspace_with_non_macos_app(
                 last_not_found_error = Some(error);
             }
             Err(error) => {
-                return Err(format!("Failed to open workspace ({target_label}): {error}"));
+                return Err(format!(
+                    "Failed to open workspace ({target_label}): {error}"
+                ));
             }
         }
     }
 
     if let Some(error) = last_not_found_error {
-        return Err(format!("Failed to open workspace ({target_label}): {error}"));
+        return Err(format!(
+            "Failed to open workspace ({target_label}): {error}"
+        ));
     }
 
     Err(format!(
@@ -14127,9 +16159,16 @@ fn open_workspace_with_default_app(path: &Path) -> Result<std::process::ExitStat
 
 #[tauri::command]
 fn open_workspace_file(
+    store: State<'_, AppStore>,
     project_root: String,
     path: String,
+    workspace_id: Option<String>,
 ) -> Result<OpenWorkspaceFileResult, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    if matches!(workspace_target, WorkspaceTarget::Ssh { .. }) {
+        return Err("Remote workspaces cannot be opened in a local editor.".to_string());
+    }
     let absolute_path = Path::new(&project_root).join(&path);
     if !absolute_path.exists() {
         return Err("File does not exist.".to_string());
@@ -14138,7 +16177,8 @@ fn open_workspace_file(
     let preferred_editors = ["code", "cursor", "windsurf", "code-insiders"];
     for editor in preferred_editors {
         if let Some(editor_path) = resolve_command_path(editor) {
-            let status = batch_aware_command(&editor_path, &[&absolute_path.to_string_lossy()]).status();
+            let status =
+                batch_aware_command(&editor_path, &[&absolute_path.to_string_lossy()]).status();
             match status {
                 Ok(status) if status.success() => {
                     return Ok(OpenWorkspaceFileResult { opened: true });
@@ -14343,25 +16383,31 @@ fn get_cli_skills(
     store: State<'_, AppStore>,
     cli_id: String,
     project_root: String,
+    workspace_id: Option<String>,
 ) -> Result<Vec<CliSkillItem>, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
     match cli_id.as_str() {
         "codex" => {
-            let wrapper_path = {
-                let state = store.state.lock().map_err(|err| err.to_string())?;
-                state
-                    .agents
-                    .iter()
-                    .find(|agent| agent.id == cli_id)
-                    .and_then(|agent| agent.runtime.command_path.clone())
-                    .ok_or_else(|| "codex CLI not found".to_string())?
+            let wrapper_path = match &workspace_target {
+                WorkspaceTarget::Ssh { .. } => remote_cli_command_name("codex"),
+                WorkspaceTarget::Local { .. } => {
+                    let state = store.state.lock().map_err(|err| err.to_string())?;
+                    state
+                        .agents
+                        .iter()
+                        .find(|agent| agent.id == cli_id)
+                        .and_then(|agent| agent.runtime.command_path.clone())
+                        .ok_or_else(|| "codex CLI not found".to_string())?
+                }
             };
 
             Ok(
-                list_codex_skills_for_workspace(&app, &wrapper_path, &project_root)
-                    .unwrap_or_else(|_| list_codex_fallback_skills(&project_root)),
+                list_codex_skills_for_target(&app, &wrapper_path, &workspace_target)
+                    .unwrap_or_else(|_| list_codex_fallback_skills_for_target(&workspace_target)),
             )
         }
-        "claude" => Ok(list_claude_skills_for_workspace(&project_root)),
+        "claude" => Ok(list_claude_skills_for_target(&workspace_target)),
         _ => Ok(Vec::new()),
     }
 }
@@ -14388,7 +16434,9 @@ fn list_global_mcp_servers() -> Result<Vec<GlobalMcpServerEntry>, String> {
     let home = user_home_dir();
     let mut entries = Vec::new();
     entries.extend(parse_claude_global_mcp_servers(&home.join(".claude.json")));
-    entries.extend(parse_codex_global_mcp_servers(&home.join(".codex").join("config.toml")));
+    entries.extend(parse_codex_global_mcp_servers(
+        &home.join(".codex").join("config.toml"),
+    ));
     entries.extend(parse_gemini_global_mcp_servers(
         &home.join(".gemini").join("settings.json"),
     ));
@@ -14439,22 +16487,63 @@ fn list_codex_mcp_runtime_servers(
 
 #[tauri::command]
 fn search_workspace_files(
+    store: State<'_, AppStore>,
     project_root: String,
     query: String,
+    workspace_id: Option<String>,
 ) -> Result<Vec<FileMentionCandidate>, String> {
-    let root = PathBuf::from(&project_root);
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    match workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            let root = PathBuf::from(&project_root);
+            if !root.exists() {
+                return Ok(Vec::new());
+            }
 
-    let lower_query = query.to_lowercase();
-    let mut results = Vec::new();
-    collect_workspace_files(&root, &root, &lower_query, &mut results)?;
-    Ok(results)
+            let lower_query = query.to_lowercase();
+            let mut results = Vec::new();
+            collect_workspace_files(&root, &root, &lower_query, &mut results)?;
+            Ok(results)
+        }
+        remote_target @ WorkspaceTarget::Ssh { .. } => {
+            let script = r#"
+import json, os, sys
+
+IGNORED_DIRS = {".git", "node_modules", "target", "dist", "build", ".next", ".turbo"}
+root = os.getcwd()
+query = (sys.argv[1] if len(sys.argv) > 1 else "").strip().lower()
+results = []
+
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [name for name in dirnames if name not in IGNORED_DIRS]
+    for name in filenames:
+        full_path = os.path.join(dirpath, name)
+        relative = os.path.relpath(full_path, root).replace(os.sep, "/")
+        haystack = relative.lower()
+        if (not query) or query in haystack or query in name.lower():
+            results.append({
+                "id": relative,
+                "name": name,
+                "relativePath": relative,
+                "absolutePath": None,
+            })
+            if len(results) >= 40:
+                print(json.dumps(results))
+                raise SystemExit(0)
+
+print(json.dumps(results))
+"#;
+            let value = run_workspace_python_json(&remote_target, script, &[query])?;
+            serde_json::from_value(value)
+                .map_err(|err| format!("Failed to decode remote file search results: {err}"))
+        }
+    }
 }
 
 #[tauri::command]
 fn search_workspace_text(
+    store: State<'_, AppStore>,
     project_root: String,
     query: String,
     case_sensitive: bool,
@@ -14462,41 +16551,194 @@ fn search_workspace_text(
     is_regex: bool,
     include_pattern: Option<String>,
     exclude_pattern: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<WorkspaceTextSearchResponse, String> {
-    let root = PathBuf::from(&project_root);
-    if !root.exists() || !root.is_dir() {
-        return Ok(WorkspaceTextSearchResponse {
-            files: Vec::new(),
-            file_count: 0,
-            match_count: 0,
-            limit_hit: false,
-        });
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    match workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            let root = PathBuf::from(&project_root);
+            if !root.exists() || !root.is_dir() {
+                return Ok(WorkspaceTextSearchResponse {
+                    files: Vec::new(),
+                    file_count: 0,
+                    match_count: 0,
+                    limit_hit: false,
+                });
+            }
+
+            let regex =
+                compile_workspace_search_regex(&query, case_sensitive, whole_word, is_regex)?;
+            let include_patterns =
+                compile_workspace_search_glob_patterns(include_pattern.as_deref())?;
+            let exclude_patterns =
+                compile_workspace_search_glob_patterns(exclude_pattern.as_deref())?;
+            let mut files = Vec::new();
+            let mut total_matches = 0usize;
+            let mut limit_hit = false;
+
+            collect_workspace_text_search_results(
+                &root,
+                &root,
+                &regex,
+                &include_patterns,
+                &exclude_patterns,
+                &mut files,
+                &mut total_matches,
+                &mut limit_hit,
+            )?;
+
+            Ok(WorkspaceTextSearchResponse {
+                file_count: files.len(),
+                files,
+                match_count: total_matches,
+                limit_hit,
+            })
+        }
+        remote_target @ WorkspaceTarget::Ssh { .. } => {
+            let script = r#"
+import fnmatch, json, os, re, sys
+
+MAX_MATCHES = 1000
+MAX_FILE_BYTES = 1024 * 1024
+MAX_PREVIEW_CHARS = 180
+IGNORED_DIRS = {".git", "node_modules", "target", "dist", "build", ".next", ".turbo"}
+
+def split_patterns(raw):
+    return [item.strip() for item in (raw or "").replace("\r", "\n").replace(",", "\n").split("\n") if item.strip()]
+
+def matches_patterns(path, patterns):
+    if not patterns:
+        return False
+    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+
+def build_preview(line, start, end):
+    stripped = line.strip()
+    if len(stripped) <= MAX_PREVIEW_CHARS:
+        return stripped
+    slice_start = max(0, start - (MAX_PREVIEW_CHARS // 3))
+    slice_end = min(len(line), max(end + (MAX_PREVIEW_CHARS // 3), slice_start + MAX_PREVIEW_CHARS))
+    preview = line[slice_start:slice_end].strip()
+    if slice_start > 0:
+        preview = "…" + preview
+    if slice_end < len(line):
+        preview = preview + "…"
+    return preview
+
+query = sys.argv[1]
+case_sensitive = sys.argv[2] == "1"
+whole_word = sys.argv[3] == "1"
+is_regex = sys.argv[4] == "1"
+include_patterns = split_patterns(sys.argv[5] if len(sys.argv) > 5 else "")
+exclude_patterns = split_patterns(sys.argv[6] if len(sys.argv) > 6 else "")
+
+pattern = query if is_regex else re.escape(query)
+if whole_word:
+    pattern = r"\b(?:%s)\b" % pattern
+
+try:
+    regex = re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
+except re.error as error:
+    raise SystemExit(f"Invalid search pattern: {error}")
+
+root = os.getcwd()
+files = []
+total_matches = 0
+limit_hit = False
+
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [name for name in dirnames if name not in IGNORED_DIRS]
+    for name in filenames:
+        full_path = os.path.join(dirpath, name)
+        try:
+            if os.path.getsize(full_path) > MAX_FILE_BYTES:
+                continue
+        except OSError:
+            continue
+
+        relative = os.path.relpath(full_path, root).replace(os.sep, "/")
+        if include_patterns and not matches_patterns(relative, include_patterns):
+            continue
+        if exclude_patterns and matches_patterns(relative, exclude_patterns):
+            continue
+
+        try:
+            with open(full_path, "rb") as handle:
+                content_bytes = handle.read()
+        except OSError:
+            continue
+
+        if b"\0" in content_bytes:
+            continue
+
+        content = content_bytes.decode("utf-8", "ignore")
+        file_matches = []
+        file_match_count = 0
+
+        for line_index, line in enumerate(content.splitlines(), start=1):
+            for match in regex.finditer(line):
+                file_match_count += 1
+                total_matches += 1
+                if len(file_matches) < 50:
+                    file_matches.append({
+                        "line": line_index,
+                        "column": match.start() + 1,
+                        "endColumn": match.end() + 1,
+                        "preview": build_preview(line, match.start(), match.end()),
+                    })
+                if total_matches >= MAX_MATCHES:
+                    limit_hit = True
+                    break
+            if limit_hit:
+                break
+
+        if file_match_count > 0:
+            files.append({
+                "path": relative,
+                "matchCount": file_match_count,
+                "matches": file_matches,
+            })
+
+        if limit_hit:
+            break
+    if limit_hit:
+        break
+
+print(json.dumps({
+    "files": files,
+    "fileCount": len(files),
+    "matchCount": total_matches,
+    "limitHit": limit_hit,
+}))
+"#;
+            let value = run_workspace_python_json(
+                &remote_target,
+                script,
+                &[
+                    query,
+                    if case_sensitive {
+                        "1".to_string()
+                    } else {
+                        "0".to_string()
+                    },
+                    if whole_word {
+                        "1".to_string()
+                    } else {
+                        "0".to_string()
+                    },
+                    if is_regex {
+                        "1".to_string()
+                    } else {
+                        "0".to_string()
+                    },
+                    include_pattern.unwrap_or_default(),
+                    exclude_pattern.unwrap_or_default(),
+                ],
+            )?;
+            serde_json::from_value(value)
+                .map_err(|err| format!("Failed to decode remote text search results: {err}"))
+        }
     }
-
-    let regex = compile_workspace_search_regex(&query, case_sensitive, whole_word, is_regex)?;
-    let include_patterns = compile_workspace_search_glob_patterns(include_pattern.as_deref())?;
-    let exclude_patterns = compile_workspace_search_glob_patterns(exclude_pattern.as_deref())?;
-    let mut files = Vec::new();
-    let mut total_matches = 0usize;
-    let mut limit_hit = false;
-
-    collect_workspace_text_search_results(
-        &root,
-        &root,
-        &regex,
-        &include_patterns,
-        &exclude_patterns,
-        &mut files,
-        &mut total_matches,
-        &mut limit_hit,
-    )?;
-
-    Ok(WorkspaceTextSearchResponse {
-        file_count: files.len(),
-        files,
-        match_count: total_matches,
-        limit_hit,
-    })
 }
 
 fn normalize_workspace_relative_path(path: &Path) -> String {
@@ -14546,69 +16788,7 @@ fn workspace_tree_entry_has_children(path: &Path) -> bool {
     false
 }
 
-#[tauri::command]
-fn list_workspace_entries(
-    project_root: String,
-    relative_path: Option<String>,
-) -> Result<Vec<WorkspaceTreeEntry>, String> {
-    let root = PathBuf::from(&project_root);
-    if !root.exists() || !root.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let root_canonical = root
-        .canonicalize()
-        .map_err(|err| format!("Unable to resolve workspace root: {}", err))?;
-    let requested_relative = relative_path.unwrap_or_default();
-    let requested_relative = requested_relative.trim().replace('\\', "/");
-    let requested_relative = requested_relative.trim_matches('/').to_string();
-
-    let target = if requested_relative.is_empty() {
-        root_canonical.clone()
-    } else {
-        root_canonical.join(&requested_relative)
-    };
-
-    if !target.exists() || !target.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let target_canonical = target
-        .canonicalize()
-        .map_err(|err| format!("Unable to resolve target directory: {}", err))?;
-    if !target_canonical.starts_with(&root_canonical) {
-        return Err("Requested directory is outside the workspace root.".to_string());
-    }
-
-    let mut entries = Vec::new();
-    let read_dir = fs::read_dir(&target_canonical)
-        .map_err(|err| format!("Unable to read workspace directory: {}", err))?;
-
-    for entry in read_dir.flatten() {
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        if file_name == ".git" {
-            continue;
-        }
-
-        let child_path = entry.path();
-        let kind = if child_path.is_dir() { "directory" } else { "file" };
-        let relative_child = child_path
-            .strip_prefix(&root_canonical)
-            .map(normalize_workspace_relative_path)
-            .unwrap_or_else(|_| normalize_workspace_relative_path(Path::new(&file_name)));
-
-        entries.push(WorkspaceTreeEntry {
-            name: file_name,
-            path: relative_child,
-            kind: kind.to_string(),
-            has_children: if child_path.is_dir() {
-                workspace_tree_entry_has_children(&child_path)
-            } else {
-                false
-            },
-        });
-    }
-
+fn sort_workspace_tree_entries(entries: &mut Vec<WorkspaceTreeEntry>) {
     entries.sort_by(|left, right| {
         if left.kind != right.kind {
             return if left.kind == "directory" {
@@ -14619,41 +16799,475 @@ fn list_workspace_entries(
         }
         left.path.to_lowercase().cmp(&right.path.to_lowercase())
     });
-
-    Ok(entries)
 }
 
-#[tauri::command]
-fn create_workspace_file(project_root: String, relative_path: String) -> Result<(), String> {
-    let (_root_canonical, target) = resolve_workspace_target_path(&project_root, &relative_path)?;
-    if target.exists() {
-        return Err("File already exists.".to_string());
+fn collect_workspace_file_index_local_recursive(
+    root: &Path,
+    current: &Path,
+    entries_by_parent: &mut HashMap<String, Vec<WorkspaceTreeEntry>>,
+    files: &mut Vec<FileMentionCandidate>,
+) -> Result<(), String> {
+    let current_relative = current
+        .strip_prefix(root)
+        .map(normalize_workspace_relative_path)
+        .unwrap_or_default();
+    entries_by_parent
+        .entry(current_relative.clone())
+        .or_default();
+
+    let read_dir = fs::read_dir(current).map_err(|err| err.to_string())?;
+    for entry in read_dir {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_dir() {
+            if is_ignored_workspace_dir(&name) {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .map(normalize_workspace_relative_path)
+                .unwrap_or_else(|_| normalize_workspace_relative_path(Path::new(&name)));
+            collect_workspace_file_index_local_recursive(root, &path, entries_by_parent, files)?;
+            let has_children = entries_by_parent
+                .get(&relative)
+                .map(|items| !items.is_empty())
+                .unwrap_or(false);
+            entries_by_parent
+                .entry(current_relative.clone())
+                .or_default()
+                .push(WorkspaceTreeEntry {
+                    name,
+                    path: relative,
+                    kind: "directory".to_string(),
+                    has_children,
+                });
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(root)
+            .map(normalize_workspace_relative_path)
+            .unwrap_or_else(|_| normalize_workspace_relative_path(Path::new(&name)));
+        entries_by_parent
+            .entry(current_relative.clone())
+            .or_default()
+            .push(WorkspaceTreeEntry {
+                name: name.clone(),
+                path: relative.clone(),
+                kind: "file".to_string(),
+                has_children: false,
+            });
+        files.push(FileMentionCandidate {
+            id: relative.clone(),
+            name,
+            relative_path: relative,
+            absolute_path: Some(path.to_string_lossy().to_string()),
+        });
     }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("Unable to create parent directory: {}", err))?;
+
+    if let Some(entries) = entries_by_parent.get_mut(&current_relative) {
+        sort_workspace_tree_entries(entries);
     }
-    fs::write(&target, "").map_err(|err| format!("Unable to create file: {}", err))?;
+
     Ok(())
 }
 
-#[tauri::command]
-fn create_workspace_directory(project_root: String, relative_path: String) -> Result<(), String> {
-    let (_root_canonical, target) = resolve_workspace_target_path(&project_root, &relative_path)?;
-    if target.exists() {
-        return Err("Directory already exists.".to_string());
+fn build_workspace_file_index_local(
+    project_root: &str,
+) -> Result<WorkspaceFileIndexResponse, String> {
+    let root = PathBuf::from(project_root);
+    if !root.exists() || !root.is_dir() {
+        return Ok(WorkspaceFileIndexResponse {
+            entries_by_parent: HashMap::from([(String::new(), Vec::new())]),
+            files: Vec::new(),
+        });
     }
-    fs::create_dir_all(&target).map_err(|err| format!("Unable to create directory: {}", err))?;
-    Ok(())
+
+    let root_canonical = root
+        .canonicalize()
+        .map_err(|err| format!("Unable to resolve workspace root: {}", err))?;
+    let mut entries_by_parent = HashMap::new();
+    let mut files = Vec::new();
+    collect_workspace_file_index_local_recursive(
+        &root_canonical,
+        &root_canonical,
+        &mut entries_by_parent,
+        &mut files,
+    )?;
+    files.sort_by(|left, right| {
+        left.relative_path
+            .to_lowercase()
+            .cmp(&right.relative_path.to_lowercase())
+    });
+    Ok(WorkspaceFileIndexResponse {
+        entries_by_parent,
+        files,
+    })
 }
 
 #[tauri::command]
-fn trash_workspace_item(project_root: String, relative_path: String) -> Result<(), String> {
-    let (_root_canonical, target) = resolve_workspace_target_path(&project_root, &relative_path)?;
-    if !target.exists() {
-        return Err("Target does not exist.".to_string());
+fn get_workspace_file_index(
+    store: State<'_, AppStore>,
+    project_root: String,
+    workspace_id: Option<String>,
+) -> Result<WorkspaceFileIndexResponse, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    match workspace_target {
+        WorkspaceTarget::Local { project_root } => build_workspace_file_index_local(&project_root),
+        remote_target @ WorkspaceTarget::Ssh { .. } => {
+            let script = r#"
+import json, os
+
+IGNORED_DIRS = {".git", "node_modules", "target", "dist", "build", ".next", ".turbo"}
+root = os.getcwd()
+entries_by_parent = {"": []}
+files = []
+
+if not os.path.isdir(root):
+    print(json.dumps({"entriesByParent": entries_by_parent, "files": files}))
+    raise SystemExit(0)
+
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [name for name in dirnames if name not in IGNORED_DIRS]
+    dirnames.sort(key=lambda item: item.lower())
+    filenames.sort(key=lambda item: item.lower())
+
+    relative_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+    if relative_dir == ".":
+        relative_dir = ""
+    entries_by_parent.setdefault(relative_dir, [])
+
+    children = []
+    for name in dirnames:
+        child = os.path.join(dirpath, name)
+        relative = os.path.relpath(child, root).replace(os.sep, "/")
+        entries_by_parent.setdefault(relative, [])
+        children.append({
+            "name": name,
+            "path": relative,
+            "kind": "directory",
+            "hasChildren": False,
+        })
+
+    for name in filenames:
+        child = os.path.join(dirpath, name)
+        relative = os.path.relpath(child, root).replace(os.sep, "/")
+        children.append({
+            "name": name,
+            "path": relative,
+            "kind": "file",
+            "hasChildren": False,
+        })
+        files.append({
+            "id": relative,
+            "name": name,
+            "relativePath": relative,
+            "absolutePath": None,
+        })
+
+    children.sort(key=lambda item: (0 if item["kind"] == "directory" else 1, item["path"].lower()))
+    entries_by_parent[relative_dir] = children
+
+for items in entries_by_parent.values():
+    for item in items:
+        if item["kind"] == "directory":
+            item["hasChildren"] = bool(entries_by_parent.get(item["path"], []))
+
+files.sort(key=lambda item: item["relativePath"].lower())
+print(json.dumps({"entriesByParent": entries_by_parent, "files": files}))
+"#;
+            let value = run_workspace_python_json(&remote_target, script, &[])?;
+            serde_json::from_value(value)
+                .map_err(|err| format!("Failed to decode remote workspace file index: {err}"))
+        }
     }
-    trash::delete(&target).map_err(|err| format!("Failed to move to trash: {}", err))?;
-    Ok(())
+}
+
+#[tauri::command]
+fn list_workspace_entries(
+    store: State<'_, AppStore>,
+    project_root: String,
+    relative_path: Option<String>,
+    workspace_id: Option<String>,
+) -> Result<Vec<WorkspaceTreeEntry>, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    match workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            let root = PathBuf::from(&project_root);
+            if !root.exists() || !root.is_dir() {
+                return Ok(Vec::new());
+            }
+
+            let root_canonical = root
+                .canonicalize()
+                .map_err(|err| format!("Unable to resolve workspace root: {}", err))?;
+            let requested_relative = relative_path.unwrap_or_default();
+            let requested_relative = requested_relative.trim().replace('\\', "/");
+            let requested_relative = requested_relative.trim_matches('/').to_string();
+
+            let target = if requested_relative.is_empty() {
+                root_canonical.clone()
+            } else {
+                root_canonical.join(&requested_relative)
+            };
+
+            if !target.exists() || !target.is_dir() {
+                return Ok(Vec::new());
+            }
+
+            let target_canonical = target
+                .canonicalize()
+                .map_err(|err| format!("Unable to resolve target directory: {}", err))?;
+            if !target_canonical.starts_with(&root_canonical) {
+                return Err("Requested directory is outside the workspace root.".to_string());
+            }
+
+            let mut entries = Vec::new();
+            let read_dir = fs::read_dir(&target_canonical)
+                .map_err(|err| format!("Unable to read workspace directory: {}", err))?;
+
+            for entry in read_dir.flatten() {
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if file_name == ".git" {
+                    continue;
+                }
+
+                let child_path = entry.path();
+                let kind = if child_path.is_dir() {
+                    "directory"
+                } else {
+                    "file"
+                };
+                let relative_child = child_path
+                    .strip_prefix(&root_canonical)
+                    .map(normalize_workspace_relative_path)
+                    .unwrap_or_else(|_| normalize_workspace_relative_path(Path::new(&file_name)));
+
+                entries.push(WorkspaceTreeEntry {
+                    name: file_name,
+                    path: relative_child,
+                    kind: kind.to_string(),
+                    has_children: if child_path.is_dir() {
+                        workspace_tree_entry_has_children(&child_path)
+                    } else {
+                        false
+                    },
+                });
+            }
+
+            entries.sort_by(|left, right| {
+                if left.kind != right.kind {
+                    return if left.kind == "directory" {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    };
+                }
+                left.path.to_lowercase().cmp(&right.path.to_lowercase())
+            });
+
+            Ok(entries)
+        }
+        remote_target @ WorkspaceTarget::Ssh { .. } => {
+            let script = r#"
+import json, os, sys
+
+root = os.path.realpath(os.getcwd())
+requested = (sys.argv[1] if len(sys.argv) > 1 else "").strip().replace("\\", "/").strip("/")
+target = root if not requested else os.path.realpath(os.path.join(root, requested))
+
+try:
+    if os.path.commonpath([root, target]) != root:
+        raise SystemExit("Requested directory is outside the workspace root.")
+except ValueError:
+    raise SystemExit("Requested directory is outside the workspace root.")
+
+if not os.path.isdir(target):
+    print("[]")
+    raise SystemExit(0)
+
+entries = []
+for name in os.listdir(target):
+    if name == ".git":
+        continue
+    child = os.path.join(target, name)
+    is_dir = os.path.isdir(child)
+    has_children = False
+    if is_dir:
+        try:
+            has_children = any(item != ".git" for item in os.listdir(child))
+        except OSError:
+            has_children = False
+    entries.append({
+        "name": name,
+        "path": os.path.relpath(child, root).replace(os.sep, "/"),
+        "kind": "directory" if is_dir else "file",
+        "hasChildren": has_children,
+    })
+
+entries.sort(key=lambda item: (0 if item["kind"] == "directory" else 1, item["path"].lower()))
+print(json.dumps(entries))
+"#;
+            let value = run_workspace_python_json(
+                &remote_target,
+                script,
+                &[relative_path.unwrap_or_default()],
+            )?;
+            serde_json::from_value(value)
+                .map_err(|err| format!("Failed to decode remote workspace tree entries: {err}"))
+        }
+    }
+}
+
+#[tauri::command]
+fn create_workspace_file(
+    store: State<'_, AppStore>,
+    project_root: String,
+    relative_path: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    match workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            let (_root_canonical, target) =
+                resolve_workspace_target_path(&project_root, &relative_path)?;
+            if target.exists() {
+                return Err("File already exists.".to_string());
+            }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("Unable to create parent directory: {}", err))?;
+            }
+            fs::write(&target, "").map_err(|err| format!("Unable to create file: {}", err))?;
+            Ok(())
+        }
+        remote_target @ WorkspaceTarget::Ssh { .. } => {
+            let script = r#"
+import os, sys
+
+root = os.path.realpath(os.getcwd())
+relative = (sys.argv[1] if len(sys.argv) > 1 else "").strip().replace("\\", "/").strip("/")
+if not relative:
+    raise SystemExit("Path cannot be empty.")
+target = os.path.realpath(os.path.join(root, relative))
+try:
+    if os.path.commonpath([root, target]) != root:
+        raise SystemExit("Requested path is outside the workspace root.")
+except ValueError:
+    raise SystemExit("Requested path is outside the workspace root.")
+
+if os.path.exists(target):
+    raise SystemExit("File already exists.")
+
+os.makedirs(os.path.dirname(target), exist_ok=True)
+with open(target, "x", encoding="utf-8"):
+    pass
+"#;
+            run_workspace_python_status(&remote_target, script, &[relative_path])?;
+            Ok(())
+        }
+    }
+}
+
+#[tauri::command]
+fn create_workspace_directory(
+    store: State<'_, AppStore>,
+    project_root: String,
+    relative_path: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    match workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            let (_root_canonical, target) =
+                resolve_workspace_target_path(&project_root, &relative_path)?;
+            if target.exists() {
+                return Err("Directory already exists.".to_string());
+            }
+            fs::create_dir_all(&target)
+                .map_err(|err| format!("Unable to create directory: {}", err))?;
+            Ok(())
+        }
+        remote_target @ WorkspaceTarget::Ssh { .. } => {
+            let script = r#"
+import os, sys
+
+root = os.path.realpath(os.getcwd())
+relative = (sys.argv[1] if len(sys.argv) > 1 else "").strip().replace("\\", "/").strip("/")
+if not relative:
+    raise SystemExit("Path cannot be empty.")
+target = os.path.realpath(os.path.join(root, relative))
+try:
+    if os.path.commonpath([root, target]) != root:
+        raise SystemExit("Requested path is outside the workspace root.")
+except ValueError:
+    raise SystemExit("Requested path is outside the workspace root.")
+
+if os.path.exists(target):
+    raise SystemExit("Directory already exists.")
+
+os.makedirs(target, exist_ok=False)
+"#;
+            run_workspace_python_status(&remote_target, script, &[relative_path])?;
+            Ok(())
+        }
+    }
+}
+
+#[tauri::command]
+fn trash_workspace_item(
+    store: State<'_, AppStore>,
+    project_root: String,
+    relative_path: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    match workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            let (_root_canonical, target) =
+                resolve_workspace_target_path(&project_root, &relative_path)?;
+            if !target.exists() {
+                return Err("Target does not exist.".to_string());
+            }
+            trash::delete(&target).map_err(|err| format!("Failed to move to trash: {}", err))?;
+            Ok(())
+        }
+        remote_target @ WorkspaceTarget::Ssh { .. } => {
+            let script = r#"
+import os, shutil, sys, time
+
+root = os.path.realpath(os.getcwd())
+relative = (sys.argv[1] if len(sys.argv) > 1 else "").strip().replace("\\", "/").strip("/")
+if not relative:
+    raise SystemExit("Path cannot be empty.")
+target = os.path.realpath(os.path.join(root, relative))
+try:
+    if os.path.commonpath([root, target]) != root:
+        raise SystemExit("Requested path is outside the workspace root.")
+except ValueError:
+    raise SystemExit("Requested path is outside the workspace root.")
+
+if not os.path.exists(target):
+    raise SystemExit("Target does not exist.")
+
+trash_root = os.path.join(root, ".multi-cli-trash")
+os.makedirs(trash_root, exist_ok=True)
+base_name = os.path.basename(target.rstrip(os.sep)) or "item"
+destination = os.path.join(trash_root, f"{int(time.time() * 1000)}-{base_name}")
+shutil.move(target, destination)
+print("{}")
+"#;
+            run_workspace_python_status(&remote_target, script, &[relative_path])?;
+            Ok(())
+        }
+    }
 }
 
 #[tauri::command]
@@ -14670,11 +17284,18 @@ fn ensure_pty_session(
             pixel_width: 0,
             pixel_height: 0,
         };
-        existing.master.resize(size).map_err(|err| err.to_string())?;
+        existing
+            .master
+            .resize(size)
+            .map_err(|err| err.to_string())?;
         return Ok(());
     }
 
-    let shell = shell_path();
+    let workspace_target = resolve_workspace_target(
+        &store,
+        request.workspace_id.as_deref(),
+        request.cwd.as_deref(),
+    )?;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -14685,23 +17306,55 @@ fn ensure_pty_session(
         })
         .map_err(|err| err.to_string())?;
 
-    let mut command = CommandBuilder::new(shell.clone());
-    let args = interactive_shell_args(&shell);
-    if !args.is_empty() {
-        command.args(args);
-    }
-    if let Some(cwd) = request.cwd.as_ref().filter(|value| !value.trim().is_empty()) {
-        let cwd_path = PathBuf::from(cwd);
-        if cwd_path.exists() && cwd_path.is_dir() {
-            command.cwd(cwd_path);
+    let mut command = match &workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            let shell = shell_path();
+            let mut command = CommandBuilder::new(shell.clone());
+            let args = interactive_shell_args(&shell);
+            if !args.is_empty() {
+                command.args(args);
+            }
+            let cwd_candidate = request
+                .cwd
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.exists() && path.is_dir())
+                .unwrap_or_else(|| PathBuf::from(project_root));
+            if cwd_candidate.exists() && cwd_candidate.is_dir() {
+                command.cwd(cwd_candidate);
+            }
+            command
         }
-    }
+        WorkspaceTarget::Ssh {
+            project_root,
+            connection,
+        } => {
+            let mut command = CommandBuilder::new("ssh");
+            command.arg("-tt");
+            apply_ssh_args_to_pty_command(&mut command, connection)?;
+            command.arg(ssh_target_host(connection));
+            command.arg("--");
+            command.arg("sh");
+            command.arg("-lc");
+            command.arg(build_remote_runtime_script(
+                &build_remote_interactive_shell_command(
+                    project_root,
+                    connection.remote_shell.trim(),
+                ),
+            ));
+            command
+        }
+    };
 
     let child = pair
         .slave
         .spawn_command(command)
         .map_err(|err| err.to_string())?;
-    let mut reader = pair.master.try_clone_reader().map_err(|err| err.to_string())?;
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|err| err.to_string())?;
     let writer = pair.master.take_writer().map_err(|err| err.to_string())?;
     let terminal_tab_id = request.terminal_tab_id.clone();
     let app_handle = app.clone();
@@ -14711,7 +17364,12 @@ fn ensure_pty_session(
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
-                    emit_pty_output(&app_handle, &terminal_tab_id, "\r\n[process exited]\r\n".to_string(), "exit");
+                    emit_pty_output(
+                        &app_handle,
+                        &terminal_tab_id,
+                        "\r\n[process exited]\r\n".to_string(),
+                        "exit",
+                    );
                     break;
                 }
                 Ok(read) => {
@@ -14719,7 +17377,12 @@ fn ensure_pty_session(
                     emit_pty_output(&app_handle, &terminal_tab_id, data, "stdout");
                 }
                 Err(_) => {
-                    emit_pty_output(&app_handle, &terminal_tab_id, "\r\n[pty read error]\r\n".to_string(), "stderr");
+                    emit_pty_output(
+                        &app_handle,
+                        &terminal_tab_id,
+                        "\r\n[pty read error]\r\n".to_string(),
+                        "stderr",
+                    );
                     break;
                 }
             }
@@ -14782,8 +17445,8 @@ fn runtime_log_detect_profiles(
     store: State<'_, AppStore>,
     workspace_id: String,
 ) -> Result<Vec<RuntimeProfileDescriptor>, String> {
-    let project_root = resolve_runtime_workspace_root(&store, &workspace_id)?;
-    Ok(detect_runtime_profiles(&project_root))
+    let workspace_target = resolve_workspace_target(&store, Some(&workspace_id), None)?;
+    detect_runtime_profiles_for_target(&workspace_target)
 }
 
 #[tauri::command]
@@ -14794,20 +17457,30 @@ fn runtime_log_start(
     profile_id: Option<String>,
     command_override: Option<String>,
 ) -> Result<RuntimeLogSessionSnapshot, String> {
-    let project_root = resolve_runtime_workspace_root(&store, &workspace_id)?;
-    let detected_profiles = detect_runtime_profiles(&project_root);
+    let workspace_target = resolve_workspace_target(&store, Some(&workspace_id), None)?;
+    let detected_profiles = detect_runtime_profiles_for_target(&workspace_target)?;
     let trimmed_override = command_override
         .as_ref()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let selected_profile = profile_id
         .as_ref()
-        .and_then(|target| detected_profiles.iter().find(|profile| profile.id == *target))
+        .and_then(|target| {
+            detected_profiles
+                .iter()
+                .find(|profile| profile.id == *target)
+        })
         .cloned();
-    let active_profile = selected_profile.clone().or_else(|| detected_profiles.first().cloned());
+    let active_profile = selected_profile
+        .clone()
+        .or_else(|| detected_profiles.first().cloned());
     let command_preview = trimmed_override
         .clone()
-        .or_else(|| active_profile.as_ref().map(|profile| profile.default_command.clone()))
+        .or_else(|| {
+            active_profile
+                .as_ref()
+                .map(|profile| profile.default_command.clone())
+        })
         .ok_or_else(|| "No runnable runtime profile detected for this workspace.".to_string())?;
 
     let previous_session = {
@@ -14824,15 +17497,16 @@ fn runtime_log_start(
             let _ = {
                 let mut child = child.lock().map_err(|err| err.to_string())?;
                 terminate_process_tree(child.id());
-                child.wait().ok().and_then(|status| status.code()).unwrap_or(130)
+                child
+                    .wait()
+                    .ok()
+                    .and_then(|status| status.code())
+                    .unwrap_or(130)
             };
         }
     }
 
-    let shell = shell_path();
-    let mut command = Command::new(&shell);
-    command.args(shell_command_args(&shell, &command_preview));
-    command.current_dir(&project_root);
+    let mut command = spawn_workspace_shell_command(&workspace_target, &command_preview, true)?;
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -14855,7 +17529,9 @@ fn runtime_log_start(
         status: RuntimeLogSessionStatus::Running,
         command_preview: Some(command_preview),
         profile_id: active_profile.as_ref().map(|profile| profile.id.clone()),
-        detected_stack: active_profile.as_ref().map(|profile| profile.detected_stack.clone()),
+        detected_stack: active_profile
+            .as_ref()
+            .map(|profile| profile.detected_stack.clone()),
         started_at_ms: Some(runtime_now_ms()),
         stopped_at_ms: None,
         exit_code: None,
@@ -14938,7 +17614,11 @@ fn runtime_log_stop(
         let exit_code = {
             let mut child = child.lock().map_err(|err| err.to_string())?;
             terminate_process_tree(child.id());
-            child.wait().ok().and_then(|status| status.code()).unwrap_or(130)
+            child
+                .wait()
+                .ok()
+                .and_then(|status| status.code())
+                .unwrap_or(130)
         };
         return Ok(finalize_runtime_session(
             &store.runtime_log_sessions,
@@ -14983,7 +17663,9 @@ fn runtime_log_get_session(
         .runtime_log_sessions
         .lock()
         .map_err(|err| err.to_string())?;
-    Ok(sessions.get(&workspace_id).map(|session| session.snapshot.clone()))
+    Ok(sessions
+        .get(&workspace_id)
+        .map(|session| session.snapshot.clone()))
 }
 
 #[tauri::command]
@@ -15037,11 +17719,13 @@ fn list_external_absolute_directory_children(
         })
         .collect::<Vec<_>>();
 
-    entries.sort_by(|left, right| match (left.kind.as_str(), right.kind.as_str()) {
-        ("dir", "file") => std::cmp::Ordering::Less,
-        ("file", "dir") => std::cmp::Ordering::Greater,
-        _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
-    });
+    entries.sort_by(
+        |left, right| match (left.kind.as_str(), right.kind.as_str()) {
+            ("dir", "file") => std::cmp::Ordering::Less,
+            ("file", "dir") => std::cmp::Ordering::Greater,
+            _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+        },
+    );
 
     Ok(entries)
 }
@@ -15085,8 +17769,7 @@ fn reload_codex_runtime_config() -> Result<CodexRuntimeReloadResult, String> {
         stage: "refresh-only".to_string(),
         restarted_sessions: 0,
         message: Some(
-            "multi-cli-studio 当前只执行 vendors/runtime 状态刷新，不重启现有会话。"
-                .to_string(),
+            "multi-cli-studio 当前只执行 vendors/runtime 状态刷新，不重启现有会话。".to_string(),
         ),
     })
 }
@@ -17489,6 +20172,9 @@ fn execute_auto_mode_goal(
 
     let mut encountered_failure = false;
     let mut collected_files = BTreeSet::new();
+    let workspace_target = WorkspaceTarget::Local {
+        project_root: request.project_root.clone(),
+    };
 
     for index in 0..step_states.len() {
         if encountered_failure {
@@ -17540,7 +20226,7 @@ fn execute_auto_mode_goal(
             run_codex_app_server_turn(
                 app,
                 &wrapper_path,
-                &request.project_root,
+                &workspace_target,
                 &worker_prompt,
                 &[],
                 &[],
@@ -17565,7 +20251,7 @@ fn execute_auto_mode_goal(
             run_gemini_acp_turn(
                 app,
                 &wrapper_path,
-                &request.project_root,
+                &workspace_target,
                 &worker_prompt,
                 &worker_session,
                 None,
@@ -17588,7 +20274,7 @@ fn execute_auto_mode_goal(
             run_claude_headless_turn(
                 app,
                 &wrapper_path,
-                &request.project_root,
+                &workspace_target,
                 &worker_prompt,
                 &worker_session,
                 None,
@@ -18824,8 +21510,11 @@ fn execute_automation_goal(
     } else {
         composed_prompt_base
     };
+    let workspace_target = WorkspaceTarget::Local {
+        project_root: run.project_root.clone(),
+    };
 
-    let before_files = get_git_panel(run.project_root.clone())
+    let before_files = build_git_panel_for_target(&workspace_target)
         .map(|panel| {
             panel
                 .recent_changes
@@ -18839,7 +21528,7 @@ fn execute_automation_goal(
         "codex" => run_codex_app_server_turn(
             app,
             &wrapper_path,
-            &run.project_root,
+            &workspace_target,
             &composed_prompt,
             &[],
             &selected_codex_skills,
@@ -18865,7 +21554,7 @@ fn execute_automation_goal(
         "claude" => run_claude_headless_turn(
             app,
             &wrapper_path,
-            &run.project_root,
+            &workspace_target,
             &composed_prompt,
             &session,
             previous_transport_session.clone(),
@@ -18890,7 +21579,7 @@ fn execute_automation_goal(
         "gemini" => run_gemini_acp_turn(
             app,
             &wrapper_path,
-            &run.project_root,
+            &workspace_target,
             &composed_prompt,
             &session,
             previous_transport_session,
@@ -18937,7 +21626,7 @@ fn execute_automation_goal(
         }),
     };
 
-    let after_files = get_git_panel(run.project_root.clone())
+    let after_files = build_git_panel_for_target(&workspace_target)
         .map(|panel| {
             panel
                 .recent_changes
@@ -20246,11 +22935,17 @@ fn detect_gemini_mcp(settings_path: &Path) -> AgentResourceGroup {
 }
 
 fn json_array_len(value: Option<&Value>) -> usize {
-    value.and_then(Value::as_array).map(|items| items.len()).unwrap_or(0)
+    value
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0)
 }
 
 fn read_json_string(value: Option<&Value>) -> Option<String> {
-    value.and_then(Value::as_str).map(|entry| entry.trim().to_string()).filter(|entry| !entry.is_empty())
+    value
+        .and_then(Value::as_str)
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
 }
 
 fn parse_claude_global_mcp_servers(config_path: &Path) -> Vec<GlobalMcpServerEntry> {
@@ -20928,6 +23623,546 @@ fn interactive_shell_args(shell_path: &str) -> Vec<String> {
     }
 }
 
+#[derive(Debug, Clone)]
+enum WorkspaceTarget {
+    Local {
+        project_root: String,
+    },
+    Ssh {
+        project_root: String,
+        connection: SshConnectionConfig,
+    },
+}
+
+fn normalize_workspace_location_kind(value: &str) -> &str {
+    if value.trim().eq_ignore_ascii_case("ssh") {
+        "ssh"
+    } else {
+        "local"
+    }
+}
+
+fn workspace_target_project_root(target: &WorkspaceTarget) -> &str {
+    match target {
+        WorkspaceTarget::Local { project_root } => project_root,
+        WorkspaceTarget::Ssh { project_root, .. } => project_root,
+    }
+}
+
+fn remote_cli_command_name(cli_id: &str) -> String {
+    match cli_id {
+        "claude" => "claude".to_string(),
+        "gemini" => "gemini".to_string(),
+        _ => "codex".to_string(),
+    }
+}
+
+fn expand_home_prefixed_path(path: &str) -> Option<PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "~" {
+        return Some(user_home_dir());
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return Some(user_home_dir().join(rest));
+    }
+    Some(PathBuf::from(trimmed))
+}
+
+fn ssh_target_host(connection: &SshConnectionConfig) -> String {
+    format!("{}@{}", connection.username.trim(), connection.host.trim())
+}
+
+fn ensure_ssh_askpass_helper() -> Result<PathBuf, String> {
+    let path = std::env::temp_dir().join(SSH_ASKPASS_HELPER_NAME);
+    #[cfg(target_os = "windows")]
+    let content = format!("@echo off\r\nsetlocal\r\necho %{SSH_ASKPASS_PASSWORD_ENV}%\r\n");
+    #[cfg(not(target_os = "windows"))]
+    let content = format!("#!/bin/sh\nprintf '%s\\n' \"${{{SSH_ASKPASS_PASSWORD_ENV}:-}}\"\n");
+    let should_write = fs::read_to_string(&path)
+        .map(|existing| existing != content)
+        .unwrap_or(true);
+    if should_write {
+        fs::write(&path, content).map_err(|err| err.to_string())?;
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                .map_err(|err| err.to_string())?;
+        }
+    }
+    Ok(path)
+}
+
+fn apply_ssh_password_envs(command: &mut Command, password: &str) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("SSH password is required for password auth mode.".to_string());
+    }
+    let helper_path = ensure_ssh_askpass_helper()?;
+    command.env("SSH_ASKPASS", helper_path);
+    command.env("SSH_ASKPASS_REQUIRE", "force");
+    command.env("DISPLAY", "multi-cli-studio");
+    command.env(SSH_ASKPASS_PASSWORD_ENV, password);
+    Ok(())
+}
+
+fn apply_ssh_password_envs_to_pty(
+    command: &mut CommandBuilder,
+    password: &str,
+) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("SSH password is required for password auth mode.".to_string());
+    }
+    let helper_path = ensure_ssh_askpass_helper()?;
+    command.env("SSH_ASKPASS", helper_path.to_string_lossy().to_string());
+    command.env("SSH_ASKPASS_REQUIRE", "force");
+    command.env("DISPLAY", "multi-cli-studio");
+    command.env(SSH_ASKPASS_PASSWORD_ENV, password);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_ssh_control_path_dir() -> Result<PathBuf, String> {
+    let path = PathBuf::from("/tmp/multi-cli-studio-ssh");
+    fs::create_dir_all(&path).map_err(|err| err.to_string())?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|err| err.to_string())?;
+    Ok(path)
+}
+
+#[cfg(not(unix))]
+fn ensure_ssh_control_path_dir() -> Result<PathBuf, String> {
+    Ok(PathBuf::new())
+}
+
+fn apply_ssh_connection_reuse_args(command: &mut Command) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let control_path = ensure_ssh_control_path_dir()?.join("%C");
+        command.arg("-o").arg("ControlMaster=auto");
+        command.arg("-o").arg("ControlPersist=600");
+        command
+            .arg("-o")
+            .arg(format!("ControlPath={}", control_path.to_string_lossy()));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = ensure_ssh_control_path_dir()?;
+    }
+    Ok(())
+}
+
+fn apply_ssh_connection_reuse_args_to_pty(command: &mut CommandBuilder) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let control_path = ensure_ssh_control_path_dir()?.join("%C");
+        command.arg("-o");
+        command.arg("ControlMaster=auto");
+        command.arg("-o");
+        command.arg("ControlPersist=600");
+        command.arg("-o");
+        command.arg(format!("ControlPath={}", control_path.to_string_lossy()));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = ensure_ssh_control_path_dir()?;
+    }
+    Ok(())
+}
+
+fn apply_ssh_args(command: &mut Command, connection: &SshConnectionConfig) -> Result<(), String> {
+    apply_ssh_connection_reuse_args(command)?;
+    if connection.auth_mode == "password" {
+        command.arg("-o").arg("BatchMode=no");
+        command
+            .arg("-o")
+            .arg("PreferredAuthentications=password,keyboard-interactive");
+        command.arg("-o").arg("PubkeyAuthentication=no");
+        command.arg("-o").arg("NumberOfPasswordPrompts=1");
+        apply_ssh_password_envs(command, &connection.password)?;
+    } else {
+        command.arg("-o").arg("BatchMode=yes");
+    }
+    if connection.port > 0 {
+        command.arg("-p").arg(connection.port.to_string());
+    }
+    if !connection.proxy_jump.trim().is_empty() {
+        command.arg("-J").arg(connection.proxy_jump.trim());
+    }
+    if connection.auth_mode == "identityFile" {
+        if let Some(identity_path) = expand_home_prefixed_path(&connection.identity_file) {
+            command.arg("-i").arg(identity_path);
+        }
+    }
+    Ok(())
+}
+
+fn apply_ssh_args_to_pty_command(
+    command: &mut CommandBuilder,
+    connection: &SshConnectionConfig,
+) -> Result<(), String> {
+    apply_ssh_connection_reuse_args_to_pty(command)?;
+    if connection.auth_mode == "password" {
+        command.arg("-o");
+        command.arg("BatchMode=no");
+        command.arg("-o");
+        command.arg("PreferredAuthentications=password,keyboard-interactive");
+        command.arg("-o");
+        command.arg("PubkeyAuthentication=no");
+        command.arg("-o");
+        command.arg("NumberOfPasswordPrompts=1");
+        apply_ssh_password_envs_to_pty(command, &connection.password)?;
+    } else {
+        command.arg("-o");
+        command.arg("BatchMode=yes");
+    }
+    if connection.port > 0 {
+        command.arg("-p");
+        command.arg(connection.port.to_string());
+    }
+    if !connection.proxy_jump.trim().is_empty() {
+        command.arg("-J");
+        command.arg(connection.proxy_jump.trim());
+    }
+    if connection.auth_mode == "identityFile" {
+        if let Some(identity_path) = expand_home_prefixed_path(&connection.identity_file) {
+            command.arg("-i");
+            command.arg(identity_path.to_string_lossy().to_string());
+        }
+    }
+    Ok(())
+}
+
+fn build_remote_runtime_prelude() -> String {
+    [
+        "[ -f /etc/profile ] && . /etc/profile >/dev/null 2>&1 || true",
+        "[ -f \"$HOME/.profile\" ] && . \"$HOME/.profile\" >/dev/null 2>&1 || true",
+        "[ -f \"$HOME/.bash_profile\" ] && . \"$HOME/.bash_profile\" >/dev/null 2>&1 || true",
+        "[ -f \"$HOME/.bash_login\" ] && . \"$HOME/.bash_login\" >/dev/null 2>&1 || true",
+        "[ -f \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\" >/dev/null 2>&1 || true",
+        "[ -f \"$HOME/.zprofile\" ] && . \"$HOME/.zprofile\" >/dev/null 2>&1 || true",
+        "[ -f \"$HOME/.zshrc\" ] && . \"$HOME/.zshrc\" >/dev/null 2>&1 || true",
+        "append_path() { [ -d \"$1\" ] && PATH=\"$1:$PATH\"; }",
+        "append_path \"$HOME/.cargo/bin\"",
+        "append_path \"$HOME/.volta/bin\"",
+        "append_path \"$HOME/.asdf/shims\"",
+        "append_path \"$HOME/.local/bin\"",
+        "append_path \"$HOME/.local/share/mise/shims\"",
+        "append_path \"$HOME/.mise/shims\"",
+        "append_path \"$HOME/.npm-global/bin\"",
+        "append_path \"$HOME/Library/pnpm\"",
+        "append_path \"$HOME/.pnpm\"",
+        "append_path \"$HOME/bin\"",
+        "for candidate in \"$HOME\"/.nvm/versions/node/*/bin \"$HOME\"/.fnm/node-versions/*/installation/bin; do [ -d \"$candidate\" ] && PATH=\"$candidate:$PATH\"; done",
+        "export PATH",
+        "hash -r 2>/dev/null || true",
+        "resolve_remote_command() { if command -v \"$1\" >/dev/null 2>&1; then command -v \"$1\"; return 0; fi; for candidate_dir in \"$HOME/.cargo/bin\" \"$HOME/.volta/bin\" \"$HOME/.asdf/shims\" \"$HOME/.local/bin\" \"$HOME/.local/share/mise/shims\" \"$HOME/.mise/shims\" \"$HOME/.npm-global/bin\" \"$HOME/Library/pnpm\" \"$HOME/.pnpm\" \"$HOME/bin\" \"$HOME\"/.nvm/versions/node/*/bin \"$HOME\"/.fnm/node-versions/*/installation/bin; do if [ -x \"$candidate_dir/$1\" ]; then printf '%s\\n' \"$candidate_dir/$1\"; return 0; fi; done; return 1; }",
+    ]
+    .join("; ")
+}
+
+fn build_remote_runtime_script(script: &str) -> String {
+    format!("{}; {}", build_remote_runtime_prelude(), script)
+}
+
+fn build_remote_command_resolution(command_path: &str) -> String {
+    if command_path.contains('/') {
+        format!("REMOTE_COMMAND={}", shell_quote(command_path))
+    } else {
+        format!(
+            "REMOTE_COMMAND=$(resolve_remote_command {}) || {{ printf '%s\\n' {} >&2; exit 127; }}",
+            shell_quote(command_path),
+            shell_quote(&format!(
+                "Command not found in remote PATH: {}",
+                command_path
+            ))
+        )
+    }
+}
+
+fn build_remote_shell_resolution(shell: &str) -> String {
+    let trimmed = shell.trim();
+    let fallback = if trimmed.is_empty() { "bash" } else { trimmed };
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("bash") {
+        format!(
+            "REMOTE_SHELL=${{SHELL:-}}; if [ -z \"$REMOTE_SHELL\" ]; then REMOTE_SHELL={}; fi; case \"$REMOTE_SHELL\" in */*) : ;; *) if command -v \"$REMOTE_SHELL\" >/dev/null 2>&1; then REMOTE_SHELL=$(command -v \"$REMOTE_SHELL\"); fi ;; esac",
+            shell_quote(fallback)
+        )
+    } else {
+        format!(
+            "REMOTE_SHELL={}; case \"$REMOTE_SHELL\" in */*) : ;; *) if command -v \"$REMOTE_SHELL\" >/dev/null 2>&1; then REMOTE_SHELL=$(command -v \"$REMOTE_SHELL\"); fi ;; esac",
+            shell_quote(fallback)
+        )
+    }
+}
+
+fn build_remote_shell_command(project_root: &str, command_path: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push("\"$REMOTE_COMMAND\"".to_string());
+    parts.extend(args.iter().map(|arg| shell_quote(arg)));
+    format!(
+        "{}; cd {} && exec {}",
+        build_remote_command_resolution(command_path),
+        shell_quote(project_root),
+        parts.join(" ")
+    )
+}
+
+fn spawn_workspace_command(
+    target: &WorkspaceTarget,
+    command_path: &str,
+    args: &[String],
+    apply_local_runtime_env: bool,
+) -> Result<Command, String> {
+    match target {
+        WorkspaceTarget::Local { project_root } => {
+            let resolved_command = resolve_direct_command_path(command_path);
+            let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            let mut command = batch_aware_command(&resolved_command, &arg_refs);
+            if apply_local_runtime_env {
+                apply_runtime_environment(&mut command);
+            }
+            command.current_dir(project_root);
+            Ok(command)
+        }
+        WorkspaceTarget::Ssh {
+            project_root,
+            connection,
+        } => {
+            let mut command = Command::new("ssh");
+            apply_ssh_args(&mut command, connection)?;
+            command
+                .arg(ssh_target_host(connection))
+                .arg("--")
+                .arg("sh")
+                .arg("-lc")
+                .arg(build_remote_runtime_script(&build_remote_shell_command(
+                    project_root,
+                    command_path,
+                    args,
+                )));
+            Ok(command)
+        }
+    }
+}
+
+fn run_ssh_capture(
+    connection: &SshConnectionConfig,
+    remote_command: &str,
+) -> Result<CliCommandOutput, String> {
+    let mut command = Command::new("ssh");
+    apply_ssh_args(&mut command, connection)?;
+    command
+        .arg(ssh_target_host(connection))
+        .arg("--")
+        .arg("sh")
+        .arg("-lc")
+        .arg(build_remote_runtime_script(remote_command));
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().map_err(|err| err.to_string())?;
+    Ok(CliCommandOutput {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
+
+fn command_output_detail(output: &CliCommandOutput, fallback: &str) -> String {
+    let stderr = output.stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_string();
+    }
+    let stdout = output.stdout.trim();
+    if !stdout.is_empty() {
+        return stdout.to_string();
+    }
+    fallback.to_string()
+}
+
+fn run_workspace_command_capture(
+    target: &WorkspaceTarget,
+    command_path: &str,
+    args: &[String],
+    apply_local_runtime_env: bool,
+) -> Result<CliCommandOutput, String> {
+    let mut command = spawn_workspace_command(target, command_path, args, apply_local_runtime_env)?;
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command.output().map_err(|err| err.to_string())?;
+    Ok(CliCommandOutput {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
+
+fn run_workspace_command_status(
+    target: &WorkspaceTarget,
+    command_path: &str,
+    args: &[String],
+    apply_local_runtime_env: bool,
+    fallback: &str,
+) -> Result<(), String> {
+    let output =
+        run_workspace_command_capture(target, command_path, args, apply_local_runtime_env)?;
+    if output.success {
+        Ok(())
+    } else {
+        Err(command_output_detail(&output, fallback))
+    }
+}
+
+fn build_remote_shell_process_command(project_root: &str, shell: &str, script: &str) -> String {
+    format!(
+        "{}; cd {} && exec \"$REMOTE_SHELL\" -lc {}",
+        build_remote_shell_resolution(shell),
+        shell_quote(project_root),
+        shell_quote(script),
+    )
+}
+
+fn build_remote_interactive_shell_command(project_root: &str, shell: &str) -> String {
+    format!(
+        "{}; cd {} && exec \"$REMOTE_SHELL\" -il",
+        build_remote_shell_resolution(shell),
+        shell_quote(project_root),
+    )
+}
+
+fn spawn_workspace_shell_command(
+    target: &WorkspaceTarget,
+    script: &str,
+    apply_local_runtime_env: bool,
+) -> Result<Command, String> {
+    match target {
+        WorkspaceTarget::Local { project_root } => {
+            let shell = shell_path();
+            let mut command = Command::new(&shell);
+            command.args(shell_command_args(&shell, script));
+            if apply_local_runtime_env {
+                apply_runtime_environment(&mut command);
+            }
+            command.current_dir(project_root);
+            Ok(command)
+        }
+        WorkspaceTarget::Ssh {
+            project_root,
+            connection,
+        } => {
+            let mut command = Command::new("ssh");
+            apply_ssh_args(&mut command, connection)?;
+            command
+                .arg(ssh_target_host(connection))
+                .arg("--")
+                .arg("sh")
+                .arg("-lc")
+                .arg(build_remote_runtime_script(
+                    &build_remote_shell_process_command(
+                        project_root,
+                        connection.remote_shell.trim(),
+                        script,
+                    ),
+                ));
+            Ok(command)
+        }
+    }
+}
+
+fn run_workspace_python_json(
+    target: &WorkspaceTarget,
+    script: &str,
+    args: &[String],
+) -> Result<Value, String> {
+    let mut command_args = vec!["-c".to_string(), script.to_string()];
+    command_args.extend(args.iter().cloned());
+    let output = run_workspace_command_capture(target, "python3", &command_args, false)?;
+    if !output.success {
+        return Err(command_output_detail(
+            &output,
+            "Python helper failed for the workspace target.",
+        ));
+    }
+    serde_json::from_str(output.stdout.trim()).map_err(|err| {
+        format!(
+            "Failed to parse workspace helper output: {}{}",
+            err,
+            if output.stdout.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" | output: {}", output.stdout.trim())
+            }
+        )
+    })
+}
+
+fn run_workspace_python_status(
+    target: &WorkspaceTarget,
+    script: &str,
+    args: &[String],
+) -> Result<(), String> {
+    let mut command_args = vec!["-c".to_string(), script.to_string()];
+    command_args.extend(args.iter().cloned());
+    run_workspace_command_status(
+        target,
+        "python3",
+        &command_args,
+        false,
+        "Python helper failed for the workspace target.",
+    )
+}
+
+fn resolve_workspace_target(
+    store: &AppStore,
+    workspace_id: Option<&str>,
+    project_root: Option<&str>,
+) -> Result<WorkspaceTarget, String> {
+    if let Some(workspace_id) = workspace_id.filter(|value| !value.trim().is_empty()) {
+        if let Some(workspace) = store
+            .terminal_storage
+            .load_workspace_ref_by_id(workspace_id)?
+        {
+            if normalize_workspace_location_kind(&workspace.location_kind) == "ssh" {
+                let connection_id = workspace
+                    .connection_id
+                    .clone()
+                    .ok_or_else(|| "Remote workspace is missing connectionId.".to_string())?;
+                let connection = {
+                    let settings = store.settings.lock().map_err(|err| err.to_string())?;
+                    settings
+                        .ssh_connections
+                        .iter()
+                        .find(|item| item.id == connection_id)
+                        .cloned()
+                        .ok_or_else(|| "SSH connection not found for workspace.".to_string())?
+                };
+                let remote_path = workspace
+                    .remote_path
+                    .clone()
+                    .unwrap_or_else(|| workspace.root_path.clone());
+                return Ok(WorkspaceTarget::Ssh {
+                    project_root: remote_path,
+                    connection,
+                });
+            }
+            return Ok(WorkspaceTarget::Local {
+                project_root: workspace.root_path.clone(),
+            });
+        }
+    }
+
+    if let Some(project_root) = project_root.filter(|value| !value.trim().is_empty()) {
+        return Ok(WorkspaceTarget::Local {
+            project_root: project_root.to_string(),
+        });
+    }
+
+    let state = store.state.lock().map_err(|err| err.to_string())?;
+    Ok(WorkspaceTarget::Local {
+        project_root: state.workspace.project_root.clone(),
+    })
+}
+
 fn emit_pty_output(app: &AppHandle, terminal_tab_id: &str, data: String, stream: &str) {
     if data.is_empty() {
         return;
@@ -20946,12 +24181,7 @@ fn runtime_now_ms() -> u64 {
     Local::now().timestamp_millis().max(0) as u64
 }
 
-fn emit_runtime_log_output(
-    app: &AppHandle,
-    workspace_id: &str,
-    terminal_id: &str,
-    data: String,
-) {
+fn emit_runtime_log_output(app: &AppHandle, workspace_id: &str, terminal_id: &str, data: String) {
     if data.is_empty() {
         return;
     }
@@ -21025,9 +24255,11 @@ fn resolve_node_runner(entries: &HashSet<String>) -> String {
     }
 }
 
-fn detect_runtime_profiles(project_root: &str) -> Vec<RuntimeProfileDescriptor> {
-    let entries = read_workspace_entries(project_root);
-    let scripts = read_package_scripts(project_root);
+fn detect_runtime_profiles_from_scan(
+    project_root: &str,
+    entries: &HashSet<String>,
+    scripts: &HashSet<String>,
+) -> Vec<RuntimeProfileDescriptor> {
     let mut profiles = Vec::new();
 
     if entries.contains("pom.xml") {
@@ -21073,7 +24305,7 @@ fn detect_runtime_profiles(project_root: &str) -> Vec<RuntimeProfileDescriptor> 
     }
 
     if entries.contains("package.json") {
-        let runner = resolve_node_runner(&entries);
+        let runner = resolve_node_runner(entries);
         if scripts.contains("dev") {
             profiles.push(RuntimeProfileDescriptor {
                 id: "node-dev".to_string(),
@@ -21134,11 +24366,15 @@ fn detect_runtime_profiles(project_root: &str) -> Vec<RuntimeProfileDescriptor> 
         let command = targets
             .iter()
             .find_map(|entry| {
-                let path = Path::new(project_root).join(entry);
-                if path.exists() && path.is_dir() {
+                if project_root.is_empty() {
                     Some(format!("go run ./{}", entry.replace('\\', "/")))
                 } else {
-                    None
+                    let path = Path::new(project_root).join(entry);
+                    if path.exists() && path.is_dir() {
+                        Some(format!("go run ./{}", entry.replace('\\', "/")))
+                    } else {
+                        None
+                    }
                 }
             })
             .unwrap_or_else(|| "go run .".to_string());
@@ -21150,6 +24386,57 @@ fn detect_runtime_profiles(project_root: &str) -> Vec<RuntimeProfileDescriptor> 
     }
 
     profiles
+}
+
+fn detect_runtime_profiles(project_root: &str) -> Vec<RuntimeProfileDescriptor> {
+    let entries = read_workspace_entries(project_root);
+    let scripts = read_package_scripts(project_root);
+    detect_runtime_profiles_from_scan(project_root, &entries, &scripts)
+}
+
+fn detect_runtime_profiles_for_target(
+    target: &WorkspaceTarget,
+) -> Result<Vec<RuntimeProfileDescriptor>, String> {
+    match target {
+        WorkspaceTarget::Local { project_root } => Ok(detect_runtime_profiles(project_root)),
+        remote_target @ WorkspaceTarget::Ssh { .. } => {
+            let script = r#"
+import json, os
+
+scripts = []
+try:
+    with open("package.json", "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+        if isinstance(data.get("scripts"), dict):
+            scripts = [str(key) for key in data["scripts"].keys()]
+except Exception:
+    pass
+
+print(json.dumps({
+    "entries": sorted(os.listdir(".")),
+    "scripts": sorted(scripts),
+}))
+"#;
+            let value = run_workspace_python_json(remote_target, script, &[])?;
+            let entries = value
+                .get("entries")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<HashSet<_>>();
+            let scripts = value
+                .get("scripts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<HashSet<_>>();
+            Ok(detect_runtime_profiles_from_scan("", &entries, &scripts))
+        }
+    }
 }
 
 fn finalize_runtime_session(
@@ -21237,9 +24524,13 @@ fn spawn_runtime_exit_watcher(
 
         match poll_result {
             Ok(Some(status)) => {
-                let exit_code = status
-                    .code()
-                    .unwrap_or_else(|| if stop_requested.load(Ordering::SeqCst) { 130 } else { 1 });
+                let exit_code = status.code().unwrap_or_else(|| {
+                    if stop_requested.load(Ordering::SeqCst) {
+                        130
+                    } else {
+                        1
+                    }
+                });
                 let status_value = if stop_requested.load(Ordering::SeqCst) || exit_code == 0 {
                     RuntimeLogSessionStatus::Stopped
                 } else {
@@ -21711,10 +25002,14 @@ fn collect_workspace_text_search_results(
         if relative.is_empty() {
             continue;
         }
-        if !include_patterns.is_empty() && !workspace_search_path_matches_patterns(&relative, include_patterns) {
+        if !include_patterns.is_empty()
+            && !workspace_search_path_matches_patterns(&relative, include_patterns)
+        {
             continue;
         }
-        if !exclude_patterns.is_empty() && workspace_search_path_matches_patterns(&relative, exclude_patterns) {
+        if !exclude_patterns.is_empty()
+            && workspace_search_path_matches_patterns(&relative, exclude_patterns)
+        {
             continue;
         }
 
@@ -21738,7 +25033,11 @@ fn collect_workspace_text_search_results(
                         line: line_index + 1,
                         column: line[..capture.start()].chars().count() + 1,
                         end_column: line[..capture.end()].chars().count() + 1,
-                        preview: build_workspace_search_preview(line, capture.start(), capture.end()),
+                        preview: build_workspace_search_preview(
+                            line,
+                            capture.start(),
+                            capture.end(),
+                        ),
                     });
                 }
                 if *total_matches >= MAX_WORKSPACE_TEXT_SEARCH_MATCHES {
@@ -22692,7 +25991,8 @@ fn load_or_seed_settings(project_root: &str) -> Result<AppSettings, String> {
     let path = settings_file()?;
     if path.exists() {
         let raw = fs::read_to_string(&path).map_err(|err| err.to_string())?;
-        let mut settings = serde_json::from_str::<AppSettings>(&raw).map_err(|err| err.to_string())?;
+        let mut settings =
+            serde_json::from_str::<AppSettings>(&raw).map_err(|err| err.to_string())?;
         normalize_settings_providers(&mut settings);
         Ok(settings)
     } else {
@@ -22742,6 +26042,7 @@ fn seed_settings(project_root: &str) -> AppSettings {
             claude: "auto".to_string(),
             gemini: "auto".to_string(),
         },
+        ssh_connections: Vec::new(),
         project_root: project_root.to_string(),
         max_turns_per_agent: DEFAULT_MAX_TURNS,
         max_output_chars_per_turn: DEFAULT_MAX_OUTPUT_CHARS,
@@ -23036,18 +26337,17 @@ fn update_agent_modes(
 }
 
 fn sync_workspace_metrics(state: &mut AppStateDto) {
-    state.workspace.branch =
-        git_output(&state.workspace.project_root, &["branch", "--show-current"])
-            .unwrap_or_else(|| "workspace".to_string());
-    state.workspace.dirty_files =
-        git_output(&state.workspace.project_root, &["status", "--porcelain"])
-            .map(|output| {
-                output
-                    .lines()
-                    .filter(|line| !line.trim().is_empty())
-                    .count()
-            })
-            .unwrap_or(state.workspace.dirty_files);
+    if let Some(branch) = git_output(&state.workspace.project_root, &["branch", "--show-current"]) {
+        state.workspace.branch = branch;
+    }
+    if let Some(output) =
+        git_output_allow_empty(&state.workspace.project_root, &["status", "--porcelain"])
+    {
+        state.workspace.dirty_files = output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+    }
 }
 
 fn git_output(project_root: &str, args: &[&str]) -> Option<String> {
@@ -23336,6 +26636,7 @@ pub fn run() {
             run_auto_orchestration,
             respond_assistant_approval,
             get_git_panel,
+            get_git_overview,
             get_git_file_diff,
             get_git_log,
             get_git_commit_history,
@@ -23368,8 +26669,10 @@ pub fn run() {
             reload_codex_runtime_config,
             list_global_mcp_servers,
             list_codex_mcp_runtime_servers,
+            test_ssh_connection,
             search_workspace_files,
             search_workspace_text,
+            get_workspace_file_index,
             list_workspace_entries,
             create_workspace_file,
             create_workspace_directory,

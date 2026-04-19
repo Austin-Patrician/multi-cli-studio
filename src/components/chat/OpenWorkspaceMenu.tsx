@@ -132,7 +132,13 @@ function formatOpenWorkspaceError(error: unknown) {
   }
 }
 
-export function OpenWorkspaceMenu({ path }: { path: string }) {
+export function OpenWorkspaceMenu({
+  path,
+  disabled = false,
+}: {
+  path: string;
+  disabled?: boolean;
+}) {
   const menuRef = useRef<HTMLDivElement | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [selectedTargetId, setSelectedTargetId] = useState(readSelectedOpenWorkspaceId);
@@ -205,6 +211,7 @@ export function OpenWorkspaceMenu({ path }: { path: string }) {
   }
 
   async function handleOpenSelectedTarget() {
+    if (disabled) return;
     const success = await openWithTarget(selectedTarget);
     if (!success) {
       setMenuOpen(true);
@@ -212,6 +219,7 @@ export function OpenWorkspaceMenu({ path }: { path: string }) {
   }
 
   async function handleSelectTarget(target: OpenWorkspaceTarget) {
+    if (disabled) return;
     setSelectedTargetId(target.id);
     persistSelectedOpenWorkspaceId(target.id);
     setMenuOpen(false);
@@ -229,9 +237,9 @@ export function OpenWorkspaceMenu({ path }: { path: string }) {
           onClick={() => {
             void handleOpenSelectedTarget();
           }}
-          disabled={openingTargetId !== null}
-          title={`用 ${selectedTarget.label} 打开项目`}
-          aria-label={`用 ${selectedTarget.label} 打开项目`}
+          disabled={disabled || openingTargetId !== null}
+          title={disabled ? "远程工作区不支持在本机打开" : `用 ${selectedTarget.label} 打开项目`}
+          aria-label={disabled ? "远程工作区不支持在本机打开" : `用 ${selectedTarget.label} 打开项目`}
           className="inline-flex h-8 w-9 items-center justify-center text-slate-700 transition-all hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <img
@@ -244,14 +252,16 @@ export function OpenWorkspaceMenu({ path }: { path: string }) {
         <button
           type="button"
           onClick={() => {
+            if (disabled) return;
             setError(null);
             setMenuOpen((current) => !current);
           }}
-          title="选择打开方式"
-          aria-label="选择打开方式"
+          disabled={disabled}
+          title={disabled ? "远程工作区不支持在本机打开" : "选择打开方式"}
+          aria-label={disabled ? "远程工作区不支持在本机打开" : "选择打开方式"}
           aria-expanded={menuOpen}
           aria-haspopup="menu"
-          className="inline-flex h-8 w-8 items-center justify-center border-l border-slate-200 text-slate-500 transition-all hover:bg-slate-50 hover:text-slate-900"
+          className="inline-flex h-8 w-8 items-center justify-center border-l border-slate-200 text-slate-500 transition-all hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <ChevronDown
             className={`h-[14px] w-[14px] transition-transform ${menuOpen ? "rotate-180" : ""}`}

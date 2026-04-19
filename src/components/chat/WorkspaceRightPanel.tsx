@@ -38,6 +38,11 @@ import type {
 } from "../../lib/models";
 import { bridge } from "../../lib/bridge";
 import { useStore } from "../../lib/store";
+import {
+  isWorkspaceFileIndexFresh,
+  loadWorkspaceFileIndex,
+  peekWorkspaceFileIndex,
+} from "../../lib/workspaceFileIndex";
 import { FileIcon } from "../FileIcon";
 import { GitPanel } from "./GitPanel";
 
@@ -79,6 +84,13 @@ const PANEL_STORAGE_KEY = "multi-cli-studio::workspace-right-panel-mode";
 const EMPTY_TREE: WorkspaceTreeEntry[] = [];
 const EMPTY_CHAT_SESSIONS: Record<string, ConversationSession> = {};
 const EMPTY_GIT_CHANGES: GitFileChange[] = [];
+const REMOTE_FILE_TREE_CACHE_TTL_MS = 30_000;
+const workspaceTreeUiStateByWorkspace = new Map<
+  string,
+  {
+    expandedDirectories: Record<string, boolean>;
+  }
+>();
 const PANEL_MODES: Array<{
   id: WorkspacePanelMode;
   label: string;
@@ -602,15 +614,15 @@ function WorkspaceSessionActivityPanel({
 
   const handleOpenFile = useCallback(
     async (path: string) => {
-      if (!path || openingPath === path) return;
+      if (!path || openingPath === path || workspace.locationKind === "ssh") return;
       setOpeningPath(path);
       try {
-        await bridge.openWorkspaceFile(workspace.rootPath, path);
+        await bridge.openWorkspaceFile(workspace.rootPath, path, workspace.id);
       } finally {
         setOpeningPath((current) => (current === path ? null : current));
       }
     },
-    [openingPath, workspace.rootPath]
+    [openingPath, workspace.id, workspace.locationKind, workspace.rootPath]
   );
 
   const groupedActivities = useMemo(() => {
@@ -906,7 +918,7 @@ function WorkspaceSearchPanel({ workspace }: { workspace: WorkspaceRef }) {
         isRegex: searchRegex,
         includePattern: includePattern.trim() || null,
         excludePattern: excludePattern.trim() || null,
-      })
+      }, workspace.id)
       .then((response) => {
         if (cancelled) return;
         setSearchResults(response);
@@ -983,8 +995,12 @@ function WorkspaceSearchPanel({ workspace }: { workspace: WorkspaceRef }) {
                   key={`${result.path}-${match.line}-${match.column}-${index}`}
                   type="button"
                   className="workspace-search-result-match"
-                  onClick={() => void bridge.openWorkspaceFile(workspace.rootPath, result.path)}
+                  onClick={() => {
+                    if (workspace.locationKind === "ssh") return;
+                    void bridge.openWorkspaceFile(workspace.rootPath, result.path, workspace.id);
+                  }}
                   title={`${result.path}:${match.line}:${match.column}`}
+                  disabled={workspace.locationKind === "ssh"}
                 >
                   <span className="workspace-search-result-location">
                     {match.line}:{match.column}
@@ -1098,7 +1114,7 @@ function WorkspaceFilesPanel({
 }) {
   const [entriesByParent, setEntriesByParent] = useState<Record<string, WorkspaceTreeEntry[]>>({});
   const [expandedDirectories, setExpandedDirectories] = useState<Record<string, boolean>>({ "": true });
-  const [loadingParents, setLoadingParents] = useState<Record<string, boolean>>({});
+  const [treeLoading, setTreeLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectedKind, setSelectedKind] = useState<WorkspaceTreeEntry["kind"] | null>(null);
@@ -1107,35 +1123,66 @@ function WorkspaceFilesPanel({
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const gitStatusByPath = useMemo(() => changeStatusMap(changes), [changes]);
 
-  const loadEntries = useCallback(
-    async (parentPath: string) => {
-      const key = parentPath;
-      setLoadingParents((current) => ({ ...current, [key]: true }));
+  const syncFileTree = useCallback(
+    async (options?: { force?: boolean; silent?: boolean }) => {
+      const force = Boolean(options?.force);
+      const silent = Boolean(options?.silent);
+      if (!silent) {
+        setTreeLoading(true);
+      }
       setErrorMessage(null);
       try {
-        const entries = await bridge.listWorkspaceEntries(workspace.rootPath, parentPath || null);
-        setEntriesByParent((current) => ({ ...current, [key]: entries }));
+        const index = await loadWorkspaceFileIndex({
+          workspaceId: workspace.id,
+          projectRoot: workspace.rootPath,
+          force,
+          maxAgeMs:
+            workspace.locationKind === "ssh" ? REMOTE_FILE_TREE_CACHE_TTL_MS : Number.POSITIVE_INFINITY,
+        });
+        setEntriesByParent(index.entriesByParent);
       } catch (error) {
         const detail = error instanceof Error ? error.message : "Unable to load workspace files.";
         setErrorMessage(detail);
       } finally {
-        setLoadingParents((current) => ({ ...current, [key]: false }));
+        if (!silent) {
+          setTreeLoading(false);
+        }
       }
     },
-    [workspace.rootPath]
+    [workspace.id, workspace.locationKind, workspace.rootPath]
   );
 
   useEffect(() => {
-    setEntriesByParent({});
-    setExpandedDirectories({ "": true });
+    const cachedUiState = workspaceTreeUiStateByWorkspace.get(workspace.id);
+    const cachedIndex = peekWorkspaceFileIndex(workspace.id);
+    setEntriesByParent(cachedIndex?.entriesByParent ?? {});
+    setExpandedDirectories(cachedUiState?.expandedDirectories ?? { "": true });
     setErrorMessage(null);
     setSelectedPath(null);
     setSelectedKind(null);
     setCreateDialogKind(null);
     setCreateName("");
     setDeleteDialogOpen(false);
-    void loadEntries("");
-  }, [loadEntries, workspace.id]);
+    const hasCachedRoot = Boolean(
+      cachedIndex && Object.prototype.hasOwnProperty.call(cachedIndex.entriesByParent, "")
+    );
+    const cacheFresh =
+      workspace.locationKind !== "ssh" ||
+      isWorkspaceFileIndexFresh(workspace.id, REMOTE_FILE_TREE_CACHE_TTL_MS);
+    if (!hasCachedRoot) {
+      void syncFileTree();
+      return;
+    }
+    if (!cacheFresh) {
+      void syncFileTree({ force: true, silent: true });
+    }
+  }, [syncFileTree, workspace.id, workspace.locationKind]);
+
+  useEffect(() => {
+    workspaceTreeUiStateByWorkspace.set(workspace.id, {
+      expandedDirectories,
+    });
+  }, [expandedDirectories, workspace.id]);
 
   const toggleDirectory = useCallback(
     (path: string) => {
@@ -1143,15 +1190,12 @@ function WorkspaceFilesPanel({
         const isExpanded = Boolean(current[path]);
         return { ...current, [path]: !isExpanded };
       });
-      if (!(path in entriesByParent)) {
-        void loadEntries(path);
-      }
     },
-    [entriesByParent, loadEntries]
+    []
   );
 
-    const renderDirectory = useCallback(
-      (parentPath: string, depth: number) => {
+  const renderDirectory = useCallback(
+    (parentPath: string, depth: number) => {
       const entries = entriesByParent[parentPath] ?? EMPTY_TREE;
       return entries.flatMap((entry) => {
         const normalizedPath = entry.path.replace(/\\/g, "/");
@@ -1173,7 +1217,10 @@ function WorkspaceFilesPanel({
                   toggleDirectory(normalizedPath);
                   return;
                 }
-                void bridge.openWorkspaceFile(workspace.rootPath, normalizedPath);
+                if (workspace.locationKind === "ssh") {
+                  return;
+                }
+                void bridge.openWorkspaceFile(workspace.rootPath, normalizedPath, workspace.id);
               }}
               className={`file-tree-row ${isDirectory ? "is-folder" : "is-file"}${selectedPath === normalizedPath ? " is-selected" : ""}`}
               style={{ paddingLeft: `${12 + depth * 16}px` }}
@@ -1194,20 +1241,12 @@ function WorkspaceFilesPanel({
                 {entry.name}
               </span>
             </button>
-            {isDirectory && isExpanded ? (
-              loadingParents[normalizedPath] && !(normalizedPath in entriesByParent) ? (
-                <div className="file-tree-lazy-state" style={{ paddingLeft: `${28 + depth * 16}px` }}>
-                  Loading...
-                </div>
-              ) : (
-                children
-              )
-            ) : null}
+            {isDirectory && isExpanded ? children : null}
           </div>,
         ];
       });
-      },
-    [entriesByParent, expandedDirectories, gitStatusByPath, loadingParents, selectedPath, toggleDirectory, workspace.rootPath]
+    },
+    [entriesByParent, expandedDirectories, gitStatusByPath, selectedPath, toggleDirectory, workspace.id, workspace.locationKind, workspace.rootPath]
   );
 
   const selectedParentFolder = useMemo(() => {
@@ -1223,9 +1262,8 @@ function WorkspaceFilesPanel({
   const selectedParentDisplay = selectedParentFolder || workspace.rootPath;
 
   const refreshFileTree = useCallback(async () => {
-    setEntriesByParent({});
-    await loadEntries("");
-  }, [loadEntries]);
+    await syncFileTree({ force: true });
+  }, [syncFileTree]);
 
   const resolveCreateTargetPath = useCallback(
     (draft: string | null) => {
@@ -1252,9 +1290,9 @@ function WorkspaceFilesPanel({
     if (!nextPath) return;
     try {
       if (createDialogKind === "file") {
-        await bridge.createWorkspaceFile(workspace.rootPath, nextPath);
+        await bridge.createWorkspaceFile(workspace.rootPath, nextPath, workspace.id);
       } else {
-        await bridge.createWorkspaceDirectory(workspace.rootPath, nextPath);
+        await bridge.createWorkspaceDirectory(workspace.rootPath, nextPath, workspace.id);
       }
       closeCreateDialog();
       await refreshFileTree();
@@ -1275,7 +1313,7 @@ function WorkspaceFilesPanel({
   const confirmDeleteDialog = useCallback(async () => {
     if (!selectedPath || !selectedKind) return;
     try {
-      await bridge.trashWorkspaceItem(workspace.rootPath, selectedPath);
+      await bridge.trashWorkspaceItem(workspace.rootPath, selectedPath, workspace.id);
       setSelectedPath(null);
       setSelectedKind(null);
       setDeleteDialogOpen(false);
@@ -1338,7 +1376,7 @@ function WorkspaceFilesPanel({
                 title="刷新文件列表"
                 aria-label="刷新文件列表"
               >
-                <RefreshIcon className={`h-4 w-4 ${loadingParents[""] ? "animate-spin" : ""}`} />
+                <RefreshIcon className={`h-4 w-4 ${treeLoading ? "animate-spin" : ""}`} />
               </button>
               <button
                 type="button"
@@ -1357,7 +1395,11 @@ function WorkspaceFilesPanel({
           <div className="file-tree-empty">
             {errorMessage}
           </div>
-        ) : (entriesByParent[""] ?? EMPTY_TREE).length === 0 && !loadingParents[""] ? (
+        ) : treeLoading && (entriesByParent[""] ?? EMPTY_TREE).length === 0 ? (
+          <div className="file-tree-empty">
+            Loading workspace files...
+          </div>
+        ) : (entriesByParent[""] ?? EMPTY_TREE).length === 0 ? (
           <div className="file-tree-empty">
             No files found for this workspace.
           </div>

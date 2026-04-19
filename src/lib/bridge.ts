@@ -48,6 +48,7 @@ import {
   GitHistoryResponse,
   GitPushPreviewResponse,
   GitLogResponse,
+  GitOverviewResponse,
   GitFileStatus,
   GitPanelData,
   NotificationConfig,
@@ -59,10 +60,13 @@ import {
   SemanticRecallRequest,
   CodexRuntimeReloadResult,
   SettingsEngineStatus,
+  SshConnectionConfig,
+  SshConnectionTestResult,
   StreamEvent,
   TerminalEvent,
   WorkspacePickResult,
   WorkspaceTextSearchResponse,
+  WorkspaceFileIndexResponse,
   WorkspaceTreeEntry,
 } from "./models";
 import type {
@@ -177,9 +181,10 @@ export interface RuntimeBridge {
   interruptChatTurn: (terminalTabId: string, messageId: string) => Promise<ChatInterruptResult>;
   runAutoOrchestration: (request: AutoOrchestrationRequest) => Promise<string>;
   respondAssistantApproval: (requestId: string, decision: AssistantApprovalDecision) => Promise<boolean>;
-  getGitPanel: (projectRoot: string) => Promise<GitPanelData>;
-  getGitFileDiff: (projectRoot: string, path: string) => Promise<GitFileDiff>;
-  getGitLog: (projectRoot: string) => Promise<GitLogResponse>;
+  getGitPanel: (projectRoot: string, workspaceId?: string | null) => Promise<GitPanelData>;
+  getGitOverview: (projectRoot: string, workspaceId?: string | null) => Promise<GitOverviewResponse>;
+  getGitFileDiff: (projectRoot: string, path: string, workspaceId?: string | null) => Promise<GitFileDiff>;
+  getGitLog: (projectRoot: string, workspaceId?: string | null) => Promise<GitLogResponse>;
   getGitCommitHistory: (
     projectRoot: string,
     options?: {
@@ -188,7 +193,8 @@ export interface RuntimeBridge {
       offset?: number;
       limit?: number;
       snapshotId?: string | null;
-    }
+    },
+    workspaceId?: string | null
   ) => Promise<GitHistoryResponse>;
   getGitPushPreview: (
     projectRoot: string,
@@ -196,32 +202,46 @@ export interface RuntimeBridge {
       remote: string;
       branch: string;
       limit?: number;
-    }
+    },
+    workspaceId?: string | null
   ) => Promise<GitPushPreviewResponse>;
   getGitCommitDetails: (
     projectRoot: string,
     commitHash: string,
-    maxDiffLines?: number
+    maxDiffLines?: number,
+    workspaceId?: string | null
   ) => Promise<GitCommitDetails>;
-  listGitBranches: (projectRoot: string) => Promise<GitBranchListResponse>;
-  checkoutGitBranch: (projectRoot: string, name: string) => Promise<void>;
+  listGitBranches: (projectRoot: string, workspaceId?: string | null) => Promise<GitBranchListResponse>;
+  checkoutGitBranch: (projectRoot: string, name: string, workspaceId?: string | null) => Promise<void>;
   createGitBranch: (
     projectRoot: string,
     name: string,
     sourceRef?: string | null,
-    checkoutAfterCreate?: boolean
+    checkoutAfterCreate?: boolean,
+    workspaceId?: string | null
   ) => Promise<void>;
-  renameGitBranch: (projectRoot: string, oldName: string, newName: string) => Promise<void>;
-  deleteGitBranch: (projectRoot: string, name: string, force?: boolean) => Promise<void>;
-  mergeGitBranch: (projectRoot: string, sourceBranch: string) => Promise<void>;
-  fetchGit: (projectRoot: string, remote?: string | null) => Promise<void>;
+  renameGitBranch: (
+    projectRoot: string,
+    oldName: string,
+    newName: string,
+    workspaceId?: string | null
+  ) => Promise<void>;
+  deleteGitBranch: (projectRoot: string, name: string, force?: boolean, workspaceId?: string | null) => Promise<void>;
+  mergeGitBranch: (projectRoot: string, sourceBranch: string, workspaceId?: string | null) => Promise<void>;
+  fetchGit: (projectRoot: string, remote?: string | null, workspaceId?: string | null) => Promise<void>;
   pullGit: (
     projectRoot: string,
     remote?: string | null,
     targetBranch?: string | null,
     pullOption?: string | null,
+    workspaceId?: string | null,
   ) => Promise<void>;
-  syncGit: (projectRoot: string, remote?: string | null, targetBranch?: string | null) => Promise<void>;
+  syncGit: (
+    projectRoot: string,
+    remote?: string | null,
+    targetBranch?: string | null,
+    workspaceId?: string | null
+  ) => Promise<void>;
   pushGit: (
     projectRoot: string,
     remote?: string | null,
@@ -234,17 +254,19 @@ export interface RuntimeBridge {
       topic?: string | null;
       reviewers?: string | null;
       cc?: string | null;
-    }
+    },
+    workspaceId?: string | null
   ) => Promise<void>;
-  getGitHubIssues: (projectRoot: string) => Promise<GitHubIssuesResponse>;
-  getGitHubPullRequests: (projectRoot: string) => Promise<GitHubPullRequestsResponse>;
-  stageGitFile: (projectRoot: string, path: string) => Promise<void>;
-  unstageGitFile: (projectRoot: string, path: string) => Promise<void>;
-  discardGitFile: (projectRoot: string, path: string) => Promise<void>;
+  getGitHubIssues: (projectRoot: string, workspaceId?: string | null) => Promise<GitHubIssuesResponse>;
+  getGitHubPullRequests: (projectRoot: string, workspaceId?: string | null) => Promise<GitHubPullRequestsResponse>;
+  stageGitFile: (projectRoot: string, path: string, workspaceId?: string | null) => Promise<void>;
+  unstageGitFile: (projectRoot: string, path: string, workspaceId?: string | null) => Promise<void>;
+  discardGitFile: (projectRoot: string, path: string, workspaceId?: string | null) => Promise<void>;
   commitGitChanges: (
     projectRoot: string,
     message: string,
-    options?: { stageAll?: boolean }
+    options?: { stageAll?: boolean },
+    workspaceId?: string | null
   ) => Promise<{ commitSha: string | null }>;
   openWorkspaceIn: (
     path: string,
@@ -254,11 +276,15 @@ export interface RuntimeBridge {
       args?: string[];
     }
   ) => Promise<void>;
-  openWorkspaceFile: (projectRoot: string, path: string) => Promise<boolean>;
+  openWorkspaceFile: (projectRoot: string, path: string, workspaceId?: string | null) => Promise<boolean>;
   onStream: (listener: (event: StreamEvent) => void) => Promise<Unlisten>;
   pickWorkspaceFolder: () => Promise<WorkspacePickResult | null>;
   pickChatAttachments: () => Promise<PickedChatAttachment[]>;
-  searchWorkspaceFiles: (projectRoot: string, query: string) => Promise<FileMentionCandidate[]>;
+  searchWorkspaceFiles: (
+    projectRoot: string,
+    query: string,
+    workspaceId?: string | null
+  ) => Promise<FileMentionCandidate[]>;
   searchWorkspaceText: (
     projectRoot: string,
     options: {
@@ -268,17 +294,24 @@ export interface RuntimeBridge {
       isRegex: boolean;
       includePattern?: string | null;
       excludePattern?: string | null;
-    }
+    },
+    workspaceId?: string | null
   ) => Promise<WorkspaceTextSearchResponse>;
-  createWorkspaceFile: (projectRoot: string, relativePath: string) => Promise<void>;
-  createWorkspaceDirectory: (projectRoot: string, relativePath: string) => Promise<void>;
-  trashWorkspaceItem: (projectRoot: string, relativePath: string) => Promise<void>;
+  createWorkspaceFile: (projectRoot: string, relativePath: string, workspaceId?: string | null) => Promise<void>;
+  createWorkspaceDirectory: (projectRoot: string, relativePath: string, workspaceId?: string | null) => Promise<void>;
+  trashWorkspaceItem: (projectRoot: string, relativePath: string, workspaceId?: string | null) => Promise<void>;
   listWorkspaceEntries: (
     projectRoot: string,
-    relativePath?: string | null
+    relativePath?: string | null,
+    workspaceId?: string | null
   ) => Promise<WorkspaceTreeEntry[]>;
-  getCliSkills: (cliId: AgentId, projectRoot: string) => Promise<CliSkillItem[]>;
+  getWorkspaceFileIndex: (
+    projectRoot: string,
+    workspaceId?: string | null
+  ) => Promise<WorkspaceFileIndexResponse>;
+  getCliSkills: (cliId: AgentId, projectRoot: string, workspaceId?: string | null) => Promise<CliSkillItem[]>;
   detectEngines: () => Promise<SettingsEngineStatus[]>;
+  testSshConnection: (connection: SshConnectionConfig) => Promise<SshConnectionTestResult>;
   getClaudeSettingsPath: () => Promise<string | null>;
   getCodexConfigPath: () => Promise<string | null>;
   reloadCodexRuntimeConfig: () => Promise<CodexRuntimeReloadResult>;
@@ -297,6 +330,7 @@ export interface RuntimeBridge {
   }) => Promise<LocalUsageStatistics>;
   ensurePtySession: (request: {
     terminalTabId: string;
+    workspaceId?: string | null;
     cwd?: string | null;
     cols: number;
     rows: number;
@@ -615,19 +649,30 @@ const tauriRuntime: RuntimeBridge = {
     });
     return result.applied;
   },
-  async getGitPanel(projectRoot) {
+  async getGitPanel(projectRoot, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<GitPanelData>("get_git_panel", { projectRoot });
+    return invoke<GitPanelData>("get_git_panel", { projectRoot, workspaceId: workspaceId ?? null });
   },
-  async getGitFileDiff(projectRoot, path) {
+  async getGitOverview(projectRoot, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<GitFileDiff>("get_git_file_diff", { projectRoot, path });
+    return invoke<GitOverviewResponse>("get_git_overview", {
+      projectRoot,
+      workspaceId: workspaceId ?? null,
+    });
   },
-  async getGitLog(projectRoot) {
+  async getGitFileDiff(projectRoot, path, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<GitLogResponse>("get_git_log", { projectRoot });
+    return invoke<GitFileDiff>("get_git_file_diff", {
+      projectRoot,
+      path,
+      workspaceId: workspaceId ?? null,
+    });
   },
-  async getGitCommitHistory(projectRoot, options) {
+  async getGitLog(projectRoot, workspaceId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<GitLogResponse>("get_git_log", { projectRoot, workspaceId: workspaceId ?? null });
+  },
+  async getGitCommitHistory(projectRoot, options, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<GitHistoryResponse>("get_git_commit_history", {
       projectRoot,
@@ -636,63 +681,68 @@ const tauriRuntime: RuntimeBridge = {
       offset: options?.offset ?? 0,
       limit: options?.limit ?? 100,
       snapshotId: options?.snapshotId ?? null,
+      workspaceId: workspaceId ?? null,
     });
   },
-  async getGitPushPreview(projectRoot, options) {
+  async getGitPushPreview(projectRoot, options, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<GitPushPreviewResponse>("get_git_push_preview", {
       projectRoot,
       remote: options.remote,
       branch: options.branch,
       limit: options.limit ?? 120,
+      workspaceId: workspaceId ?? null,
     });
   },
-  async getGitCommitDetails(projectRoot, commitHash, maxDiffLines) {
+  async getGitCommitDetails(projectRoot, commitHash, maxDiffLines, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<GitCommitDetails>("get_git_commit_details", {
       projectRoot,
       commitHash,
       maxDiffLines: maxDiffLines ?? 10000,
+      workspaceId: workspaceId ?? null,
     });
   },
-  async listGitBranches(projectRoot) {
+  async listGitBranches(projectRoot, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<GitBranchListResponse>("list_git_branches", { projectRoot });
+    return invoke<GitBranchListResponse>("list_git_branches", { projectRoot, workspaceId: workspaceId ?? null });
   },
-  async checkoutGitBranch(projectRoot, name) {
+  async checkoutGitBranch(projectRoot, name, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("checkout_git_branch", { projectRoot, name });
+    await invoke("checkout_git_branch", { projectRoot, name, workspaceId: workspaceId ?? null });
   },
-  async createGitBranch(projectRoot, name, sourceRef, checkoutAfterCreate) {
+  async createGitBranch(projectRoot, name, sourceRef, checkoutAfterCreate, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("create_git_branch", {
       projectRoot,
       name,
       sourceRef: sourceRef ?? null,
       checkoutAfterCreate: checkoutAfterCreate ?? false,
+      workspaceId: workspaceId ?? null,
     });
   },
-  async renameGitBranch(projectRoot, oldName, newName) {
+  async renameGitBranch(projectRoot, oldName, newName, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("rename_git_branch", { projectRoot, oldName, newName });
+    await invoke("rename_git_branch", { projectRoot, oldName, newName, workspaceId: workspaceId ?? null });
   },
-  async deleteGitBranch(projectRoot, name, force) {
+  async deleteGitBranch(projectRoot, name, force, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("delete_git_branch", { projectRoot, name, force: force ?? false });
+    await invoke("delete_git_branch", { projectRoot, name, force: force ?? false, workspaceId: workspaceId ?? null });
   },
-  async mergeGitBranch(projectRoot, sourceBranch) {
+  async mergeGitBranch(projectRoot, sourceBranch, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("merge_git_branch", { projectRoot, sourceBranch });
+    await invoke("merge_git_branch", { projectRoot, sourceBranch, workspaceId: workspaceId ?? null });
   },
-  async fetchGit(projectRoot, remote) {
+  async fetchGit(projectRoot, remote, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("fetch_git", { projectRoot, remote: remote ?? null });
+    await invoke("fetch_git", { projectRoot, remote: remote ?? null, workspaceId: workspaceId ?? null });
   },
   async pullGit(
     projectRoot: string,
     remote?: string | null,
     targetBranch?: string | null,
     pullOption?: string | null,
+    workspaceId?: string | null,
   ) {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("pull_git", {
@@ -700,18 +750,25 @@ const tauriRuntime: RuntimeBridge = {
       remote: remote ?? null,
       targetBranch: targetBranch ?? null,
       pullOption: pullOption ?? null,
+      workspaceId: workspaceId ?? null,
     });
   },
-  async syncGit(projectRoot, remote, targetBranch) {
+  async syncGit(projectRoot, remote, targetBranch, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("sync_git", { projectRoot, remote: remote ?? null, targetBranch: targetBranch ?? null });
+    await invoke("sync_git", {
+      projectRoot,
+      remote: remote ?? null,
+      targetBranch: targetBranch ?? null,
+      workspaceId: workspaceId ?? null,
+    });
   },
-  async pushGit(projectRoot, remote, targetBranch, options) {
+  async pushGit(projectRoot, remote, targetBranch, options, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("push_git", {
       projectRoot,
       remote: remote ?? null,
       targetBranch: targetBranch ?? null,
+      workspaceId: workspaceId ?? null,
       pushTags: options?.pushTags ?? false,
       noVerify: options?.noVerify ?? false,
       forceWithLease: options?.forceWithLease ?? false,
@@ -721,31 +778,32 @@ const tauriRuntime: RuntimeBridge = {
       cc: options?.cc ?? null,
     });
   },
-  async getGitHubIssues(projectRoot) {
+  async getGitHubIssues(projectRoot, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<GitHubIssuesResponse>("get_github_issues", { projectRoot });
+    return invoke<GitHubIssuesResponse>("get_github_issues", { projectRoot, workspaceId: workspaceId ?? null });
   },
-  async getGitHubPullRequests(projectRoot) {
+  async getGitHubPullRequests(projectRoot, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<GitHubPullRequestsResponse>("get_github_pull_requests", { projectRoot });
+    return invoke<GitHubPullRequestsResponse>("get_github_pull_requests", { projectRoot, workspaceId: workspaceId ?? null });
   },
-  async stageGitFile(projectRoot, path) {
+  async stageGitFile(projectRoot, path, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("stage_git_file", { projectRoot, path });
+    await invoke("stage_git_file", { projectRoot, path, workspaceId: workspaceId ?? null });
   },
-  async unstageGitFile(projectRoot, path) {
+  async unstageGitFile(projectRoot, path, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("unstage_git_file", { projectRoot, path });
+    await invoke("unstage_git_file", { projectRoot, path, workspaceId: workspaceId ?? null });
   },
-  async discardGitFile(projectRoot, path) {
+  async discardGitFile(projectRoot, path, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("discard_git_file", { projectRoot, path });
+    await invoke("discard_git_file", { projectRoot, path, workspaceId: workspaceId ?? null });
   },
-  async commitGitChanges(projectRoot, message, options) {
+  async commitGitChanges(projectRoot, message, options, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<{ commitSha: string | null }>("commit_git_changes", {
       projectRoot,
       message,
+      workspaceId: workspaceId ?? null,
       stageAll: options?.stageAll ?? false,
     });
   },
@@ -758,9 +816,13 @@ const tauriRuntime: RuntimeBridge = {
       args: options?.args ?? [],
     });
   },
-  async openWorkspaceFile(projectRoot, path) {
+  async openWorkspaceFile(projectRoot, path, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    const result = await invoke<{ opened: boolean }>("open_workspace_file", { projectRoot, path });
+    const result = await invoke<{ opened: boolean }>("open_workspace_file", {
+      projectRoot,
+      path,
+      workspaceId: workspaceId ?? null,
+    });
     return result.opened;
   },
   async onStream(listener) {
@@ -778,11 +840,15 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<PickedChatAttachment[]>("pick_chat_attachments");
   },
-  async searchWorkspaceFiles(projectRoot, query) {
+  async searchWorkspaceFiles(projectRoot, query, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<FileMentionCandidate[]>("search_workspace_files", { projectRoot, query });
+    return invoke<FileMentionCandidate[]>("search_workspace_files", {
+      projectRoot,
+      query,
+      workspaceId: workspaceId ?? null,
+    });
   },
-  async searchWorkspaceText(projectRoot, options) {
+  async searchWorkspaceText(projectRoot, options, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<WorkspaceTextSearchResponse>("search_workspace_text", {
       projectRoot,
@@ -792,31 +858,59 @@ const tauriRuntime: RuntimeBridge = {
       isRegex: options.isRegex,
       includePattern: options.includePattern ?? null,
       excludePattern: options.excludePattern ?? null,
+      workspaceId: workspaceId ?? null,
     });
   },
-  async createWorkspaceFile(projectRoot, relativePath) {
+  async createWorkspaceFile(projectRoot, relativePath, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("create_workspace_file", { projectRoot, relativePath });
+    await invoke("create_workspace_file", {
+      projectRoot,
+      relativePath,
+      workspaceId: workspaceId ?? null,
+    });
   },
-  async createWorkspaceDirectory(projectRoot, relativePath) {
+  async createWorkspaceDirectory(projectRoot, relativePath, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("create_workspace_directory", { projectRoot, relativePath });
+    await invoke("create_workspace_directory", {
+      projectRoot,
+      relativePath,
+      workspaceId: workspaceId ?? null,
+    });
   },
-  async trashWorkspaceItem(projectRoot, relativePath) {
+  async trashWorkspaceItem(projectRoot, relativePath, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("trash_workspace_item", { projectRoot, relativePath });
+    await invoke("trash_workspace_item", {
+      projectRoot,
+      relativePath,
+      workspaceId: workspaceId ?? null,
+    });
   },
-  async listWorkspaceEntries(projectRoot, relativePath) {
+  async listWorkspaceEntries(projectRoot, relativePath, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<WorkspaceTreeEntry[]>("list_workspace_entries", { projectRoot, relativePath });
+    return invoke<WorkspaceTreeEntry[]>("list_workspace_entries", {
+      projectRoot,
+      relativePath,
+      workspaceId: workspaceId ?? null,
+    });
   },
-  async getCliSkills(cliId, projectRoot) {
+  async getWorkspaceFileIndex(projectRoot, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<CliSkillItem[]>("get_cli_skills", { cliId, projectRoot });
+    return invoke<WorkspaceFileIndexResponse>("get_workspace_file_index", {
+      projectRoot,
+      workspaceId: workspaceId ?? null,
+    });
+  },
+  async getCliSkills(cliId, projectRoot, workspaceId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<CliSkillItem[]>("get_cli_skills", { cliId, projectRoot, workspaceId: workspaceId ?? null });
   },
   async detectEngines() {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<SettingsEngineStatus[]>("detect_engines");
+  },
+  async testSshConnection(connection) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<SshConnectionTestResult>("test_ssh_connection", { connection });
   },
   async getClaudeSettingsPath() {
     const { invoke } = await import("@tauri-apps/api/core");

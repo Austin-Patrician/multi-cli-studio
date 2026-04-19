@@ -138,6 +138,100 @@ const PUSH_TARGET_MENU_VIEWPORT_PADDING = 16;
 const PUSH_TARGET_MENU_MIN_HEIGHT = 148;
 const PUSH_TARGET_MENU_MAX_HEIGHT = 320;
 const PUSH_TARGET_MENU_ESTIMATED_ROW_HEIGHT = 31;
+const REMOTE_GIT_BRANCH_CACHE_TTL_MS = 30_000;
+const REMOTE_GIT_HISTORY_CACHE_TTL_MS = 20_000;
+const remoteBranchCacheByWorkspace = new Map<
+  string,
+  {
+    data: GitBranchListResponse;
+    refreshedAt: number;
+  }
+>();
+const remoteHistoryCacheByKey = new Map<
+  string,
+  {
+    data: GitHistoryResponse;
+    refreshedAt: number;
+  }
+>();
+const remoteCommitDetailsCacheByKey = new Map<string, GitCommitDetails>();
+const remoteCommitDetailsInflightByKey = new Map<string, Promise<GitCommitDetails>>();
+
+function isGitCacheFresh(refreshedAt: number, ttlMs: number) {
+  return Date.now() - refreshedAt < ttlMs;
+}
+
+function buildRemoteGitHistoryCacheKey(
+  workspaceScopeKey: string,
+  branch: string | null,
+  query: string,
+  limit: number,
+  offset: number
+) {
+  return [workspaceScopeKey, branch ?? "", query.trim().toLowerCase(), String(limit), String(offset)].join("::");
+}
+
+function buildRemoteGitCommitDetailsCacheKey(
+  workspaceScopeKey: string,
+  commitSha: string,
+  maxDiffLines: number
+) {
+  return [workspaceScopeKey, commitSha, String(maxDiffLines)].join("::");
+}
+
+function getCachedRemoteGitCommitDetails(
+  workspaceScopeKey: string | null,
+  commitSha: string,
+  maxDiffLines: number | undefined,
+  isRemoteWorkspace: boolean
+) {
+  if (!isRemoteWorkspace || !workspaceScopeKey) {
+    return null;
+  }
+  return (
+    remoteCommitDetailsCacheByKey.get(
+      buildRemoteGitCommitDetailsCacheKey(workspaceScopeKey, commitSha, maxDiffLines ?? 10000)
+    ) ?? null
+  );
+}
+
+async function getGitCommitDetailsWithRemoteCache(
+  projectRoot: string,
+  commitSha: string,
+  maxDiffLines: number | undefined,
+  workspaceId: string | null,
+  workspaceScopeKey: string | null,
+  isRemoteWorkspace: boolean
+) {
+  const normalizedMaxDiffLines = maxDiffLines ?? 10000;
+  if (!isRemoteWorkspace || !workspaceScopeKey) {
+    return bridge.getGitCommitDetails(projectRoot, commitSha, normalizedMaxDiffLines, workspaceId);
+  }
+
+  const cacheKey = buildRemoteGitCommitDetailsCacheKey(workspaceScopeKey, commitSha, normalizedMaxDiffLines);
+  const cached = remoteCommitDetailsCacheByKey.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const inflight = remoteCommitDetailsInflightByKey.get(cacheKey);
+  if (inflight) {
+    return inflight;
+  }
+
+  const request = bridge
+    .getGitCommitDetails(projectRoot, commitSha, normalizedMaxDiffLines, workspaceId)
+    .then((details) => {
+      remoteCommitDetailsCacheByKey.set(cacheKey, details);
+      return details;
+    })
+    .finally(() => {
+      remoteCommitDetailsInflightByKey.delete(cacheKey);
+    });
+  remoteCommitDetailsInflightByKey.set(cacheKey, request);
+  return request;
+}
+
 const PULL_DIALOG_OPTIONS: Array<{
   id: PullDialogOption;
   label: string;
@@ -1454,6 +1548,9 @@ export function DesktopGitSection({
   onSelectWorkspace?: (workspaceId: string) => void;
 }) {
   const projectRoot = activeWorkspace?.rootPath ?? null;
+  const workspaceId = activeWorkspace?.id ?? null;
+  const workspaceScopeKey = projectRoot ? `${workspaceId ?? "local"}:${projectRoot}` : null;
+  const isRemoteWorkspace = activeWorkspace?.locationKind === "ssh";
   const repositoryRootName = activeWorkspace ? splitPath(activeWorkspace.rootPath).at(-1) ?? activeWorkspace.name : "";
 
   const [changeView, setChangeView] = useState<ChangeViewMode>("flat");
@@ -1462,7 +1559,7 @@ export function DesktopGitSection({
   const [gitPanel, setGitPanel] = useState<GitPanelData | null>(null);
   const [branches, setBranches] = useState<GitBranchListResponse | null>(null);
   const [history, setHistory] = useState<GitHistoryResponse | null>(null);
-  const [historyProjectRoot, setHistoryProjectRoot] = useState<string | null>(null);
+  const [historyWorkspaceScopeKey, setHistoryWorkspaceScopeKey] = useState<string | null>(null);
   const [details, setDetails] = useState<GitCommitDetails | null>(null);
   const [panelLoading, setPanelLoading] = useState(false);
   const [branchesLoading, setBranchesLoading] = useState(false);
@@ -1761,7 +1858,8 @@ export function DesktopGitSection({
     setPanelLoading(true);
     setPanelError(null);
     try {
-      setGitPanel(await bridge.getGitPanel(projectRoot));
+      const overview = await bridge.getGitOverview(projectRoot, workspaceId);
+      setGitPanel(overview.panel);
     } catch (error) {
       setPanelError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1769,12 +1867,29 @@ export function DesktopGitSection({
     }
   }
 
-  async function refreshBranches() {
-    if (!projectRoot) return;
+  async function refreshBranches(options?: { force?: boolean }) {
+    if (!projectRoot || !workspaceId) return;
+    const force = Boolean(options?.force);
+    const cached = isRemoteWorkspace ? remoteBranchCacheByWorkspace.get(workspaceId) ?? null : null;
+    if (cached && !force && isGitCacheFresh(cached.refreshedAt, REMOTE_GIT_BRANCH_CACHE_TTL_MS)) {
+      setBranchesError(null);
+      setBranchesLoading(false);
+      setBranches(cached.data);
+      setSelectedBranch(
+        cached.data.currentBranch ?? cached.data.localBranches[0]?.name ?? cached.data.remoteBranches[0]?.name ?? null
+      );
+      return;
+    }
     setBranchesLoading(true);
     setBranchesError(null);
     try {
-      const next = await bridge.listGitBranches(projectRoot);
+      const next = await bridge.listGitBranches(projectRoot, workspaceId);
+      if (isRemoteWorkspace) {
+        remoteBranchCacheByWorkspace.set(workspaceId, {
+          data: next,
+          refreshedAt: Date.now(),
+        });
+      }
       setBranches(next);
       setSelectedBranch(next.currentBranch ?? next.localBranches[0]?.name ?? next.remoteBranches[0]?.name ?? null);
     } catch (error) {
@@ -1784,19 +1899,51 @@ export function DesktopGitSection({
     }
   }
 
-  async function loadHistory(reset = true, offset = 0) {
-    if (!projectRoot) return;
+  async function loadHistory(reset = true, offset = 0, options?: { force?: boolean }) {
+    if (!projectRoot || !workspaceScopeKey) return;
+    const force = Boolean(options?.force);
+    const historyCacheKey = buildRemoteGitHistoryCacheKey(
+      workspaceScopeKey,
+      selectedBranch,
+      commitQuery,
+      historyLimit,
+      offset
+    );
+    const cached = isRemoteWorkspace ? remoteHistoryCacheByKey.get(historyCacheKey) ?? null : null;
+    if (cached && !force && isGitCacheFresh(cached.refreshedAt, REMOTE_GIT_HISTORY_CACHE_TTL_MS)) {
+      setHistoryError(null);
+      setHistoryLoading(false);
+      setHistory((current) =>
+        reset || !current ? cached.data : { ...cached.data, commits: [...current.commits, ...cached.data.commits] }
+      );
+      setHistoryWorkspaceScopeKey(workspaceScopeKey);
+      setHistoryOffset(offset);
+      if (reset) {
+        setSelectedCommitSha(cached.data.commits[0]?.sha ?? null);
+      }
+      return;
+    }
     setHistoryLoading(true);
     setHistoryError(null);
     try {
-      const next = await bridge.getGitCommitHistory(projectRoot, {
-        branch: selectedBranch,
-        query: commitQuery.trim() || null,
-        offset,
-        limit: historyLimit,
-      });
+      const next = await bridge.getGitCommitHistory(
+        projectRoot,
+        {
+          branch: selectedBranch,
+          query: commitQuery.trim() || null,
+          offset,
+          limit: historyLimit,
+        },
+        workspaceId
+      );
+      if (isRemoteWorkspace) {
+        remoteHistoryCacheByKey.set(historyCacheKey, {
+          data: next,
+          refreshedAt: Date.now(),
+        });
+      }
       setHistory((current) => (reset || !current ? next : { ...next, commits: [...current.commits, ...next.commits] }));
-      setHistoryProjectRoot(projectRoot);
+      setHistoryWorkspaceScopeKey(workspaceScopeKey);
       setHistoryOffset(offset);
       if (reset) {
         setSelectedCommitSha(next.commits[0]?.sha ?? null);
@@ -1814,10 +1961,24 @@ export function DesktopGitSection({
       return;
     }
     const requestSeq = ++detailRequestSeqRef.current;
+    const cached = getCachedRemoteGitCommitDetails(workspaceScopeKey, commitSha, undefined, isRemoteWorkspace);
+    if (cached) {
+      setDetails(cached);
+      setDetailsError(null);
+      setDetailsLoading(false);
+      return;
+    }
     setDetailsLoading(true);
     setDetailsError(null);
     try {
-      const next = await bridge.getGitCommitDetails(projectRoot, commitSha);
+      const next = await getGitCommitDetailsWithRemoteCache(
+        projectRoot,
+        commitSha,
+        undefined,
+        workspaceId,
+        workspaceScopeKey,
+        isRemoteWorkspace
+      );
       if (detailRequestSeqRef.current !== requestSeq) {
         return;
       }
@@ -1843,11 +2004,15 @@ export function DesktopGitSection({
     setPushPreviewLoading(true);
     setPushPreviewError(null);
     try {
-      const response = await bridge.getGitPushPreview(projectRoot, {
-        remote: remoteName,
-        branch: targetBranchName,
-        limit: 120,
-      });
+      const response = await bridge.getGitPushPreview(
+        projectRoot,
+        {
+          remote: remoteName,
+          branch: targetBranchName,
+          limit: 120,
+        },
+        workspaceId
+      );
       if (pushPreviewLoadSeqRef.current !== requestSeq) {
         return;
       }
@@ -1889,13 +2054,13 @@ export function DesktopGitSection({
     }
   }
 
-  async function refreshAll() {
-    await Promise.all([refreshChanges(), refreshBranches()]);
+  async function refreshAll(options?: { force?: boolean }) {
+    await Promise.all([refreshChanges(), refreshBranches(options)]);
   }
 
-  async function refreshWorkbenchData() {
-    await Promise.all([refreshChanges(), refreshBranches()]);
-    await loadHistory(true, 0);
+  async function refreshWorkbenchData(options?: { force?: boolean }) {
+    await Promise.all([refreshChanges(), refreshBranches(options)]);
+    await loadHistory(true, 0, options);
   }
 
   async function refreshWorkbenchFromToolbar() {
@@ -1903,7 +2068,7 @@ export function DesktopGitSection({
     setRefreshLoading(true);
     setOperationError(null);
     try {
-      await refreshWorkbenchData();
+      await refreshWorkbenchData({ force: true });
     } finally {
       setRefreshLoading(false);
     }
@@ -2053,14 +2218,14 @@ export function DesktopGitSection({
   }
 
   useLayoutEffect(() => {
-    if (!projectRoot) return;
+    if (!projectRoot || !workspaceScopeKey) return;
     detailRequestSeqRef.current += 1;
     pushPreviewLoadSeqRef.current += 1;
     pushPreviewDetailsLoadSeqRef.current += 1;
     setGitPanel(null);
     setBranches(null);
     setHistory(null);
-    setHistoryProjectRoot(null);
+    setHistoryWorkspaceScopeKey(null);
     setDetails(null);
     setPanelError(null);
     setBranchesError(null);
@@ -2100,7 +2265,7 @@ export function DesktopGitSection({
     setSyncPreviewTargetFound(true);
     setActiveToolbarDialog(null);
     void refreshAll();
-  }, [projectRoot]);
+  }, [projectRoot, workspaceScopeKey]);
 
   useEffect(() => {
     setExpandedLocalScopes((current) => {
@@ -2257,18 +2422,18 @@ export function DesktopGitSection({
   }, [pushTargetBranchActiveScopeTab, pushTargetBranchMenuOpen]);
 
   useEffect(() => {
-    if (!projectRoot || !selectedBranch) return;
+    if (!projectRoot || !selectedBranch || !workspaceScopeKey) return;
     const id = window.setTimeout(() => {
       void loadHistory(true, 0);
-    }, 180);
+    }, isRemoteWorkspace ? 360 : 180);
     return () => window.clearTimeout(id);
-  }, [projectRoot, selectedBranch, commitQuery]);
+  }, [commitQuery, isRemoteWorkspace, projectRoot, selectedBranch, workspaceScopeKey]);
 
   useEffect(() => {
     if (!pushDialogOpen) {
       return;
     }
-    if (!projectRoot || !pushRemoteTrimmed || !pushTargetBranchTrimmed) {
+    if (!projectRoot || !workspaceScopeKey || !pushRemoteTrimmed || !pushTargetBranchTrimmed) {
       pushPreviewLoadSeqRef.current += 1;
       pushPreviewDetailsLoadSeqRef.current += 1;
       setPushPreviewLoading(false);
@@ -2286,10 +2451,10 @@ export function DesktopGitSection({
       void loadPushPreview(pushRemoteTrimmed, pushTargetBranchTrimmed);
     }, 180);
     return () => window.clearTimeout(id);
-  }, [projectRoot, pushDialogOpen, pushRemoteTrimmed, pushTargetBranchTrimmed]);
+  }, [projectRoot, pushDialogOpen, pushRemoteTrimmed, pushTargetBranchTrimmed, workspaceScopeKey]);
 
   useEffect(() => {
-    if (!pushDialogOpen || !projectRoot || !pushPreviewSelectedSha) {
+    if (!pushDialogOpen || !projectRoot || !workspaceScopeKey || !pushPreviewSelectedSha) {
       pushPreviewDetailsLoadSeqRef.current += 1;
       setPushPreviewDetails(null);
       setPushPreviewDetailsLoading(false);
@@ -2297,10 +2462,28 @@ export function DesktopGitSection({
       return;
     }
     const requestSeq = ++pushPreviewDetailsLoadSeqRef.current;
+    const cached = getCachedRemoteGitCommitDetails(
+      workspaceScopeKey,
+      pushPreviewSelectedSha,
+      undefined,
+      isRemoteWorkspace
+    );
+    if (cached) {
+      setPushPreviewDetails(cached);
+      setPushPreviewDetailsError(null);
+      setPushPreviewDetailsLoading(false);
+      return;
+    }
     setPushPreviewDetailsLoading(true);
     setPushPreviewDetailsError(null);
-    void bridge
-      .getGitCommitDetails(projectRoot, pushPreviewSelectedSha)
+    void getGitCommitDetailsWithRemoteCache(
+      projectRoot,
+      pushPreviewSelectedSha,
+      undefined,
+      workspaceId,
+      workspaceScopeKey,
+      isRemoteWorkspace
+    )
       .then((next) => {
         if (pushPreviewDetailsLoadSeqRef.current !== requestSeq) {
           return;
@@ -2319,7 +2502,7 @@ export function DesktopGitSection({
           setPushPreviewDetailsLoading(false);
         }
       });
-  }, [projectRoot, pushDialogOpen, pushPreviewSelectedSha]);
+  }, [isRemoteWorkspace, projectRoot, pushDialogOpen, pushPreviewSelectedSha, workspaceId, workspaceScopeKey]);
 
   useEffect(() => {
     if (!syncDialogOpen) {
@@ -2340,11 +2523,15 @@ export function DesktopGitSection({
       setSyncPreviewLoading(true);
       setSyncPreviewError(null);
       void bridge
-        .getGitPushPreview(projectRoot, {
-          remote: normalizedSyncRemote,
-          branch: normalizedSyncTargetBranch,
-          limit: 5,
-        })
+          .getGitPushPreview(
+            projectRoot,
+            {
+              remote: normalizedSyncRemote,
+              branch: normalizedSyncTargetBranch,
+              limit: 5,
+            },
+            workspaceId
+          )
         .then((response) => {
           if (syncPreviewLoadSeqRef.current !== requestSeq) {
             return;
@@ -2369,11 +2556,11 @@ export function DesktopGitSection({
     return () => {
       window.clearTimeout(id);
     };
-  }, [normalizedSyncRemote, normalizedSyncTargetBranch, projectRoot, syncDialogOpen]);
+  }, [normalizedSyncRemote, normalizedSyncTargetBranch, projectRoot, syncDialogOpen, workspaceScopeKey]);
 
   useEffect(() => {
-    if (!projectRoot || !selectedCommitSha) return;
-    if (historyProjectRoot !== projectRoot) {
+    if (!projectRoot || !selectedCommitSha || !workspaceScopeKey) return;
+    if (historyWorkspaceScopeKey !== workspaceScopeKey) {
       setDetails(null);
       setDetailsError(null);
       return;
@@ -2385,7 +2572,7 @@ export function DesktopGitSection({
       return;
     }
     void loadCommitDetails(selectedCommitSha);
-  }, [projectRoot, selectedCommitSha, history?.snapshotId, historyProjectRoot]);
+  }, [projectRoot, selectedCommitSha, history?.snapshotId, historyWorkspaceScopeKey, workspaceScopeKey]);
 
   useEffect(() => {
     setDetailsCollapsedFolders(new Set());
@@ -2419,7 +2606,7 @@ export function DesktopGitSection({
     setSelectedWorktreeFileKey(buildFileKey(file.path, file.previousPath));
     setDiffModal({ source: "worktree", file, diff: null, loading: true, error: null });
     try {
-      const diff = await bridge.getGitFileDiff(projectRoot, file.path);
+      const diff = await bridge.getGitFileDiff(projectRoot, file.path, workspaceId);
       setDiffModal({ source: "worktree", file, diff, loading: false, error: null });
     } catch (error) {
       setDiffModal({
@@ -2619,9 +2806,9 @@ export function DesktopGitSection({
       setRenameDialogOpen(false);
       setDeleteDialogOpen(false);
       setMergeDialogOpen(false);
-      await refreshBranches();
+      await refreshBranches({ force: true });
       await refreshChanges();
-      await loadHistory(true, 0);
+      await loadHistory(true, 0, { force: true });
     } catch (error) {
       setOperationError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2635,7 +2822,7 @@ export function DesktopGitSection({
     setPushError(null);
     setPanelError(null);
     try {
-      await bridge.stageGitFile(projectRoot, path);
+      await bridge.stageGitFile(projectRoot, path, workspaceId);
       await refreshChanges();
     } catch (error) {
       setPanelError(error instanceof Error ? error.message : String(error));
@@ -2648,7 +2835,7 @@ export function DesktopGitSection({
     setPushError(null);
     setPanelError(null);
     try {
-      await bridge.unstageGitFile(projectRoot, path);
+      await bridge.unstageGitFile(projectRoot, path, workspaceId);
       await refreshChanges();
     } catch (error) {
       setPanelError(error instanceof Error ? error.message : String(error));
@@ -2661,7 +2848,7 @@ export function DesktopGitSection({
     setPushError(null);
     setPanelError(null);
     try {
-      await bridge.discardGitFile(projectRoot, path);
+      await bridge.discardGitFile(projectRoot, path, workspaceId);
       if (selectedWorktreeFileKey?.endsWith(`::${path}`)) {
         setSelectedWorktreeFileKey(null);
       }
@@ -2678,7 +2865,7 @@ export function DesktopGitSection({
     setPanelError(null);
     try {
       for (const file of unstagedFiles) {
-        await bridge.stageGitFile(projectRoot, file.path);
+        await bridge.stageGitFile(projectRoot, file.path, workspaceId);
       }
       await refreshChanges();
     } catch (error) {
@@ -2693,7 +2880,7 @@ export function DesktopGitSection({
     setPanelError(null);
     try {
       for (const file of stagedFiles) {
-        await bridge.unstageGitFile(projectRoot, file.path);
+        await bridge.unstageGitFile(projectRoot, file.path, workspaceId);
       }
       await refreshChanges();
     } catch (error) {
@@ -2708,7 +2895,7 @@ export function DesktopGitSection({
     setPanelError(null);
     try {
       for (const file of unstagedFiles) {
-        await bridge.discardGitFile(projectRoot, file.path);
+        await bridge.discardGitFile(projectRoot, file.path, workspaceId);
       }
       setSelectedWorktreeFileKey(null);
       await refreshChanges();
@@ -2724,10 +2911,10 @@ export function DesktopGitSection({
     setCommitLoading(true);
     setCommitError(null);
     try {
-      await bridge.commitGitChanges(projectRoot, trimmed, { stageAll: stagedFiles.length === 0 && unstagedFiles.length > 0 });
+      await bridge.commitGitChanges(projectRoot, trimmed, { stageAll: stagedFiles.length === 0 && unstagedFiles.length > 0 }, workspaceId);
       setCommitMessage("");
       setSelectedWorktreeFileKey(null);
-      await refreshWorkbenchData();
+      await refreshWorkbenchData({ force: true });
     } catch (error) {
       setCommitError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2751,16 +2938,22 @@ export function DesktopGitSection({
     setPushError(null);
     setOperationError(null);
     try {
-      await bridge.pushGit(projectRoot, params?.remote ?? null, params?.targetBranch ?? null, {
-        pushTags: params?.pushTags ?? false,
-        noVerify: params?.noVerify ?? false,
-        forceWithLease: params?.forceWithLease ?? false,
-        pushToGerrit: params?.pushToGerrit ?? false,
-        topic: params?.topic ?? null,
-        reviewers: params?.reviewers ?? null,
-        cc: params?.cc ?? null,
-      });
-      await refreshWorkbenchData();
+      await bridge.pushGit(
+        projectRoot,
+        params?.remote ?? null,
+        params?.targetBranch ?? null,
+        {
+          pushTags: params?.pushTags ?? false,
+          noVerify: params?.noVerify ?? false,
+          forceWithLease: params?.forceWithLease ?? false,
+          pushToGerrit: params?.pushToGerrit ?? false,
+          topic: params?.topic ?? null,
+          reviewers: params?.reviewers ?? null,
+          cc: params?.cc ?? null,
+        },
+        workspaceId
+      );
+      await refreshWorkbenchData({ force: true });
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2784,8 +2977,9 @@ export function DesktopGitSection({
         params?.remote ?? null,
         params?.targetBranch ?? null,
         params?.pullOption ?? null,
+        workspaceId
       );
-      await refreshWorkbenchData();
+      await refreshWorkbenchData({ force: true });
       return true;
     } catch (error) {
       setOperationError(error instanceof Error ? error.message : String(error));
@@ -2800,8 +2994,8 @@ export function DesktopGitSection({
     setFetchLoading(true);
     setOperationError(null);
     try {
-      await bridge.fetchGit(projectRoot, params?.remote ?? null);
-      await refreshWorkbenchData();
+      await bridge.fetchGit(projectRoot, params?.remote ?? null, workspaceId);
+      await refreshWorkbenchData({ force: true });
       return true;
     } catch (error) {
       setOperationError(error instanceof Error ? error.message : String(error));
@@ -2818,8 +3012,8 @@ export function DesktopGitSection({
     setPushError(null);
     setCommitError(null);
     try {
-      await bridge.syncGit(projectRoot, params?.remote ?? null, params?.targetBranch ?? null);
-      await refreshWorkbenchData();
+      await bridge.syncGit(projectRoot, params?.remote ?? null, params?.targetBranch ?? null, workspaceId);
+      await refreshWorkbenchData({ force: true });
       return true;
     } catch (error) {
       setOperationError(error instanceof Error ? error.message : String(error));
@@ -4340,7 +4534,7 @@ export function DesktopGitSection({
                 disabled={operationBusy || !branchNameDraft.trim()}
                 onClick={() =>
                   void runBranchOperation(() =>
-                    bridge.createGitBranch(projectRoot, branchNameDraft.trim(), sourceRefDraft.trim() || null, checkoutAfterCreate)
+                    bridge.createGitBranch(projectRoot, branchNameDraft.trim(), sourceRefDraft.trim() || null, checkoutAfterCreate, workspaceId)
                   )
                 }
               >
@@ -4371,7 +4565,7 @@ export function DesktopGitSection({
                 disabled={operationBusy || !branchNameDraft.trim()}
                 onClick={() =>
                   void runBranchOperation(() =>
-                    bridge.renameGitBranch(projectRoot, selectedBranchItem.name, branchNameDraft.trim())
+                    bridge.renameGitBranch(projectRoot, selectedBranchItem.name, branchNameDraft.trim(), workspaceId)
                   )
                 }
               >
@@ -4397,7 +4591,7 @@ export function DesktopGitSection({
                 disabled={operationBusy}
                 onClick={() =>
                   void runBranchOperation(() =>
-                    bridge.deleteGitBranch(projectRoot, selectedBranchItem.name, false)
+                    bridge.deleteGitBranch(projectRoot, selectedBranchItem.name, false, workspaceId)
                   )
                 }
               >
@@ -4422,7 +4616,7 @@ export function DesktopGitSection({
                 className="dcc-action-button"
                 disabled={operationBusy}
                 onClick={() =>
-                  void runBranchOperation(() => bridge.mergeGitBranch(projectRoot, selectedBranchItem.name))
+                  void runBranchOperation(() => bridge.mergeGitBranch(projectRoot, selectedBranchItem.name, workspaceId))
                 }
               >
                 {operationBusy ? "合并中…" : "合并"}

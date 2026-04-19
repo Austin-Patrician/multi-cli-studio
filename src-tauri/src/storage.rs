@@ -30,6 +30,14 @@ pub struct PersistedWorkspaceRef {
     pub id: String,
     pub name: String,
     pub root_path: String,
+    #[serde(default = "default_workspace_location_kind")]
+    pub location_kind: String,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub remote_path: Option<String>,
+    #[serde(default)]
+    pub location_label: Option<String>,
     pub branch: String,
     pub current_writer: String,
     pub active_agent: String,
@@ -37,6 +45,10 @@ pub struct PersistedWorkspaceRef {
     pub failing_checks: usize,
     pub handoff_ready: bool,
     pub last_snapshot: Option<String>,
+}
+
+fn default_workspace_location_kind() -> String {
+    "local".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1482,13 +1494,17 @@ impl TerminalStorage {
         for (workspace_order, workspace) in state.workspaces.iter().enumerate() {
             tx.execute(
                 "INSERT INTO workspaces (
-                    id, name, root_path, branch, current_writer, active_agent,
+                    id, name, root_path, location_kind, connection_id, remote_path, location_label, branch, current_writer, active_agent,
                     dirty_files, failing_checks, handoff_ready, last_snapshot, workspace_order
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     workspace.id,
                     workspace.name,
                     workspace.root_path,
+                    workspace.location_kind,
+                    workspace.connection_id,
+                    workspace.remote_path,
+                    workspace.location_label,
                     workspace.branch,
                     workspace.current_writer,
                     workspace.active_agent,
@@ -1563,6 +1579,10 @@ impl TerminalStorage {
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 root_path TEXT NOT NULL,
+                location_kind TEXT NOT NULL DEFAULT 'local',
+                connection_id TEXT,
+                remote_path TEXT,
+                location_label TEXT,
                 branch TEXT NOT NULL,
                 current_writer TEXT NOT NULL,
                 active_agent TEXT NOT NULL,
@@ -1900,6 +1920,15 @@ impl TerminalStorage {
         )?;
         ensure_column_exists(
             conn,
+            "workspaces",
+            "location_kind",
+            "TEXT NOT NULL DEFAULT 'local'",
+        )?;
+        ensure_column_exists(conn, "workspaces", "connection_id", "TEXT")?;
+        ensure_column_exists(conn, "workspaces", "remote_path", "TEXT")?;
+        ensure_column_exists(conn, "workspaces", "location_label", "TEXT")?;
+        ensure_column_exists(
+            conn,
             "chat_messages",
             "attachments_json",
             "TEXT NOT NULL DEFAULT '[]'",
@@ -1984,8 +2013,8 @@ impl TerminalStorage {
     fn load_workspaces(&self, conn: &Connection) -> Result<Vec<PersistedWorkspaceRef>, String> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, root_path, branch, current_writer, active_agent,
-                        dirty_files, failing_checks, handoff_ready, last_snapshot
+                "SELECT id, name, root_path, location_kind, connection_id, remote_path, location_label,
+                        branch, current_writer, active_agent, dirty_files, failing_checks, handoff_ready, last_snapshot
                  FROM workspaces
                  ORDER BY workspace_order ASC",
             )
@@ -1996,18 +2025,57 @@ impl TerminalStorage {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     root_path: row.get(2)?,
-                    branch: row.get(3)?,
-                    current_writer: row.get(4)?,
-                    active_agent: row.get(5)?,
-                    dirty_files: row.get::<_, i64>(6)? as usize,
-                    failing_checks: row.get::<_, i64>(7)? as usize,
-                    handoff_ready: row.get(8)?,
-                    last_snapshot: row.get(9)?,
+                    location_kind: row.get(3)?,
+                    connection_id: row.get(4)?,
+                    remote_path: row.get(5)?,
+                    location_label: row.get(6)?,
+                    branch: row.get(7)?,
+                    current_writer: row.get(8)?,
+                    active_agent: row.get(9)?,
+                    dirty_files: row.get::<_, i64>(10)? as usize,
+                    failing_checks: row.get::<_, i64>(11)? as usize,
+                    handoff_ready: row.get(12)?,
+                    last_snapshot: row.get(13)?,
                 })
             })
             .map_err(|err| err.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|err| err.to_string())
+    }
+
+    pub fn load_workspace_ref_by_id(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<PersistedWorkspaceRef>, String> {
+        let conn = self.open_connection()?;
+        conn.query_row(
+            "SELECT id, name, root_path, location_kind, connection_id, remote_path, location_label,
+                    branch, current_writer, active_agent, dirty_files, failing_checks, handoff_ready, last_snapshot
+             FROM workspaces
+             WHERE id = ?1
+             LIMIT 1",
+            [workspace_id],
+            |row| {
+                Ok(PersistedWorkspaceRef {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    root_path: row.get(2)?,
+                    location_kind: row.get(3)?,
+                    connection_id: row.get(4)?,
+                    remote_path: row.get(5)?,
+                    location_label: row.get(6)?,
+                    branch: row.get(7)?,
+                    current_writer: row.get(8)?,
+                    active_agent: row.get(9)?,
+                    dirty_files: row.get::<_, i64>(10)? as usize,
+                    failing_checks: row.get::<_, i64>(11)? as usize,
+                    handoff_ready: row.get(12)?,
+                    last_snapshot: row.get(13)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|err| err.to_string())
     }
 
     fn load_terminal_tabs(&self, conn: &Connection) -> Result<Vec<PersistedTerminalTab>, String> {

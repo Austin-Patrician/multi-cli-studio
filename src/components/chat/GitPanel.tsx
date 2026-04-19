@@ -17,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { bridge } from "../../lib/bridge";
-import type { GitFileDiff, GitFileStatus, GitLogResponse, WorkspaceRef } from "../../lib/models";
+import type { GitFileDiff, GitFileStatus, GitLogResponse, GitOverviewResponse, WorkspaceRef } from "../../lib/models";
 import { useStore } from "../../lib/store";
 import { FileIcon } from "../FileIcon";
 import { GitTooltipButton } from "../GitTooltipButton";
@@ -41,6 +41,9 @@ type DiffModalState = {
 const TREE_INDENT_STEP = 10;
 const DIFF_STYLE_STORAGE_KEY = "workspace_right_panel_git_diff_style";
 const COMMIT_COLLAPSE_STORAGE_KEY = "workspace_right_panel_git_commit_collapsed";
+const REMOTE_GIT_CACHE_TTL_MS = 30_000;
+const gitLogCacheByWorkspace = new Map<string, GitLogResponse | null>();
+const gitRefreshAtByWorkspace = new Map<string, number>();
 
 function splitPath(path: string) {
   return path.replace(/\\/g, "/").split("/").filter(Boolean);
@@ -710,6 +713,7 @@ function DiffModal({
 }
 
 export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
+  const applyGitPanel = useStore((state) => state.applyGitPanel);
   const refreshGitPanel = useStore((state) => state.refreshGitPanel);
   const setGitCommitMessage = useStore((state) => state.setGitCommitMessage);
   const stageGitFile = useStore((state) => state.stageGitFile);
@@ -742,7 +746,7 @@ export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
   const [pushLoading, setPushLoading] = useState(false);
   const [pushError, setPushError] = useState<string | null>(null);
   const [panelError, setPanelError] = useState<string | null>(null);
-  const [gitLog, setGitLog] = useState<GitLogResponse | null>(null);
+  const [gitLog, setGitLog] = useState<GitLogResponse | null>(() => (workspace?.id ? gitLogCacheByWorkspace.get(workspace.id) ?? null : null));
 
   const stagedFiles = gitPanel?.stagedFiles ?? [];
   const unstagedFiles = gitPanel?.unstagedFiles ?? [];
@@ -752,30 +756,54 @@ export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
   const commitsAhead = gitLog?.ahead ?? 0;
   const canCommit = commitMessage.trim().length > 0 && hasAnyChanges && !commitLoading;
 
+  const applyGitOverview = useCallback((overview: GitOverviewResponse) => {
+    if (!workspaceId) return;
+    applyGitPanel(workspaceId, overview.panel);
+    setGitLog(overview.log);
+    gitLogCacheByWorkspace.set(workspaceId, overview.log);
+    gitRefreshAtByWorkspace.set(workspaceId, Date.now());
+  }, [applyGitPanel, workspaceId]);
+
   const loadGitLog = useCallback(async () => {
     if (!projectRoot) {
       setGitLog(null);
       return;
     }
     try {
-      setGitLog(await bridge.getGitLog(projectRoot));
+      const response = await bridge.getGitLog(projectRoot, workspaceId);
+      setGitLog(response);
+      if (workspaceId) {
+        gitLogCacheByWorkspace.set(workspaceId, response);
+        gitRefreshAtByWorkspace.set(workspaceId, Date.now());
+      }
     } catch {
-      setGitLog(null);
+      if (!workspaceId || !gitLogCacheByWorkspace.has(workspaceId)) {
+        setGitLog(null);
+      }
     }
-  }, [projectRoot]);
+  }, [projectRoot, workspaceId]);
 
-  const refreshAll = useCallback(async () => {
+  const refreshAll = useCallback(async (options?: { silent?: boolean }) => {
     if (!workspaceId) return;
-    setRefreshLoading(true);
+    const silent = Boolean(options?.silent);
+    if (!silent) {
+      setRefreshLoading(true);
+    }
     setPanelError(null);
     try {
-      await Promise.all([refreshGitPanel(workspaceId), loadGitLog()]);
+      if (!projectRoot) {
+        return;
+      }
+      const overview = await bridge.getGitOverview(projectRoot, workspaceId);
+      applyGitOverview(overview);
     } catch (error) {
       setPanelError(error instanceof Error ? error.message : String(error));
     } finally {
-      setRefreshLoading(false);
+      if (!silent) {
+        setRefreshLoading(false);
+      }
     }
-  }, [loadGitLog, refreshGitPanel, workspaceId]);
+  }, [applyGitOverview, projectRoot, workspaceId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -794,8 +822,19 @@ export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
     setDiffModal(null);
     setPushError(null);
     setPanelError(null);
-    void refreshAll();
-  }, [refreshAll, workspaceId]);
+    const cachedGitLog = gitLogCacheByWorkspace.get(workspaceId) ?? null;
+    setGitLog(cachedGitLog);
+    const lastRefreshAt = gitRefreshAtByWorkspace.get(workspaceId) ?? 0;
+    const hasCachedView = Boolean(gitPanel) || cachedGitLog !== null;
+    const cacheFresh =
+      workspace?.locationKind === "ssh" &&
+      hasCachedView &&
+      Date.now() - lastRefreshAt < REMOTE_GIT_CACHE_TTL_MS;
+    if (cacheFresh) {
+      return;
+    }
+    void refreshAll({ silent: hasCachedView });
+  }, [refreshAll, workspace?.locationKind, workspaceId]);
 
   const openWorktreeDiff = useCallback(
     async (file: GitFileStatus) => {
@@ -803,7 +842,7 @@ export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
       setSelectedWorktreeFileKey(buildFileKey(file.path, file.previousPath));
       setDiffModal({ file, diff: null, loading: true, error: null });
       try {
-        const diff = await bridge.getGitFileDiff(projectRoot, file.path);
+        const diff = await bridge.getGitFileDiff(projectRoot, file.path, workspaceId);
         setDiffModal({ file, diff, loading: false, error: null });
       } catch (error) {
         setDiffModal({
@@ -831,16 +870,16 @@ export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
     setPanelError(null);
     setPushError(null);
     await stageGitFile(workspaceId, path);
-    await loadGitLog();
-  }, [loadGitLog, stageGitFile, workspaceId]);
+    gitRefreshAtByWorkspace.set(workspaceId, Date.now());
+  }, [stageGitFile, workspaceId]);
 
   const handleUnstageFile = useCallback(async (path: string) => {
     if (!workspaceId) return;
     setPanelError(null);
     setPushError(null);
     await unstageGitFile(workspaceId, path);
-    await loadGitLog();
-  }, [loadGitLog, unstageGitFile, workspaceId]);
+    gitRefreshAtByWorkspace.set(workspaceId, Date.now());
+  }, [unstageGitFile, workspaceId]);
 
   const handleDiscardFile = useCallback(async (path: string) => {
     if (!workspaceId) return;
@@ -850,8 +889,8 @@ export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
     if (selectedWorktreeFileKey?.endsWith(`::${path}`)) {
       setSelectedWorktreeFileKey(null);
     }
-    await loadGitLog();
-  }, [discardGitFile, loadGitLog, selectedWorktreeFileKey, workspaceId]);
+    gitRefreshAtByWorkspace.set(workspaceId, Date.now());
+  }, [discardGitFile, selectedWorktreeFileKey, workspaceId]);
 
   const stageAllChanges = useCallback(async () => {
     if (!workspaceId || !projectRoot) return;
@@ -859,13 +898,14 @@ export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
     setPushError(null);
     try {
       for (const file of unstagedFiles) {
-        await bridge.stageGitFile(projectRoot, file.path);
+        await bridge.stageGitFile(projectRoot, file.path, workspaceId);
       }
-      await Promise.all([refreshGitPanel(workspaceId), loadGitLog()]);
+      await refreshGitPanel(workspaceId);
+      gitRefreshAtByWorkspace.set(workspaceId, Date.now());
     } catch (error) {
       setPanelError(error instanceof Error ? error.message : String(error));
     }
-  }, [loadGitLog, projectRoot, refreshGitPanel, unstagedFiles, workspaceId]);
+  }, [projectRoot, refreshGitPanel, unstagedFiles, workspaceId]);
 
   const unstageAllChanges = useCallback(async () => {
     if (!workspaceId || !projectRoot) return;
@@ -873,13 +913,14 @@ export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
     setPushError(null);
     try {
       for (const file of stagedFiles) {
-        await bridge.unstageGitFile(projectRoot, file.path);
+        await bridge.unstageGitFile(projectRoot, file.path, workspaceId);
       }
-      await Promise.all([refreshGitPanel(workspaceId), loadGitLog()]);
+      await refreshGitPanel(workspaceId);
+      gitRefreshAtByWorkspace.set(workspaceId, Date.now());
     } catch (error) {
       setPanelError(error instanceof Error ? error.message : String(error));
     }
-  }, [loadGitLog, projectRoot, refreshGitPanel, stagedFiles, workspaceId]);
+  }, [projectRoot, refreshGitPanel, stagedFiles, workspaceId]);
 
   const discardAllChanges = useCallback(async () => {
     if (!workspaceId || !projectRoot) return;
@@ -887,14 +928,15 @@ export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
     setPushError(null);
     try {
       for (const file of unstagedFiles) {
-        await bridge.discardGitFile(projectRoot, file.path);
+        await bridge.discardGitFile(projectRoot, file.path, workspaceId);
       }
       setSelectedWorktreeFileKey(null);
-      await Promise.all([refreshGitPanel(workspaceId), loadGitLog()]);
+      await refreshGitPanel(workspaceId);
+      gitRefreshAtByWorkspace.set(workspaceId, Date.now());
     } catch (error) {
       setPanelError(error instanceof Error ? error.message : String(error));
     }
-  }, [loadGitLog, projectRoot, refreshGitPanel, unstagedFiles, workspaceId]);
+  }, [projectRoot, refreshGitPanel, unstagedFiles, workspaceId]);
 
   const handleCommit = useCallback(async () => {
     if (!workspaceId) return;
@@ -913,7 +955,7 @@ export function GitPanel({ workspace }: { workspace: WorkspaceRef | null }) {
     setPushError(null);
     setPanelError(null);
     try {
-      await bridge.pushGit(projectRoot, null, null);
+      await bridge.pushGit(projectRoot, null, null, undefined, workspaceId);
       await refreshAll();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

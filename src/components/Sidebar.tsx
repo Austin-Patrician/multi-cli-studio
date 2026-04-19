@@ -197,6 +197,7 @@ function SidebarSectionTitle({ label, collapsed }: { label: string; collapsed: b
 function WorkspaceTabItem({
   title,
   subtitle,
+  locationKind,
   active,
   collapsed,
   planMode,
@@ -209,6 +210,7 @@ function WorkspaceTabItem({
 }: {
   title: string;
   subtitle: string;
+  locationKind: "local" | "ssh";
   active: boolean;
   collapsed: boolean;
   planMode: boolean;
@@ -245,6 +247,15 @@ function WorkspaceTabItem({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-[12px] font-semibold">{title}</span>
+            {locationKind === "ssh" ? (
+              <span
+                className={`inline-flex shrink-0 items-center rounded-full px-1.5 py-0.5 text-[9px] font-semibold tracking-[0.08em] ${
+                  active ? "bg-emerald-400/18 text-emerald-100" : "bg-emerald-100 text-emerald-700"
+                }`}
+              >
+                SSH
+              </span>
+            ) : null}
             {planMode ? (
               <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${active ? "bg-white/12 text-white" : "bg-amber-100 text-amber-700"}`}>
                 PLAN
@@ -513,6 +524,7 @@ export function Sidebar() {
                   key={tab.id}
                   title={tab.title}
                   subtitle={workspaceById.get(tab.workspaceId)?.rootPath ?? "Detached workspace"}
+                  locationKind={workspaceById.get(tab.workspaceId)?.locationKind ?? "local"}
                   active={tab.id === activeTerminalTabId}
                   collapsed={collapsed}
                   planMode={tab.planMode}

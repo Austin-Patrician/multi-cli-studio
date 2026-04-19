@@ -55,6 +55,10 @@ import {
   summarizeForContext,
 } from "./messageFormatting";
 import { notifyTerminalCompletion, type TerminalCompletionNotice } from "./desktopNotifications";
+import {
+  loadWorkspaceFileIndex,
+  searchWorkspaceFileIndex,
+} from "./workspaceFileIndex";
 
 const DEFAULT_PROCESS_TIMEOUT_MS = 300000;
 const STREAM_RUNTIME_STALE_GRACE_MS = 10000;
@@ -216,10 +220,15 @@ function createWorkspaceRef(
   rootPath: string,
   partial?: Partial<WorkspaceRef>
 ): WorkspaceRef {
+  const locationKind = partial?.locationKind ?? "local";
   return {
     id: partial?.id ?? createId("workspace"),
     name: partial?.name ?? basename(rootPath),
     rootPath,
+    locationKind,
+    connectionId: partial?.connectionId ?? null,
+    remotePath: partial?.remotePath ?? (locationKind === "ssh" ? rootPath : null),
+    locationLabel: partial?.locationLabel ?? null,
     branch: partial?.branch ?? "workspace",
     currentWriter: partial?.currentWriter ?? "codex",
     activeAgent: partial?.activeAgent ?? "codex",
@@ -958,6 +967,12 @@ interface StoreState {
   hydrateTerminalSession: (tabId: string) => Promise<void>;
 
   openWorkspaceFolder: () => Promise<void>;
+  addRemoteWorkspace: (input: {
+    name?: string;
+    remotePath: string;
+    connectionId: string;
+    locationLabel?: string | null;
+  }) => string | null;
   createTerminalTab: (workspaceId?: string) => void;
   cloneTerminalTab: (sourceTabId?: string) => void;
   reorderTerminalTabs: (sourceTabId: string, targetTabId: string) => void;
@@ -1001,6 +1016,7 @@ interface StoreState {
     transportKind?: AgentTransportKind | null,
     interruptedByUser?: boolean | null
   ) => void;
+  applyGitPanel: (workspaceId: string, gitPanel: GitPanelData) => void;
   loadGitPanel: (workspaceId: string, projectRoot: string) => Promise<void>;
   refreshGitPanel: (workspaceId?: string) => Promise<void>;
   setGitCommitMessage: (workspaceId: string, message: string) => void;
@@ -1597,6 +1613,59 @@ export const useStore = create<StoreState>((set, get) => {
     );
 
     await get().loadGitPanel(workspace.id, workspace.rootPath);
+  },
+
+  addRemoteWorkspace: ({ name, remotePath, connectionId, locationLabel }) => {
+    const trimmedPath = remotePath.trim();
+    if (!trimmedPath || !connectionId.trim()) {
+      return null;
+    }
+
+    const existing = get().workspaces.find(
+      (workspace) =>
+        workspace.locationKind === "ssh" &&
+        workspace.connectionId === connectionId &&
+        workspace.remotePath === trimmedPath
+    );
+    if (existing) {
+      get().createTerminalTab(existing.id);
+      return existing.id;
+    }
+
+    const workspace = createWorkspaceRef(trimmedPath, {
+      name: name?.trim() || basename(trimmedPath),
+      locationKind: "ssh",
+      connectionId,
+      remotePath: trimmedPath,
+      locationLabel: locationLabel ?? null,
+      branch: "workspace",
+    });
+    const tab = createTerminalTab(workspace);
+    const session = createConversationSession(tab, workspace);
+
+    set((current) => {
+      const workspaces = [...current.workspaces, workspace];
+      const terminalTabs = [...current.terminalTabs, tab];
+      const chatSessions = { ...current.chatSessions, [tab.id]: session };
+      const appState = current.appState
+        ? deriveActiveWorkspaceState(current.appState, workspaces, terminalTabs, tab.id)
+        : null;
+      persistTerminalState(workspaces, terminalTabs, tab.id, chatSessions);
+      return {
+        appState,
+        workspaces,
+        terminalTabs,
+        activeTerminalTabId: tab.id,
+        chatSessions,
+      };
+    });
+    enqueueMessagePersistence(() =>
+      bridge.appendChatMessages({
+        seeds: [toPersistedSessionSeed(session, tab.id, session.messages)],
+      })
+    );
+    void get().loadGitPanel(workspace.id, workspace.rootPath);
+    return workspace.id;
   },
 
   createTerminalTab: (workspaceId) => {
@@ -3062,35 +3131,39 @@ export const useStore = create<StoreState>((set, get) => {
     }
   },
 
+  applyGitPanel: (workspaceId, gitPanel) => {
+    set((state) => {
+      const workspaces = state.workspaces.map((workspace) =>
+        workspace.id === workspaceId
+          ? {
+              ...workspace,
+              branch: gitPanel.branch || workspace.branch,
+            }
+          : workspace
+      );
+      const appState = state.appState
+        ? deriveActiveWorkspaceState(
+            state.appState,
+            workspaces,
+            state.terminalTabs,
+            state.activeTerminalTabId
+          )
+        : null;
+      return {
+        appState,
+        workspaces,
+        gitPanelsByWorkspace: {
+          ...state.gitPanelsByWorkspace,
+          [workspaceId]: gitPanel,
+        },
+      };
+    });
+  },
+
   loadGitPanel: async (workspaceId, projectRoot) => {
     try {
-      const gitPanel = await bridge.getGitPanel(projectRoot);
-      set((state) => {
-        const workspaces = state.workspaces.map((workspace) =>
-          workspace.id === workspaceId
-            ? {
-                ...workspace,
-                branch: gitPanel.branch || workspace.branch,
-              }
-            : workspace
-        );
-        const appState = state.appState
-          ? deriveActiveWorkspaceState(
-              state.appState,
-              workspaces,
-              state.terminalTabs,
-              state.activeTerminalTabId
-            )
-          : null;
-        return {
-          appState,
-          workspaces,
-          gitPanelsByWorkspace: {
-            ...state.gitPanelsByWorkspace,
-            [workspaceId]: gitPanel,
-          },
-        };
-      });
+      const gitPanel = await bridge.getGitPanel(projectRoot, workspaceId);
+      get().applyGitPanel(workspaceId, gitPanel);
     } catch {
       // ignore
     }
@@ -3128,7 +3201,7 @@ export const useStore = create<StoreState>((set, get) => {
       },
     }));
     try {
-      await bridge.stageGitFile(workspace.rootPath, path);
+      await bridge.stageGitFile(workspace.rootPath, path, workspace.id);
       await get().refreshGitPanel(workspaceId);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Failed to stage file.";
@@ -3151,7 +3224,7 @@ export const useStore = create<StoreState>((set, get) => {
       },
     }));
     try {
-      await bridge.unstageGitFile(workspace.rootPath, path);
+      await bridge.unstageGitFile(workspace.rootPath, path, workspace.id);
       await get().refreshGitPanel(workspaceId);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Failed to unstage file.";
@@ -3174,7 +3247,7 @@ export const useStore = create<StoreState>((set, get) => {
       },
     }));
     try {
-      await bridge.discardGitFile(workspace.rootPath, path);
+      await bridge.discardGitFile(workspace.rootPath, path, workspace.id);
       await get().refreshGitPanel(workspaceId);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Failed to discard file changes.";
@@ -3211,9 +3284,14 @@ export const useStore = create<StoreState>((set, get) => {
       },
     }));
     try {
-      await bridge.commitGitChanges(workspace.rootPath, message, {
-        stageAll: options?.stageAll ?? false,
-      });
+      await bridge.commitGitChanges(
+        workspace.rootPath,
+        message,
+        {
+          stageAll: options?.stageAll ?? false,
+        },
+        workspace.id
+      );
       set((state) => ({
         gitCommitMessageByWorkspace: {
           ...state.gitCommitMessageByWorkspace,
@@ -3252,7 +3330,21 @@ export const useStore = create<StoreState>((set, get) => {
     const workspace = get().workspaces.find((item) => item.id === workspaceId);
     if (!workspace || !query.trim()) return [];
     try {
-      return await bridge.searchWorkspaceFiles(workspace.rootPath, query);
+      const cached = searchWorkspaceFileIndex(workspace.id, query);
+      if (cached.length > 0) {
+        return cached;
+      }
+      const index = await loadWorkspaceFileIndex({
+        workspaceId: workspace.id,
+        projectRoot: workspace.rootPath,
+      });
+      const normalized = query.trim().toLowerCase();
+      return index.files
+        .filter((item) => {
+          const relativePath = item.relativePath.toLowerCase();
+          return relativePath.includes(normalized) || item.name.toLowerCase().includes(normalized);
+        })
+        .slice(0, 40);
     } catch {
       return [];
     }
@@ -3280,7 +3372,7 @@ export const useStore = create<StoreState>((set, get) => {
     }));
 
     try {
-      const skills = await bridge.getCliSkills(cliId, workspace.rootPath);
+      const skills = await bridge.getCliSkills(cliId, workspace.rootPath, workspace.id);
       set((state) => ({
         cliSkillsByContext: {
           ...state.cliSkillsByContext,

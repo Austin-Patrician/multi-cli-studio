@@ -85,11 +85,13 @@ function createDockTerminalTab(defaults?: {
 
 function XtermSurface({
   terminalTabId,
+  workspaceId,
   cwd,
   initialContent,
   onData,
 }: {
   terminalTabId: string;
+  workspaceId: string | null;
   cwd: string | null;
   initialContent: string;
   onData: (tabId: string, data: string) => void;
@@ -137,6 +139,7 @@ function XtermSurface({
 
     void bridge.ensurePtySession({
       terminalTabId,
+      workspaceId,
       cwd,
       cols: terminal.cols,
       rows: terminal.rows,
@@ -160,7 +163,7 @@ function XtermSurface({
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [cwd, terminalTabId]);
+  }, [cwd, terminalTabId, workspaceId]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -403,6 +406,7 @@ export function TerminalDock({
             {activeTab ? (
               <XtermSurface
                 terminalTabId={activeTab.id}
+                workspaceId={activeTab.workspaceId}
                 cwd={activeTab.cwd}
                 initialContent={outputBuffersRef.current[activeTab.id] ?? ""}
                 onData={handleBufferData}

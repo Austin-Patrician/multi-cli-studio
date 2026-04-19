@@ -72,6 +72,7 @@ import {
   GitHubPullRequestsResponse,
   GitLogEntry,
   GitLogResponse,
+  GitOverviewResponse,
   GitFileStatus,
   StreamEvent,
   GitPanelData,
@@ -82,6 +83,8 @@ import {
   SemanticMemoryChunk,
   CodexRuntimeReloadResult,
   SettingsEngineStatus,
+  SshConnectionTestResult,
+  WorkspaceFileIndexResponse,
   WorkspacePickResult,
   WorkspaceTreeEntry,
 } from "./models";
@@ -358,6 +361,7 @@ function createSeedContext(): ContextStore {
 function defaultSettings(): AppSettings {
   return normalizeProviderSettings({
     cliPaths: { codex: "auto", claude: "auto", gemini: "auto" },
+    sshConnections: [],
     projectRoot: state?.workspace?.projectRoot ?? "C:\\Users\\admin\\source\\repos\\multi-cli-studio",
     maxTurnsPerAgent: 50,
     maxOutputCharsPerTurn: 100000,
@@ -427,6 +431,68 @@ function normalizeUpdateConfig(value: unknown, fallback = defaultSettings().upda
   };
 }
 
+function normalizeSshConnections(
+  value: unknown,
+  fallback = defaultSettings().sshConnections
+): AppSettings["sshConnections"] {
+  if (!Array.isArray(value)) return fallback;
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const raw = entry as Partial<AppSettings["sshConnections"][number]>;
+      const id = typeof raw.id === "string" ? raw.id.trim() : "";
+      const host = typeof raw.host === "string" ? raw.host.trim() : "";
+      const username = typeof raw.username === "string" ? raw.username.trim() : "";
+      if (!id || !host || !username) return null;
+      const port =
+        typeof raw.port === "number" && Number.isFinite(raw.port) && raw.port > 0
+          ? Math.round(raw.port)
+          : 22;
+      const labels = Array.isArray(raw.labels)
+        ? raw.labels
+            .map((item) => (typeof item === "string" ? item.trim() : ""))
+            .filter(Boolean)
+        : [];
+      return {
+        id,
+        name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : host,
+        host,
+        port,
+        username,
+        authMode:
+          raw.authMode === "identityFile" ? "identityFile" : raw.authMode === "password" ? "password" : "agent",
+        identityFile: typeof raw.identityFile === "string" ? raw.identityFile : "",
+        password: typeof raw.password === "string" ? raw.password : "",
+        proxyJump: typeof raw.proxyJump === "string" ? raw.proxyJump : "",
+        remoteShell: typeof raw.remoteShell === "string" && raw.remoteShell.trim()
+          ? raw.remoteShell.trim()
+          : "bash",
+        labels,
+        createdAt: typeof raw.createdAt === "string" && raw.createdAt.trim() ? raw.createdAt : nowISO(),
+        updatedAt: typeof raw.updatedAt === "string" && raw.updatedAt.trim() ? raw.updatedAt : nowISO(),
+        lastValidatedAt:
+          typeof raw.lastValidatedAt === "string" && raw.lastValidatedAt.trim()
+            ? raw.lastValidatedAt
+            : null,
+        detectedCliPaths: {
+          codex:
+            typeof raw.detectedCliPaths?.codex === "string" && raw.detectedCliPaths.codex.trim()
+              ? raw.detectedCliPaths.codex.trim()
+              : null,
+          claude:
+            typeof raw.detectedCliPaths?.claude === "string" && raw.detectedCliPaths.claude.trim()
+              ? raw.detectedCliPaths.claude.trim()
+              : null,
+          gemini:
+            typeof raw.detectedCliPaths?.gemini === "string" && raw.detectedCliPaths.gemini.trim()
+              ? raw.detectedCliPaths.gemini.trim()
+              : null,
+        },
+      } satisfies AppSettings["sshConnections"][number];
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+}
+
 function normalizeSettings(value: unknown): AppSettings {
   const defaults = defaultSettings();
   if (!value || typeof value !== "object") return defaults;
@@ -440,6 +506,7 @@ function normalizeSettings(value: unknown): AppSettings {
       ...defaults.cliPaths,
       ...(raw.cliPaths ?? {}),
     },
+    sshConnections: normalizeSshConnections(raw.sshConnections, defaults.sshConnections),
     projectRoot:
       typeof raw.projectRoot === "string" && raw.projectRoot.trim()
         ? raw.projectRoot
@@ -2964,7 +3031,11 @@ export const browserRuntime = {
     return pickBrowserChatAttachments();
   },
 
-  async searchWorkspaceFiles(_projectRoot: string, query: string): Promise<FileMentionCandidate[]> {
+  async searchWorkspaceFiles(
+    _projectRoot: string,
+    query: string,
+    _workspaceId?: string | null
+  ): Promise<FileMentionCandidate[]> {
     const lower = query.toLowerCase();
     return MOCK_WORKSPACE_FILE_PATHS
       .filter((path) => path.toLowerCase().includes(lower))
@@ -2986,7 +3057,8 @@ export const browserRuntime = {
       isRegex: boolean;
       includePattern?: string | null;
       excludePattern?: string | null;
-    }
+    },
+    _workspaceId?: string | null
   ): Promise<WorkspaceTextSearchResponse> {
     const trimmed = options.query.trim();
     if (!trimmed) {
@@ -3028,26 +3100,46 @@ export const browserRuntime = {
     };
   },
 
-  async createWorkspaceFile(_projectRoot: string, _relativePath: string): Promise<void> {
+  async createWorkspaceFile(
+    _projectRoot: string,
+    _relativePath: string,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
 
-  async createWorkspaceDirectory(_projectRoot: string, _relativePath: string): Promise<void> {
+  async createWorkspaceDirectory(
+    _projectRoot: string,
+    _relativePath: string,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
 
-  async trashWorkspaceItem(_projectRoot: string, _relativePath: string): Promise<void> {
+  async trashWorkspaceItem(
+    _projectRoot: string,
+    _relativePath: string,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
 
   async listWorkspaceEntries(
     _projectRoot: string,
-    relativePath?: string | null
+    relativePath?: string | null,
+    _workspaceId?: string | null
   ): Promise<WorkspaceTreeEntry[]> {
     return listMockWorkspaceEntries(relativePath);
   },
 
-  async getCliSkills(cliId: AgentId, _projectRoot: string): Promise<CliSkillItem[]> {
+  async getWorkspaceFileIndex(
+    _projectRoot: string,
+    _workspaceId?: string | null
+  ): Promise<WorkspaceFileIndexResponse> {
+    return buildMockWorkspaceFileIndex();
+  },
+
+  async getCliSkills(cliId: AgentId, _projectRoot: string, _workspaceId?: string | null): Promise<CliSkillItem[]> {
     return structuredClone(fallbackCliSkills(cliId));
   },
 
@@ -3057,6 +3149,22 @@ export const browserRuntime = {
       { engineType: "codex", installed: true, version: "browser-fallback", binPath: null, error: null },
       { engineType: "gemini", installed: true, version: "browser-fallback", binPath: null, error: null },
     ];
+  },
+
+  async testSshConnection(): Promise<SshConnectionTestResult> {
+    return {
+      reachable: false,
+      authOk: false,
+      pythonOk: false,
+      shell: null,
+      platform: null,
+      detectedCliPaths: {
+        codex: null,
+        claude: null,
+        gemini: null,
+      },
+      errors: ["SSH 连接测试仅在桌面端运行时可用。"],
+    };
   },
 
   async getClaudeSettingsPath(): Promise<string | null> {
@@ -3168,7 +3276,7 @@ export const browserRuntime = {
     return () => {};
   },
 
-  async getGitPanel(_projectRoot: string): Promise<GitPanelData> {
+  async getGitPanel(_projectRoot: string, _workspaceId?: string | null): Promise<GitPanelData> {
     const stagedFiles: GitFileStatus[] = [
       { path: "src/components/chat/WorkspaceRightPanel.tsx", status: "modified", additions: 18, deletions: 6 },
     ];
@@ -3197,6 +3305,13 @@ export const browserRuntime = {
       recentChanges: fakeChanges,
     };
   },
+  async getGitOverview(projectRoot: string, workspaceId?: string | null): Promise<GitOverviewResponse> {
+    const [panel, log] = await Promise.all([
+      browserRuntime.getGitPanel(projectRoot, workspaceId),
+      browserRuntime.getGitLog(projectRoot, workspaceId),
+    ]);
+    return { panel, log };
+  },
   async getGitCommitHistory(
     _projectRoot: string,
     options?: {
@@ -3205,7 +3320,8 @@ export const browserRuntime = {
       offset?: number;
       limit?: number;
       snapshotId?: string | null;
-    }
+    },
+    _workspaceId?: string | null
   ): Promise<GitHistoryResponse> {
     const query = (options?.query ?? "").toLowerCase();
     const all = [
@@ -3253,7 +3369,8 @@ export const browserRuntime = {
       remote: string;
       branch: string;
       limit?: number;
-    }
+    },
+    _workspaceId?: string | null
   ): Promise<GitPushPreviewResponse> {
     const allCommits: GitHistoryCommit[] = [
       {
@@ -3303,7 +3420,12 @@ export const browserRuntime = {
       commits: allCommits.slice(0, maxItems),
     };
   },
-  async getGitCommitDetails(_projectRoot: string, commitHash: string): Promise<GitCommitDetails> {
+  async getGitCommitDetails(
+    _projectRoot: string,
+    commitHash: string,
+    _maxDiffLines?: number,
+    _workspaceId?: string | null
+  ): Promise<GitCommitDetails> {
     return {
       sha: commitHash,
       summary: "Refine workspace right panel layout",
@@ -3343,7 +3465,7 @@ export const browserRuntime = {
       ],
     };
   },
-  async listGitBranches(_projectRoot: string): Promise<GitBranchListResponse> {
+  async listGitBranches(_projectRoot: string, _workspaceId?: string | null): Promise<GitBranchListResponse> {
     return {
       currentBranch: "main",
       localBranches: [
@@ -3383,22 +3505,46 @@ export const browserRuntime = {
       ],
     };
   },
-  async checkoutGitBranch(): Promise<void> {
+  async checkoutGitBranch(_projectRoot?: string, _name?: string, _workspaceId?: string | null): Promise<void> {
     return;
   },
-  async createGitBranch(): Promise<void> {
+  async createGitBranch(
+    _projectRoot?: string,
+    _name?: string,
+    _sourceRef?: string | null,
+    _checkoutAfterCreate?: boolean,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
-  async renameGitBranch(): Promise<void> {
+  async renameGitBranch(
+    _projectRoot?: string,
+    _oldName?: string,
+    _newName?: string,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
-  async deleteGitBranch(): Promise<void> {
+  async deleteGitBranch(
+    _projectRoot?: string,
+    _name?: string,
+    _force?: boolean,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
-  async mergeGitBranch(): Promise<void> {
+  async mergeGitBranch(
+    _projectRoot?: string,
+    _sourceBranch?: string,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
-  async fetchGit(_projectRoot: string, _remote?: string | null): Promise<void> {
+  async fetchGit(
+    _projectRoot: string,
+    _remote?: string | null,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
   async pullGit(
@@ -3406,14 +3552,24 @@ export const browserRuntime = {
     _remote?: string | null,
     _targetBranch?: string | null,
     _pullOption?: string | null,
+    _workspaceId?: string | null,
   ): Promise<void> {
     return;
   },
-  async syncGit(_projectRoot: string, _remote?: string | null, _targetBranch?: string | null): Promise<void> {
+  async syncGit(
+    _projectRoot: string,
+    _remote?: string | null,
+    _targetBranch?: string | null,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
 
-  async getGitFileDiff(_projectRoot: string, path: string): Promise<GitFileDiff> {
+  async getGitFileDiff(
+    _projectRoot: string,
+    path: string,
+    _workspaceId?: string | null
+  ): Promise<GitFileDiff> {
     const diffByPath: Record<string, GitFileDiff> = {
       "src/pages/TerminalPage.tsx": {
         path: "src/pages/TerminalPage.tsx",
@@ -3550,7 +3706,7 @@ rename to src/components/chat/GitPanel.tsx`,
     );
   },
 
-  async getGitLog(_projectRoot: string): Promise<GitLogResponse> {
+  async getGitLog(_projectRoot: string, _workspaceId?: string | null): Promise<GitLogResponse> {
     const entries: GitLogEntry[] = [
       {
         sha: "a1b2c3d4",
@@ -3588,12 +3744,13 @@ rename to src/components/chat/GitPanel.tsx`,
       topic?: string | null;
       reviewers?: string | null;
       cc?: string | null;
-    }
+    },
+    _workspaceId?: string | null
   ): Promise<void> {
     return;
   },
 
-  async getGitHubIssues(_projectRoot: string): Promise<GitHubIssuesResponse> {
+  async getGitHubIssues(_projectRoot: string, _workspaceId?: string | null): Promise<GitHubIssuesResponse> {
     const issues: GitHubIssue[] = [
       {
         number: 12,
@@ -3605,7 +3762,7 @@ rename to src/components/chat/GitPanel.tsx`,
     return { total: issues.length, issues };
   },
 
-  async getGitHubPullRequests(_projectRoot: string): Promise<GitHubPullRequestsResponse> {
+  async getGitHubPullRequests(_projectRoot: string, _workspaceId?: string | null): Promise<GitHubPullRequestsResponse> {
     const pullRequests: GitHubPullRequest[] = [
       {
         number: 34,
@@ -3623,22 +3780,35 @@ rename to src/components/chat/GitPanel.tsx`,
     return { total: pullRequests.length, pullRequests };
   },
 
-  async stageGitFile(_projectRoot: string, _path: string): Promise<void> {
+  async stageGitFile(
+    _projectRoot: string,
+    _path: string,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
 
-  async unstageGitFile(_projectRoot: string, _path: string): Promise<void> {
+  async unstageGitFile(
+    _projectRoot: string,
+    _path: string,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
 
-  async discardGitFile(_projectRoot: string, _path: string): Promise<void> {
+  async discardGitFile(
+    _projectRoot: string,
+    _path: string,
+    _workspaceId?: string | null
+  ): Promise<void> {
     return;
   },
 
   async commitGitChanges(
     _projectRoot: string,
     _message: string,
-    _options?: { stageAll?: boolean }
+    _options?: { stageAll?: boolean },
+    _workspaceId?: string | null
   ): Promise<{ commitSha: string | null }> {
     return { commitSha: "browser-fallback-commit" };
   },
@@ -3654,7 +3824,11 @@ rename to src/components/chat/GitPanel.tsx`,
     window.alert(`Open workspace is only available in the desktop runtime.\n\n${path}`);
   },
 
-  async openWorkspaceFile(_projectRoot: string, path: string): Promise<boolean> {
+  async openWorkspaceFile(
+    _projectRoot: string,
+    path: string,
+    _workspaceId?: string | null
+  ): Promise<boolean> {
     window.alert(`Open file is only available in the desktop runtime.\n\n${path}`);
     return false;
   },
@@ -3966,4 +4140,33 @@ function listMockWorkspaceEntries(relativePath?: string | null): WorkspaceTreeEn
     }
     return left.path.localeCompare(right.path, undefined, { sensitivity: "base" });
   });
+}
+
+function buildMockWorkspaceFileIndex(): WorkspaceFileIndexResponse {
+  const entriesByParent: Record<string, WorkspaceTreeEntry[]> = { "": listMockWorkspaceEntries("") };
+  for (const filePath of MOCK_WORKSPACE_FILE_PATHS) {
+    const normalizedPath = normalizeMockWorkspaceRelativePath(filePath);
+    if (!normalizedPath) continue;
+    const segments = normalizedPath.split("/");
+    let parentPath = "";
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const nextParent = segments.slice(0, index + 1).join("/");
+      if (!(parentPath in entriesByParent)) {
+        entriesByParent[parentPath] = listMockWorkspaceEntries(parentPath);
+      }
+      if (!(nextParent in entriesByParent)) {
+        entriesByParent[nextParent] = listMockWorkspaceEntries(nextParent);
+      }
+      parentPath = nextParent;
+    }
+  }
+  return {
+    entriesByParent,
+    files: MOCK_WORKSPACE_FILE_PATHS.map((relativePath) => ({
+      id: relativePath,
+      name: basename(relativePath),
+      relativePath,
+      absolutePath: null,
+    })),
+  };
 }

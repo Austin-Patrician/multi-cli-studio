@@ -161,6 +161,11 @@ export function DesktopUsageSection({
       setError("请选择一个工作区后再查看当前项目的使用统计。");
       return;
     }
+    if (scope === "current" && selectedWorkspace?.locationKind === "ssh") {
+      setStatistics(null);
+      setError("远程 SSH 工作区暂不支持本地使用统计。");
+      return;
+    }
 
     setLoading(true);
     setError(null);

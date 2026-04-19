@@ -84,6 +84,8 @@ export function ProjectBar({
             id: item.id,
             name: item.name,
             rootPath: item.rootPath,
+            locationKind: item.locationKind,
+            locationLabel: item.locationLabel,
           }
         : null;
     })
@@ -162,7 +164,7 @@ export function ProjectBar({
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
-            <OpenWorkspaceMenu path={workspace.rootPath} />
+            <OpenWorkspaceMenu path={workspace.rootPath} disabled={workspace.locationKind === "ssh"} />
             <LaunchScriptButton
               launchScript={launchScript}
               editorOpen={launchScriptEditorOpen}

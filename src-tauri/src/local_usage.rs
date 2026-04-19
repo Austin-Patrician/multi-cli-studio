@@ -158,7 +158,11 @@ pub(crate) fn local_usage_statistics(
             Some(PathBuf::from(trimmed))
         }
     });
-    let filter_workspace = if scope == "current" { workspace_path } else { None };
+    let filter_workspace = if scope == "current" {
+        workspace_path
+    } else {
+        None
+    };
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -249,7 +253,8 @@ fn build_usage_statistics(
         let engine_label = infer_engine_label(provider, session);
         *engine_usage_map.entry(engine_label).or_insert(0) += 1;
 
-        let day_key = day_key_for_timestamp_ms(session.timestamp).unwrap_or_else(|| "1970-01-01".to_string());
+        let day_key =
+            day_key_for_timestamp_ms(session.timestamp).unwrap_or_else(|| "1970-01-01".to_string());
         let daily = daily_map
             .entry(day_key.clone())
             .or_insert_with(|| LocalUsageDailyUsage {
@@ -262,16 +267,21 @@ fn build_usage_statistics(
         if session.modified_lines > 0 {
             *daily_code_changes_map.entry(day_key.clone()).or_insert(0) += session.modified_lines;
         }
-        if !daily.models_used.iter().any(|model| model == &session.model) {
+        if !daily
+            .models_used
+            .iter()
+            .any(|model| model == &session.model)
+        {
             daily.models_used.push(session.model.clone());
         }
 
-        let model_usage = model_map
-            .entry(session.model.clone())
-            .or_insert_with(|| LocalUsageModelUsage {
-                model: session.model.clone(),
-                ..LocalUsageModelUsage::default()
-            });
+        let model_usage =
+            model_map
+                .entry(session.model.clone())
+                .or_insert_with(|| LocalUsageModelUsage {
+                    model: session.model.clone(),
+                    ..LocalUsageModelUsage::default()
+                });
         model_usage.session_count += 1;
         model_usage.total_cost += session.cost;
         model_usage.total_tokens += session.usage.total_tokens;
@@ -291,8 +301,10 @@ fn build_usage_statistics(
         }
     }
 
-    total_usage.total_tokens =
-        total_usage.input_tokens + total_usage.output_tokens + total_usage.cache_write_tokens + total_usage.cache_read_tokens;
+    total_usage.total_tokens = total_usage.input_tokens
+        + total_usage.output_tokens
+        + total_usage.cache_write_tokens
+        + total_usage.cache_read_tokens;
 
     let mut daily_usage: Vec<LocalUsageDailyUsage> = daily_map.into_values().collect();
     daily_usage.sort_by(|a, b| a.date.cmp(&b.date));
@@ -306,7 +318,10 @@ fn build_usage_statistics(
     let total_engine_usage_count = engine_usage.iter().map(|item| item.count).sum();
     let mut daily_code_changes: Vec<LocalUsageDailyCodeChange> = daily_code_changes_map
         .into_iter()
-        .map(|(date, modified_lines)| LocalUsageDailyCodeChange { date, modified_lines })
+        .map(|(date, modified_lines)| LocalUsageDailyCodeChange {
+            date,
+            modified_lines,
+        })
         .collect();
     daily_code_changes.sort_by(|a, b| a.date.cmp(&b.date));
 
@@ -355,7 +370,11 @@ fn infer_engine_label(provider: &str, session: &LocalUsageSessionSummary) -> Str
         return "Codex CLI".to_string();
     }
 
-    let provider_hint = session.provider.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let provider_hint = session
+        .provider
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if provider_hint.contains("anthropic") || provider_hint.contains("claude") {
         return "Claude Code".to_string();
     }
@@ -507,14 +526,23 @@ fn parse_codex_session_summary(
             Err(_) => continue,
         };
         latest_timestamp = latest_timestamp.max(read_timestamp_ms(&value).unwrap_or(0));
-        let entry_type = value.get("type").and_then(|value| value.as_str()).unwrap_or("");
+        let entry_type = value
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
 
         if entry_type == "response_item" {
             if let Some(payload) = value.get("payload").and_then(|payload| payload.as_object()) {
-                let payload_type = payload.get("type").and_then(|value| value.as_str()).unwrap_or("");
+                let payload_type = payload
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
 
                 if payload_type == "custom_tool_call" {
-                    let tool_name = payload.get("name").and_then(|value| value.as_str()).unwrap_or("");
+                    let tool_name = payload
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
                     if tool_name == "apply_patch" {
                         let call_id = payload
                             .get("call_id")
@@ -522,21 +550,34 @@ fn parse_codex_session_summary(
                             .unwrap_or("")
                             .to_string();
                         if !call_id.is_empty() {
-                            let patch_input = payload.get("input").and_then(|value| value.as_str()).unwrap_or("");
-                            pending_apply_patch_lines.insert(call_id, count_apply_patch_changed_lines(patch_input));
+                            let patch_input = payload
+                                .get("input")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("");
+                            pending_apply_patch_lines
+                                .insert(call_id, count_apply_patch_changed_lines(patch_input));
                             saw_session_signal = true;
                         }
                     }
                 } else if payload_type == "custom_tool_call_output" {
-                    let call_id = payload.get("call_id").and_then(|value| value.as_str()).unwrap_or("");
+                    let call_id = payload
+                        .get("call_id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
                     if let Some(pending_lines) = pending_apply_patch_lines.remove(call_id) {
-                        let output = payload.get("output").map(stringify_tool_output_value).unwrap_or_default();
+                        let output = payload
+                            .get("output")
+                            .map(stringify_tool_output_value)
+                            .unwrap_or_default();
                         if is_successful_apply_patch_output(&output) {
                             modified_lines += pending_lines.max(0);
                         }
                     }
                 } else if payload_type == "function_call_output" {
-                    let output = payload.get("output").map(extract_tool_output_text).unwrap_or_default();
+                    let output = payload
+                        .get("output")
+                        .map(extract_tool_output_text)
+                        .unwrap_or_default();
                     if let Some(lines) = parse_changed_lines_from_git_diff_stat_output(&output) {
                         max_diff_stat_lines = max_diff_stat_lines.max(lines.max(0));
                     }
@@ -559,7 +600,8 @@ fn parse_codex_session_summary(
                     }
                 }
             }
-            let (detected_source, detected_provider) = extract_source_provider_from_session_value(&value);
+            let (detected_source, detected_provider) =
+                extract_source_provider_from_session_value(&value);
             if source.is_none() {
                 source = detected_source;
             }
@@ -588,7 +630,10 @@ fn parse_codex_session_summary(
 
         if summary.is_none() && entry_type == "event_msg" {
             if let Some(payload) = value.get("payload").and_then(|payload| payload.as_object()) {
-                let payload_type = payload.get("type").and_then(|value| value.as_str()).unwrap_or("");
+                let payload_type = payload
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 if payload_type == "user_message" {
                     saw_session_signal = true;
                     if let Some(message) = payload.get("message").and_then(|value| value.as_str()) {
@@ -602,13 +647,17 @@ fn parse_codex_session_summary(
             continue;
         }
         let payload = value.get("payload").and_then(|value| value.as_object());
-        let payload_type = payload.and_then(|payload| payload.get("type")).and_then(|value| value.as_str());
+        let payload_type = payload
+            .and_then(|payload| payload.get("type"))
+            .and_then(|value| value.as_str());
         if payload_type != Some("token_count") {
             continue;
         }
         saw_session_signal = true;
 
-        let info = payload.and_then(|payload| payload.get("info")).and_then(|value| value.as_object());
+        let info = payload
+            .and_then(|payload| payload.get("info"))
+            .and_then(|value| value.as_object());
         let (input, cached, output, used_total) = if let Some(info) = info {
             if let Some(total) = find_usage_map(info, &["total_token_usage", "totalTokenUsage"]) {
                 (
@@ -625,7 +674,8 @@ fn parse_codex_session_summary(
                     read_i64(total, &["output_tokens", "outputTokens"]),
                     true,
                 )
-            } else if let Some(last) = find_usage_map(info, &["last_token_usage", "lastTokenUsage"]) {
+            } else if let Some(last) = find_usage_map(info, &["last_token_usage", "lastTokenUsage"])
+            {
                 (
                     read_i64(last, &["input_tokens", "inputTokens"]),
                     read_i64(
@@ -647,7 +697,11 @@ fn parse_codex_session_summary(
             continue;
         };
 
-        let mut delta = UsageTotals { input, cached, output };
+        let mut delta = UsageTotals {
+            input,
+            cached,
+            output,
+        };
         if used_total {
             let prev = previous_totals.unwrap_or_default();
             delta = UsageTotals {
@@ -655,7 +709,11 @@ fn parse_codex_session_summary(
                 cached: (cached - prev.cached).max(0),
                 output: (output - prev.output).max(0),
             };
-            previous_totals = Some(UsageTotals { input, cached, output });
+            previous_totals = Some(UsageTotals {
+                input,
+                cached,
+                output,
+            });
         } else {
             let mut next = previous_totals.unwrap_or_default();
             next.input += delta.input;
@@ -680,8 +738,10 @@ fn parse_codex_session_summary(
         return Ok(None);
     }
 
-    usage.total_tokens =
-        usage.input_tokens + usage.output_tokens + usage.cache_write_tokens + usage.cache_read_tokens;
+    usage.total_tokens = usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_write_tokens
+        + usage.cache_read_tokens;
     if modified_lines == 0 && max_diff_stat_lines > 0 {
         modified_lines = max_diff_stat_lines;
     }
@@ -698,7 +758,11 @@ fn parse_codex_session_summary(
         return Ok(None);
     }
 
-    let file_stem = path.file_stem().and_then(|name| name.to_str()).unwrap_or_default().to_string();
+    let file_stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
     let session_id = canonical_session_id.unwrap_or_else(|| file_stem.clone());
     let mut session_id_aliases = Vec::new();
     if !file_stem.is_empty() && file_stem != session_id {
@@ -742,7 +806,11 @@ fn parse_gemini_session_summary(path: &Path) -> Result<Option<LocalUsageSessionS
     };
 
     let session_id = normalize_non_empty_string(value.get("sessionId").and_then(Value::as_str))
-        .or_else(|| path.file_stem().and_then(|name| name.to_str()).map(ToString::to_string));
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .map(ToString::to_string)
+        });
     let Some(session_id) = session_id else {
         return Ok(None);
     };
@@ -755,9 +823,14 @@ fn parse_gemini_session_summary(path: &Path) -> Result<Option<LocalUsageSessionS
     let mut last_timestamp = 0_i64;
 
     for message in messages.into_iter().flatten() {
-        let message_type = message.get("type").and_then(Value::as_str).unwrap_or_default().to_ascii_lowercase();
+        let message_type = message
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         if summary.is_none() && message_type == "user" {
-            summary = extract_gemini_text_from_value(message, 0).and_then(|text| truncate_summary(text.as_str()));
+            summary = extract_gemini_text_from_value(message, 0)
+                .and_then(|text| truncate_summary(text.as_str()));
         }
         if matches!(message_type.as_str(), "gemini" | "assistant" | "model") {
             if let Some(candidate) = normalize_non_empty_string(
@@ -775,7 +848,10 @@ fn parse_gemini_session_summary(path: &Path) -> Result<Option<LocalUsageSessionS
             usage.output_tokens += read_i64(tokens, &["output"]);
             usage.cache_read_tokens += read_i64(tokens, &["cached"]);
         }
-        let timestamp = message.get("timestamp").and_then(Value::as_str).and_then(parse_gemini_timestamp_millis);
+        let timestamp = message
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_gemini_timestamp_millis);
         if let Some(timestamp) = timestamp {
             if first_timestamp == 0 {
                 first_timestamp = timestamp;
@@ -786,8 +862,10 @@ fn parse_gemini_session_summary(path: &Path) -> Result<Option<LocalUsageSessionS
         }
     }
 
-    usage.total_tokens =
-        usage.input_tokens + usage.output_tokens + usage.cache_write_tokens + usage.cache_read_tokens;
+    usage.total_tokens = usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_write_tokens
+        + usage.cache_read_tokens;
     let cost = if usage.total_tokens > 0 {
         calculate_usage_cost(&usage, gemini_cost_rates())
     } else {
@@ -797,7 +875,12 @@ fn parse_gemini_session_summary(path: &Path) -> Result<Option<LocalUsageSessionS
         .get("lastUpdated")
         .and_then(Value::as_str)
         .and_then(parse_gemini_timestamp_millis)
-        .or_else(|| value.get("startTime").and_then(Value::as_str).and_then(parse_gemini_timestamp_millis))
+        .or_else(|| {
+            value
+                .get("startTime")
+                .and_then(Value::as_str)
+                .and_then(parse_gemini_timestamp_millis)
+        })
         .or_else(|| (last_timestamp > 0).then_some(last_timestamp))
         .or_else(|| (first_timestamp > 0).then_some(first_timestamp))
         .unwrap_or_else(|| {
@@ -822,7 +905,9 @@ fn parse_gemini_session_summary(path: &Path) -> Result<Option<LocalUsageSessionS
     }))
 }
 
-fn scan_gemini_session_summaries(workspace_path: Option<&Path>) -> Result<Vec<LocalUsageSessionSummary>, String> {
+fn scan_gemini_session_summaries(
+    workspace_path: Option<&Path>,
+) -> Result<Vec<LocalUsageSessionSummary>, String> {
     let base_dir = resolve_gemini_base_dir();
     if !base_dir.exists() {
         return Ok(Vec::new());
@@ -832,7 +917,11 @@ fn scan_gemini_session_summaries(workspace_path: Option<&Path>) -> Result<Vec<Lo
     let mut seen = HashSet::new();
     collect_gemini_chat_files(&base_dir.join("tmp"), &mut files, &mut seen);
     collect_gemini_chat_files(&base_dir.join("history"), &mut files, &mut seen);
-    let projects_map = if workspace_path.is_some() { load_gemini_projects_alias_map(base_dir.as_path()) } else { HashMap::new() };
+    let projects_map = if workspace_path.is_some() {
+        load_gemini_projects_alias_map(base_dir.as_path())
+    } else {
+        HashMap::new()
+    };
 
     let mut sessions = Vec::new();
     for path in files {
@@ -840,7 +929,9 @@ fn scan_gemini_session_summaries(workspace_path: Option<&Path>) -> Result<Vec<Lo
             let Some(alias) = gemini_project_alias_from_chat_path(&path) else {
                 continue;
             };
-            let Some(project_root) = resolve_gemini_project_root(base_dir.as_path(), alias.as_str(), &projects_map) else {
+            let Some(project_root) =
+                resolve_gemini_project_root(base_dir.as_path(), alias.as_str(), &projects_map)
+            else {
                 continue;
             };
             if !gemini_project_matches_workspace(project_root.as_str(), workspace_path) {
@@ -859,7 +950,10 @@ fn claude_projects_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude").join("projects"))
 }
 
-fn scan_claude_project_summaries(project_dir: &Path, sessions: &mut Vec<LocalUsageSessionSummary>) -> Result<(), String> {
+fn scan_claude_project_summaries(
+    project_dir: &Path,
+    sessions: &mut Vec<LocalUsageSessionSummary>,
+) -> Result<(), String> {
     let entries = match fs::read_dir(project_dir) {
         Ok(entries) => entries,
         Err(_) => return Ok(()),
@@ -879,7 +973,9 @@ fn scan_claude_project_summaries(project_dir: &Path, sessions: &mut Vec<LocalUsa
     Ok(())
 }
 
-fn scan_claude_session_summaries(workspace_path: Option<&Path>) -> Result<Vec<LocalUsageSessionSummary>, String> {
+fn scan_claude_session_summaries(
+    workspace_path: Option<&Path>,
+) -> Result<Vec<LocalUsageSessionSummary>, String> {
     let projects_dir = match claude_projects_dir() {
         Some(dir) if dir.exists() => dir,
         _ => return Ok(Vec::new()),
@@ -962,7 +1058,11 @@ fn parse_claude_session_summary(path: &Path) -> Result<Option<LocalUsageSessionS
         let output_tokens = read_i64(usage_map, &["output_tokens"]);
         let cache_write_tokens = read_i64(usage_map, &["cache_creation_input_tokens"]);
         let cache_read_tokens = read_i64(usage_map, &["cache_read_input_tokens"]);
-        if input_tokens == 0 && output_tokens == 0 && cache_write_tokens == 0 && cache_read_tokens == 0 {
+        if input_tokens == 0
+            && output_tokens == 0
+            && cache_write_tokens == 0
+            && cache_read_tokens == 0
+        {
             continue;
         }
         let message_usage = LocalUsageUsageData {
@@ -977,11 +1077,18 @@ fn parse_claude_session_summary(path: &Path) -> Result<Option<LocalUsageSessionS
         total_cost += calculate_usage_cost(&message_usage, claude_cost_rates(pricing_model));
     }
 
-    usage.total_tokens = usage.input_tokens + usage.output_tokens + usage.cache_write_tokens + usage.cache_read_tokens;
+    usage.total_tokens = usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_write_tokens
+        + usage.cache_read_tokens;
     if usage.total_tokens == 0 {
         return Ok(None);
     }
-    let session_id = path.file_stem().and_then(|name| name.to_str()).unwrap_or_default().to_string();
+    let session_id = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
     let timestamp = if first_timestamp > 0 {
         first_timestamp
     } else {
@@ -1070,7 +1177,13 @@ fn parse_changed_lines_from_git_diff_stat_output(output: &str) -> Option<i64> {
         }
     }
 
-    changed_lines_from_summary.or_else(|| if saw_stat_line { Some(changed_lines_from_stats) } else { None })
+    changed_lines_from_summary.or_else(|| {
+        if saw_stat_line {
+            Some(changed_lines_from_stats)
+        } else {
+            None
+        }
+    })
 }
 
 fn parse_diff_stat_line_changed_count(line: &str) -> Option<i64> {
@@ -1139,7 +1252,10 @@ fn extract_tool_output_text(value: &Value) -> String {
 }
 
 fn normalize_non_empty_string(value: Option<&str>) -> Option<String> {
-    value.map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string)
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn extract_session_id_from_session_value(value: &Value) -> Option<String> {
@@ -1148,18 +1264,30 @@ fn extract_session_id_from_session_value(value: &Value) -> Option<String> {
     let session_meta = payload
         .and_then(|payload| payload.get("session_meta"))
         .and_then(Value::as_object)
-        .or_else(|| payload.and_then(|payload| payload.get("sessionMeta")).and_then(Value::as_object));
+        .or_else(|| {
+            payload
+                .and_then(|payload| payload.get("sessionMeta"))
+                .and_then(Value::as_object)
+        });
     normalize_non_empty_string(
         root.get("session_id")
             .or_else(|| root.get("sessionId"))
             .or_else(|| root.get("id"))
             .and_then(Value::as_str),
     )
-    .or_else(|| payload.and_then(|item| read_string_from_object(item, &["id", "session_id", "sessionId"])))
-    .or_else(|| session_meta.and_then(|item| read_string_from_object(item, &["id", "session_id", "sessionId"])))
+    .or_else(|| {
+        payload.and_then(|item| read_string_from_object(item, &["id", "session_id", "sessionId"]))
+    })
+    .or_else(|| {
+        session_meta
+            .and_then(|item| read_string_from_object(item, &["id", "session_id", "sessionId"]))
+    })
 }
 
-fn read_string_from_object(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+fn read_string_from_object(
+    object: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<String> {
     for key in keys {
         if let Some(found) = normalize_non_empty_string(object.get(*key).and_then(Value::as_str)) {
             return Some(found);
@@ -1185,27 +1313,59 @@ fn extract_source_provider_from_session_value(value: &Value) -> (Option<String>,
     let session_meta = payload
         .and_then(|payload| payload.get("session_meta"))
         .and_then(Value::as_object)
-        .or_else(|| payload.and_then(|payload| payload.get("sessionMeta")).and_then(Value::as_object));
+        .or_else(|| {
+            payload
+                .and_then(|payload| payload.get("sessionMeta"))
+                .and_then(Value::as_object)
+        });
     let originator = normalize_originator_source(
         read_string_from_object(root, &["originator", "origin", "client", "app"])
-            .or_else(|| payload.and_then(|item| read_string_from_object(item, &["originator", "origin"])))
-            .or_else(|| session_meta.and_then(|item| read_string_from_object(item, &["originator", "origin"]))),
+            .or_else(|| {
+                payload.and_then(|item| read_string_from_object(item, &["originator", "origin"]))
+            })
+            .or_else(|| {
+                session_meta
+                    .and_then(|item| read_string_from_object(item, &["originator", "origin"]))
+            }),
     );
     let source = read_string_from_object(root, &["source", "sessionSource"])
-        .or_else(|| payload.and_then(|item| read_string_from_object(item, &["source", "sessionSource"])))
-        .or_else(|| session_meta.and_then(|item| read_string_from_object(item, &["source", "sessionSource"])));
+        .or_else(|| {
+            payload.and_then(|item| read_string_from_object(item, &["source", "sessionSource"]))
+        })
+        .or_else(|| {
+            session_meta
+                .and_then(|item| read_string_from_object(item, &["source", "sessionSource"]))
+        });
     let source = match (source, originator) {
         (Some(source), Some(originator))
-            if source.eq_ignore_ascii_case("vscode") && !originator.eq_ignore_ascii_case("vscode") =>
+            if source.eq_ignore_ascii_case("vscode")
+                && !originator.eq_ignore_ascii_case("vscode") =>
         {
             Some(originator)
         }
         (None, Some(originator)) => Some(originator),
         (source, _) => source,
     };
-    let provider = read_string_from_object(root, &["provider", "providerId", "model_provider", "modelProvider"])
-        .or_else(|| payload.and_then(|item| read_string_from_object(item, &["provider", "providerId", "model_provider", "modelProvider"])))
-        .or_else(|| session_meta.and_then(|item| read_string_from_object(item, &["provider", "providerId", "model_provider", "modelProvider"])));
+    let provider = read_string_from_object(
+        root,
+        &["provider", "providerId", "model_provider", "modelProvider"],
+    )
+    .or_else(|| {
+        payload.and_then(|item| {
+            read_string_from_object(
+                item,
+                &["provider", "providerId", "model_provider", "modelProvider"],
+            )
+        })
+    })
+    .or_else(|| {
+        session_meta.and_then(|item| {
+            read_string_from_object(
+                item,
+                &["provider", "providerId", "model_provider", "modelProvider"],
+            )
+        })
+    });
     (source, provider)
 }
 
@@ -1261,7 +1421,10 @@ fn is_gemini_chat_file(path: &Path) -> bool {
     if !file_name.starts_with("session-") {
         return false;
     }
-    path.parent().and_then(|value| value.file_name()).and_then(|value| value.to_str()) == Some("chats")
+    path.parent()
+        .and_then(|value| value.file_name())
+        .and_then(|value| value.to_str())
+        == Some("chats")
 }
 
 fn collect_gemini_chat_files(root: &Path, output: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
@@ -1285,7 +1448,9 @@ fn collect_gemini_chat_files(root: &Path, output: &mut Vec<PathBuf>, seen: &mut 
 }
 
 fn parse_gemini_timestamp_millis(value: &str) -> Option<i64> {
-    DateTime::parse_from_rfc3339(value).ok().map(|value| value.timestamp_millis())
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.timestamp_millis())
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -1323,17 +1488,38 @@ fn extract_gemini_text_from_value(value: &Value, depth: usize) -> Option<String>
             if parts.is_empty() {
                 None
             } else {
-                Some(truncate_chars(parts.join("\n").as_str(), MAX_GEMINI_TEXT_PREVIEW_CHARS))
+                Some(truncate_chars(
+                    parts.join("\n").as_str(),
+                    MAX_GEMINI_TEXT_PREVIEW_CHARS,
+                ))
             }
         }
         Value::Object(map) => {
-            for key in ["displayContent", "display_content", "text", "message", "content", "output", "result", "response"] {
-                if let Some(text) = map.get(key).and_then(|node| extract_gemini_text_from_value(node, depth + 1)) {
+            for key in [
+                "displayContent",
+                "display_content",
+                "text",
+                "message",
+                "content",
+                "output",
+                "result",
+                "response",
+            ] {
+                if let Some(text) = map
+                    .get(key)
+                    .and_then(|node| extract_gemini_text_from_value(node, depth + 1))
+                {
                     return Some(text);
                 }
             }
-            for key in ["content", "message", "output", "result", "response", "data", "payload", "parts", "part", "item", "items"] {
-                if let Some(text) = map.get(key).and_then(|node| extract_gemini_text_from_value(node, depth + 1)) {
+            for key in [
+                "content", "message", "output", "result", "response", "data", "payload", "parts",
+                "part", "item", "items",
+            ] {
+                if let Some(text) = map
+                    .get(key)
+                    .and_then(|node| extract_gemini_text_from_value(node, depth + 1))
+                {
                     return Some(text);
                 }
             }
@@ -1346,7 +1532,11 @@ fn extract_gemini_text_from_value(value: &Value, depth: usize) -> Option<String>
 fn read_gemini_project_root_file(path: &Path) -> Option<String> {
     let raw = fs::read_to_string(path).ok()?;
     let trimmed = raw.trim();
-    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn load_gemini_projects_alias_map(base_dir: &Path) -> HashMap<String, String> {
@@ -1376,10 +1566,18 @@ fn load_gemini_projects_alias_map(base_dir: &Path) -> HashMap<String, String> {
 }
 
 fn gemini_project_alias_from_chat_path(path: &Path) -> Option<String> {
-    path.parent()?.parent()?.file_name().and_then(|value| value.to_str()).map(str::to_string)
+    path.parent()?
+        .parent()?
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_string)
 }
 
-fn resolve_gemini_project_root(base_dir: &Path, alias: &str, projects_map: &HashMap<String, String>) -> Option<String> {
+fn resolve_gemini_project_root(
+    base_dir: &Path,
+    alias: &str,
+    projects_map: &HashMap<String, String>,
+) -> Option<String> {
     let tmp_candidate = base_dir.join("tmp").join(alias).join(".project_root");
     if let Some(path) = read_gemini_project_root_file(tmp_candidate.as_path()) {
         return Some(path);
@@ -1458,7 +1656,11 @@ fn gemini_project_matches_workspace(project_root: &str, workspace_path: &Path) -
     }
     build_project_root_match_candidates(project_root)
         .iter()
-        .any(|project_candidate| workspace_candidates.iter().any(|workspace_candidate| paths_match_workspace_scope(project_candidate, workspace_candidate)))
+        .any(|project_candidate| {
+            workspace_candidates.iter().any(|workspace_candidate| {
+                paths_match_workspace_scope(project_candidate, workspace_candidate)
+            })
+        })
 }
 
 fn extract_model_from_turn_context(value: &Value) -> Option<String> {
@@ -1467,21 +1669,31 @@ fn extract_model_from_turn_context(value: &Value) -> Option<String> {
         return Some(model.to_string());
     }
     let info = payload.get("info").and_then(|value| value.as_object())?;
-    info.get("model").and_then(|value| value.as_str()).map(|value| value.to_string())
+    info.get("model")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
 }
 
 fn extract_model_from_token_count(value: &Value) -> Option<String> {
     let payload = value.get("payload").and_then(|value| value.as_object())?;
     let info = payload.get("info").and_then(|value| value.as_object());
     let model = info
-        .and_then(|info| info.get("model").or_else(|| info.get("model_name")).and_then(|value| value.as_str()))
+        .and_then(|info| {
+            info.get("model")
+                .or_else(|| info.get("model_name"))
+                .and_then(|value| value.as_str())
+        })
         .or_else(|| payload.get("model").and_then(|value| value.as_str()))
         .or_else(|| value.get("model").and_then(|value| value.as_str()));
     model.map(|value| value.to_string())
 }
 
-fn find_usage_map<'a>(info: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Option<&'a serde_json::Map<String, Value>> {
-    keys.iter().find_map(|key| info.get(*key).and_then(|value| value.as_object()))
+fn find_usage_map<'a>(
+    info: &'a serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<&'a serde_json::Map<String, Value>> {
+    keys.iter()
+        .find_map(|key| info.get(*key).and_then(|value| value.as_object()))
 }
 
 fn read_i64(map: &serde_json::Map<String, Value>, keys: &[&str]) -> i64 {
@@ -1491,7 +1703,11 @@ fn read_i64(map: &serde_json::Map<String, Value>, keys: &[&str]) -> i64 {
             value
                 .as_i64()
                 .or_else(|| value.as_f64().map(|value| value as i64))
-                .or_else(|| value.as_str().and_then(|text| text.trim().parse::<i64>().ok()))
+                .or_else(|| {
+                    value
+                        .as_str()
+                        .and_then(|text| text.trim().parse::<i64>().ok())
+                })
         })
         .unwrap_or(0)
 }
@@ -1499,9 +1715,13 @@ fn read_i64(map: &serde_json::Map<String, Value>, keys: &[&str]) -> i64 {
 fn read_timestamp_ms(value: &Value) -> Option<i64> {
     let raw = value.get("timestamp")?;
     if let Some(text) = raw.as_str() {
-        return DateTime::parse_from_rfc3339(text).map(|value| value.timestamp_millis()).ok();
+        return DateTime::parse_from_rfc3339(text)
+            .map(|value| value.timestamp_millis())
+            .ok();
     }
-    let numeric = raw.as_i64().or_else(|| raw.as_f64().map(|value| value as i64))?;
+    let numeric = raw
+        .as_i64()
+        .or_else(|| raw.as_f64().map(|value| value as i64))?;
     if numeric > 0 && numeric < 1_000_000_000_000 {
         return Some(numeric * 1000);
     }
@@ -1519,7 +1739,11 @@ fn extract_cwd(value: &Value) -> Option<String> {
     let session_meta = payload
         .and_then(|payload| payload.get("session_meta"))
         .and_then(Value::as_object)
-        .or_else(|| payload.and_then(|payload| payload.get("sessionMeta")).and_then(Value::as_object));
+        .or_else(|| {
+            payload
+                .and_then(|payload| payload.get("sessionMeta"))
+                .and_then(Value::as_object)
+        });
     read_string_from_object(root, &["cwd"])
         .or_else(|| payload.and_then(|item| read_string_from_object(item, &["cwd"])))
         .or_else(|| session_meta.and_then(|item| read_string_from_object(item, &["cwd"])))
@@ -1527,12 +1751,24 @@ fn extract_cwd(value: &Value) -> Option<String> {
 
 #[cfg(windows)]
 fn path_matches_workspace(cwd: &str, workspace_path: &Path) -> bool {
-    let cwd_path = cwd.trim().replace('\\', "/").trim_end_matches('/').to_ascii_lowercase();
-    let workspace = workspace_path.to_string_lossy().replace('\\', "/").trim_end_matches('/').to_ascii_lowercase();
+    let cwd_path = cwd
+        .trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    let workspace = workspace_path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
     if cwd_path.is_empty() || workspace.is_empty() {
         return false;
     }
-    cwd_path == workspace || cwd_path.strip_prefix(&workspace).map(|rest| rest.starts_with('/')).unwrap_or(false)
+    cwd_path == workspace
+        || cwd_path
+            .strip_prefix(&workspace)
+            .map(|rest| rest.starts_with('/'))
+            .unwrap_or(false)
 }
 
 #[cfg(not(windows))]
@@ -1546,11 +1782,21 @@ fn read_claude_timestamp(value: &Value) -> Option<i64> {
     value
         .get("timestamp")
         .and_then(|v| v.as_str())
-        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok().map(|dt| dt.timestamp_millis()))
+        .and_then(|ts| {
+            DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|dt| dt.timestamp_millis())
+        })
 }
 
 fn encode_claude_project_path(path: &str) -> String {
     path.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
