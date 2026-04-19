@@ -672,7 +672,7 @@ export function buildDynamicContextTurns(
     }
 
     const failed = message.exitCode != null && message.exitCode !== 0;
-    const userContent = pendingUser.content;
+    const userContent = pendingUser.rawContent ?? pendingUser.content;
     const assistantContent = message.rawContent ?? message.content;
     const summaryLimit = failed ? 1500 : 3000;
     const replyText = summarizeForContext(assistantContent, summaryLimit);

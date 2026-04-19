@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{AgentTransportSession, ChatMessageBlock, CompactedSummary};
+use crate::{AgentTransportSession, ChatMessageBlock, CompactedSummary, SelectedCustomAgent};
 
 const COMPACT_KEEP_TURNS: usize = 4;
 const AUTO_COMPACT_MAX_HOT_TURNS: usize = 8;
@@ -93,6 +93,8 @@ pub struct PersistedTerminalTab {
     pub title: String,
     pub workspace_id: String,
     pub selected_cli: String,
+    #[serde(default)]
+    pub selected_agent: Option<SelectedCustomAgent>,
     pub plan_mode: bool,
     pub fast_mode: bool,
     pub effort_level: Option<String>,
@@ -131,6 +133,8 @@ pub struct PersistedChatMessage {
     pub id: String,
     pub role: String,
     pub cli_id: Option<String>,
+    #[serde(default)]
+    pub selected_agent: Option<SelectedCustomAgent>,
     #[serde(default)]
     pub automation_run_id: Option<String>,
     #[serde(default)]
@@ -712,7 +716,12 @@ impl TerminalStorage {
             .iter()
             .rev()
             .find(|candidate| candidate.role == "user")
-            .map(|candidate| candidate.content.clone())
+            .map(|candidate| {
+                candidate
+                    .raw_content
+                    .clone()
+                    .unwrap_or_else(|| candidate.content.clone())
+            })
             .unwrap_or_else(|| format!("Continue work in {}", session.project_name));
         let assistant_summary = truncate_text(
             message
@@ -1521,16 +1530,17 @@ impl TerminalStorage {
         for (tab_order, tab) in state.terminal_tabs.iter().enumerate() {
             tx.execute(
                 "INSERT INTO terminal_tabs (
-                    id, title, workspace_id, selected_cli, plan_mode, fast_mode, effort_level,
+                    id, title, workspace_id, selected_cli, selected_agent_json, plan_mode, fast_mode, effort_level,
                     model_overrides_json, permission_overrides_json, transport_sessions_json,
                     context_boundaries_by_cli_json, draft_prompt, draft_attachments_json,
                     status, last_active_at, tab_order
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     tab.id,
                     tab.title,
                     tab.workspace_id,
                     tab.selected_cli,
+                    option_to_json(&tab.selected_agent)?,
                     tab.plan_mode,
                     tab.fast_mode,
                     tab.effort_level,
@@ -1598,6 +1608,7 @@ impl TerminalStorage {
                 title TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
                 selected_cli TEXT NOT NULL,
+                selected_agent_json TEXT,
                 plan_mode INTEGER NOT NULL,
                 fast_mode INTEGER NOT NULL,
                 effort_level TEXT,
@@ -1631,6 +1642,7 @@ impl TerminalStorage {
                 message_order INTEGER NOT NULL,
                 role TEXT NOT NULL,
                 cli_id TEXT,
+                selected_agent_json TEXT,
                 automation_run_id TEXT,
                 workflow_run_id TEXT,
                 workflow_node_id TEXT,
@@ -1906,6 +1918,7 @@ impl TerminalStorage {
         ensure_column_exists(conn, "chat_messages", "automation_run_id", "TEXT")?;
         ensure_column_exists(conn, "chat_messages", "workflow_run_id", "TEXT")?;
         ensure_column_exists(conn, "chat_messages", "workflow_node_id", "TEXT")?;
+        ensure_column_exists(conn, "terminal_tabs", "selected_agent_json", "TEXT")?;
         ensure_column_exists(
             conn,
             "terminal_tabs",
@@ -1927,6 +1940,12 @@ impl TerminalStorage {
         ensure_column_exists(conn, "workspaces", "connection_id", "TEXT")?;
         ensure_column_exists(conn, "workspaces", "remote_path", "TEXT")?;
         ensure_column_exists(conn, "workspaces", "location_label", "TEXT")?;
+        ensure_column_exists(
+            conn,
+            "chat_messages",
+            "selected_agent_json",
+            "TEXT",
+        )?;
         ensure_column_exists(
             conn,
             "chat_messages",
@@ -2081,7 +2100,7 @@ impl TerminalStorage {
     fn load_terminal_tabs(&self, conn: &Connection) -> Result<Vec<PersistedTerminalTab>, String> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, title, workspace_id, selected_cli, plan_mode, fast_mode, effort_level,
+                "SELECT id, title, workspace_id, selected_cli, selected_agent_json, plan_mode, fast_mode, effort_level,
                         model_overrides_json, permission_overrides_json, transport_sessions_json,
                         context_boundaries_by_cli_json, draft_prompt, draft_attachments_json,
                         status, last_active_at
@@ -2096,17 +2115,20 @@ impl TerminalStorage {
                     title: row.get(1)?,
                     workspace_id: row.get(2)?,
                     selected_cli: row.get(3)?,
-                    plan_mode: row.get(4)?,
-                    fast_mode: row.get(5)?,
-                    effort_level: row.get(6)?,
-                    model_overrides: parse_json_default(row.get::<_, String>(7)?),
-                    permission_overrides: parse_json_default(row.get::<_, String>(8)?),
-                    transport_sessions: parse_json_default(row.get::<_, String>(9)?),
-                    context_boundaries_by_cli: parse_json_default(row.get::<_, String>(10)?),
-                    draft_prompt: row.get(11)?,
-                    draft_attachments: parse_json_default(row.get::<_, String>(12)?),
-                    status: row.get(13)?,
-                    last_active_at: row.get(14)?,
+                    selected_agent: row
+                        .get::<_, Option<String>>(4)?
+                        .and_then(|raw| serde_json::from_str::<SelectedCustomAgent>(&raw).ok()),
+                    plan_mode: row.get(5)?,
+                    fast_mode: row.get(6)?,
+                    effort_level: row.get(7)?,
+                    model_overrides: parse_json_default(row.get::<_, String>(8)?),
+                    permission_overrides: parse_json_default(row.get::<_, String>(9)?),
+                    transport_sessions: parse_json_default(row.get::<_, String>(10)?),
+                    context_boundaries_by_cli: parse_json_default(row.get::<_, String>(11)?),
+                    draft_prompt: row.get(12)?,
+                    draft_attachments: parse_json_default(row.get::<_, String>(13)?),
+                    status: row.get(14)?,
+                    last_active_at: row.get(15)?,
                 })
             })
             .map_err(|err| err.to_string())?;
@@ -2159,7 +2181,7 @@ impl TerminalStorage {
     ) -> Result<Vec<PersistedChatMessage>, String> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, role, cli_id, automation_run_id, workflow_run_id, workflow_node_id,
+                "SELECT id, role, cli_id, selected_agent_json, automation_run_id, workflow_run_id, workflow_node_id,
                         timestamp, content, raw_content, content_format,
                         transport_kind, blocks_json, attachments_json, is_streaming, duration_ms, exit_code
                  FROM chat_messages
@@ -2169,27 +2191,30 @@ impl TerminalStorage {
             .map_err(|err| err.to_string())?;
         let rows = stmt
             .query_map([session_id], |row| {
-                let blocks_json = row.get::<_, Option<String>>(11)?;
-                let attachments_json = row.get::<_, String>(12)?;
+                let blocks_json = row.get::<_, Option<String>>(12)?;
+                let attachments_json = row.get::<_, String>(13)?;
                 Ok(PersistedChatMessage {
                     id: row.get(0)?,
                     role: row.get(1)?,
                     cli_id: row.get(2)?,
-                    automation_run_id: row.get(3)?,
-                    workflow_run_id: row.get(4)?,
-                    workflow_node_id: row.get(5)?,
-                    timestamp: row.get(6)?,
-                    content: row.get(7)?,
-                    raw_content: row.get(8)?,
-                    content_format: row.get(9)?,
-                    transport_kind: row.get(10)?,
+                    selected_agent: row
+                        .get::<_, Option<String>>(3)?
+                        .and_then(|raw| serde_json::from_str::<SelectedCustomAgent>(&raw).ok()),
+                    automation_run_id: row.get(4)?,
+                    workflow_run_id: row.get(5)?,
+                    workflow_node_id: row.get(6)?,
+                    timestamp: row.get(7)?,
+                    content: row.get(8)?,
+                    raw_content: row.get(9)?,
+                    content_format: row.get(10)?,
+                    transport_kind: row.get(11)?,
                     blocks: blocks_json
                         .as_deref()
                         .and_then(|raw| serde_json::from_str::<Vec<ChatMessageBlock>>(raw).ok()),
                     attachments: parse_json_default(attachments_json),
-                    is_streaming: row.get(13)?,
-                    duration_ms: row.get::<_, Option<i64>>(14)?.map(|value| value as u64),
-                    exit_code: row.get(15)?,
+                    is_streaming: row.get(14)?,
+                    duration_ms: row.get::<_, Option<i64>>(15)?.map(|value| value as u64),
+                    exit_code: row.get(16)?,
                 })
             })
             .map_err(|err| err.to_string())?;
@@ -2906,10 +2931,10 @@ impl TerminalStorage {
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO chat_messages (
                     id, session_id, terminal_tab_id, message_order, role, cli_id,
-                    automation_run_id, workflow_run_id, workflow_node_id, timestamp,
+                    selected_agent_json, automation_run_id, workflow_run_id, workflow_node_id, timestamp,
                     content, raw_content, content_format, transport_kind, blocks_json,
                     attachments_json, is_streaming, duration_ms, exit_code
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     message.id,
                     session_id,
@@ -2917,6 +2942,7 @@ impl TerminalStorage {
                     next_order,
                     message.role,
                     message.cli_id,
+                    option_to_json(&message.selected_agent)?,
                     message.automation_run_id,
                     message.workflow_run_id,
                     message.workflow_node_id,
@@ -4307,7 +4333,10 @@ fn extract_completed_turns_from_messages(
                 .cli_id
                 .clone()
                 .unwrap_or_else(|| fallback_cli.to_string()),
-            user_prompt: user.content.clone(),
+            user_prompt: user
+                .raw_content
+                .clone()
+                .unwrap_or_else(|| user.content.clone()),
             assistant_reply: message
                 .raw_content
                 .clone()

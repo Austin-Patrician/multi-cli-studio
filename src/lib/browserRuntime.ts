@@ -362,6 +362,7 @@ function defaultSettings(): AppSettings {
   return normalizeProviderSettings({
     cliPaths: { codex: "auto", claude: "auto", gemini: "auto" },
     sshConnections: [],
+    customAgents: [],
     projectRoot: state?.workspace?.projectRoot ?? "C:\\Users\\admin\\source\\repos\\multi-cli-studio",
     maxTurnsPerAgent: 50,
     maxOutputCharsPerTurn: 100000,
@@ -507,6 +508,27 @@ function normalizeSettings(value: unknown): AppSettings {
       ...(raw.cliPaths ?? {}),
     },
     sshConnections: normalizeSshConnections(raw.sshConnections, defaults.sshConnections),
+    customAgents: Array.isArray(raw.customAgents)
+      ? raw.customAgents
+          .map((entry) => {
+            if (!entry || typeof entry !== "object") return null;
+            const item = entry as AppSettings["customAgents"][number];
+            const id = typeof item.id === "string" ? item.id.trim() : "";
+            const name = typeof item.name === "string" ? item.name.trim() : "";
+            if (!id || !name) return null;
+            return {
+              id,
+              name,
+              prompt: typeof item.prompt === "string" && item.prompt.trim() ? item.prompt : null,
+              icon: typeof item.icon === "string" && item.icon.trim() ? item.icon : null,
+              createdAt:
+                typeof item.createdAt === "number" && Number.isFinite(item.createdAt)
+                  ? item.createdAt
+                  : null,
+            } satisfies AppSettings["customAgents"][number];
+          })
+          .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+      : defaults.customAgents,
     projectRoot:
       typeof raw.projectRoot === "string" && raw.projectRoot.trim()
         ? raw.projectRoot

@@ -167,6 +167,17 @@ export interface WorkspaceRef {
 
 export type TerminalCliId = AgentId | "auto";
 
+export interface SelectedCustomAgent {
+  id: string;
+  name: string;
+  prompt?: string | null;
+  icon?: string | null;
+}
+
+export interface CustomAgentConfig extends SelectedCustomAgent {
+  createdAt?: number | null;
+}
+
 export interface TerminalCliContextBoundary {
   lastSeenMessageId: string | null;
   lastSeenAt: string | null;
@@ -179,6 +190,7 @@ export interface TerminalTab {
   title: string;
   workspaceId: string;
   selectedCli: TerminalCliId;
+  selectedAgent?: SelectedCustomAgent | null;
   planMode: boolean;
   fastMode: boolean;
   effortLevel: string | null;
@@ -372,6 +384,7 @@ export interface ApiChatStreamEvent {
 export interface AppSettings {
   cliPaths: { codex: string; claude: string; gemini: string };
   sshConnections: SshConnectionConfig[];
+  customAgents: CustomAgentConfig[];
   projectRoot: string;
   maxTurnsPerAgent: number;
   maxOutputCharsPerTurn: number;
@@ -854,6 +867,7 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   cliId: AgentId | null;
+  selectedAgent?: SelectedCustomAgent | null;
   automationRunId?: string | null;
   workflowRunId?: string | null;
   workflowNodeId?: string | null;

@@ -56,6 +56,14 @@
   overflow-x: hidden;
 }
 
+.terminal-chat-input-context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  padding-bottom: 2px;
+}
+
 .terminal-chat-textarea {
   display: block;
   width: 100%;
@@ -87,7 +95,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding-bottom: 2px;
+  min-width: 0;
 }
 
 .terminal-chat-attachment-chip {
@@ -568,6 +576,62 @@
 .terminal-chat-prompt .context-tool-btn--labeled:hover:not(:disabled),
 .terminal-chat-prompt .context-tool-btn--labeled:focus-visible {
   background: var(--selector-pill-bg);
+}
+
+.terminal-chat-prompt .context-agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  min-height: 28px;
+  padding: 3px 8px 3px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-primary) 6%, #ffffff);
+  color: var(--text-primary);
+}
+
+.terminal-chat-prompt .context-agent-chip--input {
+  max-width: min(100%, 240px);
+  min-height: 32px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+}
+
+.terminal-chat-prompt .context-agent-chip-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.terminal-chat-prompt .context-agent-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.terminal-chat-prompt .context-agent-chip-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.terminal-chat-prompt .context-agent-chip-clear:hover,
+.terminal-chat-prompt .context-agent-chip-clear:focus-visible {
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  color: var(--text-primary);
+  outline: none;
 }
 
 .terminal-chat-prompt .context-tool-label {

@@ -92,7 +92,15 @@ type SidebarNavItem = {
   matchPatterns: SidebarMatchPattern[];
 };
 
-type SettingsMenuSection = "settings" | "models" | "vendors" | "projects" | "git" | "mcp" | "skills";
+type SettingsMenuSection =
+  | "settings"
+  | "models"
+  | "agents"
+  | "vendors"
+  | "projects"
+  | "git"
+  | "mcp"
+  | "skills";
 
 const navItems: SidebarNavItem[] = [
   {
@@ -322,9 +330,13 @@ export function Sidebar() {
     if (matchesSidebarItem(location.pathname, [{ path: "/settings/model-providers", end: false }])) {
       return "models";
     }
+    if (matchesSidebarItem(location.pathname, [{ path: "/settings/agents", end: false }])) {
+      return "agents";
+    }
     const section = new URLSearchParams(location.search).get("section");
     switch (section) {
       case "models":
+      case "agents":
       case "vendors":
       case "projects":
       case "git":
@@ -383,6 +395,7 @@ export function Sidebar() {
   const settingsMenuItems = useMemo(
     () => [
       { id: "settings", label: "设置", section: "settings" as const, icon: IconGear },
+      { id: "agents", label: "智能体", section: "agents" as const, icon: IconSparkles },
       // { id: "models", label: "模型管理", section: "models" as const, icon: IconProviders },
       // { id: "vendors", label: "供应商", section: "vendors" as const, icon: IconProviders },
       // { id: "projects", label: "项目", section: "projects" as const, icon: IconPlus },
@@ -405,6 +418,10 @@ export function Sidebar() {
     }
     if (section === "models") {
       navigate("/settings/model-providers");
+      return;
+    }
+    if (section === "agents") {
+      navigate("/settings/agents");
       return;
     }
     navigate(`/settings?section=${section}`);

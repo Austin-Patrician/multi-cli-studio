@@ -7,10 +7,13 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { useNavigate } from "react-router-dom";
 import {
+  Bot,
   Brain,
   Check,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Cpu,
   FileText,
@@ -22,6 +25,7 @@ import {
   Settings2,
   Shield,
   Square,
+  Plus,
   X,
   Zap,
 } from "lucide-react";
@@ -43,13 +47,16 @@ import {
   ChatAttachment,
   CliSkillItem,
   FileMentionCandidate,
+  SelectedCustomAgent,
   SshConnectionConfig,
   TerminalTab,
   TerminalCliId,
 } from "../../lib/models";
 import { bridge } from "../../lib/bridge";
 import { createChatAttachment } from "../../lib/chatAttachments";
+import { AgentIcon } from "../AgentIcon";
 import { estimateSessionTokens, FULL_COMPACT_THRESHOLD } from "../../lib/tokenEstimation";
+import { resolveSelectedCustomAgent } from "../../lib/customAgents";
 import { useStore } from "../../lib/store";
 import { loadWorkspaceFileIndex } from "../../lib/workspaceFileIndex";
 import { CLI_OPTIONS } from "./CliSelector";
@@ -60,6 +67,7 @@ type InteractiveOverlayEntry =
   | { id: string; kind: "shortcut"; shortcut: "skills" }
   | { id: string; kind: "skill"; skill: CliSkillItem }
   | { id: string; kind: "mention"; mention: FileMentionCandidate }
+  | { id: string; kind: "agent"; agent: SelectedCustomAgent | null; action: "select" | "create" }
   | { id: string; kind: "option"; commandKind: AcpPickerCommandKind; option: AcpOptionDef };
 
 interface SkillOverlayState {
@@ -75,7 +83,7 @@ interface ChatPromptBarProps {
   onToggleStatusPanel?: () => void;
 }
 
-type FooterMenuId = "config" | "shortcuts" | "provider" | "mode" | "model" | "reasoning";
+type FooterMenuId = "config" | "agent" | "shortcuts" | "provider" | "mode" | "model" | "reasoning";
 
 type FooterReasoningOption = {
   id: "low" | "medium" | "high" | "max";
@@ -152,6 +160,19 @@ function findSkillToken(value: string, caret: number) {
   };
 }
 
+function findAgentToken(value: string, caret: number) {
+  const prefix = value.slice(0, caret);
+  const lineStart = prefix.lastIndexOf("\n") + 1;
+  const linePrefix = prefix.slice(lineStart);
+  const match = linePrefix.match(/^#([^\s#]*)$/);
+  if (!match) return null;
+  return {
+    start: lineStart,
+    end: caret,
+    query: match[1] ?? "",
+  };
+}
+
 function parseSkillSlashQuery(value: string) {
   const match = value.match(/^\/skills?(?:\s+(.*))?$/is);
   if (!match) return null;
@@ -193,6 +214,8 @@ function attachmentPreviewSrc(attachment: ChatAttachment) {
     return "";
   }
 }
+
+const CREATE_AGENT_ENTRY_ID = "__create-agent__";
 
 const FOOTER_REASONING_OPTIONS: FooterReasoningOption[] = [
   { id: "low", label: "低", description: "更快响应，较少推理" },
@@ -797,6 +820,7 @@ export function ChatPromptBar({
   statusPanelExpanded = false,
   onToggleStatusPanel,
 }: ChatPromptBarProps) {
+  const navigate = useNavigate();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const footerMenuRef = useRef<HTMLDivElement>(null);
   const promptHistoryStateRef = useRef<{ index: number | null; draft: string }>({
@@ -807,6 +831,7 @@ export function ChatPromptBar({
   const [mentionItems, setMentionItems] = useState<FileMentionCandidate[]>([]);
   const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
   const [dismissedSkillKey, setDismissedSkillKey] = useState<string | null>(null);
+  const [dismissedAgentKey, setDismissedAgentKey] = useState<string | null>(null);
   const [openFooterMenu, setOpenFooterMenu] = useState<FooterMenuId | null>(null);
   const [queueFeedback, setQueueFeedback] = useState<string | null>(null);
 
@@ -828,6 +853,7 @@ export function ChatPromptBar({
   const cliSkillStatusByContext = useStore((s) => s.cliSkillStatusByContext);
   const setTabDraftPrompt = useStore((s) => s.setTabDraftPrompt);
   const setTabSelectedCli = useStore((s) => s.setTabSelectedCli);
+  const setTabSelectedAgent = useStore((s) => s.setTabSelectedAgent);
   const sendChatMessage = useStore((s) => s.sendChatMessage);
   const executeAcpCommand = useStore((s) => s.executeAcpCommand);
   const snapshotWorkspace = useStore((s) => s.snapshotWorkspace);
@@ -854,6 +880,7 @@ export function ChatPromptBar({
     [settings?.sshConnections, workspace?.connectionId, workspace?.locationKind]
   );
   const remoteCliValidationKnown = hasRemoteCliDetection(activeSshConnection);
+  const customAgents = settings?.customAgents ?? [];
   const prompt = activeTab?.draftPrompt ?? "";
   const draftAttachments = activeTab?.draftAttachments ?? [];
   const isStreaming = activeTab?.status === "streaming";
@@ -863,6 +890,10 @@ export function ChatPromptBar({
   const cliSkillStatus = cliSkillCacheKey
     ? cliSkillStatusByContext[cliSkillCacheKey] ?? "idle"
     : "idle";
+  const resolvedSelectedAgent = useMemo(
+    () => resolveSelectedCustomAgent(activeTab?.selectedAgent ?? null, customAgents),
+    [activeTab?.selectedAgent, customAgents]
+  );
 
   const rawSlashPrompt = prompt.trimStart();
   const slashQuery = rawSlashPrompt.startsWith("/") ? rawSlashPrompt.slice(1).toLowerCase() : "";
@@ -899,9 +930,17 @@ export function ChatPromptBar({
     setOpenFooterMenu(null);
   }, [activeTab?.id]);
 
+  useEffect(() => {
+    setDismissedAgentKey(null);
+  }, [activeTab?.id]);
+
   const mentionToken = useMemo(() => {
     const caret = textareaRef.current?.selectionStart ?? prompt.length;
     return findMentionToken(prompt, caret);
+  }, [prompt]);
+  const agentToken = useMemo(() => {
+    const caret = textareaRef.current?.selectionStart ?? prompt.length;
+    return findAgentToken(prompt, caret);
   }, [prompt]);
   const skillToken = useMemo(() => {
     const caret = textareaRef.current?.selectionStart ?? prompt.length;
@@ -909,6 +948,7 @@ export function ChatPromptBar({
   }, [prompt]);
 
   const mentionKey = mentionToken ? `${mentionToken.start}:${mentionToken.query}` : null;
+  const agentKey = agentToken ? `${agentToken.start}:${agentToken.query}` : null;
   const skillKey = skillToken ? `${skillToken.start}:${skillToken.query}` : null;
 
   useEffect(() => {
@@ -944,6 +984,16 @@ export function ChatPromptBar({
       projectRoot: workspace.rootPath,
     });
   }, [workspace]);
+
+  useEffect(() => {
+    if (!agentToken) {
+      setDismissedAgentKey(null);
+      return;
+    }
+    if (agentKey && dismissedAgentKey && agentKey !== dismissedAgentKey) {
+      setDismissedAgentKey(null);
+    }
+  }, [agentKey, agentToken, dismissedAgentKey]);
 
   useEffect(() => {
     if (!activeTab || !workspace || rawSlashPrompt.startsWith("/")) return;
@@ -1022,6 +1072,73 @@ export function ChatPromptBar({
     return buildSkillOverlay(effectiveCli, skillToken.query, cliSkills, cliSkillStatus);
   }, [activeTab, cliSkillStatus, cliSkills, commandOverlay, effectiveCli, skillToken, workspace]);
 
+  const agentOverlay = useMemo(() => {
+    if (!agentToken || commandOverlay || !activeTab) {
+      return null;
+    }
+
+    const normalized = agentToken.query.trim().toLowerCase();
+    const filteredAgents = customAgents.filter((agent) => {
+      if (!normalized) return true;
+      return (
+        agent.name.toLowerCase().includes(normalized) ||
+        agent.prompt?.toLowerCase().includes(normalized) === true
+      );
+    });
+
+    const sections: PromptOverlaySection[] = [];
+    const entries: InteractiveOverlayEntry[] = [];
+
+    if (filteredAgents.length > 0) {
+      sections.push({
+        id: "agents",
+        title: "智能体",
+        items: filteredAgents.map((agent) => {
+          entries.push({
+            id: `agent:${agent.id}`,
+            kind: "agent",
+            agent: {
+              id: agent.id,
+              name: agent.name,
+              prompt: agent.prompt ?? null,
+              icon: agent.icon ?? null,
+            },
+            action: "select",
+          });
+          return {
+            id: `agent:${agent.id}`,
+            title: agent.name,
+          } satisfies PromptOverlayItem;
+        }),
+      });
+    }
+
+    sections.push({
+      id: "agent-actions",
+      title: "管理",
+      items: [
+        {
+          id: CREATE_AGENT_ENTRY_ID,
+          title: "创建智能体",
+        },
+      ],
+    });
+    entries.push({
+      id: CREATE_AGENT_ENTRY_ID,
+      kind: "agent",
+      agent: null,
+      action: "create",
+    });
+
+    return {
+      title: "智能体选择",
+      description: "选择一个角色型智能体附着到当前会话。发送时会自动注入角色提示。",
+      footer: "Arrow keys move, Enter applies, Esc dismisses.",
+      sections,
+      entries,
+    };
+  }, [activeTab, agentToken, commandOverlay, customAgents, resolvedSelectedAgent]);
+
   const showSkillOverlay =
     !commandOverlay &&
     !!skillToken &&
@@ -1029,8 +1146,16 @@ export function ChatPromptBar({
     skillKey !== dismissedSkillKey &&
     !!skillOverlay;
 
+  const showAgentOverlay =
+    !commandOverlay &&
+    !showSkillOverlay &&
+    !!agentToken &&
+    agentKey !== dismissedAgentKey &&
+    !!agentOverlay;
+
   const showMentionOverlay =
     !commandOverlay &&
+    !showAgentOverlay &&
     !showSkillOverlay &&
     !!mentionToken &&
     mentionItems.length > 0 &&
@@ -1038,6 +1163,8 @@ export function ChatPromptBar({
 
   const activeSections = commandOverlay
     ? commandOverlay.sections
+    : showAgentOverlay && agentOverlay
+      ? agentOverlay.sections
     : showSkillOverlay && skillOverlay
       ? skillOverlay.sections
     : showMentionOverlay
@@ -1057,6 +1184,8 @@ export function ChatPromptBar({
     ? "entries" in commandOverlay
       ? commandOverlay.entries
       : []
+    : showAgentOverlay && agentOverlay
+      ? agentOverlay.entries
     : showSkillOverlay && skillOverlay
       ? skillOverlay.entries
     : showMentionOverlay
@@ -1071,7 +1200,7 @@ export function ChatPromptBar({
 
   useEffect(() => {
     setSelectedIndex(0);
-  }, [commandOverlay?.kind, rawSlashPrompt, mentionKey, skillKey, skillSlashQuery]);
+  }, [commandOverlay?.kind, rawSlashPrompt, mentionKey, agentKey, skillKey, skillSlashQuery]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -1423,6 +1552,26 @@ export function ChatPromptBar({
     });
   }
 
+  function selectAgent(agent: SelectedCustomAgent | null, action: "select" | "create") {
+    if (!activeTab || !agentToken) return;
+    const nextPrompt = `${prompt.slice(0, agentToken.start)}${prompt.slice(agentToken.end)}`.replace(/^\s+/, "");
+    setPrompt(nextPrompt);
+    setDismissedAgentKey(agentKey);
+    if (action === "create") {
+      closeFooterMenus();
+      navigate("/settings/agents");
+      return;
+    }
+    setTabSelectedAgent(activeTab.id, agent);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const nextCaret = Math.max(0, agentToken.start);
+      el.focus();
+      el.setSelectionRange(nextCaret, nextCaret);
+    });
+  }
+
   function selectOption(commandKind: AcpPickerCommandKind, option: AcpOptionDef) {
     if (!activeTab) return;
     const command = {
@@ -1461,6 +1610,10 @@ export function ChatPromptBar({
       selectMention(entry.mention);
       return;
     }
+    if (entry.kind === "agent") {
+      selectAgent(entry.agent, entry.action);
+      return;
+    }
     selectOption(entry.commandKind, entry.option);
   }
 
@@ -1484,6 +1637,11 @@ export function ChatPromptBar({
       return;
     }
 
+    if (showAgentOverlay && agentKey) {
+      setDismissedAgentKey(agentKey);
+      return;
+    }
+
     if (showMentionOverlay && mentionKey) {
       setDismissedMentionKey(mentionKey);
       return;
@@ -1502,7 +1660,7 @@ export function ChatPromptBar({
     const atPromptStart = !hasSelection && selectionStart === 0;
     const atPromptEnd = !hasSelection && selectionEnd === event.currentTarget.value.length;
 
-    if (event.key === "Tab" && event.shiftKey && activeTab && !commandOverlay && !showSkillOverlay && !showMentionOverlay) {
+    if (event.key === "Tab" && event.shiftKey && activeTab && !commandOverlay && !showAgentOverlay && !showSkillOverlay && !showMentionOverlay) {
       event.preventDefault();
       togglePlanMode(activeTab.id);
       return;
@@ -1544,7 +1702,7 @@ export function ChatPromptBar({
       }
     }
 
-    if (!commandOverlay && !showSkillOverlay && !showMentionOverlay && !openFooterMenu) {
+    if (!commandOverlay && !showAgentOverlay && !showSkillOverlay && !showMentionOverlay && !openFooterMenu) {
       if (event.key === "ArrowUp" && atPromptStart) {
         event.preventDefault();
         navigatePromptHistory(-1);
@@ -1557,7 +1715,7 @@ export function ChatPromptBar({
       }
     }
 
-    if (event.key === "Escape" && (commandOverlay || showSkillOverlay || showMentionOverlay || openFooterMenu)) {
+    if (event.key === "Escape" && (commandOverlay || showAgentOverlay || showSkillOverlay || showMentionOverlay || openFooterMenu)) {
       event.preventDefault();
       handleEscape();
       return;
@@ -1582,8 +1740,8 @@ export function ChatPromptBar({
       ? "响应中，队列已满 · Ctrl+B 编辑队列 · Shift+Enter 换行 · ↑↓ 历史"
       : "响应中，可继续输入 · Enter 加入队列 · Shift+Enter 换行 · ↑↓ 历史"
     : isAutoMode
-      ? "/指令中心 · @引用文件 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
-      : "/指令中心 · @引用文件 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
+      ? "/指令中心 · @引用文件 · #智能体 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
+      : "/指令中心 · @引用文件 · #智能体 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
   const estimatedUsageTokens =
     activeSession?.estimatedTokens && activeSession.estimatedTokens > 0
       ? activeSession.estimatedTokens
@@ -1647,6 +1805,18 @@ export function ChatPromptBar({
       void loadAcpCapabilities(cliId);
     }
     focusPromptAtEnd();
+  }
+
+  function handleSelectedAgentChange(agent: SelectedCustomAgent | null) {
+    if (!activeTab) return;
+    setTabSelectedAgent(activeTab.id, agent);
+    closeFooterMenus();
+    focusPromptAtEnd();
+  }
+
+  function handleOpenAgentSettings() {
+    closeFooterMenus();
+    navigate("/settings/agents");
   }
 
   function handlePermissionSelect(value: string) {
@@ -1729,17 +1899,27 @@ export function ChatPromptBar({
     >
       <div className="mx-auto max-w-5xl">
         <div className="relative overflow-visible">
-          {(commandOverlay || showSkillOverlay || showMentionOverlay) && (
+          {(commandOverlay || showAgentOverlay || showSkillOverlay || showMentionOverlay) && (
             <PromptOverlay
-              title={commandOverlay?.title ?? (showSkillOverlay ? skillOverlay?.title : undefined)}
+              title={
+                commandOverlay?.title ??
+                (showAgentOverlay ? agentOverlay?.title : showSkillOverlay ? skillOverlay?.title : undefined)
+              }
               description={
                 commandOverlay?.description ??
-                (showSkillOverlay ? skillOverlay?.description : undefined)
+                (showAgentOverlay
+                  ? agentOverlay?.description
+                  : showSkillOverlay
+                    ? skillOverlay?.description
+                    : undefined)
               }
               sections={activeSections}
               selectedIndex={safeSelectedIndex}
               interactive={interactiveEntries.length > 0}
-              footer={commandOverlay?.footer ?? (showSkillOverlay ? skillOverlay?.footer : undefined)}
+              footer={
+                commandOverlay?.footer ??
+                (showAgentOverlay ? agentOverlay?.footer : showSkillOverlay ? skillOverlay?.footer : undefined)
+              }
               onBack={
                 commandOverlay?.kind === "command-argument" ||
                 commandOverlay?.kind === "command-help" ||
@@ -1757,42 +1937,70 @@ export function ChatPromptBar({
           <div className="terminal-chat-prompt-shell">
             <div className="terminal-chat-input-box">
               <div className="terminal-chat-input-area">
-                {draftAttachments.length > 0 ? (
-                  <div className="terminal-chat-attachments" data-chat-search-ignore="true">
-                    {draftAttachments.map((attachment) => {
-                      const previewSrc = attachmentPreviewSrc(attachment);
-                      const label = attachmentLabel(attachment);
-                      return (
-                        <div
-                          key={attachment.id}
-                          className={`terminal-chat-attachment-chip terminal-chat-attachment-chip--${attachment.kind}`}
-                          title={label}
+                {resolvedSelectedAgent || draftAttachments.length > 0 ? (
+                  <div className="terminal-chat-input-context" data-chat-search-ignore="true">
+                    {resolvedSelectedAgent ? (
+                      <div
+                        className="context-agent-chip context-agent-chip--input"
+                        title={resolvedSelectedAgent.name}
+                      >
+                        <span className="context-agent-chip-main">
+                          <AgentIcon
+                            icon={resolvedSelectedAgent.icon}
+                            seed={resolvedSelectedAgent.id || resolvedSelectedAgent.name}
+                            size={14}
+                          />
+                          <span className="context-agent-chip-label">{resolvedSelectedAgent.name}</span>
+                        </span>
+                        <button
+                          type="button"
+                          className="context-agent-chip-clear"
+                          onClick={() => handleSelectedAgentChange(null)}
+                          aria-label="清除智能体"
                         >
-                          {attachment.kind === "image" && previewSrc ? (
-                            <span className="terminal-chat-attachment-thumb" aria-hidden="true">
-                              <img src={previewSrc} alt="" />
-                            </span>
-                          ) : (
-                            <span className="terminal-chat-attachment-icon" aria-hidden="true">
-                              {attachment.kind === "image" ? (
-                                <ImageIcon size={13} />
+                          <X size={12} aria-hidden="true" />
+                        </button>
+                      </div>
+                    ) : null}
+
+                    {draftAttachments.length > 0 ? (
+                      <div className="terminal-chat-attachments">
+                        {draftAttachments.map((attachment) => {
+                          const previewSrc = attachmentPreviewSrc(attachment);
+                          const label = attachmentLabel(attachment);
+                          return (
+                            <div
+                              key={attachment.id}
+                              className={`terminal-chat-attachment-chip terminal-chat-attachment-chip--${attachment.kind}`}
+                              title={label}
+                            >
+                              {attachment.kind === "image" && previewSrc ? (
+                                <span className="terminal-chat-attachment-thumb" aria-hidden="true">
+                                  <img src={previewSrc} alt="" />
+                                </span>
                               ) : (
-                                <FileText size={13} />
+                                <span className="terminal-chat-attachment-icon" aria-hidden="true">
+                                  {attachment.kind === "image" ? (
+                                    <ImageIcon size={13} />
+                                  ) : (
+                                    <FileText size={13} />
+                                  )}
+                                </span>
                               )}
-                            </span>
-                          )}
-                          <span className="terminal-chat-attachment-name">{label}</span>
-                          <button
-                            type="button"
-                            className="terminal-chat-attachment-remove"
-                            onClick={() => handleRemoveDraftAttachment(attachment.id)}
-                            aria-label={`移除 ${label}`}
-                          >
-                            <X size={12} aria-hidden="true" />
-                          </button>
-                        </div>
-                      );
-                    })}
+                              <span className="terminal-chat-attachment-name">{label}</span>
+                              <button
+                                type="button"
+                                className="terminal-chat-attachment-remove"
+                                onClick={() => handleRemoveDraftAttachment(attachment.id)}
+                                aria-label={`移除 ${label}`}
+                              >
+                                <X size={12} aria-hidden="true" />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
 
@@ -1830,6 +2038,30 @@ export function ChatPromptBar({
 
                     {openFooterMenu === "config" ? (
                       <div className="selector-dropdown terminal-chat-dropdown--config">
+                        <FooterMenuSection title="智能体">
+                          <FooterMenuItem
+                            label={resolvedSelectedAgent?.name ?? "未选择智能体"}
+                            description={
+                              resolvedSelectedAgent
+                                ? "已附着到当前会话，发送时自动注入角色提示。"
+                                : "选择一个角色型智能体，作为当前会话默认角色。"
+                            }
+                            onClick={() => setOpenFooterMenu("agent")}
+                            leading={
+                              resolvedSelectedAgent ? (
+                                <AgentIcon
+                                  icon={resolvedSelectedAgent.icon}
+                                  seed={resolvedSelectedAgent.id || resolvedSelectedAgent.name}
+                                  size={14}
+                                />
+                              ) : (
+                                <Bot size={14} />
+                              )
+                            }
+                            trailing={<ChevronRight size={14} aria-hidden />}
+                          />
+                        </FooterMenuSection>
+
                         <FooterMenuSection title="会话开关">
                           <FooterMenuItem
                             label="Plan Mode"
@@ -1854,6 +2086,60 @@ export function ChatPromptBar({
                               }
                             />
                           ) : null}
+                        </FooterMenuSection>
+                      </div>
+                    ) : null}
+
+                    {openFooterMenu === "agent" ? (
+                      <div className="selector-dropdown terminal-chat-dropdown--config">
+                        <FooterMenuSection title="选择智能体">
+                          {customAgents.length > 0 ? (
+                            customAgents.map((agent) => {
+                              const selected = resolvedSelectedAgent?.id === agent.id;
+                              return (
+                                <FooterMenuItem
+                                  key={agent.id}
+                                  label={agent.name}
+                                  description={agent.prompt?.trim() || "作为当前会话默认角色。"}
+                                  onClick={() =>
+                                    handleSelectedAgentChange({
+                                      id: agent.id,
+                                      name: agent.name,
+                                      prompt: agent.prompt ?? null,
+                                      icon: agent.icon ?? null,
+                                    })
+                                  }
+                                  selected={selected}
+                                  leading={
+                                    <AgentIcon
+                                      icon={agent.icon}
+                                      seed={agent.id || agent.name}
+                                      size={14}
+                                    />
+                                  }
+                                />
+                              );
+                            })
+                          ) : (
+                            <div className="selector-option disabled">还没有可选智能体。</div>
+                          )}
+                        </FooterMenuSection>
+
+                        <FooterMenuSection title="操作">
+                          {resolvedSelectedAgent ? (
+                            <FooterMenuItem
+                              label="清除当前智能体"
+                              description="恢复为普通会话，不附着角色提示。"
+                              onClick={() => handleSelectedAgentChange(null)}
+                              leading={<X size={14} />}
+                            />
+                          ) : null}
+                          <FooterMenuItem
+                            label="管理智能体"
+                            description="打开设置页创建、编辑或导入智能体。"
+                            onClick={handleOpenAgentSettings}
+                            leading={<Plus size={14} />}
+                          />
                         </FooterMenuSection>
                       </div>
                     ) : null}

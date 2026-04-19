@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   BarChart3,
   BookOpen,
+  Bot,
   ChevronLeft,
   ChevronRight,
   Cpu,
@@ -25,6 +26,7 @@ import type { AgentId, GitPanelData, TerminalTab, WorkspaceRef } from "../lib/mo
 type SettingsSection =
   | "settings"
   | "models"
+  | "agents"
   | "vendors"
   | "projects"
   | "connections"
@@ -53,6 +55,7 @@ type ProjectView = {
 const NAV_ITEMS: SidebarNavItem[] = [
   { id: "settings", label: "设置", icon: Settings },
   { id: "models", label: "模型管理", icon: Cpu },
+  { id: "agents", label: "智能体", icon: Bot },
   { id: "vendors", label: "供应商", icon: Settings },
   { id: "projects", label: "项目", icon: FolderOpen },
   { id: "connections", label: "连接", icon: Link2 },
@@ -64,6 +67,7 @@ const NAV_ITEMS: SidebarNavItem[] = [
 function parseSettingsSection(value: string | null): SettingsSection {
   switch (value) {
     case "models":
+    case "agents":
     case "projects":
     case "connections":
     case "mcp":
@@ -169,8 +173,11 @@ export function DesktopSettingsPage() {
 
   const isGeneralSettingsRoute = location.pathname.startsWith("/settings/general");
   const isModelProvidersRoute = location.pathname.startsWith("/settings/model-providers");
+  const isAgentsRoute = location.pathname.startsWith("/settings/agents");
   const activeSection = isModelProvidersRoute
     ? "models"
+    : isAgentsRoute
+      ? "agents"
     : isGeneralSettingsRoute
       ? "settings"
       : parseSettingsSection(searchParams.get("section"));
@@ -251,6 +258,11 @@ export function DesktopSettingsPage() {
 
     if (section === "models") {
       navigate("/settings/model-providers");
+      return;
+    }
+
+    if (section === "agents") {
+      navigate("/settings/agents");
       return;
     }
 

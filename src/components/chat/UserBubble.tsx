@@ -2,6 +2,8 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useState, type ReactNode } from "react";
 import { FileText, Image as ImageIcon } from "lucide-react";
 import { ChatMessage } from "../../lib/models";
+import { AgentIcon } from "../AgentIcon";
+import { stripInjectedSelectedAgentPromptBlock } from "../../lib/customAgents";
 
 const CLI_COLORS: Record<string, string> = {
   codex: "bg-blue-100 text-blue-700",
@@ -116,7 +118,10 @@ export function UserBubble({
     hour12: false,
   });
   const attachments = message.attachments ?? [];
-  const hasTextContent = message.content.trim().length > 0;
+  const displayContent = stripInjectedSelectedAgentPromptBlock(
+    (message.content?.trim() ? message.content : message.rawContent) ?? ""
+  );
+  const hasTextContent = displayContent.trim().length > 0;
 
   useEffect(() => {
     if (!copied) return;
@@ -126,7 +131,7 @@ export function UserBubble({
 
   async function handleCopy() {
     if (!onCopy) return;
-    const result = await onCopy(message.content);
+    const result = await onCopy(displayContent);
     if (result !== false) {
       setCopied(true);
     }
@@ -135,6 +140,16 @@ export function UserBubble({
   return (
     <div className="flex flex-col items-end gap-1.5">
       <div className="flex items-center gap-2">
+        {message.selectedAgent ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200/90 bg-white/92 px-2.5 py-1 text-[10px] font-semibold text-slate-600 shadow-[0_8px_20px_rgba(15,23,42,0.05)]">
+            <AgentIcon
+              icon={message.selectedAgent.icon}
+              seed={message.selectedAgent.id || message.selectedAgent.name}
+              size={12}
+            />
+            <span>{message.selectedAgent.name}</span>
+          </span>
+        ) : null}
         {message.cliId && cliBadge && (
           <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${cliBadge}`}>
             {message.cliId}
@@ -195,7 +210,7 @@ export function UserBubble({
             data-chat-search-message-id={message.id}
             className="max-w-full rounded-2xl rounded-br-md bg-accent px-3.5 py-2.5 text-sm whitespace-pre-wrap text-white"
           >
-            {message.content}
+            {displayContent}
           </div>
         )}
 

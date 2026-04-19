@@ -9,6 +9,7 @@ import { AutomationWorkflowEditorPage } from "./pages/AutomationWorkflowEditorPa
 import { ModelChatPage } from "./pages/ModelChatPage";
 import { ModelProviderEditorPage } from "./pages/ModelProviderEditorPage";
 import { ModelProvidersPage } from "./pages/ModelProvidersPage";
+import { DesktopAgentsPage } from "./pages/DesktopAgentsPage";
 import { DesktopSettingsPage } from "./pages/DesktopSettingsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { useStore } from "./lib/store";
@@ -162,6 +163,7 @@ function App() {
           path="model-providers/:serviceType/:providerId"
           element={<ModelProviderEditorPage embedded />}
         />
+        <Route path="agents" element={<DesktopAgentsPage />} />
       </Route>
       <Route path="/model-providers" element={<ModelProvidersRedirect />} />
       <Route path="/model-providers/new" element={<ModelProviderEditorRedirect />} />

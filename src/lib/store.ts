@@ -21,6 +21,7 @@ import {
   GitFileStatus,
   PersistedTerminalState,
   PickedChatAttachment,
+  SelectedCustomAgent,
   SharedContextEntry,
   TerminalCliId,
   TerminalLine,
@@ -47,6 +48,11 @@ import {
   cloneChatAttachments,
   createChatAttachment,
 } from "./chatAttachments";
+import {
+  injectSelectedAgentPrompt,
+  normalizeSelectedCustomAgent,
+  resolveSelectedCustomAgent,
+} from "./customAgents";
 import { estimateSessionTokens } from "./tokenEstimation";
 import { ACP_COMMANDS, AcpCliCapabilities, AcpCommand } from "./acp";
 import {
@@ -74,12 +80,14 @@ interface QueuedChatMessage {
   text: string;
   attachments: ChatAttachment[];
   cliId: TerminalCliId;
+  selectedAgent: SelectedCustomAgent | null;
   queuedAt: string;
 }
 
 interface SendChatMessageOptions {
   cliIdOverride?: TerminalCliId;
   attachmentsOverride?: ChatAttachment[] | null;
+  selectedAgentOverride?: SelectedCustomAgent | null;
 }
 
 function createId(prefix: string) {
@@ -248,6 +256,7 @@ function createTerminalTab(
     title: partial?.title ?? workspace.name,
     workspaceId: workspace.id,
     selectedCli: partial?.selectedCli ?? workspace.activeAgent ?? workspace.currentWriter,
+    selectedAgent: normalizeSelectedCustomAgent(partial?.selectedAgent) ?? null,
     planMode: partial?.planMode ?? false,
     fastMode: partial?.fastMode ?? false,
     effortLevel: partial?.effortLevel ?? null,
@@ -784,7 +793,7 @@ function extractLatestTaskContext(
       for (let userIndex = index - 1; userIndex >= 0; userIndex -= 1) {
         const candidate = messages[userIndex];
         if (candidate.role === "user") {
-          latestUserPrompt = candidate.content;
+          latestUserPrompt = candidate.rawContent ?? candidate.content;
           break;
         }
       }
@@ -794,7 +803,7 @@ function extractLatestTaskContext(
 
   if (!latestUserPrompt) {
     const latestUser = [...messages].reverse().find((message) => message.role === "user");
-    latestUserPrompt = latestUser?.content ?? null;
+    latestUserPrompt = latestUser?.rawContent ?? latestUser?.content ?? null;
   }
 
   return { latestUserPrompt, latestAssistantSummary, relevantFiles };
@@ -979,6 +988,7 @@ interface StoreState {
   closeTerminalTab: (tabId: string) => void;
   setActiveTerminalTab: (tabId: string) => void;
   setTabSelectedCli: (tabId: string, cliId: TerminalCliId) => void;
+  setTabSelectedAgent: (tabId: string, agent: SelectedCustomAgent | null) => void;
   setTabDraftPrompt: (tabId: string, prompt: string) => void;
   addDraftChatAttachments: (
     tabId: string,
@@ -1059,6 +1069,7 @@ export const useStore = create<StoreState>((set, get) => {
       void get().sendChatMessage(tabId, queued.text, {
         cliIdOverride: queued.cliId,
         attachmentsOverride: queued.attachments,
+        selectedAgentOverride: queued.selectedAgent,
       });
     });
   };
@@ -1681,6 +1692,7 @@ export const useStore = create<StoreState>((set, get) => {
 
     const tab = createTerminalTab(workspace, {
       selectedCli: sourceTab?.selectedCli ?? workspace.activeAgent,
+      selectedAgent: sourceTab?.selectedAgent ?? null,
       contextBoundariesByCli: {},
     });
     const session = createConversationSession(tab, workspace);
@@ -1720,6 +1732,7 @@ export const useStore = create<StoreState>((set, get) => {
     const tab = createTerminalTab(workspace, {
       title: nextClonedTabTitle(sourceTab.title || workspace.name, current.terminalTabs.map((item) => item.title)),
       selectedCli: sourceTab.selectedCli,
+      selectedAgent: sourceTab.selectedAgent ?? null,
       planMode: sourceTab.planMode,
       fastMode: sourceTab.fastMode,
       effortLevel: sourceTab.effortLevel,
@@ -1923,6 +1936,17 @@ export const useStore = create<StoreState>((set, get) => {
     void doHandoff();
   },
 
+  setTabSelectedAgent: (tabId, agent) => {
+    const normalizedAgent = normalizeSelectedCustomAgent(agent);
+    set((state) => {
+      const terminalTabs = state.terminalTabs.map((tab) =>
+        tab.id === tabId ? { ...tab, selectedAgent: normalizedAgent } : tab
+      );
+      persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
+      return { terminalTabs };
+    });
+  },
+
   setTabDraftPrompt: (tabId, prompt) => {
     const currentTab = get().terminalTabs.find((tab) => tab.id === tabId);
     if (!currentTab || currentTab.draftPrompt === prompt) return;
@@ -2045,6 +2069,7 @@ export const useStore = create<StoreState>((set, get) => {
             text,
             attachments,
             cliId: cliIdOverride ?? currentTab.selectedCli,
+            selectedAgent: normalizeSelectedCustomAgent(currentTab.selectedAgent) ?? null,
             queuedAt: nowIso(),
           },
         },
@@ -2086,6 +2111,7 @@ export const useStore = create<StoreState>((set, get) => {
               ...item,
               draftPrompt: queued.text,
               draftAttachments: cloneChatAttachments(queued.attachments) ?? [],
+              selectedAgent: normalizeSelectedCustomAgent(queued.selectedAgent) ?? null,
             }
           : item
       );
@@ -2274,6 +2300,7 @@ export const useStore = create<StoreState>((set, get) => {
     const tab = state.terminalTabs.find((item) => item.id === tabId);
     const workspace = state.workspaces.find((item) => item.id === tab?.workspaceId);
     const session = state.chatSessions[tabId];
+    const settings = state.settings;
     if (!tab || !workspace || !session) return;
     const selectedCliForSend = options?.cliIdOverride ?? tab.selectedCli;
     const effectiveCli = resolveTerminalCliId(selectedCliForSend, workspace.activeAgent);
@@ -2282,7 +2309,12 @@ export const useStore = create<StoreState>((set, get) => {
       options?.attachmentsOverride ?? tab.draftAttachments
     ) ?? [];
     const text = (prompt ?? tab.draftPrompt).trim();
-    const composedPrompt = buildPromptWithAttachments(text, draftAttachments);
+    const visiblePrompt = buildPromptWithAttachments(text, draftAttachments);
+    const resolvedSelectedAgent = resolveSelectedCustomAgent(
+      options?.selectedAgentOverride ?? tab.selectedAgent ?? null,
+      settings?.customAgents
+    );
+    const actualPrompt = injectSelectedAgentPrompt(visiblePrompt, resolvedSelectedAgent);
     const imageAttachments = draftAttachments
       .filter((attachment) => attachment.kind === "image")
       .map((attachment) => attachment.source);
@@ -2296,8 +2328,10 @@ export const useStore = create<StoreState>((set, get) => {
         id: createId("msg"),
         role: "user",
         cliId: null,
+        selectedAgent: resolvedSelectedAgent,
         timestamp: nowIso(),
-        content: composedPrompt,
+        content: visiblePrompt,
+        rawContent: actualPrompt,
         transportKind: null,
         blocks: null,
         attachments: cloneChatAttachments(draftAttachments),
@@ -2318,7 +2352,7 @@ export const useStore = create<StoreState>((set, get) => {
           {
             kind: "orchestrationPlan",
             title: "Auto orchestration by Claude",
-            goal: composedPrompt,
+            goal: actualPrompt,
             summary: "Preparing the execution plan.",
             status: "planning",
           },
@@ -2389,7 +2423,7 @@ export const useStore = create<StoreState>((set, get) => {
           terminalTabId: tab.id,
           workspaceId: workspace.id,
           assistantMessageId: pendingMessage.id,
-          prompt: composedPrompt,
+          prompt: actualPrompt,
           projectRoot: workspace.rootPath,
           projectName: workspace.name,
           recentTurns: buildRecentTabContextTurns(session.messages, "claude"),
@@ -2499,8 +2533,10 @@ export const useStore = create<StoreState>((set, get) => {
         id: createId("msg"),
         role: "user",
         cliId: effectiveCli,
+        selectedAgent: resolvedSelectedAgent,
         timestamp: nowIso(),
-        content: composedPrompt,
+        content: visiblePrompt,
+        rawContent: actualPrompt,
         transportKind: tab.transportSessions[effectiveCli]?.kind ?? defaultTransportKind(effectiveCli),
         blocks: null,
         attachments: cloneChatAttachments(draftAttachments),
@@ -2634,7 +2670,7 @@ export const useStore = create<StoreState>((set, get) => {
         terminalTabId: tab.id,
         workspaceId: workspace.id,
         assistantMessageId: pendingMessage.id,
-        prompt: composedPrompt,
+        prompt: actualPrompt,
         projectRoot: workspace.rootPath,
         projectName: workspace.name,
         recentTurns,

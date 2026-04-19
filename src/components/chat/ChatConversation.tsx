@@ -16,6 +16,7 @@ import {
   AssistantApprovalDecision,
   AutoRouteAction,
   ChatAttachment,
+  SelectedCustomAgent,
   TerminalCliId,
 } from "../../lib/models";
 import { formatAttachmentSummary } from "../../lib/chatAttachments";
@@ -486,6 +487,7 @@ export function ChatConversation() {
     })
   );
   const setTabSelectedCli = useStore((state) => state.setTabSelectedCli);
+  const setTabSelectedAgent = useStore((state) => state.setTabSelectedAgent);
   const sendChatMessage = useStore((state) => state.sendChatMessage);
   const interruptChatTurn = useStore((state) => state.interruptChatTurn);
   const deleteChatMessage = useStore((state) => state.deleteChatMessage);
@@ -783,15 +785,18 @@ export function ChatConversation() {
   function handleRegeneratePrompt(
     prompt: string,
     cliId: AgentId | null,
-    attachments?: ChatAttachment[] | null
+    attachments?: ChatAttachment[] | null,
+    selectedAgent?: SelectedCustomAgent | null
   ) {
     if (!activeTab || activeTab.status === "streaming") return;
     if (cliId && cliId !== activeTab.selectedCli) {
       setTabSelectedCli(activeTab.id, cliId);
     }
-    void sendChatMessage(activeTab.id, prompt, { attachmentsOverride: attachments ?? null }).catch(
-      () => {}
-    );
+    setTabSelectedAgent(activeTab.id, selectedAgent ?? null);
+    void sendChatMessage(activeTab.id, prompt, {
+      attachmentsOverride: attachments ?? null,
+      selectedAgentOverride: selectedAgent ?? null,
+    }).catch(() => {});
   }
 
   function handleDeleteMessage(messageId: string) {
@@ -936,7 +941,12 @@ export function ChatConversation() {
 
           {(() => {
             let lastUserPrompt:
-              | { content: string; cliId: AgentId | null; attachments?: ChatAttachment[] | null }
+              | {
+                  content: string;
+                  cliId: AgentId | null;
+                  attachments?: ChatAttachment[] | null;
+                  selectedAgent?: SelectedCustomAgent | null;
+                }
               | null = null;
 
             return visibleMessages.map((msg, index) => {
@@ -969,6 +979,7 @@ export function ChatConversation() {
                   content: msg.content,
                   cliId: msg.cliId,
                   attachments: msg.attachments ?? null,
+                  selectedAgent: msg.selectedAgent ?? null,
                 };
                 return (
                   <Fragment key={msg.id}>
@@ -998,7 +1009,8 @@ export function ChatConversation() {
                             handleRegeneratePrompt(
                               regeneratePrompt.content,
                               regeneratePrompt.cliId,
-                              regeneratePrompt.attachments
+                              regeneratePrompt.attachments,
+                              regeneratePrompt.selectedAgent
                             )
                         : null
                     }

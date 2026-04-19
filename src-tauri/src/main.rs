@@ -368,10 +368,31 @@ struct ContextStore {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SelectedCustomAgent {
+    id: String,
+    name: String,
+    prompt: Option<String>,
+    icon: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomAgentConfig {
+    id: String,
+    name: String,
+    prompt: Option<String>,
+    icon: Option<String>,
+    created_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AppSettings {
     cli_paths: CliPaths,
     #[serde(default)]
     ssh_connections: Vec<SshConnectionConfig>,
+    #[serde(default)]
+    custom_agents: Vec<CustomAgentConfig>,
     project_root: String,
     max_turns_per_agent: usize,
     max_output_chars_per_turn: usize,
@@ -870,9 +891,41 @@ fn normalize_ssh_connections(settings: &mut AppSettings) {
     settings.ssh_connections = normalized;
 }
 
+fn normalize_custom_agents(settings: &mut AppSettings) {
+    let mut normalized = Vec::new();
+    let mut seen = BTreeSet::new();
+    for mut agent in settings.custom_agents.clone() {
+        let id = agent.id.trim().to_string();
+        let name = agent.name.trim().to_string();
+        if id.is_empty() || name.is_empty() {
+            continue;
+        }
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        agent.id = id;
+        agent.name = name;
+        agent.prompt = agent
+            .prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        agent.icon = agent
+            .icon
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        normalized.push(agent);
+    }
+    settings.custom_agents = normalized;
+}
+
 fn normalize_settings_providers(settings: &mut AppSettings) {
     settings.model_chat_context_turn_limit = settings.model_chat_context_turn_limit.max(1);
     normalize_ssh_connections(settings);
+    normalize_custom_agents(settings);
     normalize_provider_entries(
         &mut settings.openai_compatible_providers,
         "openaiCompatible",
@@ -9018,6 +9071,7 @@ fn append_workflow_log_message(
                 id: create_id("wf-log"),
                 role: "system".to_string(),
                 cli_id: None,
+                selected_agent: None,
                 automation_run_id: automation_run_id.map(|value| value.to_string()),
                 workflow_run_id: Some(run.id.clone()),
                 workflow_node_id: workflow_node_id.map(|value| value.to_string()),
@@ -9056,6 +9110,7 @@ fn append_automation_turn_seed(
                     id: create_id("auto-user"),
                     role: "user".to_string(),
                     cli_id: None,
+                    selected_agent: None,
                     automation_run_id: Some(run.id.clone()),
                     workflow_run_id: run.workflow_run_id.clone(),
                     workflow_node_id: run.workflow_node_id.clone(),
@@ -9074,6 +9129,7 @@ fn append_automation_turn_seed(
                     id: message_id.to_string(),
                     role: "assistant".to_string(),
                     cli_id: Some(owner_cli.to_string()),
+                    selected_agent: None,
                     automation_run_id: Some(run.id.clone()),
                     workflow_run_id: run.workflow_run_id.clone(),
                     workflow_node_id: run.workflow_node_id.clone(),
@@ -20040,6 +20096,7 @@ fn append_automation_validation_message(
                 id: create_id("auto-validation"),
                 role: "assistant".to_string(),
                 cli_id: Some(owner_cli.to_string()),
+                selected_agent: None,
                 automation_run_id: Some(run.id.clone()),
                 workflow_run_id: run.workflow_run_id.clone(),
                 workflow_node_id: run.workflow_node_id.clone(),
@@ -26043,6 +26100,7 @@ fn seed_settings(project_root: &str) -> AppSettings {
             gemini: "auto".to_string(),
         },
         ssh_connections: Vec::new(),
+        custom_agents: Vec::new(),
         project_root: project_root.to_string(),
         max_turns_per_agent: DEFAULT_MAX_TURNS,
         max_output_chars_per_turn: DEFAULT_MAX_OUTPUT_CHARS,
