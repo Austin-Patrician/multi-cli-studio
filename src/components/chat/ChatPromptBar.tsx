@@ -1757,11 +1757,14 @@ export function ChatPromptBar({
         0
       )
     : 0;
+  const actualUsageTokens = activeSession
+    ? activeSession.messages.reduce((sum, message) => sum + (message.totalTokens ?? 0), 0)
+    : 0;
   const usagePercent = Math.min(100, (estimatedUsageTokens / FULL_COMPACT_THRESHOLD) * 100);
   const usagePercentLabel = `${Math.round(usagePercent)}%`;
   const messageCount = activeSession?.messages.length ?? 0;
   const compactedSummaryCount = activeSession?.compactedSummaries.length ?? 0;
-  const usageTooltip = `本地估算 ${estimatedUsageTokens.toLocaleString()} tokens，占压缩阈值 ${FULL_COMPACT_THRESHOLD.toLocaleString()} 的 ${usagePercentLabel}。`;
+  const usageTooltip = `真实 usage ${actualUsageTokens.toLocaleString()} tokens；上下文占用本地估算 ${estimatedUsageTokens.toLocaleString()} tokens，占压缩阈值 ${FULL_COMPACT_THRESHOLD.toLocaleString()} 的 ${usagePercentLabel}。`;
   const capabilities = acpCapabilitiesByCli[effectiveCli] ?? null;
   const capabilityStatus = acpCapabilityStatusByCli[effectiveCli] ?? "idle";
   const currentProviderItem =
@@ -2575,10 +2578,16 @@ export function ChatPromptBar({
                   </button>
 
                   <div className="context-dual-tooltip">
-                    <div className="context-dual-tooltip-title">总消耗窗口</div>
+                    <div className="context-dual-tooltip-title">上下文与用量</div>
                     <div className="context-dual-tooltip-grid">
                       <div className="context-dual-tooltip-kv">
-                        <span className="context-dual-tooltip-key">当前消耗</span>
+                        <span className="context-dual-tooltip-key">真实 usage</span>
+                        <span className="context-dual-tooltip-value">
+                          {actualUsageTokens.toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="context-dual-tooltip-kv">
+                        <span className="context-dual-tooltip-key">上下文占用</span>
                         <span className="context-dual-tooltip-value">
                           {estimatedUsageTokens.toLocaleString()}
                         </span>
@@ -2601,7 +2610,7 @@ export function ChatPromptBar({
                     <div className="context-dual-tooltip-divider" />
                     <div className="context-dual-tooltip-foot">
                       <div className="context-dual-tooltip-note">
-                        本地估算，依据当前会话消息与摘要内容计算。
+                        真实 usage 来自 CLI 回传；上下文占用仍是基于当前会话消息与摘要内容的本地估算。
                       </div>
                     </div>
                   </div>

@@ -1865,21 +1865,38 @@ fn api_usage_from_claude_value(value: &Value) -> ApiUsage {
     let usage = value.get("usage").unwrap_or(value);
     let prompt_tokens = usage
         .get("input_tokens")
+        .or_else(|| usage.get("inputTokens"))
         .or_else(|| usage.get("prompt_tokens"))
         .and_then(Value::as_u64);
+    let cache_read_tokens = usage
+        .get("cache_read_input_tokens")
+        .or_else(|| usage.get("cached_input_tokens"))
+        .or_else(|| usage.get("cacheReadInputTokens"))
+        .or_else(|| usage.get("cachedInputTokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_creation_tokens = usage
+        .get("cache_creation_input_tokens")
+        .or_else(|| usage.get("cacheCreationInputTokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let completion_tokens = usage
         .get("output_tokens")
+        .or_else(|| usage.get("outputTokens"))
         .or_else(|| usage.get("completion_tokens"))
         .and_then(Value::as_u64);
     let total_tokens = usage
         .get("total_tokens")
+        .or_else(|| usage.get("totalTokens"))
         .and_then(Value::as_u64)
         .or_else(|| match (prompt_tokens, completion_tokens) {
-            (Some(prompt), Some(completion)) => Some(prompt + completion),
+            (Some(prompt), Some(completion)) => {
+                Some(prompt + completion + cache_read_tokens + cache_creation_tokens)
+            }
             _ => None,
         });
     ApiUsage {
-        prompt_tokens,
+        prompt_tokens: prompt_tokens.map(|value| value + cache_read_tokens + cache_creation_tokens),
         completion_tokens,
         total_tokens,
     }
@@ -1923,6 +1940,277 @@ fn merge_api_usage(target: &mut ApiUsage, next: ApiUsage) {
     }
 }
 
+fn capture_codex_usage(target: &mut ApiUsage, value: &Value) {
+    let parse_usage_value = |usage: &Value| {
+        let prompt_tokens = usage
+            .get("input_tokens")
+            .or_else(|| usage.get("inputTokens"))
+            .and_then(Value::as_u64);
+        let cached_tokens = usage
+            .get("cached_input_tokens")
+            .or_else(|| usage.get("cache_read_input_tokens"))
+            .or_else(|| usage.get("cachedInputTokens"))
+            .or_else(|| usage.get("cacheReadInputTokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let completion_tokens = usage
+            .get("output_tokens")
+            .or_else(|| usage.get("outputTokens"))
+            .and_then(Value::as_u64);
+        let total_tokens = usage
+            .get("total_tokens")
+            .or_else(|| usage.get("totalTokens"))
+            .and_then(Value::as_u64)
+            .or_else(|| match (prompt_tokens, completion_tokens) {
+                (Some(input), Some(output)) => Some(input + output + cached_tokens),
+                _ => None,
+            });
+        ApiUsage {
+            prompt_tokens: prompt_tokens.map(|value| value + cached_tokens),
+            completion_tokens,
+            total_tokens,
+        }
+    };
+
+    let capture_thread_token_usage = |target: &mut ApiUsage, holder: &Value| {
+        let token_usage = holder
+            .get("tokenUsage")
+            .or_else(|| holder.get("token_usage"));
+        if let Some(token_usage) = token_usage {
+            if let Some(last) = token_usage.get("last") {
+                merge_api_usage(target, parse_usage_value(last));
+            } else if let Some(total) = token_usage.get("total") {
+                merge_api_usage(target, parse_usage_value(total));
+            }
+        }
+    };
+
+    let capture_info = |target: &mut ApiUsage, holder: &Value| {
+        if let Some(info) = holder.get("info").or_else(|| holder.get("payload").and_then(|payload| payload.get("info"))) {
+            if let Some(usage) = info
+                .get("last_token_usage")
+                .or_else(|| info.get("lastTokenUsage"))
+                .or_else(|| info.get("total_token_usage"))
+                .or_else(|| info.get("totalTokenUsage"))
+            {
+                merge_api_usage(target, parse_usage_value(usage));
+            }
+        }
+    };
+
+    capture_thread_token_usage(target, value);
+    capture_info(target, value);
+    if let Some(payload) = value.get("payload") {
+        capture_thread_token_usage(target, payload);
+        capture_info(target, payload);
+    }
+    if let Some(item) = value.get("item") {
+        capture_thread_token_usage(target, item);
+        capture_info(target, item);
+        merge_api_usage(target, api_usage_from_openai_value(item));
+    }
+    if let Some(turn) = value.get("turn") {
+        capture_thread_token_usage(target, turn);
+        capture_info(target, turn);
+        merge_api_usage(target, api_usage_from_openai_value(turn));
+    }
+    merge_api_usage(target, api_usage_from_openai_value(value));
+}
+
+fn capture_claude_usage(target: &mut ApiUsage, value: &Value) {
+    let capture_model_usage = |target: &mut ApiUsage, holder: &Value| {
+        let Some(items) = holder
+            .get("model_usage")
+            .or_else(|| holder.get("modelUsage"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+
+        let mut input_sum = 0_u64;
+        let mut output_sum = 0_u64;
+        let mut has_input = false;
+        let mut has_output = false;
+        for item in items {
+            let token_count = item
+                .get("token_count")
+                .or_else(|| item.get("tokenCount"))
+                .unwrap_or(item);
+            if let Some(input) = token_count
+                .get("input_tokens")
+                .or_else(|| token_count.get("inputTokens"))
+                .and_then(Value::as_u64)
+            {
+                input_sum += input;
+                has_input = true;
+            }
+            if let Some(output) = token_count
+                .get("output_tokens")
+                .or_else(|| token_count.get("outputTokens"))
+                .and_then(Value::as_u64)
+            {
+                output_sum += output;
+                has_output = true;
+            }
+        }
+
+        if !has_input && !has_output {
+            return;
+        }
+        merge_api_usage(
+            target,
+            ApiUsage {
+                prompt_tokens: has_input.then_some(input_sum),
+                completion_tokens: has_output.then_some(output_sum),
+                total_tokens: match (has_input, has_output) {
+                    (true, true) => Some(input_sum + output_sum),
+                    _ => None,
+                },
+            },
+        );
+    };
+
+    merge_api_usage(target, api_usage_from_claude_value(value));
+    capture_model_usage(target, value);
+    if let Some(message) = value.get("message") {
+        merge_api_usage(target, api_usage_from_claude_value(message));
+        capture_model_usage(target, message);
+    }
+    if let Some(event) = value.get("event") {
+        merge_api_usage(target, api_usage_from_claude_value(event));
+        capture_model_usage(target, event);
+        if let Some(event_message) = event.get("message") {
+            merge_api_usage(target, api_usage_from_claude_value(event_message));
+            capture_model_usage(target, event_message);
+        }
+        if let Some(delta) = event.get("delta") {
+            merge_api_usage(target, api_usage_from_claude_value(delta));
+            capture_model_usage(target, delta);
+        }
+    }
+    if let Some(meta) = value.get("_meta") {
+        merge_api_usage(target, api_usage_from_claude_value(meta));
+        capture_model_usage(target, meta);
+    }
+    if let Some(result) = value.get("result") {
+        merge_api_usage(target, api_usage_from_claude_value(result));
+        capture_model_usage(target, result);
+    }
+}
+
+fn capture_gemini_usage(target: &mut ApiUsage, value: &Value) {
+    let capture_token_count = |target: &mut ApiUsage, holder: &Value| {
+        let token_count = holder
+            .get("token_count")
+            .or_else(|| holder.get("tokenCount"))
+            .unwrap_or(holder);
+        let prompt_tokens = token_count
+            .get("input_tokens")
+            .or_else(|| token_count.get("inputTokens"))
+            .and_then(Value::as_u64);
+        let completion_tokens = token_count
+            .get("output_tokens")
+            .or_else(|| token_count.get("outputTokens"))
+            .and_then(Value::as_u64);
+        let total_tokens = match (prompt_tokens, completion_tokens) {
+            (Some(input), Some(output)) => Some(input + output),
+            _ => None,
+        };
+        merge_api_usage(
+            target,
+            ApiUsage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+            },
+        );
+    };
+
+    let capture_model_usage = |target: &mut ApiUsage, holder: &Value| {
+        let Some(items) = holder
+            .get("model_usage")
+            .or_else(|| holder.get("modelUsage"))
+            .and_then(Value::as_array)
+        else {
+            return;
+        };
+        let mut input_sum = 0_u64;
+        let mut output_sum = 0_u64;
+        let mut has_input = false;
+        let mut has_output = false;
+        for item in items {
+            let token_count = item
+                .get("token_count")
+                .or_else(|| item.get("tokenCount"))
+                .unwrap_or(item);
+            if let Some(input) = token_count
+                .get("input_tokens")
+                .or_else(|| token_count.get("inputTokens"))
+                .and_then(Value::as_u64)
+            {
+                input_sum += input;
+                has_input = true;
+            }
+            if let Some(output) = token_count
+                .get("output_tokens")
+                .or_else(|| token_count.get("outputTokens"))
+                .and_then(Value::as_u64)
+            {
+                output_sum += output;
+                has_output = true;
+            }
+        }
+
+        if !has_input && !has_output {
+            return;
+        }
+        merge_api_usage(
+            target,
+            ApiUsage {
+                prompt_tokens: has_input.then_some(input_sum),
+                completion_tokens: has_output.then_some(output_sum),
+                total_tokens: match (has_input, has_output) {
+                    (true, true) => Some(input_sum + output_sum),
+                    _ => None,
+                },
+            },
+        );
+    };
+
+    merge_api_usage(target, api_usage_from_gemini_value(value));
+    capture_token_count(target, value);
+    capture_model_usage(target, value);
+    if let Some(result) = value.get("result") {
+        merge_api_usage(target, api_usage_from_gemini_value(result));
+        capture_token_count(target, result);
+        capture_model_usage(target, result);
+    }
+    if let Some(tokens) = value.get("tokens") {
+        let prompt_tokens = tokens.get("input").and_then(Value::as_u64);
+        let cached_tokens = tokens.get("cached").and_then(Value::as_u64).unwrap_or(0);
+        let completion_tokens = tokens.get("output").and_then(Value::as_u64);
+        let total_tokens = match (prompt_tokens, completion_tokens) {
+            (Some(input), Some(output)) => Some(input + output + cached_tokens),
+            _ => None,
+        };
+        merge_api_usage(
+            target,
+            ApiUsage {
+                prompt_tokens: prompt_tokens.map(|value| value + cached_tokens),
+                completion_tokens,
+                total_tokens,
+            },
+        );
+    }
+    if let Some(meta) = value.get("_meta") {
+        if let Some(quota) = meta.get("quota") {
+            capture_token_count(target, quota);
+            capture_model_usage(target, quota);
+        }
+        merge_api_usage(target, api_usage_from_gemini_value(meta));
+    }
+}
+
 fn fill_api_usage_estimate(usage: &mut ApiUsage, request: &ApiChatRequest, raw_content: &str) {
     if usage.prompt_tokens.is_none() {
         let prompt_chars = request
@@ -1941,6 +2229,145 @@ fn fill_api_usage_estimate(usage: &mut ApiUsage, request: &ApiChatRequest, raw_c
             (Some(prompt), Some(completion)) => Some(prompt + completion),
             _ => None,
         };
+    }
+}
+
+#[cfg(test)]
+mod usage_capture_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn capture_codex_usage_reads_thread_token_usage_last() {
+        let mut usage = ApiUsage::default();
+        let value = json!({
+            "threadId": "thr_1",
+            "turnId": "turn_1",
+            "tokenUsage": {
+                "last": {
+                    "inputTokens": 120,
+                    "cachedInputTokens": 30,
+                    "outputTokens": 50,
+                    "totalTokens": 200
+                },
+                "total": {
+                    "inputTokens": 1000,
+                    "cachedInputTokens": 200,
+                    "outputTokens": 400,
+                    "totalTokens": 1600
+                }
+            }
+        });
+
+        capture_codex_usage(&mut usage, &value);
+
+        assert_eq!(usage.prompt_tokens, Some(150));
+        assert_eq!(usage.completion_tokens, Some(50));
+        assert_eq!(usage.total_tokens, Some(200));
+    }
+
+    #[test]
+    fn capture_claude_usage_reads_event_message_usage_with_cache_tokens() {
+        let mut usage = ApiUsage::default();
+        let value = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "message_delta",
+                "message": {
+                    "usage": {
+                        "input_tokens": 80,
+                        "cache_read_input_tokens": 10,
+                        "cache_creation_input_tokens": 5,
+                        "output_tokens": 20
+                    }
+                }
+            }
+        });
+
+        capture_claude_usage(&mut usage, &value);
+
+        assert_eq!(usage.prompt_tokens, Some(95));
+        assert_eq!(usage.completion_tokens, Some(20));
+        assert_eq!(usage.total_tokens, Some(115));
+    }
+
+    #[test]
+    fn capture_claude_usage_reads_model_usage_fallback() {
+        let mut usage = ApiUsage::default();
+        let value = json!({
+            "result": {
+                "model_usage": [
+                    {
+                        "model": "claude-1",
+                        "token_count": {
+                            "input_tokens": 20,
+                            "output_tokens": 10
+                        }
+                    },
+                    {
+                        "model": "claude-2",
+                        "token_count": {
+                            "input_tokens": 30,
+                            "output_tokens": 15
+                        }
+                    }
+                ]
+            }
+        });
+
+        capture_claude_usage(&mut usage, &value);
+
+        assert_eq!(usage.prompt_tokens, Some(50));
+        assert_eq!(usage.completion_tokens, Some(25));
+        assert_eq!(usage.total_tokens, Some(75));
+    }
+
+    #[test]
+    fn capture_gemini_usage_reads_meta_quota_token_count() {
+        let mut usage = ApiUsage::default();
+        let value = json!({
+            "stopReason": "end_turn",
+            "_meta": {
+                "quota": {
+                    "token_count": {
+                        "input_tokens": 60,
+                        "output_tokens": 24
+                    }
+                }
+            }
+        });
+
+        capture_gemini_usage(&mut usage, &value);
+
+        assert_eq!(usage.prompt_tokens, Some(60));
+        assert_eq!(usage.completion_tokens, Some(24));
+        assert_eq!(usage.total_tokens, Some(84));
+    }
+
+    #[test]
+    fn capture_gemini_usage_reads_meta_quota_model_usage_fallback() {
+        let mut usage = ApiUsage::default();
+        let value = json!({
+            "_meta": {
+                "quota": {
+                    "model_usage": [
+                        {
+                            "model": "gemini-2.5-pro",
+                            "token_count": {
+                                "input_tokens": 42,
+                                "output_tokens": 17
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+
+        capture_gemini_usage(&mut usage, &value);
+
+        assert_eq!(usage.prompt_tokens, Some(42));
+        assert_eq!(usage.completion_tokens, Some(17));
+        assert_eq!(usage.total_tokens, Some(59));
     }
 }
 
@@ -2625,6 +3052,12 @@ struct StreamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     blocks: Option<Vec<ChatMessageBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completion_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     interrupted_by_user: Option<bool>,
 }
 
@@ -2733,6 +3166,7 @@ struct CodexTurnOutcome {
     exit_code: Option<i32>,
     blocks: Vec<ChatMessageBlock>,
     transport_session: AgentTransportSession,
+    usage: ApiUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -2743,6 +3177,7 @@ struct GeminiTurnOutcome {
     exit_code: Option<i32>,
     blocks: Vec<ChatMessageBlock>,
     transport_session: AgentTransportSession,
+    usage: ApiUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -2753,6 +3188,7 @@ struct ClaudeTurnOutcome {
     exit_code: Option<i32>,
     blocks: Vec<ChatMessageBlock>,
     transport_session: AgentTransportSession,
+    usage: ApiUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3274,6 +3710,7 @@ struct CodexStreamState {
     thread_id: Option<String>,
     turn_id: Option<String>,
     completion: Option<CodexTurnCompletion>,
+    usage: ApiUsage,
 }
 
 #[derive(Debug, Default)]
@@ -3290,6 +3727,7 @@ struct GeminiStreamState {
     prompt_stop_reason: Option<String>,
     active_turn_started: bool,
     awaiting_current_user_prompt: bool,
+    usage: ApiUsage,
 }
 
 #[derive(Debug, Default)]
@@ -3308,6 +3746,7 @@ struct ClaudeStreamState {
     result_is_error: bool,
     result_received: bool,
     parse_failures: Vec<String>,
+    usage: ApiUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -5284,6 +5723,7 @@ fn handle_gemini_notification(
     }
 
     let mut blocks_changed = false;
+    capture_gemini_usage(&mut stream_state.usage, params);
 
     if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
         let session_id = session_id.to_string();
@@ -5338,6 +5778,9 @@ fn handle_gemini_notification(
                         transport_kind: None,
                         transport_session: None,
                         blocks: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
                         interrupted_by_user: None,
                     },
                 );
@@ -6012,6 +6455,7 @@ fn handle_codex_notification(
     live_turn: Option<&Arc<LiveChatTurnHandle>>,
 ) -> Result<(), String> {
     let mut blocks_changed = false;
+    capture_codex_usage(&mut stream_state.usage, params);
     let next_thread_id = params
         .get("threadId")
         .and_then(Value::as_str)
@@ -6056,6 +6500,9 @@ fn handle_codex_notification(
                         transport_kind: None,
                         transport_session: None,
                         blocks: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
                         interrupted_by_user: None,
                     },
                 );
@@ -6771,6 +7218,7 @@ fn run_codex_app_server_turn(
         exit_code,
         blocks: stream_state.blocks,
         transport_session,
+        usage: stream_state.usage,
     })
 }
 
@@ -6827,6 +7275,9 @@ fn handle_claude_stream_event(
                                 transport_kind: None,
                                 transport_session: None,
                                 blocks: None,
+                                prompt_tokens: None,
+                                completion_tokens: None,
+                                total_tokens: None,
                                 interrupted_by_user: None,
                             },
                         );
@@ -6922,6 +7373,9 @@ fn handle_claude_stream_event(
                                     transport_kind: None,
                                     transport_session: None,
                                     blocks: None,
+                                    prompt_tokens: None,
+                                    completion_tokens: None,
+                                    total_tokens: None,
                                     interrupted_by_user: None,
                                 },
                             );
@@ -7074,6 +7528,7 @@ fn handle_claude_stream_record(
     claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
 ) -> Result<(), String> {
+    capture_claude_usage(&mut stream_state.usage, record);
     if let Some(session_id) = record.get("session_id").and_then(Value::as_str) {
         stream_state.session_id = Some(session_id.to_string());
     }
@@ -7336,6 +7791,9 @@ fn emit_stream_block_update_with_prefix(
             transport_kind: None,
             transport_session: None,
             blocks: Some(merged_blocks),
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
             interrupted_by_user: None,
         },
     );
@@ -7352,6 +7810,7 @@ fn emit_chat_done_event(
     transport_kind: Option<String>,
     transport_session: Option<AgentTransportSession>,
     blocks: Option<Vec<ChatMessageBlock>>,
+    usage: Option<&ApiUsage>,
     interrupted_by_user: bool,
 ) {
     let _ = app.emit(
@@ -7368,6 +7827,9 @@ fn emit_chat_done_event(
             transport_kind,
             transport_session,
             blocks,
+            prompt_tokens: usage.and_then(|value| value.prompt_tokens),
+            completion_tokens: usage.and_then(|value| value.completion_tokens),
+            total_tokens: usage.and_then(|value| value.total_tokens),
             interrupted_by_user: Some(interrupted_by_user),
         },
     );
@@ -7812,6 +8274,7 @@ fn run_claude_headless_turn_once(
         exit_code,
         blocks: stream_state.blocks,
         transport_session,
+        usage: stream_state.usage,
     })
 }
 
@@ -8130,6 +8593,7 @@ fn run_gemini_acp_turn(
                 requested_model,
                 Some(requested_local_permission),
             ),
+            usage: stream_state.usage,
         });
     }
 
@@ -8243,6 +8707,7 @@ fn run_gemini_acp_turn(
         .get("stopReason")
         .and_then(Value::as_str)
         .map(|value| value.to_string());
+    capture_gemini_usage(&mut stream_state.usage, &prompt_result);
 
     let outstanding_tool_calls = stream_state.tool_calls.keys().cloned().collect::<Vec<_>>();
     for tool_call_id in outstanding_tool_calls {
@@ -8366,6 +8831,7 @@ fn run_gemini_acp_turn(
         exit_code,
         blocks,
         transport_session,
+        usage: stream_state.usage,
     })
 }
 
@@ -9343,6 +9809,9 @@ fn append_workflow_log_message(
                 is_streaming: false,
                 duration_ms: None,
                 exit_code: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
             }],
         }],
     };
@@ -9382,6 +9851,9 @@ fn append_automation_turn_seed(
                     is_streaming: false,
                     duration_ms: None,
                     exit_code: None,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    total_tokens: None,
                 },
                 PersistedChatMessage {
                     id: message_id.to_string(),
@@ -9401,6 +9873,9 @@ fn append_automation_turn_seed(
                     is_streaming: true,
                     duration_ms: None,
                     exit_code: None,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    total_tokens: None,
                 },
             ],
         }],
@@ -9448,6 +9923,9 @@ fn finalize_automation_turn_message(
         transport_session: outcome.transport_session.clone(),
         exit_code: outcome.exit_code,
         duration_ms: None,
+        prompt_tokens: None,
+        completion_tokens: None,
+        total_tokens: None,
         updated_at: now_stamp(),
     })
 }
@@ -11376,7 +11854,7 @@ fn send_chat_message(
 
             let duration_ms = start.elapsed().as_millis() as u64;
             let interrupted_by_user = was_live_chat_turn_interrupted(Some(&codex_live_turn));
-            let (raw_output, exit_code, final_content, content_format, blocks, transport_session) =
+            let (raw_output, exit_code, final_content, content_format, blocks, transport_session, usage) =
                 match outcome {
                     Ok(outcome) => (
                         outcome.raw_output,
@@ -11385,6 +11863,7 @@ fn send_chat_message(
                         outcome.content_format,
                         outcome.blocks,
                         outcome.transport_session,
+                        outcome.usage,
                     ),
                     Err(error) => {
                         let permission_mode =
@@ -11417,6 +11896,7 @@ fn send_chat_message(
                             "log".to_string(),
                             blocks,
                             transport_session,
+                            ApiUsage::default(),
                         )
                     }
                 };
@@ -11478,6 +11958,9 @@ fn send_chat_message(
                     transport_kind: Some(codex_transport_kind),
                     transport_session: Some(transport_session),
                     blocks: Some(blocks),
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                    total_tokens: usage.total_tokens,
                     interrupted_by_user: Some(interrupted_by_user),
                 },
             );
@@ -11526,7 +12009,7 @@ fn send_chat_message(
 
             let duration_ms = start.elapsed().as_millis() as u64;
             let interrupted_by_user = was_live_chat_turn_interrupted(Some(&gemini_live_turn));
-            let (raw_output, exit_code, final_content, content_format, blocks, transport_session) =
+            let (raw_output, exit_code, final_content, content_format, blocks, transport_session, usage) =
                 match outcome {
                     Ok(outcome) => (
                         outcome.raw_output,
@@ -11535,6 +12018,7 @@ fn send_chat_message(
                         outcome.content_format,
                         outcome.blocks,
                         outcome.transport_session,
+                        outcome.usage,
                     ),
                     Err(error) => {
                         let permission_mode = gemini_local_permission_mode(
@@ -11570,6 +12054,7 @@ fn send_chat_message(
                             "log".to_string(),
                             blocks,
                             transport_session,
+                            ApiUsage::default(),
                         )
                     }
                 };
@@ -11631,6 +12116,9 @@ fn send_chat_message(
                     transport_kind: Some(gemini_transport_kind),
                     transport_session: Some(transport_session),
                     blocks: Some(blocks),
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                    total_tokens: usage.total_tokens,
                     interrupted_by_user: Some(interrupted_by_user),
                 },
             );
@@ -11682,7 +12170,7 @@ fn send_chat_message(
 
             let duration_ms = start.elapsed().as_millis() as u64;
             let interrupted_by_user = was_live_chat_turn_interrupted(Some(&claude_live_turn));
-            let (raw_output, exit_code, final_content, content_format, blocks, transport_session) =
+            let (raw_output, exit_code, final_content, content_format, blocks, transport_session, usage) =
                 match outcome {
                     Ok(outcome) => (
                         outcome.raw_output,
@@ -11691,6 +12179,7 @@ fn send_chat_message(
                         outcome.content_format,
                         outcome.blocks,
                         outcome.transport_session,
+                        outcome.usage,
                     ),
                     Err(error) => {
                         let permission_mode = claude_permission_mode(
@@ -11726,6 +12215,7 @@ fn send_chat_message(
                             "log".to_string(),
                             blocks,
                             transport_session,
+                            ApiUsage::default(),
                         )
                     }
                 };
@@ -11787,6 +12277,9 @@ fn send_chat_message(
                     transport_kind: Some(claude_transport_kind),
                     transport_session: Some(transport_session),
                     blocks: Some(blocks),
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                    total_tokens: usage.total_tokens,
                     interrupted_by_user: Some(interrupted_by_user),
                 },
             );
@@ -11861,6 +12354,9 @@ fn send_chat_message(
                             level: "error".to_string(),
                             text: format!("Error: {}", e),
                         }]),
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
                         interrupted_by_user: Some(false),
                     },
                 );
@@ -11903,13 +12399,16 @@ fn send_chat_message(
                             exit_code: None,
                             duration_ms: None,
                             final_content: None,
-                            content_format: None,
-                            transport_kind: None,
-                            transport_session: None,
-                            blocks: None,
-                            interrupted_by_user: None,
-                        },
-                    );
+                        content_format: None,
+                        transport_kind: None,
+                        transport_session: None,
+                        blocks: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        total_tokens: None,
+                        interrupted_by_user: None,
+                    },
+                );
                 }
             }
         });
@@ -11940,6 +12439,9 @@ fn send_chat_message(
                             transport_kind: None,
                             transport_session: None,
                             blocks: None,
+                            prompt_tokens: None,
+                            completion_tokens: None,
+                            total_tokens: None,
                             interrupted_by_user: None,
                         },
                     );
@@ -12029,6 +12531,9 @@ fn send_chat_message(
                 transport_kind: Some(transport_kind),
                 transport_session: Some(transport_session),
                 blocks: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
                 interrupted_by_user: Some(interrupted_by_user),
             },
         );
@@ -12169,6 +12674,7 @@ fn run_auto_orchestration(
                 Some("claude-cli".to_string()),
                 None,
                 Some(final_blocks),
+                None,
                 interrupted_by_user,
             );
             unregister_live_chat_turn(&auto_live_chat_turns, &terminal_tab_id, &msg_id);
@@ -12273,6 +12779,9 @@ fn run_auto_orchestration(
                     transport_kind: Some("claude-cli".to_string()),
                     transport_session: None,
                     blocks: Some(blocks),
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    total_tokens: None,
                     interrupted_by_user: Some(false),
                 },
             );
@@ -20381,6 +20890,9 @@ fn append_automation_validation_message(
                 is_streaming: false,
                 duration_ms: None,
                 exit_code: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
             }],
         }],
     };

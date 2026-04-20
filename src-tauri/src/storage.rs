@@ -152,6 +152,12 @@ pub struct PersistedChatMessage {
     pub is_streaming: bool,
     pub duration_ms: Option<u64>,
     pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub completion_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -501,6 +507,9 @@ pub struct MessageStreamUpdateRequest {
     pub content: String,
     pub content_format: Option<String>,
     pub blocks: Option<Vec<ChatMessageBlock>>,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
     pub updated_at: String,
 }
 
@@ -517,6 +526,9 @@ pub struct MessageFinalizeRequest {
     pub transport_session: Option<AgentTransportSession>,
     pub exit_code: Option<i32>,
     pub duration_ms: Option<u64>,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
     pub updated_at: String,
 }
 
@@ -608,13 +620,19 @@ impl TerminalStorage {
              SET raw_content = ?1,
                  content = ?2,
                  content_format = ?3,
-                 blocks_json = ?4
-             WHERE id = ?5 AND terminal_tab_id = ?6",
+                 blocks_json = ?4,
+                 prompt_tokens = ?5,
+                 completion_tokens = ?6,
+                 total_tokens = ?7
+             WHERE id = ?8 AND terminal_tab_id = ?9",
             params![
                 request.raw_content,
                 request.content,
                 request.content_format,
                 option_to_json(&request.blocks)?,
+                request.prompt_tokens.map(|value| value as i64),
+                request.completion_tokens.map(|value| value as i64),
+                request.total_tokens.map(|value| value as i64),
                 request.message_id,
                 request.terminal_tab_id,
             ],
@@ -651,8 +669,11 @@ impl TerminalStorage {
                  transport_kind = ?5,
                  is_streaming = 0,
                  duration_ms = ?6,
-                 exit_code = ?7
-             WHERE id = ?8 AND terminal_tab_id = ?9",
+                 exit_code = ?7,
+                 prompt_tokens = ?8,
+                 completion_tokens = ?9,
+                 total_tokens = ?10
+             WHERE id = ?11 AND terminal_tab_id = ?12",
             params![
                 request.raw_content,
                 request.content,
@@ -661,6 +682,9 @@ impl TerminalStorage {
                 request.transport_kind,
                 request.duration_ms.map(|value| value as i64),
                 request.exit_code,
+                request.prompt_tokens.map(|value| value as i64),
+                request.completion_tokens.map(|value| value as i64),
+                request.total_tokens.map(|value| value as i64),
                 request.message_id,
                 request.terminal_tab_id,
             ],
@@ -1655,7 +1679,10 @@ impl TerminalStorage {
                 attachments_json TEXT NOT NULL DEFAULT '[]',
                 is_streaming INTEGER NOT NULL,
                 duration_ms INTEGER,
-                exit_code INTEGER
+                exit_code INTEGER,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS message_events (
@@ -1918,6 +1945,9 @@ impl TerminalStorage {
         ensure_column_exists(conn, "chat_messages", "automation_run_id", "TEXT")?;
         ensure_column_exists(conn, "chat_messages", "workflow_run_id", "TEXT")?;
         ensure_column_exists(conn, "chat_messages", "workflow_node_id", "TEXT")?;
+        ensure_column_exists(conn, "chat_messages", "prompt_tokens", "INTEGER")?;
+        ensure_column_exists(conn, "chat_messages", "completion_tokens", "INTEGER")?;
+        ensure_column_exists(conn, "chat_messages", "total_tokens", "INTEGER")?;
         ensure_column_exists(conn, "terminal_tabs", "selected_agent_json", "TEXT")?;
         ensure_column_exists(
             conn,
@@ -2183,7 +2213,8 @@ impl TerminalStorage {
             .prepare(
                 "SELECT id, role, cli_id, selected_agent_json, automation_run_id, workflow_run_id, workflow_node_id,
                         timestamp, content, raw_content, content_format,
-                        transport_kind, blocks_json, attachments_json, is_streaming, duration_ms, exit_code
+                        transport_kind, blocks_json, attachments_json, is_streaming, duration_ms, exit_code,
+                        prompt_tokens, completion_tokens, total_tokens
                  FROM chat_messages
                  WHERE session_id = ?1
                  ORDER BY message_order ASC",
@@ -2215,6 +2246,9 @@ impl TerminalStorage {
                     is_streaming: row.get(14)?,
                     duration_ms: row.get::<_, Option<i64>>(15)?.map(|value| value as u64),
                     exit_code: row.get(16)?,
+                    prompt_tokens: row.get::<_, Option<i64>>(17)?.map(|value| value as u64),
+                    completion_tokens: row.get::<_, Option<i64>>(18)?.map(|value| value as u64),
+                    total_tokens: row.get::<_, Option<i64>>(19)?.map(|value| value as u64),
                 })
             })
             .map_err(|err| err.to_string())?;
@@ -2933,8 +2967,9 @@ impl TerminalStorage {
                     id, session_id, terminal_tab_id, message_order, role, cli_id,
                     selected_agent_json, automation_run_id, workflow_run_id, workflow_node_id, timestamp,
                     content, raw_content, content_format, transport_kind, blocks_json,
-                    attachments_json, is_streaming, duration_ms, exit_code
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                    attachments_json, is_streaming, duration_ms, exit_code,
+                    prompt_tokens, completion_tokens, total_tokens
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                 params![
                     message.id,
                     session_id,
@@ -2956,6 +2991,9 @@ impl TerminalStorage {
                     message.is_streaming,
                     message.duration_ms.map(|value| value as i64),
                     message.exit_code,
+                    message.prompt_tokens.map(|value| value as i64),
+                    message.completion_tokens.map(|value| value as i64),
+                    message.total_tokens.map(|value| value as i64),
                 ],
             )
             .map_err(|err| err.to_string())?;

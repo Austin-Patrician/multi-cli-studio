@@ -128,6 +128,9 @@ function App() {
           event.blocks ?? null,
           event.transportSession ?? null,
           event.transportKind ?? null,
+          event.promptTokens ?? null,
+          event.completionTokens ?? null,
+          event.totalTokens ?? null,
           event.interruptedByUser ?? null
         );
       } else {

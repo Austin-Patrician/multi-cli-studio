@@ -1055,6 +1055,9 @@ interface StoreState {
     blocks?: ChatMessageBlock[] | null,
     transportSession?: AgentTransportSession | null,
     transportKind?: AgentTransportKind | null,
+    promptTokens?: number | null,
+    completionTokens?: number | null,
+    totalTokens?: number | null,
     interruptedByUser?: boolean | null
   ) => void;
   applyGitPanel: (workspaceId: string, gitPanel: GitPanelData) => void;
@@ -2981,6 +2984,9 @@ export const useStore = create<StoreState>((set, get) => {
     blocks,
     transportSession,
     transportKind,
+    promptTokens,
+    completionTokens,
+    totalTokens,
     interruptedByUser
   ) => {
     const completionNotice = interruptedByUser
@@ -3074,6 +3080,9 @@ export const useStore = create<StoreState>((set, get) => {
               isStreaming: false,
               exitCode,
               durationMs,
+              promptTokens: promptTokens ?? message.promptTokens ?? null,
+              completionTokens: completionTokens ?? message.completionTokens ?? null,
+              totalTokens: totalTokens ?? message.totalTokens ?? null,
             };
           }),
           ...(systemMessage ? [systemMessage] : []),
@@ -3127,6 +3136,9 @@ export const useStore = create<StoreState>((set, get) => {
             transportSession: transportSession ?? null,
             exitCode,
             durationMs,
+            promptTokens: message.promptTokens ?? null,
+            completionTokens: message.completionTokens ?? null,
+            totalTokens: message.totalTokens ?? null,
             updatedAt: session.updatedAt,
           })
         );

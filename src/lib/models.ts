@@ -882,6 +882,9 @@ export interface ChatMessage {
   isStreaming: boolean;
   durationMs: number | null;
   exitCode: number | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  totalTokens?: number | null;
 }
 
 // ── Compaction types ──────────────────────────────────────────────────
@@ -1143,6 +1146,9 @@ export interface ChatMessageStreamUpdateRequest {
   content: string;
   contentFormat?: ChatMessage["contentFormat"];
   blocks?: ChatMessageBlock[] | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  totalTokens?: number | null;
   updatedAt: string;
 }
 
@@ -1157,6 +1163,9 @@ export interface ChatMessageFinalizeRequest {
   transportSession?: AgentTransportSession | null;
   exitCode: number | null;
   durationMs: number | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  totalTokens?: number | null;
   updatedAt: string;
 }
 
@@ -1250,6 +1259,9 @@ export interface StreamEvent {
   transportKind?: AgentTransportKind | null;
   transportSession?: AgentTransportSession | null;
   blocks?: ChatMessageBlock[] | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  totalTokens?: number | null;
   interruptedByUser?: boolean | null;
 }
 
