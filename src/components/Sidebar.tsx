@@ -395,13 +395,7 @@ export function Sidebar() {
   const settingsMenuItems = useMemo(
     () => [
       { id: "settings", label: "设置", section: "settings" as const, icon: IconGear },
-      { id: "agents", label: "智能体", section: "agents" as const, icon: IconSparkles },
-      // { id: "models", label: "模型管理", section: "models" as const, icon: IconProviders },
-      // { id: "vendors", label: "供应商", section: "vendors" as const, icon: IconProviders },
-      // { id: "projects", label: "项目", section: "projects" as const, icon: IconPlus },
       { id: "git", label: "Git", section: "git" as const, icon: IconWorkflow },
-      // { id: "mcp", label: "MCP", section: "mcp" as const, icon: IconWorkflow },
-      // { id: "skills", label: "Skills", section: "skills" as const, icon: IconSparkles },
     ],
     []
   );

@@ -150,13 +150,11 @@ function cx(...values: Array<string | false | null | undefined>) {
 
 export function DesktopAgentsSection() {
   const settings = useStore((state) => state.settings);
-  const terminalTabs = useStore((state) => state.terminalTabs);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const agents = settings?.customAgents ?? [];
   const [notice, setNotice] = useState<AgentNotice>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(agents[0]?.id ?? null);
   const [dialog, setDialog] = useState<AgentDialogState>({
     open: false,
     mode: "create",
@@ -183,30 +181,6 @@ export function DesktopAgentsSection() {
     selectedIds: new Set<string>(),
     strategy: "skip",
   });
-
-  const selectedAgent = useMemo(
-    () => agents.find((agent) => agent.id === selectedId) ?? agents[0] ?? null,
-    [agents, selectedId]
-  );
-  const usageByAgentId = useMemo(() => {
-    const counts = new Map<string, number>();
-    terminalTabs.forEach((tab) => {
-      const agentId = tab.selectedAgent?.id;
-      if (!agentId) return;
-      counts.set(agentId, (counts.get(agentId) ?? 0) + 1);
-    });
-    return counts;
-  }, [terminalTabs]);
-
-  useEffect(() => {
-    if (!agents.length) {
-      setSelectedId(null);
-      return;
-    }
-    if (!selectedId || !agents.some((agent) => agent.id === selectedId)) {
-      setSelectedId(agents[0]?.id ?? null);
-    }
-  }, [agents, selectedId]);
 
   useEffect(() => {
     if (!notice) return;
@@ -295,7 +269,6 @@ export function DesktopAgentsSection() {
           createdAt: Date.now(),
         };
         await saveAgents([nextAgent, ...agents]);
-        setSelectedId(nextAgent.id);
         setNotice({ kind: "success", message: "已创建智能体。" });
       } else {
         const nextAgents = agents.map((agent) =>
@@ -491,17 +464,9 @@ export function DesktopAgentsSection() {
   return (
     <>
       <section className="settings-section">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="settings-section-title">智能体</div>
-            <div className="settings-section-subtitle">
-              管理可选的角色型智能体。选中的智能体会附着在会话上，并在发送时把角色提示注入到真实请求里。
-            </div>
-          </div>
-          <button type="button" className="dcc-action-button" onClick={openCreateDialog}>
-            <Plus size={14} />
-            新建智能体
-          </button>
+        <div className="settings-section-title">智能体</div>
+        <div className="settings-section-subtitle">
+          管理可选的角色型智能体。选中的智能体会附着在会话上，并在发送时把角色提示注入到真实请求里。
         </div>
 
         {notice ? (
@@ -510,179 +475,84 @@ export function DesktopAgentsSection() {
           </div>
         ) : null}
 
-        <div className="mt-6 grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
-          <div className="settings-agent-surface">
-            <div className="settings-agent-surface-head">
-              <div>
-                <div className="text-sm font-semibold text-slate-900">已保存智能体</div>
-                <div className="text-xs text-slate-500">在这里维护当前可选的角色配置。</div>
-              </div>
-              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
-                {agents.length} 个
-              </span>
-            </div>
-
-            <div className="settings-agent-toolbar">
-              <button
-                type="button"
-                className="dcc-action-button secondary"
-                onClick={() => void handleRefreshAgents()}
-                disabled={refreshing}
-              >
-                <RefreshCw size={14} />
-                {refreshing ? "刷新中..." : "刷新"}
-              </button>
-              <button
-                type="button"
-                className="dcc-action-button secondary"
-                onClick={openExportDialog}
-                disabled={agents.length === 0}
-              >
-                <Download size={14} />
-                导出
-              </button>
-              <button type="button" className="dcc-action-button secondary" onClick={triggerImport}>
-                <Upload size={14} />
-                导入
-              </button>
-            </div>
-
-            {agents.length === 0 ? (
-              <div className="settings-agent-empty">
-                <Bot size={16} aria-hidden />
-                <span>还没有创建任何智能体。</span>
-              </div>
-            ) : (
-              <div className="settings-agent-list">
-                {agents.map((agent) => {
-                  const isSelected = agent.id === selectedAgent?.id;
-                  const usageCount = usageByAgentId.get(agent.id) ?? 0;
-                  return (
-                    <button
-                      key={agent.id}
-                      type="button"
-                      className={cx("settings-agent-card", isSelected && "is-selected")}
-                      onClick={() => setSelectedId(agent.id)}
-                    >
-                      <div className="settings-agent-card-main">
-                        <div className="settings-agent-card-title">
-                          <AgentIcon
-                            icon={agent.icon}
-                            seed={agent.id || agent.name}
-                            size={20}
-                          />
-                          <span>{agent.name}</span>
-                        </div>
-                        <div className="settings-agent-card-prompt" title={agent.prompt ?? ""}>
-                          {agent.prompt?.trim() || "未设置角色提示词。"}
-                        </div>
-                      </div>
-                      <div className="settings-agent-card-meta">
-                        {usageCount > 0 ? (
-                          <span className="dcc-badge">会话中 {usageCount}</span>
-                        ) : null}
-                        <div className="settings-agent-card-actions">
-                          <span
-                            role="button"
-                            tabIndex={0}
-                            className="settings-agent-card-action"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              openEditDialog(agent);
-                            }}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                openEditDialog(agent);
-                              }
-                            }}
-                          >
-                            <Pencil size={14} aria-hidden />
-                          </span>
-                          <span
-                            role="button"
-                            tabIndex={0}
-                            className="settings-agent-card-action danger"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setDeleteTarget(agent);
-                            }}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                setDeleteTarget(agent);
-                              }
-                            }}
-                          >
-                            <Trash2 size={14} aria-hidden />
-                          </span>
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <aside className="settings-agent-surface settings-agent-surface-detail">
-            {selectedAgent ? (
-              <>
-                <div className="settings-agent-preview-head">
-                  <div className="settings-agent-preview-title">
-                    <AgentIcon
-                      icon={selectedAgent.icon}
-                      seed={selectedAgent.id || selectedAgent.name}
-                      size={24}
-                    />
-                    <div>
-                      <div className="dcc-card-title">{selectedAgent.name}</div>
-                      <div className="dcc-card-description">
-                        ID: {selectedAgent.id}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="settings-agent-preview-actions">
-                    <button
-                      type="button"
-                      className="dcc-action-button secondary"
-                      onClick={() => openEditDialog(selectedAgent)}
-                    >
-                      <Pencil size={14} />
-                      编辑
-                    </button>
-                    <button
-                      type="button"
-                      className="dcc-action-button secondary"
-                      onClick={() => setDeleteTarget(selectedAgent)}
-                    >
-                      <Trash2 size={14} />
-                      删除
-                    </button>
-                  </div>
-                </div>
-                <div className="settings-agent-preview-body">
-                  <div className="settings-agent-preview-block">
-                    <div className="settings-agent-preview-label">角色提示词</div>
-                    <pre className="settings-agent-preview-prompt">
-                      {selectedAgent.prompt?.trim() || "未设置角色提示词。"}
-                    </pre>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="settings-agent-detail-empty">
-                <Bot size={18} aria-hidden />
-                <div className="dcc-card-title">选择一个智能体</div>
-                <div className="dcc-card-description">
-                  左侧列表用于切换当前查看对象，也可以直接新建一个角色型智能体。
-                </div>
-              </div>
-            )}
-          </aside>
+        <div className="settings-agent-toolbar">
+          <button
+            type="button"
+            className="dcc-action-button secondary"
+            onClick={() => void handleRefreshAgents()}
+            disabled={refreshing}
+          >
+            <RefreshCw size={14} />
+            {refreshing ? "刷新中..." : "刷新"}
+          </button>
+          <button
+            type="button"
+            className="dcc-action-button secondary"
+            onClick={openExportDialog}
+            disabled={agents.length === 0}
+          >
+            <Download size={14} />
+            导出
+          </button>
+          <button type="button" className="dcc-action-button secondary" onClick={triggerImport}>
+            <Upload size={14} />
+            导入
+          </button>
+          <button type="button" className="dcc-action-button" onClick={openCreateDialog}>
+            <Plus size={14} />
+            新建智能体
+          </button>
         </div>
+
+        <div className="settings-subsection-title">自定义智能体</div>
+        {agents.length === 0 ? (
+          <div className="settings-agent-empty">
+            <Bot size={16} aria-hidden />
+            <span>还没有创建任何智能体。</span>
+          </div>
+        ) : (
+          <div className="settings-agent-list">
+            {agents.map((agent) => (
+              <div key={agent.id} className="settings-agent-card">
+                <div className="settings-agent-card-main">
+                  <div className="settings-agent-card-title">
+                    <AgentIcon
+                      icon={agent.icon}
+                      seed={agent.id || agent.name}
+                      fallback={DEFAULT_AGENT_ICON}
+                      size={20}
+                    />
+                    <span>{agent.name}</span>
+                  </div>
+                  {agent.prompt ? (
+                    <div className="settings-agent-card-prompt" title={agent.prompt}>
+                      {agent.prompt.length > 140 ? `${agent.prompt.slice(0, 140)}...` : agent.prompt}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="settings-agent-card-actions">
+                  <button
+                    type="button"
+                    className="settings-agent-card-action"
+                    onClick={() => openEditDialog(agent)}
+                    title="编辑"
+                  >
+                    <Pencil size={14} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-agent-card-action danger"
+                    onClick={() => setDeleteTarget(agent)}
+                    title="删除"
+                  >
+                    <Trash2 size={14} aria-hidden />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
       </section>
 
       <input
@@ -695,7 +565,7 @@ export function DesktopAgentsSection() {
 
       {dialog.open ? (
         <div className="vendor-dialog-overlay" onClick={() => setDialog((current) => ({ ...current, open: false }))}>
-          <div className="vendor-dialog vendor-dialog-wide" onClick={(event) => event.stopPropagation()}>
+          <div className="vendor-dialog vendor-dialog-wide settings-agent-editor-dialog" onClick={(event) => event.stopPropagation()}>
             <div className="vendor-dialog-header">
               <h3>{dialog.mode === "create" ? "新建智能体" : "编辑智能体"}</h3>
               <button type="button" className="vendor-dialog-close" onClick={() => setDialog((current) => ({ ...current, open: false }))}>

@@ -406,7 +406,7 @@ function FinalMessageBoundary({ timestamp }: { timestamp?: string | null }) {
       <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-300/80 to-slate-300/90" />
       <span className="inline-flex items-center gap-2 rounded-full border border-slate-200/90 bg-white/92 px-3 py-1 font-semibold text-slate-600 shadow-[0_8px_22px_rgba(15,23,42,0.05)]">
         <span className="inline-flex items-center gap-1.5">
-          <Flag size={13} aria-hidden className="text-slate-500" />
+          <Flag size={13} aria-hidden className="text-amber-600" />
           <span>最终消息</span>
         </span>
         {metaText ? (
@@ -507,6 +507,7 @@ export function ChatConversation() {
   const hasHiddenMessages =
     !shouldShowAllMessages && allMessages.length > visibleMessages.length;
   const hiddenMessageCount = Math.max(0, allMessages.length - visibleMessages.length);
+  const shouldShowFinalMessageBoundary = activeTab?.status !== "streaming" && !queuedPrompt;
 
   useEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -967,7 +968,7 @@ export function ChatConversation() {
                         {msg.content}
                       </span>
                     </div>
-                    {isLastVisibleMessage ? (
+                    {isLastVisibleMessage && shouldShowFinalMessageBoundary ? (
                       <FinalMessageBoundary timestamp={msg.timestamp} />
                     ) : null}
                   </Fragment>
@@ -989,7 +990,7 @@ export function ChatConversation() {
                       onDelete={handleDeleteMessage}
                       deleteDisabled={activeTab.status === "streaming"}
                     />
-                    {isLastVisibleMessage ? (
+                    {isLastVisibleMessage && shouldShowFinalMessageBoundary ? (
                       <FinalMessageBoundary timestamp={msg.timestamp} />
                     ) : null}
                   </Fragment>
@@ -1019,7 +1020,7 @@ export function ChatConversation() {
                     onApprovalDecision={handleAssistantApproval}
                     onAutoRouteAction={handleAutoRoute}
                   />
-                  {isLastVisibleMessage ? (
+                  {isLastVisibleMessage && shouldShowFinalMessageBoundary ? (
                     <FinalMessageBoundary timestamp={msg.timestamp} />
                   ) : null}
                 </Fragment>

@@ -54,10 +54,10 @@ export function LaunchScriptButton({
         }}
         title={hasLaunchScript ? "运行启动脚本" : "设置启动脚本"}
         aria-label={hasLaunchScript ? "运行启动脚本" : "设置启动脚本"}
-        className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-all ${
+        className={`inline-flex h-8 w-8 items-center justify-center rounded-lg transition-all ${
           hasLaunchScript
-            ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:-translate-y-[1px] hover:border-emerald-300 hover:text-emerald-800"
-            : "border-slate-200 bg-white text-slate-500 hover:-translate-y-[1px] hover:border-slate-300 hover:text-slate-900"
+            ? "bg-emerald-50 text-emerald-700 hover:-translate-y-[1px] hover:bg-emerald-100 hover:text-emerald-800"
+            : "bg-white text-slate-500 hover:-translate-y-[1px] hover:bg-slate-50 hover:text-slate-900"
         }`}
       >
         <Play className="h-[15px] w-[15px]" />

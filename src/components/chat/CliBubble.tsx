@@ -886,7 +886,7 @@ function ApprovalActionButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`rounded-full border px-3.5 py-2 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${toneClass}`}
+      className={`rounded-[10px] border px-3.5 py-2 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${toneClass}`}
     >
       {label}
     </button>
@@ -905,12 +905,12 @@ function RuntimeApprovalRequestBlock({
     block.state === "approvedAlways"
       ? block.provider === "codex"
         ? "Approved for session"
-        : "Always allowed"
+      : "Always allowed"
       : block.state === "approved"
         ? "Approved"
         : block.state === "denied"
           ? "Denied"
-          : "Awaiting approval";
+          : null;
 
   return (
     <div className="rounded-[12px] border border-amber-200 bg-amber-50/80 px-4 py-3">
@@ -918,9 +918,11 @@ function RuntimeApprovalRequestBlock({
         <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-amber-700">
           Tool approval
         </span>
-        <MetaPill tone={pending ? "warning" : block.state === "denied" ? "danger" : "success"}>
-          {statusLabel}
-        </MetaPill>
+        {statusLabel ? (
+          <MetaPill tone={block.state === "denied" ? "danger" : "success"}>
+            {statusLabel}
+          </MetaPill>
+        ) : null}
       </div>
 
       <div className="mt-2 text-[13px] font-semibold text-amber-950">

@@ -147,8 +147,8 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
   },
   {
     kind: "fast", slash: "/fast", label: "Fast Mode",
-    description: "Toggle fast output mode (Claude only)",
-    execution: "flag-inject", supportedClis: ["claude"],
+    description: "Toggle fast output mode for Codex",
+    execution: "flag-inject", supportedClis: ["codex"],
   },
   {
     kind: "context", slash: "/context", label: "Context Usage",

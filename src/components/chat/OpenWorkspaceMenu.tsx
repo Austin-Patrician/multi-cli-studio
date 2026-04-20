@@ -231,7 +231,7 @@ export function OpenWorkspaceMenu({
 
   return (
     <div className="relative" ref={menuRef}>
-      <div className="inline-flex overflow-hidden rounded-[10px] border border-slate-200 bg-white shadow-[0_10px_28px_rgba(15,23,42,0.06)]">
+      <div className="inline-flex overflow-hidden rounded-[10px] bg-white">
         <button
           type="button"
           onClick={() => {
@@ -240,7 +240,7 @@ export function OpenWorkspaceMenu({
           disabled={disabled || openingTargetId !== null}
           title={disabled ? "远程工作区不支持在本机打开" : `用 ${selectedTarget.label} 打开项目`}
           aria-label={disabled ? "远程工作区不支持在本机打开" : `用 ${selectedTarget.label} 打开项目`}
-          className="inline-flex h-8 w-9 items-center justify-center text-slate-700 transition-all hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex h-8 w-9 items-center justify-center rounded-l-[10px] text-slate-700 transition-all hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <img
             src={selectedTarget.icon}
@@ -261,7 +261,7 @@ export function OpenWorkspaceMenu({
           aria-label={disabled ? "远程工作区不支持在本机打开" : "选择打开方式"}
           aria-expanded={menuOpen}
           aria-haspopup="menu"
-          className="inline-flex h-8 w-8 items-center justify-center border-l border-slate-200 text-slate-500 transition-all hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex h-8 w-8 items-center justify-center rounded-r-[10px] text-slate-500 transition-all hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <ChevronDown
             className={`h-[14px] w-[14px] transition-transform ${menuOpen ? "rotate-180" : ""}`}

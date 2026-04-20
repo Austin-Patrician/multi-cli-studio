@@ -182,10 +182,10 @@ export function ProjectBar({
               onClick={onToggleRuntimeConsole}
               title={runtimeConsoleOpen ? "收起运行控制台" : "打开运行控制台"}
               aria-label={runtimeConsoleOpen ? "收起运行控制台" : "打开运行控制台"}
-              className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-all ${
+              className={`inline-flex h-8 w-8 items-center justify-center rounded-lg transition-all ${
                 runtimeConsoleOpen
-                  ? "border-slate-900 bg-slate-900 text-white"
-                  : "border-slate-200 bg-white text-slate-500 hover:-translate-y-[1px] hover:border-slate-300 hover:text-slate-900"
+                  ? "bg-slate-900 text-white"
+                  : "bg-white text-slate-500 hover:-translate-y-[1px] hover:bg-slate-50 hover:text-slate-900"
               }`}
             >
               <Construction className="h-[15px] w-[15px]" />
@@ -195,10 +195,10 @@ export function ProjectBar({
               onClick={onToggleTerminalDock}
               title={terminalDockOpen ? "收起终端面板" : "打开终端面板"}
               aria-label={terminalDockOpen ? "收起终端面板" : "打开终端面板"}
-              className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-all ${
+              className={`inline-flex h-8 w-8 items-center justify-center rounded-lg transition-all ${
                 terminalDockOpen
-                  ? "border-slate-900 bg-slate-900 text-white"
-                  : "border-slate-200 bg-white text-slate-500 hover:-translate-y-[1px] hover:border-slate-300 hover:text-slate-900"
+                  ? "bg-slate-900 text-white"
+                  : "bg-white text-slate-500 hover:-translate-y-[1px] hover:bg-slate-50 hover:text-slate-900"
               }`}
             >
               <TerminalSquare className="h-[15px] w-[15px]" />
@@ -208,7 +208,7 @@ export function ProjectBar({
               onClick={onToggleRightPanel}
               title={rightPanelCollapsed ? "展开右侧边栏" : "收起右侧边栏"}
               aria-label={rightPanelCollapsed ? "展开右侧边栏" : "收起右侧边栏"}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition-all hover:-translate-y-[1px] hover:border-slate-300 hover:text-slate-900"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white text-slate-500 transition-all hover:-translate-y-[1px] hover:bg-slate-50 hover:text-slate-900"
             >
               <RightPanelToggleIcon collapsed={rightPanelCollapsed} />
             </button>

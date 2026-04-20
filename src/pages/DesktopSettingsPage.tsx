@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { DesktopConnectionsSection } from "../components/settings/DesktopConnectionsSection";
 import { DesktopMcpSection } from "../components/settings/DesktopMcpSection";
+import { DesktopAgentsSection } from "../components/settings/DesktopAgentsSection";
 import { DesktopSkillsSection } from "../components/settings/DesktopSkillsSection";
 import { DesktopUsageSection } from "../components/settings/DesktopUsageSection";
 import { DesktopVendorsSection } from "../components/settings/DesktopVendorsSection";
@@ -173,11 +174,8 @@ export function DesktopSettingsPage() {
 
   const isGeneralSettingsRoute = location.pathname.startsWith("/settings/general");
   const isModelProvidersRoute = location.pathname.startsWith("/settings/model-providers");
-  const isAgentsRoute = location.pathname.startsWith("/settings/agents");
   const activeSection = isModelProvidersRoute
     ? "models"
-    : isAgentsRoute
-      ? "agents"
     : isGeneralSettingsRoute
       ? "settings"
       : parseSettingsSection(searchParams.get("section"));
@@ -258,11 +256,6 @@ export function DesktopSettingsPage() {
 
     if (section === "models") {
       navigate("/settings/model-providers");
-      return;
-    }
-
-    if (section === "agents") {
-      navigate("/settings/agents");
       return;
     }
 
@@ -586,6 +579,10 @@ export function DesktopSettingsPage() {
 
             {!outlet && activeSection === "connections" ? (
               <DesktopConnectionsSection settings={settings} />
+            ) : null}
+
+            {!outlet && activeSection === "agents" ? (
+              <DesktopAgentsSection />
             ) : null}
 
             {!outlet && activeSection === "mcp" ? (

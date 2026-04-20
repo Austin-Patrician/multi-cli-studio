@@ -91,6 +91,13 @@ type FooterReasoningOption = {
   description: string;
 };
 
+type PromptShortcutAction = {
+  key: string;
+  trigger: string;
+  label: string;
+  onClick: () => void;
+};
+
 type FooterProviderItem = {
   id: TerminalCliId;
   label: string;
@@ -833,6 +840,7 @@ export function ChatPromptBar({
   const [dismissedSkillKey, setDismissedSkillKey] = useState<string | null>(null);
   const [dismissedAgentKey, setDismissedAgentKey] = useState<string | null>(null);
   const [openFooterMenu, setOpenFooterMenu] = useState<FooterMenuId | null>(null);
+  const [hoveredConfigSubmenu, setHoveredConfigSubmenu] = useState<"agent" | "speed" | null>(null);
   const [queueFeedback, setQueueFeedback] = useState<string | null>(null);
 
   const terminalTabs = useStore((s) => s.terminalTabs);
@@ -1742,12 +1750,13 @@ export function ChatPromptBar({
     : isAutoMode
       ? "/指令中心 · @引用文件 · #智能体 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
       : "/指令中心 · @引用文件 · #智能体 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
-  const estimatedUsageTokens =
-    activeSession?.estimatedTokens && activeSession.estimatedTokens > 0
-      ? activeSession.estimatedTokens
-      : activeSession
-        ? estimateSessionTokens(activeSession)
-        : 0;
+  const estimatedUsageTokens = activeSession
+    ? estimateSessionTokens(activeSession) +
+      activeSession.compactedSummaries.reduce(
+        (sum, summary) => sum + (summary.tokenEstimate ?? 0),
+        0
+      )
+    : 0;
   const usagePercent = Math.min(100, (estimatedUsageTokens / FULL_COMPACT_THRESHOLD) * 100);
   const usagePercentLabel = `${Math.round(usagePercent)}%`;
   const messageCount = activeSession?.messages.length ?? 0;
@@ -1769,6 +1778,13 @@ export function ChatPromptBar({
     (currentModelValue.trim() ? currentModelValue : "默认模型");
   const currentReasoningDisplay = footerEffortLabel(activeTab.effortLevel);
   const supportsReasoning = effectiveCli === "codex" || effectiveCli === "claude";
+  const supportsFastMode = activeTab.selectedCli === "codex";
+  const usesSpeedSubmenu = activeTab.selectedCli === "codex";
+  const fastModeLabel = activeTab.selectedCli === "codex" ? "Speed" : "Fast Mode";
+  const fastModeStateLabel =
+    activeTab.selectedCli === "codex"
+      ? activeTab.fastMode ? "FAST" : "STD"
+      : activeTab.fastMode ? "ON" : "OFF";
   const footerSelectorsLocked = isStreaming;
   const selectorLockTitle = isStreaming ? "响应进行中，当前不可修改会话配置" : undefined;
   const autoSelectorTitle = "Auto 路由下不可直接指定，先切换到具体 CLI";
@@ -1790,10 +1806,12 @@ export function ChatPromptBar({
     if ((menu === "mode" || menu === "model") && !isAutoMode) {
       void loadAcpCapabilities(effectiveCli);
     }
+    setHoveredConfigSubmenu(null);
     setOpenFooterMenu((current) => (current === menu ? null : menu));
   }
 
   function closeFooterMenus() {
+    setHoveredConfigSubmenu(null);
     setOpenFooterMenu(null);
   }
 
@@ -1869,7 +1887,7 @@ export function ChatPromptBar({
   }
 
   function handleFastToggle() {
-    if (!activeTab || footerSelectorsLocked || activeTab.selectedCli !== "claude") return;
+    if (!activeTab || footerSelectorsLocked || !supportsFastMode) return;
     closeFooterMenus();
     void executeAcpCommand(
       {
@@ -1882,15 +1900,84 @@ export function ChatPromptBar({
     focusPromptAtEnd();
   }
 
-  function handleShortcutAction(action: "snapshot" | "checks") {
-    closeFooterMenus();
-    if (action === "snapshot") {
-      void snapshotWorkspace();
-    } else {
-      void runChecks();
+  function handleFastModeSelect(mode: "standard" | "fast") {
+    if (!activeTab || footerSelectorsLocked || !supportsFastMode) return;
+    const shouldBeFast = mode === "fast";
+    if (activeTab.fastMode === shouldBeFast) {
+      closeFooterMenus();
+      focusPromptAtEnd();
+      return;
     }
+    closeFooterMenus();
+    void executeAcpCommand(
+      {
+        kind: "fast",
+        args: [shouldBeFast ? "on" : "off"],
+        rawInput: `/fast ${shouldBeFast ? "on" : "off"}`,
+      },
+      activeTab.id
+    );
     focusPromptAtEnd();
   }
+
+  function handlePromptShortcutAction(trigger: "@" | "/" | "#" | "$") {
+    closeFooterMenus();
+    if (!activeTab) return;
+    if (trigger === "#") {
+      const nextPrompt = prompt.trim().length === 0 ? "#" : `${prompt.replace(/\s*$/, "")}\n#`;
+      setPrompt(nextPrompt);
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        const nextCaret = nextPrompt.length;
+        el.focus();
+        el.setSelectionRange(nextCaret, nextCaret);
+      });
+      return;
+    }
+
+    const needsLeadingSpace = prompt.length > 0 && !/\s$/.test(prompt);
+    const nextPrompt = `${prompt}${needsLeadingSpace ? " " : ""}${trigger}`;
+    setPrompt(nextPrompt);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const nextCaret = nextPrompt.length;
+      el.focus();
+      el.setSelectionRange(nextCaret, nextCaret);
+    });
+  }
+
+  const shortcutActions: PromptShortcutAction[] = [
+    {
+      key: "file",
+      trigger: "@",
+      label: "引用文件",
+      onClick: () => handlePromptShortcutAction("@"),
+    },
+    {
+      key: "command",
+      trigger: "/",
+      label: "指令中心",
+      onClick: () => handlePromptShortcutAction("/"),
+    },
+    {
+      key: "agent",
+      trigger: "#",
+      label: "智能体",
+      onClick: () => handlePromptShortcutAction("#"),
+    },
+    ...(!isAutoMode
+      ? [
+          {
+            key: "skill",
+            trigger: "$",
+            label: "调用技能",
+            onClick: () => handlePromptShortcutAction("$"),
+          },
+        ]
+      : []),
+  ];
 
   return (
     <div
@@ -2037,56 +2124,134 @@ export function ChatPromptBar({
                     </button>
 
                     {openFooterMenu === "config" ? (
-                      <div className="selector-dropdown terminal-chat-dropdown--config">
-                        <FooterMenuSection title="智能体">
-                          <FooterMenuItem
-                            label={resolvedSelectedAgent?.name ?? "未选择智能体"}
-                            description={
-                              resolvedSelectedAgent
-                                ? "已附着到当前会话，发送时自动注入角色提示。"
-                                : "选择一个角色型智能体，作为当前会话默认角色。"
-                            }
-                            onClick={() => setOpenFooterMenu("agent")}
-                            leading={
-                              resolvedSelectedAgent ? (
-                                <AgentIcon
-                                  icon={resolvedSelectedAgent.icon}
-                                  seed={resolvedSelectedAgent.id || resolvedSelectedAgent.name}
-                                  size={14}
-                                />
-                              ) : (
-                                <Bot size={14} />
-                              )
-                            }
-                            trailing={<ChevronRight size={14} aria-hidden />}
-                          />
-                        </FooterMenuSection>
-
-                        <FooterMenuSection title="会话开关">
-                          <FooterMenuItem
-                            label="Plan Mode"
-                            description="Shift+Tab 也可以快速切换"
-                            onClick={handlePlanToggle}
-                            trailing={
-                              <span className={`footer-option-state ${activeTab.planMode ? "is-active" : ""}`}>
-                                {activeTab.planMode ? "ON" : "OFF"}
-                              </span>
-                            }
-                          />
-
-                          {activeTab.selectedCli === "claude" ? (
+                      <div
+                        className="selector-dropdown terminal-chat-dropdown--config terminal-chat-dropdown--config-menu"
+                        onMouseLeave={() => setHoveredConfigSubmenu(null)}
+                      >
+                        <div className="footer-submenu-shell">
+                          <div className="footer-submenu-primary">
+                            <div
+                              className="footer-submenu-trigger"
+                              onPointerEnter={() => setHoveredConfigSubmenu("agent")}
+                            >
+                              <FooterMenuItem
+                                label="Agent"
+                                onClick={() =>
+                                  setHoveredConfigSubmenu((current) => (current === "agent" ? null : "agent"))
+                                }
+                                trailing={
+                                  <span className="footer-option-trailing">
+                                    {resolvedSelectedAgent ? (
+                                      <span className="footer-option-inline-value">
+                                        {resolvedSelectedAgent.name}
+                                      </span>
+                                    ) : null}
+                                    <ChevronRight size={14} aria-hidden />
+                                  </span>
+                                }
+                              />
+                            </div>
+                            <div className="footer-menu-divider" aria-hidden />
                             <FooterMenuItem
-                              label="Fast Mode"
-                              description="Claude 专用的快速输出模式"
-                              onClick={handleFastToggle}
+                              label="Plan Mode"
+                              onClick={handlePlanToggle}
                               trailing={
-                                <span className={`footer-option-state ${activeTab.fastMode ? "is-active" : ""}`}>
-                                  {activeTab.fastMode ? "ON" : "OFF"}
+                                <span
+                                  className={`footer-option-switch ${activeTab.planMode ? "is-active" : ""}`}
+                                  aria-hidden="true"
+                                >
+                                  <span className="footer-option-switch-thumb" />
                                 </span>
                               }
                             />
+
+                            {supportsFastMode ? (
+                              usesSpeedSubmenu ? (
+                                <>
+                                  <div
+                                    className="footer-submenu-trigger"
+                                    onPointerEnter={() => setHoveredConfigSubmenu("speed")}
+                                  >
+                                    <FooterMenuItem
+                                      label={fastModeLabel}
+                                      onClick={() =>
+                                        setHoveredConfigSubmenu((current) => (current === "speed" ? null : "speed"))
+                                      }
+                                      trailing={
+                                        <span className="footer-option-trailing">
+                                          <span className="footer-option-inline-value">{fastModeStateLabel}</span>
+                                          <ChevronRight size={14} aria-hidden />
+                                        </span>
+                                      }
+                                    />
+                                  </div>
+                                </>
+                              ) : (
+                                <FooterMenuItem
+                                  label={fastModeLabel}
+                                  onClick={handleFastToggle}
+                                  trailing={
+                                    <span className={`footer-option-state ${activeTab.fastMode ? "is-active" : ""}`}>
+                                      {fastModeStateLabel}
+                                    </span>
+                                  }
+                                />
+                              )
+                            ) : null}
+                          </div>
+
+                          {hoveredConfigSubmenu === "agent" ? (
+                            <div
+                              className="footer-submenu-panel"
+                              onPointerEnter={() => setHoveredConfigSubmenu("agent")}
+                            >
+                              {customAgents.length > 0 ? (
+                                customAgents.map((agent) => {
+                                  const selected = resolvedSelectedAgent?.id === agent.id;
+                                  return (
+                                    <FooterMenuItem
+                                      key={agent.id}
+                                      label={agent.name}
+                                      onClick={() =>
+                                        handleSelectedAgentChange({
+                                          id: agent.id,
+                                          name: agent.name,
+                                          prompt: agent.prompt ?? null,
+                                          icon: agent.icon ?? null,
+                                        })
+                                      }
+                                      selected={selected}
+                                    />
+                                  );
+                                })
+                              ) : (
+                                <div className="selector-option disabled">还没有可选智能体。</div>
+                              )}
+                              <div className="footer-menu-divider" aria-hidden />
+                              <FooterMenuItem
+                                label="创建智能体"
+                                onClick={handleOpenAgentSettings}
+                                leading={<Plus size={14} />}
+                              />
+                            </div>
+                          ) : hoveredConfigSubmenu === "speed" ? (
+                            <div
+                              className="footer-submenu-panel"
+                              onPointerEnter={() => setHoveredConfigSubmenu("speed")}
+                            >
+                              <FooterMenuItem
+                                label="Standard"
+                                onClick={() => handleFastModeSelect("standard")}
+                                selected={!activeTab.fastMode}
+                              />
+                              <FooterMenuItem
+                                label="Fast"
+                                onClick={() => handleFastModeSelect("fast")}
+                                selected={activeTab.fastMode}
+                              />
+                            </div>
                           ) : null}
-                        </FooterMenuSection>
+                        </div>
                       </div>
                     ) : null}
 
@@ -2100,7 +2265,6 @@ export function ChatPromptBar({
                                 <FooterMenuItem
                                   key={agent.id}
                                   label={agent.name}
-                                  description={agent.prompt?.trim() || "作为当前会话默认角色。"}
                                   onClick={() =>
                                     handleSelectedAgentChange({
                                       id: agent.id,
@@ -2110,13 +2274,6 @@ export function ChatPromptBar({
                                     })
                                   }
                                   selected={selected}
-                                  leading={
-                                    <AgentIcon
-                                      icon={agent.icon}
-                                      seed={agent.id || agent.name}
-                                      size={14}
-                                    />
-                                  }
                                 />
                               );
                             })
@@ -2158,20 +2315,17 @@ export function ChatPromptBar({
 
                     {openFooterMenu === "shortcuts" ? (
                       <div className="selector-dropdown terminal-chat-dropdown--shortcuts">
-                        <FooterMenuSection title="快捷动作">
-                          <FooterMenuItem
-                            label="Snapshot"
-                            description="标记当前工作区可交接状态"
-                            onClick={() => handleShortcutAction("snapshot")}
-                            leading={<Settings2 size={14} />}
-                          />
-                          <FooterMenuItem
-                            label="Run Checks"
-                            description="运行当前工作区默认校验命令"
-                            onClick={() => handleShortcutAction("checks")}
-                            leading={isBusy ? <LoaderCircle className="animate-spin" size={14} /> : <Shield size={14} />}
-                          />
-                        </FooterMenuSection>
+                        {shortcutActions.map((action) => (
+                          <button
+                            key={action.key}
+                            type="button"
+                            className="selector-option selector-option-shortcut selector-option-button selector-option-shortcut-button"
+                            onClick={action.onClick}
+                          >
+                            <span className="selector-shortcut-trigger">{action.trigger}</span>
+                            <span>{action.label}</span>
+                          </button>
+                        ))}
                       </div>
                     ) : null}
                   </div>

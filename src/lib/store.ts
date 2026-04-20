@@ -287,7 +287,7 @@ function createConversationSession(
   workspace: WorkspaceRef,
   partial?: Partial<ConversationSession>
 ): ConversationSession {
-  return {
+  const nextSession: ConversationSession = {
     id: partial?.id ?? createId("session"),
     terminalTabId: tab.id,
     workspaceId: workspace.id,
@@ -310,9 +310,13 @@ function createConversationSession(
       ],
     compactedSummaries: partial?.compactedSummaries ?? [],
     lastCompactedAt: partial?.lastCompactedAt ?? null,
-    estimatedTokens: partial?.estimatedTokens ?? 0,
+    estimatedTokens: 0,
     createdAt: partial?.createdAt ?? nowIso(),
     updatedAt: partial?.updatedAt ?? nowIso(),
+  };
+  return {
+    ...nextSession,
+    estimatedTokens: calculateConversationSessionEstimatedTokens(nextSession),
   };
 }
 
@@ -339,6 +343,15 @@ function normalizeConversationSession(
     lastCompactedAt: partial?.lastCompactedAt ?? null,
     estimatedTokens: partial?.estimatedTokens ?? 0,
   });
+}
+
+function calculateConversationSessionEstimatedTokens(
+  session: Pick<ConversationSession, "messages" | "compactedSummaries">
+) {
+  return (
+    estimateSessionTokens(session as ConversationSession) +
+    session.compactedSummaries.reduce((sum, summary) => sum + (summary.tokenEstimate ?? 0), 0)
+  );
 }
 
 function nextClonedTabTitle(baseTitle: string, existingTitles: string[]) {
@@ -887,6 +900,24 @@ function appendSystemMessageToSession(
         },
       ],
       updatedAt: nowIso(),
+      estimatedTokens: calculateConversationSessionEstimatedTokens({
+        ...session,
+        messages: [
+          ...session.messages,
+          {
+            id: createId("msg"),
+            role: "system" as const,
+            cliId,
+            timestamp: nowIso(),
+            content,
+            transportKind: defaultTransportKind(cliId),
+            blocks: null,
+            isStreaming: false,
+            durationMs: null,
+            exitCode,
+          },
+        ],
+      }),
     },
   };
 }
@@ -1139,12 +1170,17 @@ export const useStore = create<StoreState>((set, get) => {
     set((state) => {
       const session = state.chatSessions[tabId];
       if (!session) return {};
+      const nextMessages = [...session.messages, message];
       const chatSessions = {
         ...state.chatSessions,
         [tabId]: {
           ...session,
-          messages: [...session.messages, message],
+          messages: nextMessages,
           updatedAt: message.timestamp,
+          estimatedTokens: calculateConversationSessionEstimatedTokens({
+            ...session,
+            messages: nextMessages,
+          }),
         },
       };
       persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
@@ -1486,6 +1522,7 @@ export const useStore = create<StoreState>((set, get) => {
     };
 
     set((current) => {
+      const nextMessages = [...current.chatSessions[activeTab.id].messages, systemMessage];
       const workspaces = current.workspaces.map((item) =>
         item.id === workspace.id ? { ...item, handoffReady: true, lastSnapshot: timestamp } : item
       );
@@ -1493,8 +1530,12 @@ export const useStore = create<StoreState>((set, get) => {
         ...current.chatSessions,
         [activeTab.id]: {
           ...current.chatSessions[activeTab.id],
-          messages: [...current.chatSessions[activeTab.id].messages, systemMessage],
+          messages: nextMessages,
           updatedAt: timestamp,
+          estimatedTokens: calculateConversationSessionEstimatedTokens({
+            ...current.chatSessions[activeTab.id],
+            messages: nextMessages,
+          }),
         },
       };
       const appState = current.appState
@@ -1536,12 +1577,17 @@ export const useStore = create<StoreState>((set, get) => {
     };
 
     set((current) => {
+      const nextMessages = [...current.chatSessions[activeTab.id].messages, intro];
       const chatSessions = {
         ...current.chatSessions,
         [activeTab.id]: {
           ...current.chatSessions[activeTab.id],
-          messages: [...current.chatSessions[activeTab.id].messages, intro],
+          messages: nextMessages,
           updatedAt: nowIso(),
+          estimatedTokens: calculateConversationSessionEstimatedTokens({
+            ...current.chatSessions[activeTab.id],
+            messages: nextMessages,
+          }),
         },
       };
       persistTerminalState(
@@ -2189,11 +2235,12 @@ export const useStore = create<StoreState>((set, get) => {
             ...state.chatSessions,
             [targetTabId]: {
               ...state.chatSessions[targetTabId],
-              messages: [
-                ...state.chatSessions[targetTabId].messages,
-                systemMessage!,
-              ],
+              messages: [...state.chatSessions[targetTabId].messages, systemMessage!],
               updatedAt: nowIso(),
+              estimatedTokens: calculateConversationSessionEstimatedTokens({
+                ...state.chatSessions[targetTabId],
+                messages: [...state.chatSessions[targetTabId].messages, systemMessage!],
+              }),
             },
           }
         : state.chatSessions;
@@ -2376,16 +2423,21 @@ export const useStore = create<StoreState>((set, get) => {
               }
             : item
         );
+        const nextMessages = [
+          ...current.chatSessions[tabId].messages,
+          userMessage,
+          pendingMessage,
+        ];
         const chatSessions = {
           ...current.chatSessions,
           [tabId]: {
             ...current.chatSessions[tabId],
-            messages: [
-              ...current.chatSessions[tabId].messages,
-              userMessage,
-              pendingMessage,
-            ],
+            messages: nextMessages,
             updatedAt: nowIso(),
+            estimatedTokens: calculateConversationSessionEstimatedTokens({
+              ...current.chatSessions[tabId],
+              messages: nextMessages,
+            }),
           },
         };
         persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
@@ -2580,6 +2632,10 @@ export const useStore = create<StoreState>((set, get) => {
           ...current.chatSessions[tabId],
           messages: [...current.chatSessions[tabId].messages, userMessage, pendingMessage],
           updatedAt: nowIso(),
+          estimatedTokens: calculateConversationSessionEstimatedTokens({
+            ...current.chatSessions[tabId],
+            messages: [...current.chatSessions[tabId].messages, userMessage, pendingMessage],
+          }),
         },
       };
       persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
@@ -2740,6 +2796,12 @@ export const useStore = create<StoreState>((set, get) => {
                 message.id === pendingMessage.id ? { ...message, id: messageId } : message
               ),
               updatedAt: nowIso(),
+              estimatedTokens: calculateConversationSessionEstimatedTokens({
+                ...current.chatSessions[tabId],
+                messages: current.chatSessions[tabId].messages.map((message) =>
+                  message.id === pendingMessage.id ? { ...message, id: messageId } : message
+                ),
+              }),
             },
           };
           persistTerminalState(current.workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
@@ -2775,6 +2837,28 @@ export const useStore = create<StoreState>((set, get) => {
                 : message
             ),
             updatedAt: nowIso(),
+            estimatedTokens: calculateConversationSessionEstimatedTokens({
+              ...current.chatSessions[tabId],
+              messages: current.chatSessions[tabId].messages.map<ChatMessage>((message) =>
+                message.id === pendingMessage.id
+                  ? {
+                      ...message,
+                      content: "Error: failed to send message",
+                      rawContent: "Error: failed to send message",
+                      contentFormat: "log",
+                      blocks: [
+                        {
+                          kind: "status",
+                          level: "error",
+                          text: "Error: failed to send message",
+                        },
+                      ] satisfies ChatMessageBlock[],
+                      isStreaming: false,
+                      exitCode: 1,
+                    }
+                  : message
+              ),
+            }),
           },
         };
         persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
@@ -2848,6 +2932,22 @@ export const useStore = create<StoreState>((set, get) => {
               : message
           ),
           updatedAt: nowIso(),
+          estimatedTokens: calculateConversationSessionEstimatedTokens({
+            ...session,
+            messages: session.messages.map<ChatMessage>((message) =>
+              message.id === targetMessageId
+                ? {
+                    ...message,
+                    rawContent: (message.rawContent ?? message.content) + chunk,
+                    content: normalizeAssistantContent(
+                      (message.rawContent ?? message.content) + chunk
+                    ),
+                    contentFormat: "plain",
+                    blocks: blocks ?? message.blocks ?? null,
+                  }
+                : message
+            ),
+          }),
         },
       };
       return { chatSessions };
@@ -2978,8 +3078,10 @@ export const useStore = create<StoreState>((set, get) => {
           }),
           ...(systemMessage ? [systemMessage] : []),
         ],
+        estimatedTokens: 0,
         updatedAt: systemMessage?.timestamp ?? nowIso(),
       };
+      finalizedSession.estimatedTokens = calculateConversationSessionEstimatedTokens(finalizedSession);
       const finalizedMessage = finalizedSession.messages.find((message) => message.id === targetMessageId) ?? null;
       const finalizedCliId = (transportSession?.cliId ?? finalizedMessage?.cliId ?? null) as AgentId | null;
       const nextTerminalTabs = terminalTabs.map((tab) =>
@@ -3569,9 +3671,17 @@ export const useStore = create<StoreState>((set, get) => {
       }
       case "fast": {
         let systemMessage: ChatMessage | null = null;
+        const requestedMode = command.args[0]?.trim().toLowerCase() ?? "";
         set((state) => {
+          const currentTab = state.terminalTabs.find((item) => item.id === tab.id);
+          const nextFastMode =
+            requestedMode === "on"
+              ? true
+              : requestedMode === "off"
+                ? false
+                : !currentTab?.fastMode;
           const terminalTabs = state.terminalTabs.map((item) =>
-            item.id === tab.id ? { ...item, fastMode: !item.fastMode } : item
+            item.id === tab.id ? { ...item, fastMode: nextFastMode } : item
           );
           const nextTab = terminalTabs.find((item) => item.id === tab.id);
           systemMessage = {

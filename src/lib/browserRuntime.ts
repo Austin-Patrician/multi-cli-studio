@@ -3908,7 +3908,13 @@ rename to src/components/chat/GitPanel.tsx`,
         return { success: true, output: `Effort level set to: ${level}`, sideEffects: [{ type: "effortChanged", level }] };
       }
       case "fast": {
-        acpSession.fastMode = !acpSession.fastMode;
+        const requestedMode = command.args[0]?.trim().toLowerCase() ?? "";
+        acpSession.fastMode =
+          requestedMode === "on"
+            ? true
+            : requestedMode === "off"
+              ? false
+              : !acpSession.fastMode;
         return {
           success: true,
           output: `Fast mode: ${acpSession.fastMode ? "ON" : "OFF"}`,
