@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useOutlet, useSearchParams } from "react-router-dom";
 import {
+  Archive,
   ArrowLeft,
   BarChart3,
   BookOpen,
@@ -33,6 +34,7 @@ type SettingsSection =
   | "connections"
   | "mcp"
   | "skills"
+  | "session-management"
   | "usage";
 type ProjectHealthTone = "clean" | "modified" | "attention" | "neutral";
 
@@ -59,6 +61,7 @@ const NAV_ITEMS: SidebarNavItem[] = [
   { id: "agents", label: "智能体", icon: Bot },
   { id: "vendors", label: "供应商", icon: Settings },
   { id: "projects", label: "项目", icon: FolderOpen },
+  { id: "session-management", label: "会话管理", icon: Archive },
   { id: "connections", label: "连接", icon: Link2 },
   { id: "mcp", label: "MCP", icon: Server },
   { id: "skills", label: "技能", icon: BookOpen },
@@ -73,6 +76,7 @@ function parseSettingsSection(value: string | null): SettingsSection {
     case "connections":
     case "mcp":
     case "skills":
+    case "session-management":
     case "vendors":
     case "settings":
     case "usage":
@@ -174,8 +178,11 @@ export function DesktopSettingsPage() {
 
   const isGeneralSettingsRoute = location.pathname.startsWith("/settings/general");
   const isModelProvidersRoute = location.pathname.startsWith("/settings/model-providers");
+  const isSessionManagementRoute = location.pathname.startsWith("/settings/session-management");
   const activeSection = isModelProvidersRoute
     ? "models"
+    : isSessionManagementRoute
+      ? "session-management"
     : isGeneralSettingsRoute
       ? "settings"
       : parseSettingsSection(searchParams.get("section"));
@@ -256,6 +263,11 @@ export function DesktopSettingsPage() {
 
     if (section === "models") {
       navigate("/settings/model-providers");
+      return;
+    }
+
+    if (section === "session-management") {
+      navigate("/settings/session-management");
       return;
     }
 

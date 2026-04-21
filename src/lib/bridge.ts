@@ -58,6 +58,10 @@ import {
   PersistedTerminalState,
   SemanticMemoryChunk,
   SemanticRecallRequest,
+  WorkspaceSessionBatchMutationResponse,
+  WorkspaceSessionCatalogPage,
+  WorkspaceSessionCatalogQuery,
+  WorkspaceSessionProjectionSummary,
   CodexRuntimeReloadResult,
   SettingsEngineStatus,
   SshConnectionConfig,
@@ -328,6 +332,45 @@ export interface RuntimeBridge {
     dateRange: "7d" | "30d" | "all";
     workspacePath?: string | null;
   }) => Promise<LocalUsageStatistics>;
+  listWorkspaceSessions: (
+    workspaceId: string,
+    options?: {
+      query?: WorkspaceSessionCatalogQuery | null;
+      cursor?: string | null;
+      limit?: number | null;
+    }
+  ) => Promise<WorkspaceSessionCatalogPage>;
+  listGlobalCodexSessions: (options?: {
+    query?: WorkspaceSessionCatalogQuery | null;
+    cursor?: string | null;
+    limit?: number | null;
+  }) => Promise<WorkspaceSessionCatalogPage>;
+  listProjectRelatedCodexSessions: (
+    workspaceId: string,
+    options?: {
+      query?: WorkspaceSessionCatalogQuery | null;
+      cursor?: string | null;
+      limit?: number | null;
+    }
+  ) => Promise<WorkspaceSessionCatalogPage>;
+  getWorkspaceSessionProjectionSummary: (
+    workspaceId: string,
+    options?: {
+      query?: WorkspaceSessionCatalogQuery | null;
+    }
+  ) => Promise<WorkspaceSessionProjectionSummary>;
+  archiveWorkspaceSessions: (
+    workspaceId: string,
+    sessionIds: string[]
+  ) => Promise<WorkspaceSessionBatchMutationResponse>;
+  unarchiveWorkspaceSessions: (
+    workspaceId: string,
+    sessionIds: string[]
+  ) => Promise<WorkspaceSessionBatchMutationResponse>;
+  deleteWorkspaceSessions: (
+    workspaceId: string,
+    sessionIds: string[]
+  ) => Promise<WorkspaceSessionBatchMutationResponse>;
   ensurePtySession: (request: {
     terminalTabId: string;
     workspaceId?: string | null;
@@ -953,6 +996,60 @@ const tauriRuntime: RuntimeBridge = {
       provider: input.provider ?? "all",
       dateRange: input.dateRange,
       workspacePath: input.workspacePath ?? null,
+    });
+  },
+  async listWorkspaceSessions(workspaceId, options) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<WorkspaceSessionCatalogPage>("list_workspace_sessions", {
+      workspaceId,
+      query: options?.query ?? null,
+      cursor: options?.cursor ?? null,
+      limit: options?.limit ?? null,
+    });
+  },
+  async listGlobalCodexSessions(options) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<WorkspaceSessionCatalogPage>("list_global_codex_sessions", {
+      query: options?.query ?? null,
+      cursor: options?.cursor ?? null,
+      limit: options?.limit ?? null,
+    });
+  },
+  async listProjectRelatedCodexSessions(workspaceId, options) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<WorkspaceSessionCatalogPage>("list_project_related_codex_sessions", {
+      workspaceId,
+      query: options?.query ?? null,
+      cursor: options?.cursor ?? null,
+      limit: options?.limit ?? null,
+    });
+  },
+  async getWorkspaceSessionProjectionSummary(workspaceId, options) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<WorkspaceSessionProjectionSummary>("get_workspace_session_projection_summary", {
+      workspaceId,
+      query: options?.query ?? null,
+    });
+  },
+  async archiveWorkspaceSessions(workspaceId, sessionIds) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<WorkspaceSessionBatchMutationResponse>("archive_workspace_sessions", {
+      workspaceId,
+      sessionIds,
+    });
+  },
+  async unarchiveWorkspaceSessions(workspaceId, sessionIds) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<WorkspaceSessionBatchMutationResponse>("unarchive_workspace_sessions", {
+      workspaceId,
+      sessionIds,
+    });
+  },
+  async deleteWorkspaceSessions(workspaceId, sessionIds) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<WorkspaceSessionBatchMutationResponse>("delete_workspace_sessions", {
+      workspaceId,
+      sessionIds,
     });
   },
   async ensurePtySession(request) {

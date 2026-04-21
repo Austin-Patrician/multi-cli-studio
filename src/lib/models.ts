@@ -1633,6 +1633,61 @@ export type LocalUsageStatistics = {
   lastUpdated: number;
 };
 
+export type WorkspaceSessionCatalogEntry = {
+  sessionId: string;
+  canonicalSessionId?: string | null;
+  workspaceId: string;
+  workspaceLabel?: string | null;
+  engine: string;
+  title: string;
+  updatedAt: number;
+  archivedAt?: number | null;
+  threadKind: string;
+  source?: string | null;
+  sourceLabel?: string | null;
+  sizeBytes?: number | null;
+  cwd?: string | null;
+  attributionStatus?: "strict-match" | "inferred-related" | "unassigned" | null;
+  attributionReason?: string | null;
+  attributionConfidence?: "high" | "medium" | null;
+  matchedWorkspaceId?: string | null;
+  matchedWorkspaceLabel?: string | null;
+};
+
+export type WorkspaceSessionCatalogQuery = {
+  keyword?: string | null;
+  engine?: string | null;
+  status?: "active" | "archived" | "all" | null;
+};
+
+export type WorkspaceSessionCatalogPage = {
+  data: WorkspaceSessionCatalogEntry[];
+  nextCursor?: string | null;
+  partialSource?: string | null;
+};
+
+export type WorkspaceSessionProjectionSummary = {
+  scopeKind: "project" | "worktree";
+  ownerWorkspaceIds: string[];
+  activeTotal: number;
+  archivedTotal: number;
+  allTotal: number;
+  filteredTotal: number;
+  partialSources?: string[];
+};
+
+export type WorkspaceSessionBatchMutationResult = {
+  sessionId: string;
+  ok: boolean;
+  archivedAt?: number | null;
+  error?: string | null;
+  code?: string | null;
+};
+
+export type WorkspaceSessionBatchMutationResponse = {
+  results: WorkspaceSessionBatchMutationResult[];
+};
+
 export type AgentTransportKind =
   | "codex-app-server"
   | "claude-cli"

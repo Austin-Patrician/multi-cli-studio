@@ -3,6 +3,7 @@
 mod acp;
 mod automation;
 mod local_usage;
+mod session_management;
 mod storage;
 
 use std::{
@@ -27608,6 +27609,13 @@ pub fn run() {
             read_external_absolute_file,
             write_external_absolute_file,
             local_usage::local_usage_statistics,
+            session_management::list_workspace_sessions,
+            session_management::list_global_codex_sessions,
+            session_management::list_project_related_codex_sessions,
+            session_management::get_workspace_session_projection_summary,
+            session_management::archive_workspace_sessions,
+            session_management::unarchive_workspace_sessions,
+            session_management::delete_workspace_sessions,
             ensure_pty_session,
             write_pty_input,
             resize_pty_session,

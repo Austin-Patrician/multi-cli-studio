@@ -33,6 +33,10 @@ pub(crate) struct LocalUsageSessionSummary {
     pub(crate) source: Option<String>,
     #[serde(default)]
     pub(crate) provider: Option<String>,
+    #[serde(default)]
+    pub(crate) cwd: Option<String>,
+    #[serde(default)]
+    pub(crate) source_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) file_size_bytes: Option<u64>,
     #[serde(default)]
@@ -448,7 +452,7 @@ fn gemini_cost_rates() -> CostRates {
     CostRates::default()
 }
 
-fn scan_codex_session_summaries(
+pub(crate) fn scan_codex_session_summaries(
     workspace_path: Option<&Path>,
     sessions_roots: &[PathBuf],
 ) -> Result<Vec<LocalUsageSessionSummary>, String> {
@@ -503,6 +507,7 @@ fn parse_codex_session_summary(
     let mut source: Option<String> = None;
     let mut provider: Option<String> = None;
     let mut canonical_session_id: Option<String> = None;
+    let mut cwd: Option<String> = None;
     let mut latest_timestamp = 0_i64;
     let mut previous_totals: Option<UsageTotals> = None;
     let mut match_known = workspace_path.is_none();
@@ -591,9 +596,12 @@ fn parse_codex_session_summary(
             if canonical_session_id.is_none() {
                 canonical_session_id = extract_session_id_from_session_value(&value);
             }
-            if let Some(cwd) = extract_cwd(&value) {
+            if let Some(current_cwd) = extract_cwd(&value) {
+                if !current_cwd.trim().is_empty() {
+                    cwd = Some(current_cwd.clone());
+                }
                 if let Some(filter) = workspace_path {
-                    matches_workspace = path_matches_workspace(&cwd, filter);
+                    matches_workspace = path_matches_workspace(&current_cwd, filter);
                     match_known = true;
                     if !matches_workspace {
                         break;
@@ -789,6 +797,8 @@ fn parse_codex_session_summary(
         summary,
         source,
         provider,
+        cwd,
+        source_path: Some(path.to_string_lossy().to_string()),
         file_size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
         modified_lines,
     }))
@@ -900,12 +910,14 @@ fn parse_gemini_session_summary(path: &Path) -> Result<Option<LocalUsageSessionS
         summary,
         source: Some("gemini".to_string()),
         provider: Some("google".to_string()),
+        cwd: None,
+        source_path: Some(path.to_string_lossy().to_string()),
         file_size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
         modified_lines: 0,
     }))
 }
 
-fn scan_gemini_session_summaries(
+pub(crate) fn scan_gemini_session_summaries(
     workspace_path: Option<&Path>,
 ) -> Result<Vec<LocalUsageSessionSummary>, String> {
     let base_dir = resolve_gemini_base_dir();
@@ -973,7 +985,7 @@ fn scan_claude_project_summaries(
     Ok(())
 }
 
-fn scan_claude_session_summaries(
+pub(crate) fn scan_claude_session_summaries(
     workspace_path: Option<&Path>,
 ) -> Result<Vec<LocalUsageSessionSummary>, String> {
     let projects_dir = match claude_projects_dir() {
@@ -1107,6 +1119,8 @@ fn parse_claude_session_summary(path: &Path) -> Result<Option<LocalUsageSessionS
         summary,
         source: Some("claude".to_string()),
         provider: Some("anthropic".to_string()),
+        cwd: None,
+        source_path: Some(path.to_string_lossy().to_string()),
         file_size_bytes: fs::metadata(path).ok().map(|metadata| metadata.len()),
         modified_lines: 0,
     }))

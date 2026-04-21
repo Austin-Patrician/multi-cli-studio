@@ -964,23 +964,6 @@ function RuntimeApprovalRequestBlock({
   );
 }
 
-function RuntimePlanBlock({
-  block,
-}: {
-  block: Extract<ChatMessageBlock, { kind: "plan" }>;
-}) {
-  return (
-    <div className="rounded-[12px] border border-sky-200 bg-sky-50/70 px-4 py-3">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-sky-700">
-        Plan
-      </div>
-      <div className="mt-2 whitespace-pre-wrap break-words text-[13px] leading-7 text-sky-950">
-        {block.text}
-      </div>
-    </div>
-  );
-}
-
 function orchestrationStatusTone(status?: string | null) {
   switch (status) {
     case "completed":
@@ -999,60 +982,433 @@ function orchestrationOwnerLabel(owner: AgentId) {
   return owner === "claude" ? "Claude" : owner === "gemini" ? "Gemini" : "Codex";
 }
 
-function RuntimeOrchestrationPlanBlock({
-  block,
-}: {
-  block: Extract<ChatMessageBlock, { kind: "orchestrationPlan" }>;
-}) {
+type RuntimePlanTextBlock = Extract<ChatMessageBlock, { kind: "plan" }>;
+type RuntimeOrchestrationPlan = Extract<ChatMessageBlock, { kind: "orchestrationPlan" }>;
+type RuntimeOrchestrationStep = Extract<ChatMessageBlock, { kind: "orchestrationStep" }>;
+type RuntimePlanTimelineStatus =
+  | NonNullable<RuntimeOrchestrationPlan["status"]>
+  | NonNullable<RuntimeOrchestrationStep["status"]>
+  | "planning";
+
+type RuntimePlanTimelineStep = {
+  id: string;
+  owner?: AgentId | null;
+  title: string;
+  summary?: string | null;
+  result?: string | null;
+  status: RuntimePlanTimelineStatus;
+  source: "orchestration" | "plan";
+};
+
+type RuntimePlanTimelineGroup = {
+  plan?: RuntimeOrchestrationPlan | null;
+  steps: RuntimePlanTimelineStep[];
+  status: RuntimePlanTimelineStatus;
+  planIntro?: string | null;
+  planText?: string | null;
+  isLive: boolean;
+  hasOrchestration: boolean;
+};
+
+type RuntimeStructuredRenderItem =
+  | {
+      kind: "block";
+      key: string;
+      block: ChatMessageBlock;
+    }
+  | {
+      kind: "timeline";
+      key: string;
+      group: RuntimePlanTimelineGroup;
+    };
+
+function isTimelineBlock(
+  block: ChatMessageBlock
+): block is RuntimePlanTextBlock | RuntimeOrchestrationPlan | RuntimeOrchestrationStep {
   return (
-    <div className="rounded-[12px] border border-slate-200 bg-slate-50/85 px-4 py-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-600">
-          Orchestration
-        </span>
-        <MetaPill tone={orchestrationStatusTone(block.status)}>
-          {block.status ?? "planning"}
-        </MetaPill>
-      </div>
-      <div className="mt-2 text-[13px] font-semibold text-slate-950">{block.title}</div>
-      <div className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-6 text-slate-700">
-        {block.goal}
-      </div>
-      {block.summary && (
-        <div className="mt-2 whitespace-pre-wrap break-words text-[12px] leading-6 text-slate-600">
-          {block.summary}
-        </div>
-      )}
-    </div>
+    block.kind === "plan" ||
+    block.kind === "orchestrationPlan" ||
+    block.kind === "orchestrationStep"
   );
 }
 
-function RuntimeOrchestrationStepBlock({
-  block,
+function normalizeTimelineStatus(
+  status?: string | null
+): RuntimePlanTimelineStatus {
+  switch (status) {
+    case "planned":
+    case "running":
+    case "completed":
+    case "failed":
+    case "skipped":
+    case "synthesizing":
+      return status;
+    default:
+      return "planning";
+  }
+}
+
+function parsePlanTextToSteps(text: string) {
+  const introLines: string[] = [];
+  const steps: Array<{ title: string; summary?: string | null }> = [];
+  let current: { title: string; details: string[] } | null = null;
+
+  const flushCurrent = () => {
+    if (!current) return;
+    steps.push({
+      title: current.title.trim(),
+      summary: current.details.join("\n").trim() || null,
+    });
+    current = null;
+  };
+
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (current && current.details[current.details.length - 1] !== "") {
+        current.details.push("");
+      } else if (!current && introLines[introLines.length - 1] !== "") {
+        introLines.push("");
+      }
+      continue;
+    }
+
+    const numberedMatch = trimmed.match(
+      /^(?:step\s*)?(?:\d+|[a-z])(?:[\.\):\-]|(?:\s*[-:]))\s+(.+)$/i
+    );
+    const bulletMatch = trimmed.match(/^[-*•]\s+(.+)$/);
+    const stepTitle = numberedMatch?.[1] ?? bulletMatch?.[1] ?? null;
+
+    if (stepTitle) {
+      flushCurrent();
+      current = { title: stepTitle, details: [] };
+      continue;
+    }
+
+    if (current) {
+      current.details.push(trimmed);
+    } else {
+      introLines.push(trimmed);
+    }
+  }
+
+  flushCurrent();
+
+  const intro = introLines.join("\n").trim() || null;
+  if (steps.length > 0) {
+    return { intro, steps };
+  }
+
+  const fallback = text.trim();
+  return {
+    intro: null,
+    steps: fallback
+      ? [
+          {
+            title: fallback,
+            summary: null,
+          },
+        ]
+      : [],
+  };
+}
+
+function deriveTimelineStatus(
+  plan: RuntimeOrchestrationPlan | null | undefined,
+  steps: RuntimePlanTimelineStep[],
+  isStreaming: boolean
+): RuntimePlanTimelineStatus {
+  if (plan?.status) {
+    return normalizeTimelineStatus(plan.status);
+  }
+  if (steps.some((step) => step.status === "failed")) {
+    return "failed";
+  }
+  if (steps.some((step) => step.status === "running")) {
+    return "running";
+  }
+  if (steps.some((step) => step.status === "completed")) {
+    return steps.every((step) => step.status === "completed") ? "completed" : "running";
+  }
+  return isStreaming ? "planning" : "completed";
+}
+
+function buildTimelineGroup(
+  blocks: Array<RuntimePlanTextBlock | RuntimeOrchestrationPlan | RuntimeOrchestrationStep>,
+  isStreaming: boolean
+): RuntimePlanTimelineGroup {
+  const plan = blocks.find(
+    (block): block is RuntimeOrchestrationPlan => block.kind === "orchestrationPlan"
+  );
+  const orchestrationSteps = blocks.filter(
+    (block): block is RuntimeOrchestrationStep => block.kind === "orchestrationStep"
+  );
+  const planBlocks = blocks.filter((block): block is RuntimePlanTextBlock => block.kind === "plan");
+  const planText = planBlocks.map((block) => block.text.trim()).filter(Boolean).join("\n\n");
+  const parsedPlan = planText ? parsePlanTextToSteps(planText) : { intro: null, steps: [] };
+  const hasOrchestration = orchestrationSteps.length > 0 || Boolean(plan);
+
+  const steps: RuntimePlanTimelineStep[] = hasOrchestration
+    ? orchestrationSteps.map((block, index) => ({
+        id: block.stepId || `step-${index + 1}`,
+        owner: block.owner,
+        title: block.title,
+        summary: block.summary,
+        result: block.result,
+        status: normalizeTimelineStatus(block.status ?? "planned"),
+        source: "orchestration",
+      }))
+    : parsedPlan.steps.map((step, index) => ({
+        id: `plan-step-${index + 1}`,
+        title: step.title,
+        summary: step.summary,
+        result: null,
+        owner: null,
+        status:
+          isStreaming && index === 0
+            ? "running"
+            : !isStreaming && index === parsedPlan.steps.length - 1
+              ? "completed"
+              : "planned",
+        source: "plan",
+      }));
+
+  return {
+    plan,
+    steps,
+    status: deriveTimelineStatus(plan, steps, isStreaming),
+    planIntro: plan?.summary ?? parsedPlan.intro,
+    planText: hasOrchestration ? planText || null : null,
+    isLive: isStreaming || steps.some((step) => step.status === "running"),
+    hasOrchestration,
+  };
+}
+
+function collectRuntimeStructuredRenderItems(
+  blocks: ChatMessageBlock[],
+  isStreaming: boolean
+): RuntimeStructuredRenderItem[] {
+  const items: RuntimeStructuredRenderItem[] = [];
+
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (!isTimelineBlock(block)) {
+      items.push({
+        kind: "block",
+        key: `${block.kind}-${index}`,
+        block,
+      });
+      continue;
+    }
+
+    const timelineBlocks: Array<
+      RuntimePlanTextBlock | RuntimeOrchestrationPlan | RuntimeOrchestrationStep
+    > = [block];
+    let cursor = index + 1;
+    while (cursor < blocks.length) {
+      const nextBlock = blocks[cursor];
+      if (!isTimelineBlock(nextBlock)) {
+        break;
+      }
+      timelineBlocks.push(nextBlock);
+      cursor += 1;
+    }
+
+    items.push({
+      kind: "timeline",
+      key: `timeline-${index}`,
+      group: buildTimelineGroup(timelineBlocks, isStreaming),
+    });
+    index = cursor - 1;
+  }
+
+  return items;
+}
+
+function timelineStepVisual(status: RuntimePlanTimelineStatus, active: boolean) {
+  if (status === "failed") {
+    return {
+      rail: "bg-rose-200",
+      dot: "border-rose-300 bg-rose-50 text-rose-600",
+      panel: active
+        ? "border-rose-200 bg-rose-50"
+        : "border-slate-200 bg-white",
+      index: "text-rose-700",
+    };
+  }
+  if (status === "completed") {
+    return {
+      rail: "bg-emerald-200",
+      dot: "border-emerald-300 bg-emerald-50 text-emerald-600",
+      panel: active
+        ? "border-emerald-200 bg-emerald-50"
+        : "border-slate-200 bg-white",
+      index: "text-emerald-700",
+    };
+  }
+  if (status === "running" || status === "synthesizing") {
+    return {
+      rail: "bg-sky-200",
+      dot: "border-sky-300 bg-sky-50 text-sky-600",
+      panel: "border-sky-200 bg-sky-50",
+      index: "text-sky-700",
+    };
+  }
+  if (status === "skipped") {
+    return {
+      rail: "bg-slate-200",
+      dot: "border-slate-300 bg-slate-100 text-slate-500",
+      panel: "border-slate-200 bg-slate-50",
+      index: "text-slate-500",
+    };
+  }
+  return {
+    rail: "bg-slate-200",
+    dot: active
+      ? "border-slate-400 bg-slate-100 text-slate-700"
+      : "border-slate-300 bg-white text-slate-500",
+    panel: active
+      ? "border-slate-300 bg-slate-50"
+      : "border-slate-200 bg-white",
+    index: active ? "text-slate-700" : "text-slate-500",
+  };
+}
+
+function RuntimePlanTimelineCard({
+  group,
 }: {
-  block: Extract<ChatMessageBlock, { kind: "orchestrationStep" }>;
+  group: RuntimePlanTimelineGroup;
 }) {
+  const activeStepId =
+    group.steps.find((step) => step.status === "running")?.id ??
+    group.steps.find((step) => step.status === "failed")?.id ??
+    group.steps.find((step) => step.status === "planned")?.id ??
+    group.steps[group.steps.length - 1]?.id;
+  const title =
+    group.plan?.title ??
+    (group.hasOrchestration ? "Execution plan" : "Plan outline");
+  const goal = group.plan?.goal ?? null;
+  const summary =
+    group.plan?.summary && group.plan?.summary !== goal ? group.plan.summary : null;
+
   return (
-    <div className="rounded-[12px] border border-[#dbe4ef] bg-white px-4 py-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-          {orchestrationOwnerLabel(block.owner)}
-        </span>
-        <MetaPill tone={orchestrationStatusTone(block.status)}>
-          {block.status ?? "planned"}
-        </MetaPill>
+    <div className="overflow-hidden rounded-[12px] border border-slate-200 bg-slate-50/70">
+      <div className="border-b border-slate-200 bg-white px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-slate-600">
+            {group.hasOrchestration ? "Execution timeline" : "Plan timeline"}
+          </span>
+          <MetaPill tone={orchestrationStatusTone(group.status)}>
+            {titleCase(group.status === "synthesizing" ? "synthesizing" : group.status)}
+          </MetaPill>
+          <span className="inline-flex items-center rounded-full bg-slate-900 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-white">
+            {group.steps.length} step{group.steps.length === 1 ? "" : "s"}
+          </span>
+          {group.isLive ? (
+            <span className="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-sky-700">
+              <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
+              Live
+            </span>
+          ) : null}
+        </div>
+
+        <div className="mt-2 text-[12px] font-semibold text-slate-950">
+          {title}
+        </div>
+        {goal && (
+          <div className="mt-1 whitespace-pre-wrap break-words text-[11px] leading-5 text-slate-700">
+            {goal}
+          </div>
+        )}
+        {summary && (
+          <div className="mt-1 whitespace-pre-wrap break-words text-[11px] leading-5 text-slate-600">
+            {summary}
+          </div>
+        )}
       </div>
-      <div className="mt-2 text-[13px] font-semibold text-slate-950">{block.title}</div>
-      {block.summary && (
-        <div className="mt-1 whitespace-pre-wrap break-words text-[12px] leading-6 text-slate-700">
-          {block.summary}
+
+      <div className="px-3 py-2.5">
+        <div className="relative">
+          <div className="absolute bottom-1 left-[8px] top-1 w-px bg-slate-200" />
+          <div className="space-y-2">
+            {group.steps.map((step, index) => {
+              const active = step.id === activeStepId;
+              const visual = timelineStepVisual(step.status, active);
+              const stepMarker =
+                step.status === "completed"
+                  ? "✓"
+                  : step.status === "failed"
+                    ? "×"
+                    : `${index + 1}`;
+              return (
+                <div key={step.id} className="relative pl-5">
+                  {index < group.steps.length - 1 ? (
+                    <div
+                      className={`absolute left-[8px] top-4 w-px ${visual.rail}`}
+                      style={{ height: "calc(100% + 0.5rem)" }}
+                    />
+                  ) : null}
+                  <div
+                    className={`absolute left-0 top-1 flex h-4 w-4 items-center justify-center rounded-full border text-[10px] font-semibold ${visual.dot}`}
+                  >
+                    {stepMarker}
+                  </div>
+                  <div className={`rounded-[10px] border px-2.5 py-2 ${visual.panel}`}>
+                    <div className="flex flex-wrap items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className={`text-[9px] font-semibold uppercase tracking-[0.12em] ${visual.index}`}>
+                            Step {index + 1}
+                          </span>
+                          {step.owner ? (
+                            <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.1em] text-slate-600">
+                              {orchestrationOwnerLabel(step.owner)}
+                            </span>
+                          ) : null}
+                          <MetaPill tone={orchestrationStatusTone(step.status)}>
+                            {titleCase(step.status)}
+                          </MetaPill>
+                        </div>
+                        <div className="mt-1 text-[12px] font-semibold leading-5 text-slate-950">
+                          {step.title}
+                        </div>
+                      </div>
+                    </div>
+
+                    {step.summary && (
+                      <div className="mt-0.5 whitespace-pre-wrap break-words text-[11px] leading-5 text-slate-700">
+                        {step.summary}
+                      </div>
+                    )}
+                    {step.result && (
+                      <div className="mt-1.5 rounded-[8px] border border-slate-200 bg-white px-2.5 py-1.5 whitespace-pre-wrap break-words text-[11px] leading-5 text-slate-600">
+                        {step.result}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
-      )}
-      {block.result && (
-        <div className="mt-2 whitespace-pre-wrap break-words rounded-[12px] bg-slate-50 px-3 py-2 text-[12px] leading-6 text-slate-600">
-          {block.result}
-        </div>
-      )}
+
+        {!group.hasOrchestration && group.planIntro ? (
+          <div className="mt-2 rounded-[8px] border border-slate-200 bg-white px-2.5 py-2 text-[11px] leading-5 text-slate-600">
+            {group.planIntro}
+          </div>
+        ) : null}
+
+        {group.hasOrchestration && group.planText ? (
+          <div className="mt-2 rounded-[8px] border border-dashed border-slate-200 bg-white px-2.5 py-2">
+            <div className="text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+              Draft plan notes
+            </div>
+            <div className="mt-1 whitespace-pre-wrap break-words text-[11px] leading-5 text-slate-600">
+              {group.planText}
+            </div>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -1162,17 +1518,35 @@ function RuntimeStructuredBlocks({
   workspaceRoot,
   onApprovalDecision,
   onAutoRouteAction,
+  hideTimelineWhileStreaming = false,
 }: {
   blocks: ChatMessageBlock[];
   isStreaming?: boolean;
   workspaceRoot?: string | null;
   onApprovalDecision?: ((requestId: string, decision: AssistantApprovalDecision) => void) | null;
   onAutoRouteAction?: ((action: AutoRouteAction) => void) | null;
+  hideTimelineWhileStreaming?: boolean;
 }) {
+  const items = useMemo(
+    () => collectRuntimeStructuredRenderItems(blocks, isStreaming),
+    [blocks, isStreaming]
+  );
+  const visibleItems = useMemo(
+    () =>
+      hideTimelineWhileStreaming && isStreaming
+        ? items.filter((item) => item.kind !== "timeline")
+        : items,
+    [hideTimelineWhileStreaming, isStreaming, items]
+  );
+
   return (
     <div className="space-y-3">
-      {blocks.map((block, index) => {
-        const key = `${block.kind}-${index}`;
+      {visibleItems.map((item) => {
+        if (item.kind === "timeline") {
+          return <RuntimePlanTimelineCard key={item.key} group={item.group} />;
+        }
+
+        const { block, key } = item;
         switch (block.kind) {
           case "text":
             return <RuntimeTextBlock key={key} block={block} />;
@@ -1192,10 +1566,6 @@ function RuntimeStructuredBlocks({
                 onDecision={onApprovalDecision}
               />
             );
-          case "orchestrationPlan":
-            return <RuntimeOrchestrationPlanBlock key={key} block={block} />;
-          case "orchestrationStep":
-            return <RuntimeOrchestrationStepBlock key={key} block={block} />;
           case "autoRoute":
             return (
               <RuntimeAutoRouteBlock
@@ -1204,8 +1574,6 @@ function RuntimeStructuredBlocks({
                 onAction={onAutoRouteAction}
               />
             );
-          case "plan":
-            return <RuntimePlanBlock key={key} block={block} />;
           case "status":
             return <RuntimeStatusBlock key={key} block={block} />;
           default:
@@ -1351,6 +1719,7 @@ export function CliBubble({
                 workspaceRoot={workspaceRoot}
                 onApprovalDecision={onApprovalDecision}
                 onAutoRouteAction={onAutoRouteAction}
+                hideTimelineWhileStreaming
               />
               {shouldRenderRuntimeFallbackText && (
                 <AssistantMessageContent

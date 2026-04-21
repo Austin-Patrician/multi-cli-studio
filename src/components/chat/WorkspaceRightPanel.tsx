@@ -1424,7 +1424,7 @@ function WorkspaceFilesPanel({
             No files found for this workspace.
           </div>
         ) : rootExpanded ? (
-          <div>{renderDirectory("", 0)}</div>
+          <div className="file-tree-branch-list">{renderDirectory("", 0)}</div>
         ) : null}
       </div>
 

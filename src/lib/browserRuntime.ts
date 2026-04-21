@@ -59,6 +59,10 @@ import {
   FileMentionCandidate,
   PickedChatAttachment,
   LocalUsageStatistics,
+  WorkspaceSessionBatchMutationResponse,
+  WorkspaceSessionCatalogPage,
+  WorkspaceSessionCatalogQuery,
+  WorkspaceSessionProjectionSummary,
   WorkspaceTextSearchResponse,
   GitFileDiff,
   GitBranchListResponse,
@@ -3257,6 +3261,58 @@ export const browserRuntime = {
       dailyCodeChanges: [],
       lastUpdated: Date.now(),
     };
+  },
+  async listWorkspaceSessions(
+    _workspaceId: string,
+    _options?: {
+      query?: WorkspaceSessionCatalogQuery | null;
+      cursor?: string | null;
+      limit?: number | null;
+    }
+  ): Promise<WorkspaceSessionCatalogPage> {
+    return { data: [], nextCursor: null, partialSource: null };
+  },
+  async listGlobalCodexSessions(_options?: {
+    query?: WorkspaceSessionCatalogQuery | null;
+    cursor?: string | null;
+    limit?: number | null;
+  }): Promise<WorkspaceSessionCatalogPage> {
+    return { data: [], nextCursor: null, partialSource: null };
+  },
+  async listProjectRelatedCodexSessions(
+    _workspaceId: string,
+    _options?: {
+      query?: WorkspaceSessionCatalogQuery | null;
+      cursor?: string | null;
+      limit?: number | null;
+    }
+  ): Promise<WorkspaceSessionCatalogPage> {
+    return { data: [], nextCursor: null, partialSource: null };
+  },
+  async getWorkspaceSessionProjectionSummary(
+    workspaceId: string,
+    _options?: {
+      query?: WorkspaceSessionCatalogQuery | null;
+    }
+  ): Promise<WorkspaceSessionProjectionSummary> {
+    return {
+      scopeKind: "project",
+      ownerWorkspaceIds: workspaceId ? [workspaceId] : [],
+      activeTotal: 0,
+      archivedTotal: 0,
+      allTotal: 0,
+      filteredTotal: 0,
+      partialSources: [],
+    };
+  },
+  async archiveWorkspaceSessions(): Promise<WorkspaceSessionBatchMutationResponse> {
+    return { results: [] };
+  },
+  async unarchiveWorkspaceSessions(): Promise<WorkspaceSessionBatchMutationResponse> {
+    return { results: [] };
+  },
+  async deleteWorkspaceSessions(): Promise<WorkspaceSessionBatchMutationResponse> {
+    return { results: [] };
   },
   async ensurePtySession(): Promise<void> {
     return;

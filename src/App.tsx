@@ -10,6 +10,7 @@ import { ModelChatPage } from "./pages/ModelChatPage";
 import { ModelProviderEditorPage } from "./pages/ModelProviderEditorPage";
 import { ModelProvidersPage } from "./pages/ModelProvidersPage";
 import { DesktopSettingsPage } from "./pages/DesktopSettingsPage";
+import { DesktopSessionManagementPage } from "./pages/DesktopSessionManagementPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { useStore } from "./lib/store";
 import { bridge } from "./lib/bridge";
@@ -180,6 +181,7 @@ function App() {
           path="model-providers/:serviceType/:providerId"
           element={<ModelProviderEditorPage embedded />}
         />
+        <Route path="session-management" element={<DesktopSessionManagementPage />} />
         <Route path="agents" element={<AgentsSettingsRedirect />} />
       </Route>
       <Route path="/model-providers" element={<ModelProvidersRedirect />} />
