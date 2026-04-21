@@ -155,6 +155,10 @@ function resolveTerminalCliId(
   return cliId === "auto" || !cliId ? fallback : cliId;
 }
 
+function formatAgentLabel(cliId: AgentId) {
+  return cliId.charAt(0).toUpperCase() + cliId.slice(1);
+}
+
 function createCliSkillCacheKey(cliId: AgentId, workspaceId: string) {
   return `${cliId}:${workspaceId}`;
 }
@@ -1017,6 +1021,8 @@ interface StoreState {
   reorderTerminalTabs: (sourceTabId: string, targetTabId: string) => void;
   closeTerminalTab: (tabId: string) => void;
   setActiveTerminalTab: (tabId: string) => void;
+  resetTerminalTabSession: (tabId?: string) => void;
+  resetCliTransportSession: (cliId: AgentId, tabId?: string) => void;
   setTabSelectedCli: (tabId: string, cliId: TerminalCliId) => void;
   setTabSelectedAgent: (tabId: string, agent: SelectedCustomAgent | null) => void;
   setTabDraftPrompt: (tabId: string, prompt: string) => void;
@@ -1887,6 +1893,130 @@ export const useStore = create<StoreState>((set, get) => {
       };
     });
     enqueueMessagePersistence(() => bridge.deleteChatSessionByTab(tabId));
+  },
+
+  resetTerminalTabSession: (tabId) => {
+    const current = get();
+    const targetTabId = tabId ?? current.activeTerminalTabId;
+    if (!targetTabId) return;
+
+    const currentTab = current.terminalTabs.find((tab) => tab.id === targetTabId) ?? null;
+    const workspace = current.workspaces.find((item) => item.id === currentTab?.workspaceId) ?? null;
+    if (!currentTab || !workspace || currentTab.status === "streaming") return;
+
+    const nextTab: TerminalTab = {
+      ...currentTab,
+      transportSessions: {},
+      contextBoundariesByCli: {},
+      draftPrompt: "",
+      draftAttachments: [],
+      status: "idle",
+      lastActiveAt: nowIso(),
+    };
+    const nextSession = createConversationSession(nextTab, workspace);
+
+    set((state) => {
+      const terminalTabs = state.terminalTabs.map((tab) =>
+        tab.id === targetTabId ? nextTab : tab
+      );
+      const chatSessions = {
+        ...state.chatSessions,
+        [targetTabId]: nextSession,
+      };
+      const queuedChatByTab = { ...state.queuedChatByTab };
+      delete queuedChatByTab[targetTabId];
+      const sharedContext = rebuildSharedContextMap(chatSessions, terminalTabs, state.workspaces);
+      const appState = state.appState
+        ? deriveActiveWorkspaceState(state.appState, state.workspaces, terminalTabs, state.activeTerminalTabId)
+        : null;
+      persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, chatSessions);
+      return {
+        appState,
+        terminalTabs,
+        chatSessions,
+        queuedChatByTab,
+        sharedContext,
+      };
+    });
+
+    enqueueMessagePersistence(() => bridge.deleteChatSessionByTab(targetTabId));
+    enqueueMessagePersistence(() =>
+      bridge.appendChatMessages({
+        seeds: [toPersistedSessionSeed(nextSession, targetTabId, nextSession.messages)],
+      })
+    );
+  },
+
+  resetCliTransportSession: (cliId, tabId) => {
+    const current = get();
+    const targetTabId = tabId ?? current.activeTerminalTabId;
+    if (!targetTabId) return;
+
+    const currentTab = current.terminalTabs.find((tab) => tab.id === targetTabId) ?? null;
+    const session = current.chatSessions[targetTabId] ?? null;
+    if (!currentTab || !session || currentTab.status === "streaming") return;
+
+    const timestamp = nowIso();
+    const systemMessage: ChatMessage = {
+      id: createId("msg"),
+      role: "system",
+      cliId,
+      timestamp,
+      content: `${formatAgentLabel(cliId)} session restarted for this tab.`,
+      transportKind: null,
+      blocks: null,
+      isStreaming: false,
+      durationMs: null,
+      exitCode: null,
+    };
+
+    set((state) => {
+      const terminalTabs = state.terminalTabs.map((tab) => {
+        if (tab.id !== targetTabId) return tab;
+        const nextTransportSessions = { ...normalizeTransportSessions(tab) };
+        nextTransportSessions[cliId] = invalidateTransportSession(cliId, tab.transportSessions[cliId] ?? null);
+        const nextContextBoundaries = { ...normalizeContextBoundariesByCli(tab) };
+        nextContextBoundaries[cliId] = createCliContextBoundary();
+        return {
+          ...tab,
+          transportSessions: nextTransportSessions,
+          contextBoundariesByCli: nextContextBoundaries,
+        };
+      });
+      const nextMessages = [...state.chatSessions[targetTabId].messages, systemMessage];
+      const chatSessions = {
+        ...state.chatSessions,
+        [targetTabId]: {
+          ...state.chatSessions[targetTabId],
+          messages: nextMessages,
+          updatedAt: timestamp,
+          estimatedTokens: calculateConversationSessionEstimatedTokens({
+            ...state.chatSessions[targetTabId],
+            messages: nextMessages,
+          }),
+        },
+      };
+      const sharedContext = rebuildSharedContextMap(chatSessions, terminalTabs, state.workspaces);
+      const appState = state.appState
+        ? deriveActiveWorkspaceState(state.appState, state.workspaces, terminalTabs, state.activeTerminalTabId)
+        : null;
+      persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, chatSessions);
+      return {
+        appState,
+        terminalTabs,
+        chatSessions,
+        sharedContext,
+      };
+    });
+
+    const nextSession = get().chatSessions[targetTabId];
+    if (nextSession) {
+      enqueueMessagePersistence(() =>
+        bridge.appendChatMessages({
+          seeds: [toPersistedSessionSeed(nextSession, targetTabId, [systemMessage])],
+        })
+      );
+    }
   },
 
   setActiveTerminalTab: (tabId) => {

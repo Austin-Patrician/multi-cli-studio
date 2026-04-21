@@ -57,7 +57,7 @@ import {
 import { bridge } from "../../lib/bridge";
 import { createChatAttachment } from "../../lib/chatAttachments";
 import { AgentIcon } from "../AgentIcon";
-import { estimateSessionTokens, FULL_COMPACT_THRESHOLD } from "../../lib/tokenEstimation";
+import { estimateSessionTokens } from "../../lib/tokenEstimation";
 import { resolveSelectedCustomAgent } from "../../lib/customAgents";
 import { useStore } from "../../lib/store";
 import { loadWorkspaceFileIndex } from "../../lib/workspaceFileIndex";
@@ -961,7 +961,7 @@ export function ChatPromptBar({
   const [dismissedSkillKey, setDismissedSkillKey] = useState<string | null>(null);
   const [dismissedAgentKey, setDismissedAgentKey] = useState<string | null>(null);
   const [openFooterMenu, setOpenFooterMenu] = useState<FooterMenuId | null>(null);
-  const [hoveredConfigSubmenu, setHoveredConfigSubmenu] = useState<"agent" | "speed" | null>(null);
+  const [hoveredConfigSubmenu, setHoveredConfigSubmenu] = useState<"agent" | "speed" | "session" | null>(null);
   const [queueFeedback, setQueueFeedback] = useState<string | null>(null);
   const [reviewPrompt, setReviewPrompt] = useState<ReviewInlinePromptState | null>(null);
   const [highlightedPresetIndex, setHighlightedPresetIndex] = useState(0);
@@ -992,6 +992,8 @@ export function ChatPromptBar({
   const snapshotWorkspace = useStore((s) => s.snapshotWorkspace);
   const runChecks = useStore((s) => s.runChecks);
   const togglePlanMode = useStore((s) => s.togglePlanMode);
+  const resetTerminalTabSession = useStore((s) => s.resetTerminalTabSession);
+  const resetCliTransportSession = useStore((s) => s.resetCliTransportSession);
   const searchWorkspaceFiles = useStore((s) => s.searchWorkspaceFiles);
   const loadCliSkills = useStore((s) => s.loadCliSkills);
   const loadAcpCapabilities = useStore((s) => s.loadAcpCapabilities);
@@ -1942,17 +1944,13 @@ export function ChatPromptBar({
     : isAutoMode
       ? "/指令中心 · @引用文件 · #智能体 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
       : "/指令中心 · @引用文件 · #智能体 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
-  const estimatedUsageTokens = activeSession
-    ? estimateSessionTokens(activeSession) +
-      activeSession.compactedSummaries.reduce(
-        (sum, summary) => sum + (summary.tokenEstimate ?? 0),
-        0
-      )
-    : 0;
+  const estimatedUsageTokens = activeSession ? estimateSessionTokens(activeSession) : 0;
   const actualUsageTokens = activeSession
     ? activeSession.messages.reduce((sum, message) => sum + (message.totalTokens ?? 0), 0)
     : 0;
-  const usagePercent = Math.min(100, (estimatedUsageTokens / FULL_COMPACT_THRESHOLD) * 100);
+  const usagePercent = actualUsageTokens > 0 && estimatedUsageTokens > 0
+    ? Math.min(100, (actualUsageTokens / estimatedUsageTokens) * 100)
+    : 0;
   const usagePercentLabel = `${Math.round(usagePercent)}%`;
   const messageCount = activeSession
     ? activeSession.messages.filter(
@@ -1960,7 +1958,7 @@ export function ChatPromptBar({
       ).length
     : 0;
   const compactedSummaryCount = activeSession?.compactedSummaries.length ?? 0;
-  const usageTooltip = `真实 usage ${actualUsageTokens.toLocaleString()} tokens；上下文占用本地估算 ${estimatedUsageTokens.toLocaleString()} tokens，占压缩阈值 ${FULL_COMPACT_THRESHOLD.toLocaleString()} 的 ${usagePercentLabel}。`;
+  const usageTooltip = `真实 usage ${actualUsageTokens.toLocaleString()} tokens，占当前会话估算总量 ${estimatedUsageTokens.toLocaleString()} tokens 的 ${usagePercentLabel}。`;
   const capabilities = acpCapabilitiesByCli[effectiveCli] ?? null;
   const capabilityStatus = acpCapabilityStatusByCli[effectiveCli] ?? "idle";
   const currentProviderItem =
@@ -1985,6 +1983,7 @@ export function ChatPromptBar({
       ? activeTab.fastMode ? "FAST" : "STD"
       : activeTab.fastMode ? "ON" : "OFF";
   const footerSelectorsLocked = isStreaming;
+  const sessionActionsLocked = footerSelectorsLocked || isBusy;
   const selectorLockTitle = isStreaming ? "响应进行中，当前不可修改会话配置" : undefined;
   const autoSelectorTitle = "Auto 路由下不可直接指定，先切换到具体 CLI";
   const reasoningSelectorTitle = !supportsReasoning
@@ -2400,6 +2399,20 @@ export function ChatPromptBar({
     focusPromptAtEnd();
   }
 
+  function handleFreshTabSession() {
+    if (!activeTab || footerSelectorsLocked || isBusy) return;
+    resetTerminalTabSession(activeTab.id);
+    closeFooterMenus();
+    focusPromptAtEnd();
+  }
+
+  function handleCliSessionReset(cliId: AgentId) {
+    if (!activeTab || footerSelectorsLocked || isBusy) return;
+    resetCliTransportSession(cliId, activeTab.id);
+    closeFooterMenus();
+    focusPromptAtEnd();
+  }
+
   function handleFastToggle() {
     if (!activeTab || footerSelectorsLocked || !supportsFastMode) return;
     closeFooterMenus();
@@ -2688,6 +2701,23 @@ export function ChatPromptBar({
                                 }
                               />
                             </div>
+                            <div
+                              className="footer-submenu-trigger"
+                              onPointerEnter={() => setHoveredConfigSubmenu("session")}
+                            >
+                              <FooterMenuItem
+                                label="New Session"
+                                onClick={() =>
+                                  setHoveredConfigSubmenu((current) => (current === "session" ? null : "session"))
+                                }
+                                disabled={sessionActionsLocked}
+                                trailing={
+                                  <span className="footer-option-trailing">
+                                    <ChevronRight size={14} aria-hidden />
+                                  </span>
+                                }
+                              />
+                            </div>
                             <div className="footer-menu-divider" aria-hidden />
                             {supportsReviewQuickAction ? (
                               <FooterMenuItem
@@ -2779,6 +2809,37 @@ export function ChatPromptBar({
                                 label="创建智能体"
                                 onClick={handleOpenAgentSettings}
                                 leading={<Plus size={14} />}
+                              />
+                            </div>
+                          ) : hoveredConfigSubmenu === "session" ? (
+                            <div
+                              className="footer-submenu-panel"
+                              onPointerEnter={() => setHoveredConfigSubmenu("session")}
+                            >
+                              <FooterMenuItem
+                                label="Fresh Session for This Tab"
+                                description="Clear this tab history and reset all underlying CLI sessions."
+                                onClick={handleFreshTabSession}
+                                disabled={sessionActionsLocked}
+                              />
+                              <div className="footer-menu-divider" aria-hidden />
+                              <FooterMenuItem
+                                label="Reset Codex Session"
+                                description="Start a fresh Codex transport session for this tab."
+                                onClick={() => handleCliSessionReset("codex")}
+                                disabled={sessionActionsLocked}
+                              />
+                              <FooterMenuItem
+                                label="Reset Claude Session"
+                                description="Start a fresh Claude transport session for this tab."
+                                onClick={() => handleCliSessionReset("claude")}
+                                disabled={sessionActionsLocked}
+                              />
+                              <FooterMenuItem
+                                label="Reset Gemini Session"
+                                description="Start a fresh Gemini transport session for this tab."
+                                onClick={() => handleCliSessionReset("gemini")}
+                                disabled={sessionActionsLocked}
                               />
                             </div>
                           ) : hoveredConfigSubmenu === "speed" ? (
@@ -3131,18 +3192,6 @@ export function ChatPromptBar({
                         </span>
                       </div>
                       <div className="context-dual-tooltip-kv">
-                        <span className="context-dual-tooltip-key">上下文占用</span>
-                        <span className="context-dual-tooltip-value">
-                          {estimatedUsageTokens.toLocaleString()}
-                        </span>
-                      </div>
-                      <div className="context-dual-tooltip-kv">
-                        <span className="context-dual-tooltip-key">压缩阈值</span>
-                        <span className="context-dual-tooltip-value">
-                          {FULL_COMPACT_THRESHOLD.toLocaleString()}
-                        </span>
-                      </div>
-                      <div className="context-dual-tooltip-kv">
                         <span className="context-dual-tooltip-key">消息数量</span>
                         <span className="context-dual-tooltip-value">{messageCount}</span>
                       </div>
@@ -3154,7 +3203,7 @@ export function ChatPromptBar({
                     <div className="context-dual-tooltip-divider" />
                     <div className="context-dual-tooltip-foot">
                       <div className="context-dual-tooltip-note">
-                        真实 usage 来自 CLI 回传；上下文占用仍是基于当前会话消息与摘要内容的本地估算。
+                        百分比现在按真实 usage 占当前会话估算总量计算。
                       </div>
                     </div>
                   </div>
