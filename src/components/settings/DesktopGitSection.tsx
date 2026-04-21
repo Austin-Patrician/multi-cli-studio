@@ -1568,6 +1568,7 @@ export function DesktopGitSection({
   const [panelError, setPanelError] = useState<string | null>(null);
   const [branchesError, setBranchesError] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [visibleCommitCount, setVisibleCommitCount] = useState(10);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
   const [localSectionExpanded, setLocalSectionExpanded] = useState(true);
@@ -1705,6 +1706,10 @@ export function DesktopGitSection({
   const groupedRemoteBranches = useMemo(() => buildRemoteBranchTree(visibleRemoteBranches), [visibleRemoteBranches]);
 
   const visibleCommits = history?.commits ?? [];
+  const renderedCommits = useMemo(
+    () => visibleCommits.slice(0, visibleCommitCount),
+    [visibleCommits, visibleCommitCount]
+  );
   const currentBranch = branches?.currentBranch ?? null;
   const commitsAhead = currentBranchItem?.ahead ?? 0;
   const commitsBehind = currentBranchItem?.behind ?? 0;
@@ -2074,6 +2079,14 @@ export function DesktopGitSection({
     }
   }
 
+  function handleLoadMoreCommits() {
+    const nextVisibleCount = visibleCommitCount + 10;
+    setVisibleCommitCount(nextVisibleCount);
+    if (history?.hasMore && nextVisibleCount > visibleCommits.length) {
+      void loadHistory(false, visibleCommits.length);
+    }
+  }
+
   function resolveDefaultRemoteBranch() {
     return {
       remote: currentUpstreamRef.remote ?? remoteOptions[0] ?? "origin",
@@ -2428,6 +2441,10 @@ export function DesktopGitSection({
     }, isRemoteWorkspace ? 360 : 180);
     return () => window.clearTimeout(id);
   }, [commitQuery, isRemoteWorkspace, projectRoot, selectedBranch, workspaceScopeKey]);
+
+  useEffect(() => {
+    setVisibleCommitCount(10);
+  }, [projectRoot, selectedBranch, commitQuery, workspaceScopeKey]);
 
   useEffect(() => {
     if (!pushDialogOpen) {
@@ -3627,12 +3644,12 @@ export function DesktopGitSection({
             {historyLoading && !visibleCommits.length ? <div className="git-history-empty">Loading commits…</div> : null}
             {!historyLoading && !visibleCommits.length ? <div className="git-history-empty">No commits found.</div> : null}
             <div className="git-history-commit-list">
-              {visibleCommits.map((entry, index) => {
+              {renderedCommits.map((entry, index) => {
                 const active = selectedCommitSha === entry.sha;
                 const graphClassName = [
                   "git-history-graph",
                   index === 0 ? "is-first" : "",
-                  index === visibleCommits.length - 1 ? "is-last" : "",
+                  index === renderedCommits.length - 1 ? "is-last" : "",
                 ]
                   .filter(Boolean)
                   .join(" ");
@@ -3666,19 +3683,19 @@ export function DesktopGitSection({
                   </button>
                 );
               })}
+              {renderedCommits.length > 0 && (history?.hasMore || visibleCommits.length > renderedCommits.length) ? (
+                <div className="git-history-load-more git-history-load-more--inline">
+                  <button
+                    type="button"
+                    className="git-history-load-more-chip"
+                    disabled={historyLoading}
+                    onClick={handleLoadMoreCommits}
+                  >
+                    {historyLoading ? "Loading…" : "Load more"}
+                  </button>
+                </div>
+              ) : null}
             </div>
-            {history?.hasMore ? (
-              <div className="git-history-load-more">
-                <button
-                  type="button"
-                  className="git-history-load-more-chip"
-                  disabled={historyLoading}
-                  onClick={() => void loadHistory(false, visibleCommits.length)}
-                >
-                  {historyLoading ? "Loading…" : "Load more"}
-                </button>
-              </div>
-            ) : null}
           </div>
         </section>
 

@@ -3,7 +3,7 @@ import { AgentId } from "./models";
 export type AcpCommandKind =
   | "plan" | "model" | "compact" | "clear" | "rewind"
   | "diff" | "permissions" | "cost" | "help" | "export"
-  | "status" | "effort" | "fast" | "context" | "memory" | "recall";
+  | "status" | "effort" | "fast" | "context" | "memory" | "review";
 
 export type CommandExecution = "local" | "flag-inject" | "git-local";
 
@@ -147,7 +147,8 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
   },
   {
     kind: "fast", slash: "/fast", label: "Fast Mode",
-    description: "Toggle fast output mode for Codex",
+    description: "Set Codex speed mode",
+    argsHint: "[on|off]",
     execution: "flag-inject", supportedClis: ["codex"],
   },
   {
@@ -161,10 +162,10 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
     execution: "local", supportedClis: ["codex", "claude", "gemini"],
   },
   {
-    kind: "recall", slash: "/recall", label: "Recall",
-    description: "Search conversation history across all CLIs in this tab",
-    argsHint: "<search-query>",
-    execution: "local", supportedClis: ["codex", "claude", "gemini"],
+    kind: "review", slash: "/review", label: "Review Code",
+    description: "Open the inline review flow for Codex or Claude",
+    argsHint: "[base <branch>|commit <sha>|custom <instructions>]",
+    execution: "local", supportedClis: ["codex", "claude"],
   },
 ];
 
@@ -202,6 +203,7 @@ export function getCommandCategory(kind: AcpCommandKind) {
     case "effort":
     case "fast":
     case "status":
+    case "review":
       return "session";
     case "diff":
     case "memory":

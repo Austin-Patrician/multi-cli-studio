@@ -47,6 +47,8 @@ import {
   ChatAttachment,
   CliSkillItem,
   FileMentionCandidate,
+  GitBranchListItem,
+  GitHistoryCommit,
   SelectedCustomAgent,
   SshConnectionConfig,
   TerminalTab,
@@ -61,6 +63,11 @@ import { useStore } from "../../lib/store";
 import { loadWorkspaceFileIndex } from "../../lib/workspaceFileIndex";
 import { CLI_OPTIONS } from "./CliSelector";
 import { PromptOverlay, PromptOverlayItem, PromptOverlaySection } from "./PromptOverlay";
+import {
+  ReviewInlinePrompt,
+  type ReviewInlinePromptState,
+  type ReviewPresetChoice,
+} from "./ReviewInlinePrompt";
 
 type InteractiveOverlayEntry =
   | { id: string; kind: "command"; command: AcpCommandDef }
@@ -68,7 +75,7 @@ type InteractiveOverlayEntry =
   | { id: string; kind: "skill"; skill: CliSkillItem }
   | { id: string; kind: "mention"; mention: FileMentionCandidate }
   | { id: string; kind: "agent"; agent: SelectedCustomAgent | null; action: "select" | "create" }
-  | { id: string; kind: "option"; commandKind: AcpPickerCommandKind; option: AcpOptionDef };
+  | { id: string; kind: "option"; commandKind: SelectableCommandKind; option: AcpOptionDef };
 
 interface SkillOverlayState {
   title: string;
@@ -97,6 +104,9 @@ type PromptShortcutAction = {
   label: string;
   onClick: () => void;
 };
+
+type SelectableCommandKind = AcpPickerCommandKind | "fast";
+type ReviewPromptStep = "preset" | "baseBranch" | "commit" | "custom";
 
 type FooterProviderItem = {
   id: TerminalCliId;
@@ -138,7 +148,7 @@ type CommandOverlayState =
       footer: string;
       sections: PromptOverlaySection[];
       entries: InteractiveOverlayEntry[];
-      commandKind: AcpPickerCommandKind;
+      commandKind: SelectableCommandKind;
       loading: boolean;
     };
 
@@ -406,7 +416,9 @@ function commandStateMeta(command: AcpCommandDef, tab: TerminalTab) {
     case "effort":
       return currentEffortLabel(tab);
     case "fast":
-      return tab.fastMode ? "ON" : "OFF";
+      return tab.selectedCli === "codex"
+        ? tab.fastMode ? "FAST" : "STD"
+        : tab.fastMode ? "ON" : "OFF";
     default:
       return undefined;
   }
@@ -419,6 +431,24 @@ function commandHelpSubtitle(command: AcpCommandDef, tab: TerminalTab) {
     details.push(`Current: ${current}`);
   }
   return details.join("\n");
+}
+
+function buildReviewCommandText(target: ReviewPresetChoice | { type: "baseBranch"; branch: string } | { type: "commit"; sha: string; title?: string } | { type: "custom"; instructions: string }) {
+  if (target === "uncommitted") {
+    return "/review";
+  }
+  if (typeof target === "string") {
+    return "/review";
+  }
+  if (target.type === "baseBranch") {
+    return `/review base ${target.branch}`.trim();
+  }
+  if (target.type === "commit") {
+    return target.title?.trim()
+      ? `/review commit ${target.sha} ${target.title}`.trim()
+      : `/review commit ${target.sha}`.trim();
+  }
+  return `/review custom ${target.instructions}`.trim();
 }
 
 function appendSectionItem(
@@ -439,6 +469,18 @@ function appendSectionItem(
   });
 }
 
+function orderInteractiveEntries(
+  sections: PromptOverlaySection[],
+  entryById: Map<string, InteractiveOverlayEntry>
+) {
+  return sections.flatMap((section) =>
+    section.items.flatMap((item) => {
+      const entry = entryById.get(item.id);
+      return entry ? [entry] : [];
+    })
+  );
+}
+
 function buildCommandListOverlay(
   activeTab: TerminalTab,
   query: string
@@ -455,7 +497,7 @@ function buildCommandListOverlay(
   });
 
   const sections: PromptOverlaySection[] = [];
-  const entries: InteractiveOverlayEntry[] = [];
+  const entryById = new Map<string, InteractiveOverlayEntry>();
 
   supportedCommands.forEach((command) => {
     const category = getCommandCategory(command.kind);
@@ -465,9 +507,9 @@ function buildCommandListOverlay(
       title: command.slash,
       subtitle: command.description,
       meta: commandStateMeta(command, activeTab),
-      badge: command.argsHint ? "pick" : undefined,
+      badge: command.argsHint || command.kind === "fast" ? "pick" : undefined,
     });
-    entries.push({ id: itemId, kind: "command", command });
+    entryById.set(itemId, { id: itemId, kind: "command", command });
   });
 
   const normalized = query.trim().toLowerCase();
@@ -484,7 +526,7 @@ function buildCommandListOverlay(
       subtitle: "Browse installed skills for the active CLI and insert one into the prompt.",
       badge: "picker",
     });
-    entries.push({ id: "shortcut-skills", kind: "shortcut", shortcut: "skills" });
+    entryById.set("shortcut-skills", { id: "shortcut-skills", kind: "shortcut", shortcut: "skills" });
   }
 
   if (sections.length === 0) {
@@ -499,6 +541,8 @@ function buildCommandListOverlay(
       ],
     });
   }
+
+  const entries = orderInteractiveEntries(sections, entryById);
 
   return {
     kind: "command-list",
@@ -633,7 +677,7 @@ function buildArgumentOverlay(
   }
 
   const sections: PromptOverlaySection[] = [];
-  const entries: InteractiveOverlayEntry[] = [];
+  const entryById = new Map<string, InteractiveOverlayEntry>();
 
   options.forEach((option) => {
     const sourceKey = option.source === "manual" ? "manual" : option.source;
@@ -657,7 +701,7 @@ function buildArgumentOverlay(
         badge: sourceLabel,
       }
     );
-    entries.push({ id: itemId, kind: "option", commandKind, option });
+    entryById.set(itemId, { id: itemId, kind: "option", commandKind, option });
   });
 
   if (sections.length === 0) {
@@ -673,6 +717,8 @@ function buildArgumentOverlay(
     });
   }
 
+  const entries = orderInteractiveEntries(sections, entryById);
+
   return {
     kind: "command-argument",
     commandKind,
@@ -685,6 +731,81 @@ function buildArgumentOverlay(
     footer: "Arrow keys move, Enter applies, Esc returns to the command palette.",
     sections,
     entries,
+  };
+}
+
+function buildFastModeOverlay(
+  activeTab: TerminalTab,
+  query: string,
+  cliId: AgentId
+): CommandOverlayState {
+  const current = activeTab.fastMode ? "Fast" : "Standard";
+  const options: AcpOptionDef[] = [
+    {
+      value: "off",
+      label: "Standard",
+      description: "Use the normal Codex speed setting.",
+      source: "fallback" as const,
+    },
+    {
+      value: "on",
+      label: "Fast",
+      description: "Enable faster Codex responses for this session.",
+      source: "fallback" as const,
+    },
+  ].filter((option) => optionMatchesQuery(option, query));
+
+  if (options.length === 0) {
+    return {
+      kind: "command-argument",
+      commandKind: "fast",
+      loading: false,
+      title: `Select speed for ${titleCaseCli(cliId)}`,
+      description: `Current: ${current}. This stays in sync with Session Config > Speed.`,
+      footer: "Esc returns to the command palette.",
+      sections: [
+        {
+          id: "empty",
+          items: [
+            {
+              id: "empty",
+              title: "No matching speed mode",
+              subtitle: "Type fast or standard, or press Esc to return to the command palette.",
+            },
+          ],
+        },
+      ],
+      entries: [],
+    };
+  }
+
+  const sections: PromptOverlaySection[] = [];
+  const entryById = new Map<string, InteractiveOverlayEntry>();
+
+  options.forEach((option) => {
+    const itemId = `fast-${option.value}`;
+    appendSectionItem(sections, "speed", "Speed", {
+      id: itemId,
+      title: option.label,
+      subtitle: option.description ?? undefined,
+      meta:
+        (option.value === "on" && activeTab.fastMode) || (option.value === "off" && !activeTab.fastMode)
+          ? "current"
+          : undefined,
+      badge: "mode",
+    });
+    entryById.set(itemId, { id: itemId, kind: "option", commandKind: "fast", option });
+  });
+
+  return {
+    kind: "command-argument",
+    commandKind: "fast",
+    loading: false,
+    title: `Select speed for ${titleCaseCli(cliId)}`,
+    description: `Current: ${current}. This stays in sync with Session Config > Speed.`,
+    footer: "Arrow keys move, Enter applies, Esc returns to the command palette.",
+    sections,
+    entries: orderInteractiveEntries(sections, entryById),
   };
 }
 
@@ -778,7 +899,7 @@ function buildSkillOverlay(
   }
 
   const sections: PromptOverlaySection[] = [];
-  const entries: InteractiveOverlayEntry[] = [];
+  const entryById = new Map<string, InteractiveOverlayEntry>();
 
   filteredSkills.forEach((skill) => {
     const sectionId = skill.scope ?? skill.source ?? "skills";
@@ -794,7 +915,7 @@ function buildSkillOverlay(
           : undefined,
       chips: skillChips(skill),
     });
-    entries.push({ id: itemId, kind: "skill", skill });
+    entryById.set(itemId, { id: itemId, kind: "skill", skill });
   });
 
   return {
@@ -802,7 +923,7 @@ function buildSkillOverlay(
     description: `Select one skill to apply to the next ${titleCaseCli(cliId)} turn.`,
     footer: "Arrow keys move, Enter inserts the skill, Esc dismisses.",
     sections,
-    entries,
+    entries: orderInteractiveEntries(sections, entryById),
   };
 }
 
@@ -842,6 +963,10 @@ export function ChatPromptBar({
   const [openFooterMenu, setOpenFooterMenu] = useState<FooterMenuId | null>(null);
   const [hoveredConfigSubmenu, setHoveredConfigSubmenu] = useState<"agent" | "speed" | null>(null);
   const [queueFeedback, setQueueFeedback] = useState<string | null>(null);
+  const [reviewPrompt, setReviewPrompt] = useState<ReviewInlinePromptState | null>(null);
+  const [highlightedPresetIndex, setHighlightedPresetIndex] = useState(0);
+  const [highlightedBranchIndex, setHighlightedBranchIndex] = useState(0);
+  const [highlightedCommitIndex, setHighlightedCommitIndex] = useState(0);
 
   const terminalTabs = useStore((s) => s.terminalTabs);
   const workspaces = useStore((s) => s.workspaces);
@@ -880,6 +1005,8 @@ export function ChatPromptBar({
   const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
   const workspace = workspaces.find((item) => item.id === activeTab?.workspaceId) ?? null;
   const effectiveCli = resolveConcreteCli(activeTab, workspace?.activeAgent);
+  const supportsReviewQuickAction = effectiveCli === "codex" || effectiveCli === "claude";
+  const reviewPromptOpen = Boolean(reviewPrompt);
   const activeSshConnection = useMemo(
     () =>
       workspace?.locationKind === "ssh" && workspace.connectionId
@@ -937,6 +1064,21 @@ export function ChatPromptBar({
   useEffect(() => {
     setOpenFooterMenu(null);
   }, [activeTab?.id]);
+
+  useEffect(() => {
+    setReviewPrompt(null);
+  }, [activeTab?.id, workspace?.id]);
+
+  useEffect(() => {
+    if (!activeTab || !supportsReviewQuickAction) {
+      return;
+    }
+    if (!/^\/review\s*$/i.test(rawSlashPrompt)) {
+      return;
+    }
+    setTabDraftPrompt(activeTab.id, "");
+    openReviewPrompt();
+  }, [activeTab, openFooterMenu, rawSlashPrompt, setTabDraftPrompt, supportsReviewQuickAction]);
 
   useEffect(() => {
     setDismissedAgentKey(null);
@@ -1039,6 +1181,9 @@ export function ChatPromptBar({
 
   const commandOverlay = useMemo<CommandOverlayState | null>(() => {
     if (!activeTab || !rawSlashPrompt.startsWith("/")) return null;
+    if (reviewPromptOpen || (/^\/review\b/i.test(rawSlashPrompt) && supportsReviewQuickAction)) {
+      return null;
+    }
 
     if (skillSlashQuery != null && activeTab.selectedCli !== "auto") {
       return buildSkillCommandOverlay(effectiveCli, skillSlashQuery, cliSkills, cliSkillStatus);
@@ -1046,6 +1191,11 @@ export function ChatPromptBar({
 
     if (/^\/help\s*$/i.test(rawSlashPrompt)) {
       return buildHelpOverlay(activeTab);
+    }
+
+    const fastMatch = rawSlashPrompt.match(/^\/fast(?:\s+(.*))?$/is);
+    if (fastMatch && effectiveCli === "codex") {
+      return buildFastModeOverlay(activeTab, fastMatch[1] ?? "", effectiveCli);
     }
 
     const pickerMatch = rawSlashPrompt.match(/^\/(model|permissions|effort)\s+(.*)$/is);
@@ -1069,8 +1219,10 @@ export function ChatPromptBar({
     cliSkills,
     effectiveCli,
     rawSlashPrompt,
+    reviewPromptOpen,
     slashQuery,
     skillSlashQuery,
+    supportsReviewQuickAction,
   ]);
 
   const skillOverlay = useMemo<SkillOverlayState | null>(() => {
@@ -1423,6 +1575,27 @@ export function ChatPromptBar({
   function handleSend() {
     if (!activeTab) return;
     closeFooterMenus();
+    if (supportsReviewQuickAction && /^\/review\b/i.test(rawSlashPrompt)) {
+      const normalized = rawSlashPrompt.trim();
+      if (/^\/review\s*$/i.test(normalized)) {
+        openReviewPrompt();
+        setPrompt("");
+        return;
+      }
+      setPrompt("");
+      void sendChatMessage(activeTab.id, normalized, {
+        cliIdOverride: activeTab.selectedCli,
+      }).catch((error) => {
+        const detail =
+          error instanceof Error
+            ? error.message
+            : typeof error === "string"
+              ? error
+              : "发送失败";
+        setQueueFeedback(detail);
+      });
+      return;
+    }
     if (draftAttachments.some((attachment) => attachment.kind === "image") && activeTab.selectedCli !== "codex") {
       setQueueFeedback("当前仅 Codex 支持图片附件，请切换到 Codex 后发送。");
       return;
@@ -1505,9 +1678,22 @@ export function ChatPromptBar({
       return;
     }
 
+    if (command.kind === "review" && supportsReviewQuickAction) {
+      openReviewPrompt();
+      setPrompt("");
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      return;
+    }
+
     if (isPickerCommandKind(command.kind)) {
       void loadAcpCapabilities(effectiveCli);
       setPrompt(`${command.slash} `);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      return;
+    }
+
+    if (command.kind === "fast" && effectiveCli === "codex") {
+      setPrompt("/fast ");
       requestAnimationFrame(() => textareaRef.current?.focus());
       return;
     }
@@ -1580,13 +1766,19 @@ export function ChatPromptBar({
     });
   }
 
-  function selectOption(commandKind: AcpPickerCommandKind, option: AcpOptionDef) {
+  function selectOption(commandKind: SelectableCommandKind, option: AcpOptionDef) {
     if (!activeTab) return;
     const command = {
       kind: commandKind,
       args: [option.value],
       rawInput: `/${commandKind} ${option.value}`,
     };
+
+    if (commandKind === "fast") {
+      setPrompt("");
+      void executeAcpCommand(command, activeTab.id);
+      return;
+    }
 
     if (commandKind === "model" && effectiveCli === "codex") {
       setPrompt("/effort ");
@@ -1762,7 +1954,11 @@ export function ChatPromptBar({
     : 0;
   const usagePercent = Math.min(100, (estimatedUsageTokens / FULL_COMPACT_THRESHOLD) * 100);
   const usagePercentLabel = `${Math.round(usagePercent)}%`;
-  const messageCount = activeSession?.messages.length ?? 0;
+  const messageCount = activeSession
+    ? activeSession.messages.filter(
+        (message) => message.role === "user" || message.role === "assistant"
+      ).length
+    : 0;
   const compactedSummaryCount = activeSession?.compactedSummaries.length ?? 0;
   const usageTooltip = `真实 usage ${actualUsageTokens.toLocaleString()} tokens；上下文占用本地估算 ${estimatedUsageTokens.toLocaleString()} tokens，占压缩阈值 ${FULL_COMPACT_THRESHOLD.toLocaleString()} 的 ${usagePercentLabel}。`;
   const capabilities = acpCapabilitiesByCli[effectiveCli] ?? null;
@@ -1882,10 +2078,325 @@ export function ChatPromptBar({
     focusPromptAtEnd();
   }
 
+  function openReviewPrompt() {
+    if (!workspace || !supportsReviewQuickAction) {
+      return;
+    }
+
+    setHighlightedPresetIndex(0);
+    setHighlightedBranchIndex(0);
+    setHighlightedCommitIndex(0);
+    setReviewPrompt({
+      workspaceName: workspace.name,
+      step: "preset",
+      branches: [],
+      commits: [],
+      isLoadingBranches: true,
+      isLoadingCommits: true,
+      selectedBranch: "",
+      selectedCommitSha: "",
+      selectedCommitTitle: "",
+      customInstructions: "",
+      error: null,
+      isSubmitting: false,
+    });
+
+    void (async () => {
+      try {
+        const [branchResponse, commitResponse] = await Promise.all([
+          bridge.listGitBranches(workspace.rootPath, workspace.id),
+          bridge.getGitCommitHistory(
+            workspace.rootPath,
+            { limit: 100, offset: 0 },
+            workspace.id
+          ),
+        ]);
+
+        const branches = branchResponse.localBranches ?? [];
+        const commits = commitResponse.commits ?? [];
+        const preferredBranch =
+          branches.find((branch) => branch.name === "main")?.name ??
+          branches[0]?.name ??
+          "";
+        const preferredCommit = commits[0] ?? null;
+
+        setReviewPrompt((current) =>
+          current
+            ? {
+                ...current,
+                branches,
+                commits,
+                isLoadingBranches: false,
+                isLoadingCommits: false,
+                selectedBranch: current.selectedBranch || preferredBranch,
+                selectedCommitSha: current.selectedCommitSha || preferredCommit?.sha || "",
+                selectedCommitTitle:
+                  current.selectedCommitTitle ||
+                  preferredCommit?.summary ||
+                  preferredCommit?.sha ||
+                  "",
+              }
+            : current
+        );
+
+        const nextBranchIndex = branches.findIndex((branch) => branch.name === preferredBranch);
+        const nextCommitIndex = commits.findIndex((commit) => commit.sha === preferredCommit?.sha);
+        setHighlightedBranchIndex(nextBranchIndex >= 0 ? nextBranchIndex : 0);
+        setHighlightedCommitIndex(nextCommitIndex >= 0 ? nextCommitIndex : 0);
+      } catch (error) {
+        setReviewPrompt((current) =>
+          current
+            ? {
+                ...current,
+                isLoadingBranches: false,
+                isLoadingCommits: false,
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : "Unable to load Git history for review.",
+              }
+            : current
+        );
+      }
+    })();
+  }
+
+  function closeReviewPrompt() {
+    setReviewPrompt(null);
+    focusPromptAtEnd();
+  }
+
+  function showReviewPresetStep() {
+    setHighlightedPresetIndex(0);
+    setReviewPrompt((current) => (current ? { ...current, step: "preset", error: null } : current));
+  }
+
+  function chooseReviewPreset(preset: ReviewPresetChoice) {
+    if (preset === "uncommitted") {
+      void submitReviewTarget("uncommitted");
+      return;
+    }
+    setHighlightedBranchIndex(0);
+    setHighlightedCommitIndex(0);
+    setReviewPrompt((current) =>
+      current
+        ? {
+            ...current,
+            step: preset,
+            error: null,
+            selectedBranch:
+              preset === "baseBranch"
+                ? current.selectedBranch || current.branches.find((branch) => branch.name === "main")?.name || current.branches[0]?.name || ""
+                : current.selectedBranch,
+            selectedCommitSha:
+              preset === "commit"
+                ? current.selectedCommitSha || current.commits[0]?.sha || ""
+                : current.selectedCommitSha,
+            selectedCommitTitle:
+              preset === "commit"
+                ? current.selectedCommitTitle || current.commits[0]?.summary || current.commits[0]?.sha || ""
+                : current.selectedCommitTitle,
+          }
+        : current
+    );
+  }
+
+  function selectReviewBranch(value: string) {
+    setReviewPrompt((current) => {
+      if (!current) {
+        return current;
+      }
+      const nextIndex = current.branches.findIndex((branch) => branch.name === value);
+      if (nextIndex >= 0) {
+        setHighlightedBranchIndex(nextIndex);
+      }
+      return { ...current, selectedBranch: value, error: null };
+    });
+  }
+
+  function selectReviewCommit(sha: string, title: string) {
+    setReviewPrompt((current) => {
+      if (!current) {
+        return current;
+      }
+      const nextIndex = current.commits.findIndex((commit) => commit.sha === sha);
+      if (nextIndex >= 0) {
+        setHighlightedCommitIndex(nextIndex);
+      }
+      return {
+        ...current,
+        selectedCommitSha: sha,
+        selectedCommitTitle: title,
+        error: null,
+      };
+    });
+  }
+
+  function updateReviewCustomInstructions(value: string) {
+    setReviewPrompt((current) => (current ? { ...current, customInstructions: value, error: null } : current));
+  }
+
+  async function submitReviewTarget(
+    target:
+      | "uncommitted"
+      | { type: "baseBranch"; branch: string }
+      | { type: "commit"; sha: string; title?: string }
+      | { type: "custom"; instructions: string }
+  ) {
+    if (!activeTab) {
+      return;
+    }
+
+    setReviewPrompt((current) => (current ? { ...current, isSubmitting: true, error: null } : current));
+    const commandText = buildReviewCommandText(target);
+
+    try {
+      await sendChatMessage(activeTab.id, commandText, {
+        cliIdOverride: activeTab.selectedCli,
+      });
+      setReviewPrompt(null);
+      focusPromptAtEnd();
+    } catch (error) {
+      setReviewPrompt((current) =>
+        current
+          ? {
+              ...current,
+              isSubmitting: false,
+              error: error instanceof Error ? error.message : "Unable to start review.",
+            }
+          : current
+      );
+    }
+  }
+
+  async function confirmReviewBranch() {
+    const branch = reviewPrompt?.selectedBranch.trim() ?? "";
+    if (!branch) {
+      setReviewPrompt((current) => (current ? { ...current, error: "Choose a base branch." } : current));
+      return;
+    }
+    await submitReviewTarget({ type: "baseBranch", branch });
+  }
+
+  async function confirmReviewCommit() {
+    const sha = reviewPrompt?.selectedCommitSha.trim() ?? "";
+    if (!sha) {
+      setReviewPrompt((current) => (current ? { ...current, error: "Choose a commit to review." } : current));
+      return;
+    }
+    await submitReviewTarget({
+      type: "commit",
+      sha,
+      title: reviewPrompt?.selectedCommitTitle.trim() || undefined,
+    });
+  }
+
+  async function confirmReviewCustom() {
+    const instructions = reviewPrompt?.customInstructions.trim() ?? "";
+    if (!instructions) {
+      setReviewPrompt((current) =>
+        current ? { ...current, error: "Enter custom review instructions." } : current
+      );
+      return;
+    }
+    await submitReviewTarget({ type: "custom", instructions });
+  }
+
+  function handleReviewPromptKeyDown(event: {
+    key: string;
+    shiftKey?: boolean;
+    preventDefault: () => void;
+  }) {
+    if (!reviewPrompt) {
+      return false;
+    }
+    const { key } = event;
+    if (reviewPrompt.isSubmitting) {
+      if (key === "Enter" || key === "Escape" || key.startsWith("Arrow")) {
+        event.preventDefault();
+      }
+      return true;
+    }
+
+    if (key === "Escape") {
+      event.preventDefault();
+      if (reviewPrompt.step === "preset") {
+        closeReviewPrompt();
+      } else {
+        showReviewPresetStep();
+      }
+      return true;
+    }
+
+    if (key === "ArrowDown" || key === "ArrowUp") {
+      event.preventDefault();
+      const direction = key === "ArrowDown" ? 1 : -1;
+      if (reviewPrompt.step === "preset") {
+        const presetCount = 4;
+        setHighlightedPresetIndex((current) => (current + direction + presetCount) % presetCount);
+        return true;
+      }
+      if (reviewPrompt.step === "baseBranch") {
+        if (reviewPrompt.branches.length === 0) {
+          return true;
+        }
+        const count = reviewPrompt.branches.length;
+        const next = (highlightedBranchIndex + direction + count) % count;
+        const branch = reviewPrompt.branches[next];
+        if (branch) {
+          selectReviewBranch(branch.name);
+        }
+        return true;
+      }
+      if (reviewPrompt.step === "commit") {
+        if (reviewPrompt.commits.length === 0) {
+          return true;
+        }
+        const count = reviewPrompt.commits.length;
+        const next = (highlightedCommitIndex + direction + count) % count;
+        const commit = reviewPrompt.commits[next];
+        if (commit) {
+          selectReviewCommit(commit.sha, commit.summary || commit.sha);
+        }
+        return true;
+      }
+    }
+
+    if (key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (reviewPrompt.step === "preset") {
+        const presets: ReviewPresetChoice[] = ["baseBranch", "uncommitted", "commit", "custom"];
+        chooseReviewPreset(presets[highlightedPresetIndex] ?? "baseBranch");
+        return true;
+      }
+      if (reviewPrompt.step === "baseBranch") {
+        void confirmReviewBranch();
+        return true;
+      }
+      if (reviewPrompt.step === "commit") {
+        void confirmReviewCommit();
+        return true;
+      }
+      if (reviewPrompt.step === "custom") {
+        void confirmReviewCustom();
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   function handlePlanToggle() {
     if (!activeTab || footerSelectorsLocked) return;
     togglePlanMode(activeTab.id);
     closeFooterMenus();
+    focusPromptAtEnd();
+  }
+
+  function handleReviewQuickStart() {
+    if (!activeTab || isStreaming || isBusy || !supportsReviewQuickAction) return;
+    closeFooterMenus();
+    openReviewPrompt();
     focusPromptAtEnd();
   }
 
@@ -2025,6 +2536,29 @@ export function ChatPromptBar({
           )}
 
           <div className="terminal-chat-prompt-shell">
+            {reviewPrompt ? (
+              <div className="terminal-chat-review-inline-suggestions">
+                <ReviewInlinePrompt
+                  reviewPrompt={reviewPrompt}
+                  onClose={closeReviewPrompt}
+                  onShowPreset={showReviewPresetStep}
+                  onChoosePreset={chooseReviewPreset}
+                  highlightedPresetIndex={highlightedPresetIndex}
+                  onHighlightPreset={setHighlightedPresetIndex}
+                  highlightedBranchIndex={highlightedBranchIndex}
+                  onHighlightBranch={setHighlightedBranchIndex}
+                  highlightedCommitIndex={highlightedCommitIndex}
+                  onHighlightCommit={setHighlightedCommitIndex}
+                  onSelectBranch={selectReviewBranch}
+                  onConfirmBranch={confirmReviewBranch}
+                  onSelectCommit={selectReviewCommit}
+                  onConfirmCommit={confirmReviewCommit}
+                  onUpdateCustomInstructions={updateReviewCustomInstructions}
+                  onConfirmCustom={confirmReviewCustom}
+                  onKeyDown={handleReviewPromptKeyDown}
+                />
+              </div>
+            ) : null}
             <div className="terminal-chat-input-box">
               <div className="terminal-chat-input-area">
                 {resolvedSelectedAgent || draftAttachments.length > 0 ? (
@@ -2155,6 +2689,16 @@ export function ChatPromptBar({
                               />
                             </div>
                             <div className="footer-menu-divider" aria-hidden />
+                            {supportsReviewQuickAction ? (
+                              <FooterMenuItem
+                                label="Review Code"
+                                description="让当前 CLI 审查工作区并给出下一步建议。"
+                                onClick={handleReviewQuickStart}
+                                disabled={isStreaming || isBusy}
+                                
+                                className="selector-option-review-quick"
+                              />
+                            ) : null}
                             <FooterMenuItem
                               label="Plan Mode"
                               onClick={handlePlanToggle}

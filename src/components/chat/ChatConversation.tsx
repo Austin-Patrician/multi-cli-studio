@@ -497,6 +497,10 @@ export function ChatConversation() {
   const editQueuedChatMessage = useStore((state) => state.editQueuedChatMessage);
 
   const allMessages = activeSession?.messages ?? [];
+  const conversationMessageCount = useMemo(
+    () => allMessages.filter((message) => message.role === "user" || message.role === "assistant").length,
+    [allMessages]
+  );
   const shouldShowAllMessages = isSearchOpen && compiledSearch.hasQuery;
   const visibleMessages = useMemo(() => {
     if (shouldShowAllMessages) {
@@ -913,7 +917,7 @@ export function ChatConversation() {
             <div className="text-right text-xs text-secondary">
               <div>
                 <div>{activeTab.planMode ? "Plan mode" : "Execution mode"}</div>
-                <div>{allMessages.length} messages</div>
+                <div>{conversationMessageCount} messages</div>
               </div>
             </div>
           </div>

@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useState, type ReactNode } from "react";
-import { FileText, Image as ImageIcon } from "lucide-react";
+import { ChevronDown, ChevronUp, FileText, Image as ImageIcon } from "lucide-react";
 import { ChatMessage } from "../../lib/models";
 import { AgentIcon } from "../AgentIcon";
 import { stripInjectedSelectedAgentPromptBlock } from "../../lib/customAgents";
@@ -122,12 +122,20 @@ export function UserBubble({
     (message.content?.trim() ? message.content : message.rawContent) ?? ""
   );
   const hasTextContent = displayContent.trim().length > 0;
+  const contentLines = displayContent.split(/\r?\n/);
+  const isCollapsible = contentLines.length > 5;
+  const [expanded, setExpanded] = useState(false);
+  const visibleContent = isCollapsible && !expanded ? `${contentLines.slice(0, 5).join("\n")}\n…` : displayContent;
 
   useEffect(() => {
     if (!copied) return;
     const timeoutId = window.setTimeout(() => setCopied(false), 1400);
     return () => window.clearTimeout(timeoutId);
   }, [copied]);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [message.id, displayContent]);
 
   async function handleCopy() {
     if (!onCopy) return;
@@ -210,12 +218,19 @@ export function UserBubble({
             data-chat-search-message-id={message.id}
             className="max-w-full rounded-2xl rounded-br-md bg-accent px-3.5 py-2.5 text-sm whitespace-pre-wrap text-white"
           >
-            {displayContent}
+            {visibleContent}
           </div>
         )}
 
-        {((onCopy && hasTextContent) || onDelete) && (
+        {((onCopy && hasTextContent) || onDelete || isCollapsible) && (
           <div className="flex items-center justify-end gap-1 pr-1">
+            {isCollapsible && (
+              <ActionIconButton
+                label={expanded ? "Collapse message" : "Expand message"}
+                icon={expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                onClick={() => setExpanded((value) => !value)}
+              />
+            )}
             {onCopy && hasTextContent && (
               <ActionIconButton
                 label={copied ? "Copied" : "Copy"}

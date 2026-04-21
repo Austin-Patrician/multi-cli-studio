@@ -2288,7 +2288,7 @@
   width: 100%;
   min-height: 30px;
   padding: 0 30px 0 12px;
-  border-radius: 10px;
+  border-radius: 12px;
   font-size: 12px;
   font-weight: 600;
 }
@@ -2316,7 +2316,7 @@
   justify-content: center;
   height: 18px;
   padding: 0 6px;
-  border-radius: 999px;
+  border-radius: 12px;
   border: 1px solid rgba(37, 99, 235, 0.24);
   background: rgba(37, 99, 235, 0.08);
   color: #2563eb;
@@ -2332,7 +2332,7 @@
   max-width: min(26vw, 320px);
   min-width: 0;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: 12px;
   border: 1px solid rgba(16, 185, 129, 0.28);
   background: rgba(16, 185, 129, 0.08);
   color: #0f766e;
@@ -2389,7 +2389,7 @@
   align-items: center;
   gap: 2px;
   padding: 2px;
-  border-radius: 999px;
+  border-radius: 12px;
   border: 1px solid rgba(15, 23, 42, 0.08);
   background: rgba(255, 255, 255, 0.86);
 }
@@ -2402,7 +2402,7 @@
   height: 28px;
   padding: 0 10px;
   border: none;
-  border-radius: 999px;
+  border-radius: 12px;
   background: transparent;
   color: rgba(15, 23, 42, 0.62);
   font-size: 12px;
@@ -3175,12 +3175,18 @@
   padding-top: 10px;
 }
 
+.git-history-load-more.git-history-load-more--inline {
+  padding-top: 6px;
+}
+
 .git-history-load-more-chip {
-  min-height: 32px;
-  padding: 0 12px;
-  border-radius: 999px;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 8px;
   border: 1px solid rgba(15, 23, 42, 0.08);
   background: rgba(248, 250, 252, 0.88);
+  font-size: 11px;
+  color: rgba(15, 23, 42, 0.72);
 }
 
 .git-history-diff-modal-overlay,

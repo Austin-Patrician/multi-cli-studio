@@ -40,7 +40,6 @@ import {
   formatCompactedSummaries,
   formatDeltaHandoffDocument,
   formatHandoffDocument,
-  recallSearch,
   diffWorkingMemory,
 } from "./compaction";
 import {
@@ -3753,44 +3752,6 @@ export const useStore = create<StoreState>((set, get) => {
       }
       case "diff": {
         pushSystemMessage(formatDiffSummary(get().gitPanelsByWorkspace[workspace.id]));
-        return;
-      }
-      case "recall": {
-        const query = command.args.join(" ").trim();
-        if (!query) {
-          pushSystemMessage("Usage: /recall <search-query>", 1);
-          return;
-        }
-        const session = get().chatSessions[tab.id];
-        if (!session) {
-          pushSystemMessage("No conversation history to search.", 1);
-          return;
-        }
-        // Try semantic FTS5 search first, fall back to keyword search
-        try {
-          const chunks = await bridge.semanticRecall({
-            query,
-            terminalTabId: tab.id,
-            limit: 15,
-          });
-          if (chunks.length > 0) {
-            const lines = [`Semantic recall for "${query}" (${chunks.length} results):`];
-            for (const chunk of chunks) {
-              const cli = chunk.cliId ?? "system";
-              const type = chunk.chunkType;
-              lines.push(`  [${cli}/${type}] ${chunk.content.slice(0, 300)}`);
-            }
-            pushSystemMessage(lines.join("\n"));
-          } else {
-            // Fall back to local keyword search
-            const results = recallSearch(session, query);
-            pushSystemMessage(results);
-          }
-        } catch {
-          // Fall back to local keyword search on bridge error
-          const results = recallSearch(session, query);
-          pushSystemMessage(results);
-        }
         return;
       }
       default: {

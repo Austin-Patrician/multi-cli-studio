@@ -432,32 +432,33 @@ function CommandCard({
 
   return (
     <div className="rounded-[12px] border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(248,250,252,0.98)_100%)] px-4 py-4 shadow-[0_16px_36px_rgba(15,23,42,0.05)]">
-      <div className="flex items-start gap-3">
-        <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[16px] border border-slate-200 bg-white text-slate-700 shadow-[0_10px_18px_rgba(15,23,42,0.06)]">
-          <CommandIcon />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
+      <div className="space-y-2">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[16px] border border-slate-200 bg-white text-slate-700 shadow-[0_10px_18px_rgba(15,23,42,0.06)]">
+            <CommandIcon />
+          </div>
+          <div className="min-w-0 flex flex-wrap items-center gap-2">
             <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
               Command
             </span>
             <MetaPill>{label}</MetaPill>
             {status && <MetaPill tone={statusTone}>{titleCase(status)}</MetaPill>}
-            {exitCode != null && <MetaPill tone={statusTone}>exit {exitCode}</MetaPill>}
           </div>
-          {showCwd && cwd && (
-            <div className="mt-2 inline-flex max-w-full items-center gap-1.5 rounded-full border border-slate-200 bg-white/85 px-3 py-1.5 text-[11px] text-slate-500">
+        </div>
+        {showCwd && cwd ? (
+          <div className="pl-12">
+            <div className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-slate-200 bg-white/85 px-3 py-1.5 text-[11px] text-slate-500">
               <DirectoryIcon />
               <span className="truncate">{cwd}</span>
             </div>
-          )}
-        </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="mt-3 space-y-2.5">
-        <CommandSurface label="Shell Command">
-          <pre className="overflow-x-auto whitespace-pre-wrap break-all px-3.5 py-3 font-mono text-[12.5px] leading-6 text-slate-800">
-            {command}
+        <CommandSurface label="Shell Command" tone="dark">
+          <pre className="m-0 overflow-x-auto whitespace-pre-wrap break-all px-3.5 py-2.5 font-mono text-[11px] leading-5 text-slate-100">
+            <code>{command}</code>
           </pre>
         </CommandSurface>
 
@@ -470,7 +471,7 @@ function CommandCard({
             expanded={expanded}
             onToggle={canToggleOutput ? () => setExpanded((value) => !value) : undefined}
           >
-            <pre className="overflow-x-auto whitespace-pre-wrap break-all px-3.5 py-3 font-mono text-[12px] leading-6 text-slate-100">
+            <pre className="m-0 overflow-x-auto whitespace-pre-wrap break-all px-3.5 py-2.5 font-mono text-[11px] leading-5 text-slate-100">
               {expanded || !outputPreview?.truncated ? output : outputPreview?.preview}
             </pre>
           </CommandSurface>
@@ -720,6 +721,7 @@ function RuntimeFileChangeBlock({
   const changeTone = fileChangeTone(block.changeType, block.movePath);
   const patch = useMemo(() => parseFilePatch(block.diff), [block.diff]);
   const hasCounts = patch.additions > 0 || patch.deletions > 0;
+  const statusTone = commandTone(block.status ?? undefined, undefined);
 
   return (
     <div className="rounded-[12px] border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(248,250,252,0.98)_100%)] px-4 py-3.5 shadow-[0_10px_28px_rgba(15,23,42,0.05)]">
@@ -736,11 +738,11 @@ function RuntimeFileChangeBlock({
             >
               {changeTone.label}
             </span>
-            {block.status && (
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-700">
+            {block.status ? (
+              <MetaPill tone={statusTone}>
                 {block.status}
-              </span>
-            )}
+              </MetaPill>
+            ) : null}
             {hasCounts && (
               <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 font-mono text-[11px]">
                 <span className="text-emerald-700">+{patch.additions}</span>

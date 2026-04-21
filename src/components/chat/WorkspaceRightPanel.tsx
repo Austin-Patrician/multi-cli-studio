@@ -1,4 +1,4 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
 import {
   Activity as ActivityIcon,
@@ -200,7 +200,7 @@ function buildTaskNodes(session: ConversationSession | null): TaskNode[] {
       };
     })
     .filter((message) => message.detail.length > 0)
-    .slice(-10);
+    .slice(-40);
 
   return prompts
     .reverse()
@@ -561,7 +561,9 @@ function WorkspaceTaskRail({
   tabTitle: string;
   tasks: TaskNode[];
 }) {
-  const latestTask = tasks[0] ?? null;
+  const [expanded, setExpanded] = useState(false);
+  const hasMoreTasks = tasks.length > 10;
+  const visibleTasks = expanded ? tasks : tasks.slice(0, 10);
 
   return (
     <section className="workspace-task-rail">
@@ -579,19 +581,37 @@ function WorkspaceTaskRail({
           当前会话里的用户消息会在这里形成任务节点。
         </div>
       ) : (
-        <div className="workspace-task-rail-list">
-          {tasks.map((task) => (
-            <div key={task.id} className={`workspace-task-node${task.isLatest ? " is-latest" : ""}`}>
-              <div className="workspace-task-node-marker" aria-hidden>
-                <div className="workspace-task-node-dot" />
-              </div>
-              <div className="workspace-task-node-main">
-                <div className="workspace-task-node-detail">{task.detail}</div>
-                <div className="workspace-task-node-time">{task.timestamp || "just now"}</div>
-              </div>
-            </div>
-          ))}
-        </div>
+        <>
+          <div className="workspace-task-rail-list">
+            {visibleTasks.map((task, index) => {
+              const isLastVisibleTask = index === visibleTasks.length - 1;
+              return (
+                <Fragment key={task.id}>
+                  <div className={`workspace-task-node${task.isLatest ? " is-latest" : ""}`}>
+                    <div className="workspace-task-node-marker" aria-hidden>
+                      <div className="workspace-task-node-dot" />
+                    </div>
+                    <div className="workspace-task-node-main">
+                      <div className="workspace-task-node-detail">{task.detail}</div>
+                      <div className="workspace-task-node-time">{task.timestamp || "just now"}</div>
+                    </div>
+                  </div>
+                  {!expanded && hasMoreTasks && isLastVisibleTask ? (
+                    <button
+                      type="button"
+                      className="workspace-task-rail-more"
+                      onClick={() => {
+                        setExpanded(true);
+                      }}
+                    >
+                      Load More
+                    </button>
+                  ) : null}
+                </Fragment>
+              );
+            })}
+          </div>
+        </>
       )}
     </section>
   );

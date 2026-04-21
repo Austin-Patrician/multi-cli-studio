@@ -82,7 +82,7 @@ export function PromptOverlay({
   let flatIndex = -1;
 
   return (
-    <div className="absolute bottom-full left-0 right-0 z-30 mb-3 overflow-hidden rounded-[26px] border border-[#d9e3ef] bg-[linear-gradient(180deg,#ffffff_0%,#f8fbff_100%)] shadow-[0_28px_90px_rgba(15,23,42,0.16)] backdrop-blur-sm">
+    <div className="absolute bottom-full left-0 right-0 z-30 mb-3 overflow-hidden rounded-[12px] border border-[#d9e3ef] bg-[linear-gradient(180deg,#ffffff_0%,#f8fbff_100%)] shadow-[0_28px_90px_rgba(15,23,42,0.16)] backdrop-blur-sm">
       {(title || description || onBack) && (
         <div className="border-b border-[#e6edf5] px-4 py-3.5">
           <div className="flex items-start gap-3">
@@ -127,7 +127,7 @@ export function PromptOverlay({
                 {section.items.map((item) => {
                   flatIndex += 1;
                   const isActive = interactive && flatIndex === selectedIndex;
-                  const rowClasses = `flex w-full items-start gap-3 rounded-[16px] px-3 py-3 text-left transition-colors ${
+                  const rowClasses = `flex w-full items-start gap-3 rounded-[12px] px-3 py-3 text-left transition-colors ${
                     isActive ? "bg-[#eaf1ff]" : "hover:bg-[#f5f8fc]"
                   } ${item.disabled ? "cursor-not-allowed opacity-45" : ""}`;
 
