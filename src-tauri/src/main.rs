@@ -1768,6 +1768,13 @@ struct ApiUsage {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
+    context_window_tokens: Option<u64>,
+}
+
+fn read_context_window_tokens(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_u64))
+        .filter(|value| *value > 0)
 }
 
 fn trim_api_segment(text: &str) -> String {
@@ -1858,6 +1865,10 @@ fn api_usage_from_openai_value(value: &Value) -> ApiUsage {
         prompt_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
         completion_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+        context_window_tokens: read_context_window_tokens(
+            usage,
+            &["model_context_window", "modelContextWindow", "context_window"],
+        ),
     }
 }
 
@@ -1899,6 +1910,10 @@ fn api_usage_from_claude_value(value: &Value) -> ApiUsage {
         prompt_tokens: prompt_tokens.map(|value| value + cache_read_tokens + cache_creation_tokens),
         completion_tokens,
         total_tokens,
+        context_window_tokens: read_context_window_tokens(
+            usage,
+            &["model_context_window", "modelContextWindow", "context_window"],
+        ),
     }
 }
 
@@ -1925,6 +1940,10 @@ fn api_usage_from_gemini_value(value: &Value) -> ApiUsage {
         prompt_tokens,
         completion_tokens,
         total_tokens,
+        context_window_tokens: read_context_window_tokens(
+            usage,
+            &["model_context_window", "modelContextWindow", "context_window"],
+        ),
     }
 }
 
@@ -1937,6 +1956,9 @@ fn merge_api_usage(target: &mut ApiUsage, next: ApiUsage) {
     }
     if next.total_tokens.is_some() {
         target.total_tokens = next.total_tokens;
+    }
+    if next.context_window_tokens.is_some() {
+        target.context_window_tokens = next.context_window_tokens;
     }
 }
 
@@ -1969,6 +1991,7 @@ fn capture_codex_usage(target: &mut ApiUsage, value: &Value) {
             prompt_tokens: prompt_tokens.map(|value| value + cached_tokens),
             completion_tokens,
             total_tokens,
+            context_window_tokens: None,
         }
     };
 
@@ -1977,6 +2000,12 @@ fn capture_codex_usage(target: &mut ApiUsage, value: &Value) {
             .get("tokenUsage")
             .or_else(|| holder.get("token_usage"));
         if let Some(token_usage) = token_usage {
+            if let Some(context_window_tokens) = read_context_window_tokens(
+                token_usage,
+                &["modelContextWindow", "model_context_window", "context_window"],
+            ) {
+                target.context_window_tokens = Some(context_window_tokens);
+            }
             if let Some(last) = token_usage.get("last") {
                 merge_api_usage(target, parse_usage_value(last));
             } else if let Some(total) = token_usage.get("total") {
@@ -1987,6 +2016,12 @@ fn capture_codex_usage(target: &mut ApiUsage, value: &Value) {
 
     let capture_info = |target: &mut ApiUsage, holder: &Value| {
         if let Some(info) = holder.get("info").or_else(|| holder.get("payload").and_then(|payload| payload.get("info"))) {
+            if let Some(context_window_tokens) = read_context_window_tokens(
+                info,
+                &["model_context_window", "modelContextWindow", "context_window"],
+            ) {
+                target.context_window_tokens = Some(context_window_tokens);
+            }
             if let Some(usage) = info
                 .get("last_token_usage")
                 .or_else(|| info.get("lastTokenUsage"))
@@ -2018,6 +2053,26 @@ fn capture_codex_usage(target: &mut ApiUsage, value: &Value) {
 }
 
 fn capture_claude_usage(target: &mut ApiUsage, value: &Value) {
+    let capture_context_window = |target: &mut ApiUsage, holder: &Value| {
+        let Some(context_window) = holder
+            .get("context_window")
+            .or_else(|| holder.get("contextWindow"))
+        else {
+            return;
+        };
+        if let Some(context_window_tokens) = read_context_window_tokens(
+            context_window,
+            &[
+                "context_window_size",
+                "contextWindowSize",
+                "model_context_window",
+                "modelContextWindow",
+            ],
+        ) {
+            target.context_window_tokens = Some(context_window_tokens);
+        }
+    };
+
     let capture_model_usage = |target: &mut ApiUsage, holder: &Value| {
         let Some(items) = holder
             .get("model_usage")
@@ -2066,39 +2121,61 @@ fn capture_claude_usage(target: &mut ApiUsage, value: &Value) {
                     (true, true) => Some(input_sum + output_sum),
                     _ => None,
                 },
+                context_window_tokens: None,
             },
         );
     };
 
+    capture_context_window(target, value);
     merge_api_usage(target, api_usage_from_claude_value(value));
     capture_model_usage(target, value);
     if let Some(message) = value.get("message") {
+        capture_context_window(target, message);
         merge_api_usage(target, api_usage_from_claude_value(message));
         capture_model_usage(target, message);
     }
     if let Some(event) = value.get("event") {
+        capture_context_window(target, event);
         merge_api_usage(target, api_usage_from_claude_value(event));
         capture_model_usage(target, event);
         if let Some(event_message) = event.get("message") {
+            capture_context_window(target, event_message);
             merge_api_usage(target, api_usage_from_claude_value(event_message));
             capture_model_usage(target, event_message);
         }
         if let Some(delta) = event.get("delta") {
+            capture_context_window(target, delta);
             merge_api_usage(target, api_usage_from_claude_value(delta));
             capture_model_usage(target, delta);
         }
     }
     if let Some(meta) = value.get("_meta") {
+        capture_context_window(target, meta);
         merge_api_usage(target, api_usage_from_claude_value(meta));
         capture_model_usage(target, meta);
     }
     if let Some(result) = value.get("result") {
+        capture_context_window(target, result);
         merge_api_usage(target, api_usage_from_claude_value(result));
         capture_model_usage(target, result);
     }
 }
 
 fn capture_gemini_usage(target: &mut ApiUsage, value: &Value) {
+    let capture_context_window = |target: &mut ApiUsage, holder: &Value| {
+        if let Some(context_window_tokens) = read_context_window_tokens(
+            holder,
+            &[
+                "model_context_window",
+                "modelContextWindow",
+                "context_window",
+                "contextWindow",
+            ],
+        ) {
+            target.context_window_tokens = Some(context_window_tokens);
+        }
+    };
+
     let capture_token_count = |target: &mut ApiUsage, holder: &Value| {
         let token_count = holder
             .get("token_count")
@@ -2122,6 +2199,7 @@ fn capture_gemini_usage(target: &mut ApiUsage, value: &Value) {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens,
+                context_window_tokens: None,
             },
         );
     };
@@ -2173,14 +2251,17 @@ fn capture_gemini_usage(target: &mut ApiUsage, value: &Value) {
                     (true, true) => Some(input_sum + output_sum),
                     _ => None,
                 },
+                context_window_tokens: None,
             },
         );
     };
 
+    capture_context_window(target, value);
     merge_api_usage(target, api_usage_from_gemini_value(value));
     capture_token_count(target, value);
     capture_model_usage(target, value);
     if let Some(result) = value.get("result") {
+        capture_context_window(target, result);
         merge_api_usage(target, api_usage_from_gemini_value(result));
         capture_token_count(target, result);
         capture_model_usage(target, result);
@@ -2199,11 +2280,14 @@ fn capture_gemini_usage(target: &mut ApiUsage, value: &Value) {
                 prompt_tokens: prompt_tokens.map(|value| value + cached_tokens),
                 completion_tokens,
                 total_tokens,
+                context_window_tokens: None,
             },
         );
     }
     if let Some(meta) = value.get("_meta") {
+        capture_context_window(target, meta);
         if let Some(quota) = meta.get("quota") {
+            capture_context_window(target, quota);
             capture_token_count(target, quota);
             capture_model_usage(target, quota);
         }
@@ -3080,6 +3164,7 @@ struct AgentTransportSession {
     turn_id: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
+    context_window_tokens: Option<u64>,
     last_sync_at: Option<String>,
 }
 
@@ -3788,6 +3873,7 @@ fn build_transport_session(
     turn_id: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
+    context_window_tokens: Option<u64>,
 ) -> AgentTransportSession {
     let default_kind = default_transport_kind(cli_id);
     let previous = previous.unwrap_or(AgentTransportSession {
@@ -3797,6 +3883,7 @@ fn build_transport_session(
         turn_id: None,
         model: None,
         permission_mode: None,
+        context_window_tokens: None,
         last_sync_at: None,
     });
 
@@ -3813,6 +3900,7 @@ fn build_transport_session(
         turn_id: turn_id.or(previous.turn_id),
         model: model.or(previous.model),
         permission_mode: permission_mode.or(previous.permission_mode),
+        context_window_tokens: context_window_tokens.or(previous.context_window_tokens),
         last_sync_at: Some(Local::now().to_rfc3339()),
     }
 }
@@ -7209,6 +7297,7 @@ fn run_codex_app_server_turn(
         stream_state.turn_id.clone(),
         effective_model,
         Some(permission_mode),
+        stream_state.usage.context_window_tokens,
     );
 
     Ok(CodexTurnOutcome {
@@ -8265,6 +8354,7 @@ fn run_claude_headless_turn_once(
             .permission_mode
             .clone()
             .or(Some(requested_permission)),
+        stream_state.usage.context_window_tokens,
     );
 
     Ok(ClaudeTurnOutcome {
@@ -8592,6 +8682,7 @@ fn run_gemini_acp_turn(
                 None,
                 requested_model,
                 Some(requested_local_permission),
+                stream_state.usage.context_window_tokens,
             ),
             usage: stream_state.usage,
         });
@@ -8822,6 +8913,7 @@ fn run_gemini_acp_turn(
         None,
         effective_model,
         Some(effective_permission),
+        stream_state.usage.context_window_tokens,
     );
 
     Ok(GeminiTurnOutcome {
@@ -9680,6 +9772,7 @@ fn workflow_cli_session_ref(session: &AgentTransportSession) -> WorkflowCliSessi
         turn_id: session.turn_id.clone(),
         model: session.model.clone(),
         permission_mode: session.permission_mode.clone(),
+        context_window_tokens: session.context_window_tokens,
         last_sync_at: session.last_sync_at.clone(),
     }
 }
@@ -9704,6 +9797,7 @@ fn agent_transport_session_from_kernel_ref(
         turn_id: session.native_turn_id.clone(),
         model: session.model.clone(),
         permission_mode: session.permission_mode.clone(),
+        context_window_tokens: None,
         last_sync_at: Some(session.last_sync_at.clone()),
     })
 }
@@ -11875,6 +11969,7 @@ fn send_chat_message(
                             None,
                             request_session_for_thread.model.get("codex").cloned(),
                             Some(permission_mode),
+                            None,
                         );
                         let final_content = if interrupted_by_user {
                             String::new()
@@ -12033,6 +12128,7 @@ fn send_chat_message(
                             None,
                             request_session_for_thread.model.get("gemini").cloned(),
                             Some(permission_mode),
+                            None,
                         );
                         let final_content = if interrupted_by_user {
                             String::new()
@@ -12194,6 +12290,7 @@ fn send_chat_message(
                             None,
                             request_session_for_thread.model.get("claude").cloned(),
                             Some(permission_mode),
+                            None,
                         );
                         let final_content = if interrupted_by_user {
                             String::new()
@@ -12349,6 +12446,7 @@ fn send_chat_message(
                                 .permission_mode
                                 .get(&agent_id)
                                 .cloned(),
+                            None,
                         )),
                         blocks: Some(vec![ChatMessageBlock::Status {
                             level: "error".to_string(),
@@ -12468,6 +12566,7 @@ fn send_chat_message(
                 .permission_mode
                 .get(&agent_id)
                 .cloned(),
+            None,
         );
 
         // Store conversation turn in unified history

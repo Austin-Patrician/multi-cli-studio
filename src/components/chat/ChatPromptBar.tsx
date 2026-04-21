@@ -57,7 +57,6 @@ import {
 import { bridge } from "../../lib/bridge";
 import { createChatAttachment } from "../../lib/chatAttachments";
 import { AgentIcon } from "../AgentIcon";
-import { estimateSessionTokens } from "../../lib/tokenEstimation";
 import { resolveSelectedCustomAgent } from "../../lib/customAgents";
 import { useStore } from "../../lib/store";
 import { loadWorkspaceFileIndex } from "../../lib/workspaceFileIndex";
@@ -1944,21 +1943,28 @@ export function ChatPromptBar({
     : isAutoMode
       ? "/指令中心 · @引用文件 · #智能体 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
       : "/指令中心 · @引用文件 · #智能体 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
-  const estimatedUsageTokens = activeSession ? estimateSessionTokens(activeSession) : 0;
   const actualUsageTokens = activeSession
     ? activeSession.messages.reduce((sum, message) => sum + (message.totalTokens ?? 0), 0)
     : 0;
-  const usagePercent = actualUsageTokens > 0 && estimatedUsageTokens > 0
-    ? Math.min(100, (actualUsageTokens / estimatedUsageTokens) * 100)
-    : 0;
-  const usagePercentLabel = `${Math.round(usagePercent)}%`;
+  const activeTransportSession = activeTab?.transportSessions[effectiveCli] ?? null;
+  const contextWindowTokens =
+    activeTransportSession?.contextWindowTokens && activeTransportSession.contextWindowTokens > 0
+      ? activeTransportSession.contextWindowTokens
+      : null;
+  const usagePercent = actualUsageTokens > 0 && contextWindowTokens
+    ? Math.min(100, (actualUsageTokens / contextWindowTokens) * 100)
+    : null;
+  const usageRingPercentLabel = `${Math.round(usagePercent ?? 0)}%`;
+  const usagePercentLabel = usagePercent === null ? "--" : `${Math.round(usagePercent)}%`;
   const messageCount = activeSession
     ? activeSession.messages.filter(
         (message) => message.role === "user" || message.role === "assistant"
       ).length
     : 0;
   const compactedSummaryCount = activeSession?.compactedSummaries.length ?? 0;
-  const usageTooltip = `真实 usage ${actualUsageTokens.toLocaleString()} tokens，占当前会话估算总量 ${estimatedUsageTokens.toLocaleString()} tokens 的 ${usagePercentLabel}。`;
+  const usageTooltip = contextWindowTokens
+    ? `真实 usage ${actualUsageTokens.toLocaleString()} tokens，占 ${titleCaseCli(effectiveCli)} 当前上报的 context window ${contextWindowTokens.toLocaleString()} tokens 的 ${usagePercentLabel}。`
+    : `真实 usage ${actualUsageTokens.toLocaleString()} tokens。${titleCaseCli(effectiveCli)} 当前没有返回可用的 context window，因此不显示百分比。`;
   const capabilities = acpCapabilitiesByCli[effectiveCli] ?? null;
   const capabilityStatus = acpCapabilityStatusByCli[effectiveCli] ?? "idle";
   const currentProviderItem =
@@ -3174,7 +3180,7 @@ export function ChatPromptBar({
                   >
                     <span
                       className="context-dual-usage-ring"
-                      style={{ "--dual-usage-percent": usagePercentLabel } as CSSProperties}
+                      style={{ "--dual-usage-percent": usageRingPercentLabel } as CSSProperties}
                       aria-hidden="true"
                     >
                       <span className="context-dual-usage-ring-inner" />
@@ -3192,6 +3198,12 @@ export function ChatPromptBar({
                         </span>
                       </div>
                       <div className="context-dual-tooltip-kv">
+                        <span className="context-dual-tooltip-key">Context window</span>
+                        <span className="context-dual-tooltip-value">
+                          {contextWindowTokens ? contextWindowTokens.toLocaleString() : "未知"}
+                        </span>
+                      </div>
+                      <div className="context-dual-tooltip-kv">
                         <span className="context-dual-tooltip-key">消息数量</span>
                         <span className="context-dual-tooltip-value">{messageCount}</span>
                       </div>
@@ -3203,8 +3215,10 @@ export function ChatPromptBar({
                     <div className="context-dual-tooltip-divider" />
                     <div className="context-dual-tooltip-foot">
                       <div className="context-dual-tooltip-note">
-                        百分比现在按真实 usage 占当前会话估算总量计算。
-                      </div>
+                        {contextWindowTokens
+                          ? `百分比按 ${titleCaseCli(effectiveCli)} 最近一次上报的 context window 计算。`
+                          : `${titleCaseCli(effectiveCli)} 当前未上报 context window，百分比已隐藏，避免把估算值伪装成真实值。`}
+                        </div>
                     </div>
                   </div>
                 </div>

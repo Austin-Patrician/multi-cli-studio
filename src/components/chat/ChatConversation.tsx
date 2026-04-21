@@ -967,7 +967,7 @@ export function ChatConversation() {
                     <div className="flex justify-center">
                       <span
                         data-chat-search-ignore="true"
-                        className={`rounded-full border px-3 py-1 text-xs ${systemTone}`}
+                        className={`rounded-[12px] border px-3 py-1 text-xs ${systemTone}`}
                       >
                         {msg.content}
                       </span>

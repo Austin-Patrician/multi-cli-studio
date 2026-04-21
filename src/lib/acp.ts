@@ -3,7 +3,7 @@ import { AgentId } from "./models";
 export type AcpCommandKind =
   | "plan" | "model" | "compact" | "clear" | "rewind"
   | "diff" | "permissions" | "cost" | "help" | "export"
-  | "status" | "effort" | "fast" | "context" | "memory" | "review";
+  | "status" | "session" | "effort" | "fast" | "context" | "memory" | "review";
 
 export type CommandExecution = "local" | "flag-inject" | "git-local";
 
@@ -140,6 +140,11 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
     execution: "local", supportedClis: ["codex", "claude", "gemini"],
   },
   {
+    kind: "session", slash: "/session", label: "Session ID",
+    description: "Show the current session/thread id for the active CLI",
+    execution: "local", supportedClis: ["codex", "claude", "gemini"],
+  },
+  {
     kind: "effort", slash: "/effort", label: "Effort Level",
     description: "Set reasoning effort for the active CLI",
     argsHint: "[low|medium|high|max]",
@@ -203,6 +208,7 @@ export function getCommandCategory(kind: AcpCommandKind) {
     case "effort":
     case "fast":
     case "status":
+    case "session":
     case "review":
       return "session";
     case "diff":

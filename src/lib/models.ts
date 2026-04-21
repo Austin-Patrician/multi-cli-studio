@@ -1647,6 +1647,7 @@ export interface AgentTransportSession {
   turnId?: string | null;
   model?: string | null;
   permissionMode?: string | null;
+  contextWindowTokens?: number | null;
   lastSyncAt?: string | null;
 }
 

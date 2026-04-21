@@ -174,6 +174,7 @@ function createTransportSession(
     turnId: partial?.turnId ?? null,
     model: partial?.model ?? null,
     permissionMode: partial?.permissionMode ?? null,
+    contextWindowTokens: partial?.contextWindowTokens ?? null,
     lastSyncAt: partial?.lastSyncAt ?? null,
   };
 }
@@ -186,6 +187,7 @@ function invalidateTransportSession(
     ...existing,
     threadId: null,
     turnId: null,
+    contextWindowTokens: null,
     lastSyncAt: null,
   });
 }
@@ -3874,6 +3876,16 @@ export const useStore = create<StoreState>((set, get) => {
             `Effort: ${tab.effortLevel ?? "default"}`,
           ].join("\n")
         );
+        return;
+      }
+      case "session": {
+        const transportSession = tab.transportSessions[effectiveCli] ?? null;
+        const sessionId = transportSession?.threadId?.trim() ?? "";
+        if (!sessionId) {
+          pushSystemMessage("No active session.");
+          return;
+        }
+        pushSystemMessage(sessionId);
         return;
       }
       case "help": {

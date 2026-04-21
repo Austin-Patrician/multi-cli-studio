@@ -291,6 +291,8 @@ pub struct WorkflowCliSessionRef {
     #[serde(default)]
     pub permission_mode: Option<String>,
     #[serde(default)]
+    pub context_window_tokens: Option<u64>,
+    #[serde(default)]
     pub last_sync_at: Option<String>,
 }
 
