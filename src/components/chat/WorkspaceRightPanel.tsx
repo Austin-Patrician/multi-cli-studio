@@ -45,8 +45,7 @@ import {
 } from "../../lib/workspaceFileIndex";
 import { FileIcon } from "../FileIcon";
 import { GitPanel } from "./GitPanel";
-
-type WorkspacePanelMode = "activity" | "radar" | "git" | "files" | "search";
+import { type WorkspacePanelMode } from "./workspacePanelModes";
 type WorkspaceCreateDialogKind = "file" | "folder";
 
 type SessionSummary = {
@@ -80,7 +79,6 @@ type ActivityEntry = {
   filePath?: string | null;
 };
 
-const PANEL_STORAGE_KEY = "multi-cli-studio::workspace-right-panel-mode";
 const EMPTY_TREE: WorkspaceTreeEntry[] = [];
 const EMPTY_CHAT_SESSIONS: Record<string, ConversationSession> = {};
 const EMPTY_GIT_CHANGES: GitFileChange[] = [];
@@ -91,18 +89,6 @@ const workspaceTreeUiStateByWorkspace = new Map<
     expandedDirectories: Record<string, boolean>;
   }
 >();
-const PANEL_MODES: Array<{
-  id: WorkspacePanelMode;
-  label: string;
-  icon: ComponentType<{ className?: string }>;
-}> = [
-  { id: "activity", label: "Activity", icon: ActivityIcon },
-  { id: "radar", label: "Radar", icon: RadarIcon },
-  { id: "git", label: "Git", icon: GitIcon },
-  { id: "files", label: "Files", icon: FilesPanelIcon },
-  { id: "search", label: "Search", icon: SearchIcon },
-];
-
 function basename(path: string) {
   const normalized = path.replace(/[\\/]+$/, "");
   const parts = normalized.split(/[\\/]/).filter(Boolean);
@@ -1496,8 +1482,10 @@ function WorkspaceFilesPanel({
 
 export function WorkspaceRightPanel({
   statusPanelCollapsed = false,
+  mode,
 }: {
   statusPanelCollapsed?: boolean;
+  mode: WorkspacePanelMode;
 }) {
   const activeTabId = useStore((state) => state.activeTerminalTabId);
   const terminalTabs = useStore((state) => state.terminalTabs);
@@ -1525,17 +1513,6 @@ export function WorkspaceRightPanel({
       ),
     [workspace?.name, workspaceTabs]
   );
-  const [mode, setMode] = useState<WorkspacePanelMode>(() => {
-    if (typeof window === "undefined") return "git";
-    const stored = window.localStorage.getItem(PANEL_STORAGE_KEY);
-    return PANEL_MODES.some((item) => item.id === stored) ? (stored as WorkspacePanelMode) : "git";
-  });
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(PANEL_STORAGE_KEY, mode);
-  }, [mode]);
-
   const sessionsByTabId = useStore((state) => (mode === "activity" || mode === "radar" ? state.chatSessions : EMPTY_CHAT_SESSIONS));
   const fileModeChanges = useStore((state) =>
     mode === "files" && workspace ? state.gitPanelsByWorkspace[workspace.id]?.recentChanges ?? EMPTY_GIT_CHANGES : EMPTY_GIT_CHANGES
@@ -1565,7 +1542,7 @@ export function WorkspaceRightPanel({
 
   if (!workspace) {
     return (
-      <aside className="workspace-right-panel-shell w-[380px] min-w-[340px] border-l border-border bg-[#fcfcfd]">
+      <aside className="workspace-right-panel-shell w-[380px] min-w-[340px] bg-[#fcfcfd]">
         <div className="workspace-right-panel-empty">
           Attach a workspace to inspect project files and Git state.
         </div>
@@ -1574,46 +1551,8 @@ export function WorkspaceRightPanel({
   }
 
   return (
-    <aside className="workspace-right-panel-shell w-[380px] min-w-[340px] border-l border-border bg-[#fcfcfd]">
+    <aside className="workspace-right-panel-shell w-[380px] min-w-[340px] bg-[#fcfcfd]">
       <div className="workspace-right-panel">
-        <div className="workspace-right-panel-top file-tree-top-zone">
-          <div className="workspace-right-panel-toolbar file-tree-tool-row">
-            <div className="file-tree-tabs-wrap">
-              <div className="panel-tabs">
-                {PANEL_MODES.map((item) => {
-                  const Icon = item.icon;
-                  const isActive = mode === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setMode(item.id)}
-                      className={`panel-tab${isActive ? " is-active" : ""}`}
-                      title={item.label}
-                      aria-label={item.label}
-                    >
-                      <span className="panel-tab-icon" aria-hidden>
-                        <Icon className="h-4 w-4" />
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            {mode === "files" && (
-              <button
-                type="button"
-                onClick={() => void refreshGitPanel(workspace.id)}
-                className="ghost icon-button file-tree-root-action"
-                title="Refresh workspace state"
-                aria-label="Refresh workspace state"
-              >
-                <RefreshIcon className="h-4 w-4" />
-              </button>
-            )}
-          </div>
-        </div>
-
         <div className="workspace-right-panel-body">
           <div className="workspace-right-panel-main">
             {mode === "activity" ? (

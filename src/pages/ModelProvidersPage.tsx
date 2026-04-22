@@ -103,7 +103,7 @@ export function ModelProvidersPage({ embedded = false }: { embedded?: boolean })
   }
 
   return (
-    <div className={embedded ? "flex flex-col gap-6" : "min-h-full bg-[#f7f7f5]"}>
+    <div className={embedded ? "flex flex-col gap-6 pt-2" : "min-h-full bg-[#f7f7f5]"}>
       <div
         className={
           embedded

@@ -560,25 +560,6 @@ function SendIcon() {
   );
 }
 
-function SettingsIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
-      <path
-        d="M12 15.2a3.2 3.2 0 100-6.4 3.2 3.2 0 000 6.4z"
-        stroke="currentColor"
-        strokeWidth="1.8"
-      />
-      <path
-        d="M19.4 15a1 1 0 00.2 1.1l.1.1a1.7 1.7 0 01-1.2 2.9h-.2a1 1 0 00-.9.6l-.1.2a1.7 1.7 0 01-3.2 0l-.1-.2a1 1 0 00-.9-.6h-.2a1.7 1.7 0 01-1.2-2.9l.1-.1a1 1 0 00.2-1.1 1 1 0 00-.8-.5h-.2a1.7 1.7 0 010-3.4h.2a1 1 0 00.8-.5 1 1 0 00-.2-1.1l-.1-.1a1.7 1.7 0 011.2-2.9h.2a1 1 0 00.9-.6l.1-.2a1.7 1.7 0 013.2 0l.1.2a1 1 0 00.9.6h.2a1.7 1.7 0 011.2 2.9l-.1.1a1 1 0 00-.2 1.1 1 1 0 00.8.5h.2a1.7 1.7 0 010 3.4h-.2a1 1 0 00-.8.5z"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
 function CopyIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
@@ -844,40 +825,6 @@ function MessageOriginPill({ origin }: { origin: ApiChatGenerationMeta }) {
   );
 }
 
-function ServiceTypeSwitch({
-  serviceType,
-  active,
-  disabled,
-  onClick,
-}: {
-  serviceType: ModelProviderServiceType;
-  active: boolean;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      title={MODEL_PROVIDER_META[serviceType].label}
-      aria-label={MODEL_PROVIDER_META[serviceType].label}
-      disabled={disabled}
-      onClick={onClick}
-      className={cx(
-        "inline-flex h-8 w-8 items-center justify-center rounded-[12px] border transition-all disabled:cursor-not-allowed disabled:opacity-45",
-        active
-          ? "border-white bg-white text-slate-900 shadow-[0_8px_20px_rgba(15,23,42,0.10)]"
-          : "border-transparent bg-transparent text-slate-500 hover:bg-white/70 hover:text-slate-800"
-      )}
-    >
-      <img
-        src={SERVICE_ICONS[serviceType]}
-        alt=""
-        className="h-4 w-4 shrink-0 object-contain"
-      />
-    </button>
-  );
-}
-
 function ModelSelectionControl({
   optionGroups,
   activeSelection,
@@ -896,7 +843,7 @@ function ModelSelectionControl({
   onSelectModel: (selection: ApiChatSelection) => void;
   className?: string;
 }) {
-  const [open, setOpen] = useState(false);
+  const [openMenu, setOpenMenu] = useState<"provider" | "model" | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const activeServiceType = activeSelection?.serviceType ?? optionGroups[0]?.serviceType ?? null;
   const activeGroup =
@@ -910,89 +857,126 @@ function ModelSelectionControl({
   useEffect(() => {
     function handlePointerDown(event: MouseEvent) {
       if (!containerRef.current?.contains(event.target as Node)) {
-        setOpen(false);
+        setOpenMenu(null);
       }
     }
-    if (!open) return;
+    if (!openMenu) return;
     document.addEventListener("mousedown", handlePointerDown);
     return () => {
       document.removeEventListener("mousedown", handlePointerDown);
     };
-  }, [open]);
+  }, [openMenu]);
 
   useLayoutEffect(() => {
-    setOpen(false);
+    setOpenMenu(null);
   }, [activeSelection?.serviceType, activeSelection?.providerId, activeSelection?.modelId]);
 
   return (
     <div
       ref={containerRef}
-      className={cx(
-        "relative flex items-center gap-2 rounded-[12px] border border-[#e7e1d5] bg-[linear-gradient(180deg,#fffdfa_0%,#f8f4eb_100%)] p-2 shadow-[0_10px_30px_rgba(15,23,42,0.06)]",
-        className
-      )}
+      className={cx("relative flex min-w-0 items-center gap-2", className)}
     >
-      <div className="flex shrink-0 items-center gap-1 rounded-[12px] border border-[#ebe5da] bg-white/90 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.92)]">
-        {MODEL_PROVIDER_SERVICE_ORDER.map((serviceType) => (
-          <ServiceTypeSwitch
-            key={serviceType}
-            serviceType={serviceType}
-            active={activeSelection?.serviceType === serviceType}
-            disabled={!optionGroups.some((group) => group.serviceType === serviceType)}
-            onClick={() => onSelectServiceType(serviceType)}
-          />
-        ))}
+      <div className="terminal-chat-footer-control">
+        <button
+          type="button"
+          onClick={() =>
+            setOpenMenu((current) => (current === "provider" ? null : "provider"))
+          }
+          className="selector-button selector-provider-button"
+          title={
+            activeGroup
+              ? `切换模型类型：${MODEL_PROVIDER_META[activeGroup.serviceType].label}`
+              : "切换模型类型"
+          }
+          aria-label={
+            activeGroup
+              ? `切换模型类型：${MODEL_PROVIDER_META[activeGroup.serviceType].label}`
+              : "切换模型类型"
+          }
+        >
+          {activeSelectionOrigin ? (
+            <img
+              src={SERVICE_ICONS[activeSelectionOrigin.serviceType]}
+              alt=""
+              aria-hidden="true"
+              className="footer-provider-icon"
+            />
+          ) : (
+            <div className="h-3.5 w-3.5 rounded-full bg-slate-300" />
+          )}
+        </button>
+
+        {openMenu === "provider" ? (
+          <div className="selector-dropdown terminal-chat-dropdown--provider">
+            <div className="selector-dropdown-title">模型类型</div>
+            {MODEL_PROVIDER_SERVICE_ORDER.map((serviceType) => {
+              const enabled = optionGroups.some((group) => group.serviceType === serviceType);
+              const selected = activeSelection?.serviceType === serviceType;
+              return (
+                <button
+                  key={serviceType}
+                  type="button"
+                  onClick={() => {
+                    if (!enabled) return;
+                    onSelectServiceType(serviceType);
+                    setOpenMenu(null);
+                  }}
+                  disabled={!enabled}
+                  className={cx(
+                    "selector-option selector-option-button",
+                    selected && "selected",
+                    !enabled && "disabled"
+                  )}
+                >
+                  <span className="footer-option-leading">
+                    <img
+                      src={SERVICE_ICONS[serviceType]}
+                      alt=""
+                      aria-hidden="true"
+                      className="footer-provider-icon"
+                      style={{ opacity: enabled ? 1 : 0.45 }}
+                    />
+                  </span>
+                  <span className="footer-option-copy">
+                    <span className="footer-option-label">
+                      {MODEL_PROVIDER_META[serviceType].label}
+                    </span>
+                    <span className="footer-option-description">
+                      {enabled ? "切换到该模型类型" : "当前没有可用模型"}
+                    </span>
+                  </span>
+                  {selected ? <CheckIcon /> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
 
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        disabled={!activeGroup || activeServiceModels.length === 0}
-        className={cx(
-          "group flex min-w-0 flex-1 items-center gap-3 rounded-[12px] border border-[#ebe4d8] bg-white/88 px-3 py-2 text-left transition-all",
-          "hover:border-[#ddd4c5] hover:bg-white",
-          "disabled:cursor-not-allowed disabled:opacity-45"
-        )}
-        title={activeOption ? `${activeOption.providerName} / ${activeOption.modelLabel}` : "No models"}
-        aria-label={activeOption ? `${activeOption.providerName} / ${activeOption.modelLabel}` : "No models"}
-      >
-        {activeSelectionOrigin ? (
-          <img
-            src={SERVICE_ICONS[activeSelectionOrigin.serviceType]}
-            alt=""
-            className="h-4.5 w-4.5 shrink-0 object-contain"
-          />
-        ) : (
-          <div className="h-4.5 w-4.5 shrink-0 rounded-[12px] bg-slate-200" />
-        )}
-
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
-            {activeOption?.providerName ?? "No provider"}
-          </div>
-          <div className="truncate text-[13px] font-semibold text-slate-800">
+      <div className="terminal-chat-footer-control min-w-0 flex-1">
+        <button
+          type="button"
+          onClick={() => setOpenMenu((current) => (current === "model" ? null : "model"))}
+          disabled={!activeGroup || activeServiceModels.length === 0}
+          title={activeOption ? `${activeOption.providerName} / ${activeOption.modelLabel}` : "No models"}
+          aria-label={activeOption ? `${activeOption.providerName} / ${activeOption.modelLabel}` : "No models"}
+          className="selector-button min-w-0 max-w-full"
+        >
+          <span className="selector-button-text">
             {activeOption?.modelLabel ?? "No models"}
-          </div>
-        </div>
+          </span>
+          {openMenu === "model" ? (
+            <ChevronIcon expanded />
+          ) : (
+            <ChevronIcon expanded={false} />
+          )}
+        </button>
 
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[12px] bg-[#f7f4ed] text-slate-500 transition-all group-hover:bg-[#f2eee5] group-hover:text-slate-800">
-          <ChevronIcon expanded={open} />
-        </div>
-      </button>
-
-      {open && activeGroup ? (
-        <div className="absolute left-2 right-2 top-[calc(100%+10px)] z-30 overflow-hidden rounded-[12px] border border-[#e5ddcf] bg-[linear-gradient(180deg,#fffdf9_0%,#faf6ef_100%)] shadow-[0_24px_60px_rgba(15,23,42,0.14)]">
-          <div className="border-b border-[#ece4d7] px-4 py-3">
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
-              <img
-                src={SERVICE_ICONS[activeGroup.serviceType]}
-                alt=""
-                className="h-4 w-4 object-contain"
-              />
-              <span>{MODEL_PROVIDER_META[activeGroup.serviceType].label}</span>
+        {openMenu === "model" && activeGroup ? (
+          <div className="selector-dropdown selector-dropdown--model">
+            <div className="selector-dropdown-title">
+              {MODEL_PROVIDER_META[activeGroup.serviceType].label}
             </div>
-          </div>
-          <div className="max-h-[280px] overflow-y-auto p-2">
             {activeGroup.options.map((option) => {
               const selected = activeSelection
                 ? option.key === selectionKey(activeSelection)
@@ -1003,39 +987,34 @@ function ModelSelectionControl({
                   type="button"
                   onClick={() => {
                     onSelectModel(option.selection);
-                    setOpen(false);
+                    setOpenMenu(null);
                   }}
                   className={cx(
-                    "flex w-full items-center gap-3 rounded-[12px] px-3 py-3 text-left transition-all",
-                    selected
-                      ? "bg-white text-slate-900 shadow-[0_10px_24px_rgba(15,23,42,0.08)]"
-                      : "text-slate-600 hover:bg-white/82 hover:text-slate-900"
+                    "selector-option selector-option-button",
+                    selected && "selected"
                   )}
                 >
-                  <div
-                    className={cx(
-                      "flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] border",
-                      selected
-                        ? "border-slate-900 bg-slate-900 text-white"
-                        : "border-[#e6dfd3] bg-[#f6f2ea] text-slate-500"
-                    )}
-                  >
-                    {selected ? <CheckIcon /> : <img src={SERVICE_ICONS[option.selection.serviceType]} alt="" className="h-4 w-4 object-contain" />}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[13px] font-semibold text-current">
-                      {option.modelLabel}
-                    </div>
-                    <div className="truncate text-[11px] text-slate-400">
+                  <span className="footer-option-leading">
+                    <img
+                      src={SERVICE_ICONS[option.selection.serviceType]}
+                      alt=""
+                      aria-hidden="true"
+                      className="footer-provider-icon"
+                    />
+                  </span>
+                  <span className="footer-option-copy">
+                    <span className="footer-option-label">{option.modelLabel}</span>
+                    <span className="footer-option-description model-description">
                       {option.providerName}
-                    </div>
-                  </div>
+                    </span>
+                  </span>
+                  {selected ? <CheckIcon /> : null}
                 </button>
               );
             })}
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -1469,21 +1448,6 @@ export function ModelChatPage() {
     }
   }
 
-  async function refreshSettings() {
-    setErrorText(null);
-    setStatusText(null);
-    try {
-      const nextSettings = normalizeProviderSettings(await bridge.getSettings());
-      setSettings(nextSettings);
-      setSessions((current) =>
-        current.map((session) => syncSessionWithSettings(session, nextSettings))
-      );
-      setStatusText("已同步最新 provider 配置。");
-    } catch (error) {
-      setErrorText(describeUiError(error, "刷新 provider 配置失败。"));
-    }
-  }
-
   async function pickComposerAttachments() {
     if (!activeSession || loading) return;
     setErrorText(null);
@@ -1834,17 +1798,6 @@ export function ModelChatPage() {
                 <HeaderIconButton title="新聊天" onClick={createChatSession}>
                   <PlusIcon />
                 </HeaderIconButton>
-                <HeaderIconButton title="刷新配置" onClick={() => void refreshSettings()}>
-                  <RefreshIcon />
-                </HeaderIconButton>
-                <Link
-                  to="/settings/model-providers"
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
-                  title="模型提供商"
-                  aria-label="模型提供商"
-                >
-                  <SettingsIcon />
-                </Link>
               </div>
             </>
           ) : (
@@ -1945,21 +1898,6 @@ export function ModelChatPage() {
                 </div>
               </div>
 
-              <div className="border-t border-[#ece7dc] px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <HeaderIconButton title="刷新配置" onClick={() => void refreshSettings()}>
-                    <RefreshIcon />
-                  </HeaderIconButton>
-                  <Link
-                    to="/settings/model-providers"
-                    className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
-                    title="模型提供商"
-                    aria-label="模型提供商"
-                  >
-                    <SettingsIcon />
-                  </Link>
-                </div>
-              </div>
             </>
           )}
         </aside>
@@ -1968,7 +1906,7 @@ export function ModelChatPage() {
           {activeSession && settings ? (
             <>
               <header className="sticky top-0 z-20 border-b border-[#eceae4] bg-[#fbfbf9]/92 backdrop-blur-xl">
-                <div className="mx-auto flex w-full max-w-[960px] items-center justify-between gap-4 px-6 py-4">
+                <div className="mx-auto flex w-full max-w-[960px] items-center gap-4 px-6 py-4">
                   <div className="min-w-0 flex-1">
                     <input
                       value={activeSession.title}
@@ -1984,35 +1922,16 @@ export function ModelChatPage() {
                     />
                     <div className="mt-3 h-4">
                       {activeSelectionOrigin ? (
-                        <img
-                          src={SERVICE_ICONS[activeSelectionOrigin.serviceType]}
-                          alt=""
-                          className="h-4 w-4 object-contain"
-                        />
+                        <div className="inline-flex items-center gap-2 rounded-[999px] bg-[#f3efe7] px-2.5 py-1 text-[11px] font-medium text-slate-500">
+                          <img
+                            src={SERVICE_ICONS[activeSelectionOrigin.serviceType]}
+                            alt=""
+                            className="h-3.5 w-3.5 object-contain"
+                          />
+                          <span>{activeSelectionOrigin.modelLabel ?? activeSelectionOrigin.modelId}</span>
+                        </div>
                       ) : null}
                     </div>
-                  </div>
-
-                  <div className="flex shrink-0 items-center gap-2">
-                    <ModelSelectionControl
-                      optionGroups={optionGroups}
-                      activeSelection={activeSelection}
-                      activeSelectionOrigin={activeSelectionOrigin}
-                      onSelectServiceType={selectServiceType}
-                      onSelectModel={selectModel}
-                      className="hidden min-w-[330px] lg:flex"
-                    />
-                    <HeaderIconButton title="刷新配置" onClick={() => void refreshSettings()}>
-                      <RefreshIcon />
-                    </HeaderIconButton>
-                    <Link
-                      to="/settings/model-providers"
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-[12px] border border-[#e6e2d8] bg-white/90 text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d8d3c7] hover:text-slate-900"
-                      title="模型提供商"
-                      aria-label="模型提供商"
-                    >
-                      <SettingsIcon />
-                    </Link>
                   </div>
                 </div>
               </header>
@@ -2116,88 +2035,54 @@ export function ModelChatPage() {
                     </div>
                   ) : null}
 
-                  <div className="rounded-[12px] border border-[#e2ddd2] bg-white/98 p-3 shadow-[0_24px_64px_rgba(15,23,42,0.10)] backdrop-blur">
-                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        {activeSelectionOrigin ? <MessageOriginPill origin={activeSelectionOrigin} /> : null}
-                      </div>
-                      <div className="text-[11px] text-slate-400">
-                        图片多模态已启用 · Enter 发送 · Shift + Enter 换行
-                      </div>
-                    </div>
-
-                    <ModelSelectionControl
-                      optionGroups={optionGroups}
-                      activeSelection={activeSelection}
-                      activeSelectionOrigin={activeSelectionOrigin}
-                      onSelectServiceType={selectServiceType}
-                      onSelectModel={selectModel}
-                      className="mb-3 lg:hidden"
-                    />
-
-                    <div className="rounded-[12px] border border-[#ece7dc] bg-[#fcfbf8] px-3 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]">
-                      {activeAttachments.length > 0 ? (
-                        <div className="mb-3 flex flex-wrap gap-2">
-                          {activeAttachments.map((attachment) => {
-                            const label = attachmentLabel(attachment);
-                            const previewSrc = attachmentPreviewSrc(attachment);
-                            return (
-                              <div
-                                key={attachment.id}
-                                className="inline-flex max-w-full items-center gap-2 rounded-[14px] border border-[#e6dfd3] bg-white px-2 py-2 shadow-sm"
-                                title={label}
-                              >
-                                {previewSrc ? (
-                                  <img
-                                    src={previewSrc}
-                                    alt={attachment.fileName}
-                                    className="h-10 w-10 rounded-[10px] object-cover"
-                                  />
-                                ) : (
-                                  <div className="flex h-10 w-10 items-center justify-center rounded-[10px] bg-slate-100 text-slate-400">
-                                    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
-                                      <path d="M5 7.5A2.5 2.5 0 017.5 5h9A2.5 2.5 0 0119 7.5v9a2.5 2.5 0 01-2.5 2.5h-9A2.5 2.5 0 015 16.5v-9z" stroke="currentColor" strokeWidth="1.6" />
-                                      <path d="M8 15l2.6-2.8a1 1 0 011.5.04L14 14l1.1-1.2a1 1 0 011.47-.02L18 14.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                                      <circle cx="9" cy="9" r="1.2" fill="currentColor" />
-                                    </svg>
-                                  </div>
-                                )}
-                                <span className="max-w-[180px] truncate text-[12px] font-medium text-slate-700">
-                                  {label}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => removeComposerAttachment(attachment.id)}
-                                  className="inline-flex h-7 w-7 items-center justify-center rounded-[10px] text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
-                                  title="移除图片"
-                                  aria-label="移除图片"
-                                >
-                                  <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
-                                    <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                  </svg>
-                                </button>
+                  <div className="terminal-chat-prompt px-0 py-0">
+                    <div className="terminal-chat-prompt-shell">
+                      <div className="terminal-chat-input-box bg-white/98 shadow-[0_24px_64px_rgba(15,23,42,0.10)] backdrop-blur">
+                        <div className="terminal-chat-input-area">
+                          {activeAttachments.length > 0 && (
+                            <div className="terminal-chat-input-context">
+                              <div className="terminal-chat-attachments">
+                                {activeAttachments.map((attachment) => {
+                                  const label = attachmentLabel(attachment);
+                                  const previewSrc = attachmentPreviewSrc(attachment);
+                                  return (
+                                    <div
+                                      key={attachment.id}
+                                      className={`terminal-chat-attachment-chip terminal-chat-attachment-chip--${attachment.kind}`}
+                                      title={label}
+                                    >
+                                      {previewSrc ? (
+                                        <span className="terminal-chat-attachment-thumb" aria-hidden="true">
+                                          <img src={previewSrc} alt="" />
+                                        </span>
+                                      ) : (
+                                        <span className="terminal-chat-attachment-icon" aria-hidden="true">
+                                          <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+                                            <path d="M5 7.5A2.5 2.5 0 017.5 5h9A2.5 2.5 0 0119 7.5v9a2.5 2.5 0 01-2.5 2.5h-9A2.5 2.5 0 015 16.5v-9z" stroke="currentColor" strokeWidth="1.6" />
+                                            <path d="M8 15l2.6-2.8a1 1 0 011.5.04L14 14l1.1-1.2a1 1 0 011.47-.02L18 14.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                                            <circle cx="9" cy="9" r="1.2" fill="currentColor" />
+                                          </svg>
+                                        </span>
+                                      )}
+                                      <span className="terminal-chat-attachment-name">{label}</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => removeComposerAttachment(attachment.id)}
+                                        className="terminal-chat-attachment-remove"
+                                        title="移除图片"
+                                        aria-label="移除图片"
+                                      >
+                                        <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
+                                          <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                        </svg>
+                                      </button>
+                                    </div>
+                                  );
+                                })}
                               </div>
-                            );
-                          })}
-                        </div>
-                      ) : null}
+                            </div>
+                          )}
 
-                      <div className="flex items-center gap-3">
-                        <button
-                          type="button"
-                          onClick={() => void pickComposerAttachments()}
-                          disabled={loading}
-                          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] border border-[#e1dbcf] bg-white text-slate-500 transition-all hover:-translate-y-[1px] hover:border-[#d4cbbb] hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-45"
-                          title="添加图片"
-                          aria-label="添加图片"
-                        >
-                          <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
-                            <path d="M8 7.5V6.8A2.8 2.8 0 0110.8 4h2.4A2.8 2.8 0 0116 6.8v.7h1.2A2.8 2.8 0 0120 10.3v6.9a2.8 2.8 0 01-2.8 2.8H6.8A2.8 2.8 0 014 17.2v-6.9a2.8 2.8 0 012.8-2.8H8z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-                            <path d="M12 10v4m-2-2h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                          </svg>
-                        </button>
-
-                        <div className="flex min-h-[44px] flex-1 items-center">
                           <textarea
                             ref={composerRef}
                             value={activeDraft}
@@ -2210,20 +2095,54 @@ export function ModelChatPage() {
                             onKeyDown={handleComposerKeyDown}
                             rows={1}
                             placeholder="有问题，尽管问，也可以直接附图"
-                            className="max-h-[180px] min-h-[30px] w-full resize-none overflow-y-auto bg-transparent px-1 py-2 text-[15px] leading-7 text-slate-900 outline-none placeholder:text-slate-400"
+                            className="terminal-chat-textarea text-[15px]"
                           />
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => void sendMessage()}
-                          disabled={loading || !activeSelectionOption || (!activeDraft.trim() && activeAttachments.length === 0)}
-                          className="inline-flex h-11 w-11 shrink-0 items-center justify-center self-end rounded-[12px] bg-[#111111] text-white transition-all hover:-translate-y-[1px] hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
-                          title={loading ? "等待响应" : "发送"}
-                          aria-label={loading ? "等待响应" : "发送"}
-                        >
-                          <SendIcon />
-                        </button>
+                        <div className="button-area" data-provider={activeSelection?.serviceType ?? "openaiCompatible"}>
+                          <div className="button-area-left">
+                            <ModelSelectionControl
+                              optionGroups={optionGroups}
+                              activeSelection={activeSelection}
+                              activeSelectionOrigin={activeSelectionOrigin}
+                              onSelectServiceType={selectServiceType}
+                              onSelectModel={selectModel}
+                              className="min-w-0 flex-1"
+                            />
+
+                            <div className="terminal-chat-footer-control">
+                              <button
+                                type="button"
+                                onClick={() => void pickComposerAttachments()}
+                                disabled={loading}
+                                className="selector-button selector-shortcut-button"
+                                title="添加图片"
+                                aria-label="添加图片"
+                              >
+                                <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                                  <path d="M8 7.5V6.8A2.8 2.8 0 0110.8 4h2.4A2.8 2.8 0 0116 6.8v.7h1.2A2.8 2.8 0 0120 10.3v6.9a2.8 2.8 0 01-2.8 2.8H6.8A2.8 2.8 0 014 17.2v-6.9a2.8 2.8 0 012.8-2.8H8z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                                  <path d="M12 10v4m-2-2h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                </svg>
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="button-area-right">
+                            <div className="text-[11px] text-slate-400">
+                              Enter 发送
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void sendMessage()}
+                              disabled={loading || !activeSelectionOption || (!activeDraft.trim() && activeAttachments.length === 0)}
+                              className="submit-button inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] bg-[#111111] text-white transition-all hover:-translate-y-[1px] hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
+                              title={loading ? "等待响应" : "发送"}
+                              aria-label={loading ? "等待响应" : "发送"}
+                            >
+                              <SendIcon />
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>

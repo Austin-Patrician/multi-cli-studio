@@ -13,7 +13,19 @@
   --workspace-panel-danger: #dc2626;
   --workspace-panel-warning: #d97706;
   background: var(--workspace-panel-bg);
-  border-left-color: rgba(148, 163, 184, 0.24) !important;
+  position: relative;
+}
+
+.workspace-right-panel-shell::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: rgba(148, 163, 184, 0.24);
+  pointer-events: none;
+  z-index: 2;
 }
 
 .workspace-right-panel {
@@ -57,8 +69,40 @@
   backdrop-filter: blur(6px);
 }
 
+.workspace-right-panel-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+
+.workspace-right-panel-action-cluster {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
 .workspace-right-panel-toolbar {
   justify-content: space-between;
+}
+
+.workspace-right-panel-mode-row {
+  gap: 12px;
+}
+
+.workspace-right-panel-mode-cluster {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.workspace-window-controls {
+  flex: 0 0 auto;
 }
 
 .workspace-right-panel-summary {

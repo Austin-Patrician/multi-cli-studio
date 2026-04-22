@@ -117,7 +117,7 @@ const navItems: SidebarNavItem[] = [
   },
   {
     to: "/automation",
-    label: "CLI 自动化",
+    label: "自动化",
     icon: IconAutomation,
     matchPatterns: [
       { path: "/automation", end: true },
@@ -127,7 +127,7 @@ const navItems: SidebarNavItem[] = [
   },
   {
     to: "/automation/workflows",
-    label: "CLI 工作流",
+    label: "工作流",
     icon: IconWorkflow,
     matchPatterns: [{ path: "/automation/workflows", end: false }],
   },
@@ -492,7 +492,7 @@ export function Sidebar() {
     >
       <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-emerald-400/20 to-transparent" />
 
-      <div className="flex h-6 shrink-0" />
+      <div className="flex h-3 shrink-0" />
 
       <div className="flex-1 overflow-y-auto px-3 pb-4">
         <div className="space-y-4">

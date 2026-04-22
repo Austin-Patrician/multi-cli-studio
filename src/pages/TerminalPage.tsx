@@ -7,6 +7,7 @@ import { TerminalDock, useTerminalDockState } from "../components/chat/TerminalD
 import { RuntimeLogDock } from "../components/chat/RuntimeLogDock";
 import { useRuntimeLogSession } from "../components/chat/useRuntimeLogSession";
 import { useWorkspaceLaunchScript } from "../components/chat/useWorkspaceLaunchScript";
+import { WORKSPACE_PANEL_MODES, WORKSPACE_PANEL_STORAGE_KEY, type WorkspacePanelMode } from "../components/chat/workspacePanelModes";
 import { useStore } from "../lib/store";
 
 const WorkspaceRightPanel = lazy(async () =>
@@ -39,6 +40,11 @@ export function TerminalPage() {
     const raw = window.localStorage.getItem(STATUS_PANEL_STORAGE_KEY);
     return raw == null ? false : raw === "true";
   });
+  const [rightPanelMode, setRightPanelMode] = useState<WorkspacePanelMode>(() => {
+    if (typeof window === "undefined") return "git";
+    const raw = window.localStorage.getItem(WORKSPACE_PANEL_STORAGE_KEY);
+    return WORKSPACE_PANEL_MODES.some((item) => item.id === raw) ? (raw as WorkspacePanelMode) : "git";
+  });
   const runtimeRunState = useRuntimeLogSession({ activeWorkspace });
   const launchScriptState = useWorkspaceLaunchScript({
     activeWorkspace,
@@ -59,6 +65,11 @@ export function TerminalPage() {
       closeDock();
     }
   }, [closeDock, runtimeRunState.runtimeConsoleVisible, terminalDockOpen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(WORKSPACE_PANEL_STORAGE_KEY, rightPanelMode);
+  }, [rightPanelMode]);
 
   function toggleRightPanel() {
     setRightPanelCollapsed((current) => {
@@ -121,68 +132,75 @@ export function TerminalPage() {
         onSaveLaunchScript={() => {
           void launchScriptState.onSaveLaunchScript();
         }}
+        panelMode={rightPanelMode}
+        onSelectPanelMode={setRightPanelMode}
       />
-      <div className="flex-1 flex min-h-0 flex-col">
-        <div className="flex min-h-0 flex-1">
-          <div className="flex-1 flex flex-col min-w-0">
-            <ChatConversation />
-            <ChatPromptBar
-              statusPanelExpanded={!statusPanelCollapsed}
-              onToggleStatusPanel={toggleStatusPanel}
-            />
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1">
+            <div className="flex min-w-0 flex-1 flex-col">
+              <ChatConversation />
+              <ChatPromptBar
+                statusPanelExpanded={!statusPanelCollapsed}
+                onToggleStatusPanel={toggleStatusPanel}
+              />
+            </div>
+            {!rightPanelCollapsed ? (
+              <Suspense
+                fallback={
+                  <aside className="h-full w-[380px] min-w-[340px] bg-[#fcfcfd]">
+                    <div className="flex h-full items-center justify-center text-sm text-secondary">
+                      Loading workspace panel…
+                    </div>
+                  </aside>
+                }
+              >
+                <WorkspaceRightPanel
+                  statusPanelCollapsed={statusPanelCollapsed}
+                  mode={rightPanelMode}
+                />
+              </Suspense>
+            ) : null}
           </div>
-          {!rightPanelCollapsed ? (
-            <Suspense
-              fallback={
-                <aside className="w-[380px] min-w-[340px] border-l border-border bg-[#fcfcfd]">
-                  <div className="flex h-full items-center justify-center text-sm text-secondary">
-                    Loading workspace panel…
-                  </div>
-                </aside>
+          {runtimeRunState.runtimeConsoleVisible ? (
+            <RuntimeLogDock
+              isVisible={runtimeRunState.runtimeConsoleVisible}
+              status={runtimeRunState.runtimeConsoleStatus}
+              commandPreview={runtimeRunState.runtimeConsoleCommandPreview}
+              log={runtimeRunState.runtimeConsoleLog}
+              error={runtimeRunState.runtimeConsoleError}
+              exitCode={runtimeRunState.runtimeConsoleExitCode}
+              truncated={runtimeRunState.runtimeConsoleTruncated}
+              autoScroll={runtimeRunState.runtimeAutoScroll}
+              wrapLines={runtimeRunState.runtimeWrapLines}
+              commandPresetOptions={runtimeRunState.runtimeCommandPresetOptions}
+              commandPresetId={runtimeRunState.runtimeCommandPresetId}
+              commandInput={runtimeRunState.runtimeCommandInput}
+              onRun={runtimeRunState.onRunProject}
+              onCommandPresetChange={runtimeRunState.onSelectRuntimeCommandPreset}
+              onCommandInputChange={runtimeRunState.onChangeRuntimeCommandInput}
+              onStop={runtimeRunState.onStopProject}
+              onClear={runtimeRunState.onClearRuntimeLogs}
+              onCopy={runtimeRunState.onCopyRuntimeLogs}
+              onToggleAutoScroll={runtimeRunState.onToggleRuntimeAutoScroll}
+              onToggleWrapLines={runtimeRunState.onToggleRuntimeWrapLines}
+            />
+          ) : (
+            <TerminalDock
+              isOpen={terminalDockOpen}
+              onToggleOpen={handleToggleTerminalPanel}
+              defaultWorkspace={
+                activeWorkspace
+                  ? {
+                      id: activeWorkspace.id,
+                      rootPath: activeWorkspace.rootPath,
+                      name: activeWorkspace.name,
+                    }
+                  : null
               }
-            >
-              <WorkspaceRightPanel statusPanelCollapsed={statusPanelCollapsed} />
-            </Suspense>
-          ) : null}
+            />
+          )}
         </div>
-        {runtimeRunState.runtimeConsoleVisible ? (
-          <RuntimeLogDock
-            isVisible={runtimeRunState.runtimeConsoleVisible}
-            status={runtimeRunState.runtimeConsoleStatus}
-            commandPreview={runtimeRunState.runtimeConsoleCommandPreview}
-            log={runtimeRunState.runtimeConsoleLog}
-            error={runtimeRunState.runtimeConsoleError}
-            exitCode={runtimeRunState.runtimeConsoleExitCode}
-            truncated={runtimeRunState.runtimeConsoleTruncated}
-            autoScroll={runtimeRunState.runtimeAutoScroll}
-            wrapLines={runtimeRunState.runtimeWrapLines}
-            commandPresetOptions={runtimeRunState.runtimeCommandPresetOptions}
-            commandPresetId={runtimeRunState.runtimeCommandPresetId}
-            commandInput={runtimeRunState.runtimeCommandInput}
-            onRun={runtimeRunState.onRunProject}
-            onCommandPresetChange={runtimeRunState.onSelectRuntimeCommandPreset}
-            onCommandInputChange={runtimeRunState.onChangeRuntimeCommandInput}
-            onStop={runtimeRunState.onStopProject}
-            onClear={runtimeRunState.onClearRuntimeLogs}
-            onCopy={runtimeRunState.onCopyRuntimeLogs}
-            onToggleAutoScroll={runtimeRunState.onToggleRuntimeAutoScroll}
-            onToggleWrapLines={runtimeRunState.onToggleRuntimeWrapLines}
-          />
-        ) : (
-          <TerminalDock
-            isOpen={terminalDockOpen}
-            onToggleOpen={handleToggleTerminalPanel}
-            defaultWorkspace={
-              activeWorkspace
-                ? {
-                    id: activeWorkspace.id,
-                    rootPath: activeWorkspace.rootPath,
-                    name: activeWorkspace.name,
-                  }
-                : null
-            }
-          />
-        )}
       </div>
     </div>
   );

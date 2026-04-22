@@ -19,7 +19,44 @@
 }
 
 .settings-header {
-  display: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 48px;
+  padding: 8px 16px 10px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+  background: rgba(248, 249, 252, 0.92);
+  backdrop-filter: blur(10px);
+}
+
+.settings-header-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-header-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #0f172a;
+}
+
+.settings-header-subtitle {
+  font-size: 11px;
+  color: rgba(15, 23, 42, 0.48);
+  white-space: nowrap;
+}
+
+.settings-header-drag-region {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: 0;
+}
+
+.settings-header-window-controls {
+  margin-left: auto;
 }
 
 .settings-body {
@@ -89,7 +126,7 @@
 .dcc-settings-scroll {
   width: min(1080px, 100%);
   margin: 0 auto;
-  padding: 0 30px 44px;
+  padding: 24px 30px 44px;
 }
 
 .dcc-settings-scroll.is-full-width {

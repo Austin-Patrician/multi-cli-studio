@@ -22,6 +22,7 @@ import { DesktopAgentsSection } from "../components/settings/DesktopAgentsSectio
 import { DesktopSkillsSection } from "../components/settings/DesktopSkillsSection";
 import { DesktopUsageSection } from "../components/settings/DesktopUsageSection";
 import { DesktopVendorsSection } from "../components/settings/DesktopVendorsSection";
+import { DesktopWindowControls } from "../components/DesktopWindowChrome";
 import { GlobalGitDrawer } from "../components/settings/GlobalGitDrawer";
 import { useStore } from "../lib/store";
 import type { AgentId, GitPanelData, TerminalTab, WorkspaceRef } from "../lib/models";
@@ -58,14 +59,14 @@ type ProjectView = {
 
 const NAV_ITEMS: SidebarNavItem[] = [
   { id: "settings", label: "设置", icon: Settings },
-  { id: "models", label: "对话模型管理", icon: Cpu },
+  { id: "models", label: "对话模型", icon: Cpu },
   { id: "agents", label: "智能体", icon: Bot },
   { id: "vendors", label: "供应商", icon: Settings },
   { id: "projects", label: "项目", icon: FolderOpen },
-  { id: "session-management", label: "会话管理", icon: Archive },
+  { id: "session-management", label: "会话", icon: Archive },
   { id: "connections", label: "连接", icon: Link2 },
   { id: "mcp", label: "MCP", icon: Server },
-  { id: "skills", label: "技能", icon: BookOpen },
+  { id: "skills", label: "Skill", icon: BookOpen },
   { id: "usage", label: "使用统计", icon: BarChart3 },
 ];
 
@@ -330,9 +331,16 @@ export function DesktopSettingsPage() {
   }
 
   return (
-    <div className={cx("settings-embedded", "dcc-settings-root", gitWorkbenchOpen && "is-git-drawer-open")}>
-      <div className="settings-header" />
-      <div className={cx("settings-body", sidebarCollapsed && "is-sidebar-collapsed")}>
+    <div className={cx("settings-embedded", "dcc-settings-root", gitWorkbenchOpen && "is-git-drawer-open", "flex h-full flex-col")}>
+      <header className="settings-header">
+        <div className="settings-header-copy">
+          <div className="settings-header-title">Settings</div>
+          <div className="settings-header-subtitle">Multi CLI Studio desktop configuration</div>
+        </div>
+        <div className="settings-header-drag-region" data-tauri-drag-region="" />
+        <DesktopWindowControls className="settings-header-window-controls" />
+      </header>
+      <div className={cx("settings-body", sidebarCollapsed && "is-sidebar-collapsed", "min-h-0 flex-1")}>
         <aside className={cx("settings-sidebar", sidebarCollapsed && "is-collapsed")}>
           <button
             type="button"
