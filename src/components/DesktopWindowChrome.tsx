@@ -111,7 +111,7 @@ export function DesktopWindowControls({ className = "" }: { className?: string }
           event.stopPropagation();
           void handleMinimize();
         }}
-        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent bg-white/88 text-slate-400 shadow-[0_6px_20px_rgba(15,23,42,0.06)] backdrop-blur-sm transition-colors hover:bg-slate-100 hover:text-slate-700"
+        className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white/88 text-slate-400 backdrop-blur-sm transition-colors hover:bg-slate-100 hover:text-slate-700"
         aria-label="最小化窗口"
         title="最小化"
       >
@@ -123,7 +123,7 @@ export function DesktopWindowControls({ className = "" }: { className?: string }
           event.stopPropagation();
           void handleToggleMaximize();
         }}
-        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent bg-white/88 text-slate-400 shadow-[0_6px_20px_rgba(15,23,42,0.06)] backdrop-blur-sm transition-colors hover:bg-slate-100 hover:text-slate-700"
+        className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white/88 text-slate-400 backdrop-blur-sm transition-colors hover:bg-slate-100 hover:text-slate-700"
         aria-label={maximized ? "还原窗口" : "最大化窗口"}
         title={maximized ? "还原" : "最大化"}
       >
@@ -135,7 +135,7 @@ export function DesktopWindowControls({ className = "" }: { className?: string }
           event.stopPropagation();
           void handleClose();
         }}
-        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent bg-white/88 text-slate-400 shadow-[0_6px_20px_rgba(15,23,42,0.06)] backdrop-blur-sm transition-colors hover:bg-rose-50 hover:text-rose-600"
+        className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-white/88 text-slate-400 backdrop-blur-sm transition-colors hover:bg-rose-50 hover:text-rose-600"
         aria-label="关闭窗口"
         title="关闭"
       >

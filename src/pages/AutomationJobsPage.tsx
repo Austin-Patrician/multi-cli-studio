@@ -153,6 +153,18 @@ function headerIconButtonClass(variant: "primary" | "secondary" | "danger" | "wa
   return cn(buttonClass(variant, "icon"), "h-10 w-10 rounded-[14px]");
 }
 
+function compactHeaderIconButtonClass(variant: "primary" | "secondary") {
+  const tones = {
+    primary: "text-slate-700 hover:bg-slate-100 hover:text-slate-900",
+    secondary: "text-slate-500 hover:bg-slate-100 hover:text-slate-700",
+  } as const;
+
+  return cn(
+    "inline-flex h-7 w-7 items-center justify-center rounded-[9px] p-0 transition-colors active:scale-95",
+    tones[variant]
+  );
+}
+
 function jobCardClass(status?: string | null, isSelected = false) {
   const stateTone = (() => {
     switch (status) {
@@ -592,8 +604,8 @@ export function AutomationJobsPage() {
 
   return (
     <div className="h-full overflow-hidden bg-slate-50/50 px-4 py-6 text-slate-900 sm:px-6 lg:px-8">
-      <div className="mx-auto flex h-full max-w-[96rem] min-h-0 flex-col gap-6">
-        <section className="flex shrink-0 flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+      <div className="mx-auto flex h-full max-w-[96rem] min-h-0 flex-col gap-4">
+        <section className="flex shrink-0 flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div className="space-y-1.5">
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">自动化任务</h1>
@@ -602,23 +614,23 @@ export function AutomationJobsPage() {
             <p className="text-sm text-slate-500">左侧选择任务，右侧直接查看最近一次运行的概览与执行日志。</p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2 xl:mr-[10px] xl:flex-nowrap">
             <button
               type="button"
               onClick={() => void refresh()}
-              className={cn(buttonClass("secondary", "icon"), "text-slate-600")}
+              className={compactHeaderIconButtonClass("secondary")}
               title="刷新状态"
             >
-              <img src={refreshIcon} alt="" className="h-5 w-5" />
+              <img src={refreshIcon} alt="" className="h-3 w-3" />
             </button>
             <button
               type="button"
               onClick={() => navigate("/automation/jobs/new")}
-              className={headerIconButtonClass("primary")}
+              className={compactHeaderIconButtonClass("primary")}
               title="新建任务"
               aria-label="新建任务"
             >
-              <PlusIcon className="h-4 w-4" />
+              <PlusIcon className="h-2.5 w-2.5" />
             </button>
           </div>
         </section>
