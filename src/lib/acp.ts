@@ -1,4 +1,5 @@
 import { AgentId } from "./models";
+import type { VendorCustomModel } from "./vendorModels";
 
 export type AcpCommandKind =
   | "plan" | "model" | "compact" | "clear" | "rewind"
@@ -25,7 +26,7 @@ export interface AcpCommand {
 
 export type AcpPickerCommandKind = Extract<AcpCommandKind, "model" | "permissions" | "effort">;
 
-export type AcpOptionSource = "runtime" | "fallback" | "manual";
+export type AcpOptionSource = "runtime" | "fallback" | "custom" | "manual";
 
 export interface AcpOptionDef {
   value: string;
@@ -45,6 +46,48 @@ export interface AcpCliCapabilities {
   model: AcpOptionCatalog;
   permissions: AcpOptionCatalog;
   effort: AcpOptionCatalog;
+}
+
+export function mergeAcpModelCatalog(
+  catalog: AcpOptionCatalog | null | undefined,
+  customModels: VendorCustomModel[],
+): AcpOptionCatalog | null {
+  const merged = new Map<string, AcpOptionDef>();
+  for (const option of catalog?.options ?? []) {
+    merged.set(option.value, option);
+  }
+  for (const model of customModels) {
+    const existing = merged.get(model.id);
+    merged.set(model.id, {
+      value: model.id,
+      label: model.label || existing?.label || model.id,
+      description:
+        model.description?.trim() ||
+        existing?.description ||
+        "Added from Vendor settings > Plugin Models.",
+      source: "custom",
+    });
+  }
+
+  const options = Array.from(merged.values());
+  if (catalog) {
+    return {
+      ...catalog,
+      options,
+      note:
+        customModels.length > 0
+          ? `${catalog.note ? `${catalog.note} ` : ""}Includes ${customModels.length} custom model${customModels.length === 1 ? "" : "s"} from Vendor settings.`
+          : catalog.note,
+    };
+  }
+  if (customModels.length === 0) {
+    return null;
+  }
+  return {
+    supported: true,
+    options,
+    note: `Includes ${customModels.length} custom model${customModels.length === 1 ? "" : "s"} from Vendor settings.`,
+  };
 }
 
 export interface AcpCommandResult {

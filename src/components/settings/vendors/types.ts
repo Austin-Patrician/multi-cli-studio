@@ -1,18 +1,12 @@
-import type { AgentId } from "../../../lib/models";
+import {
+  isValidVendorModelId,
+  type VendorCustomModel,
+  type VendorTab,
+  VENDOR_MODEL_STORAGE_KEYS,
+} from "../../../lib/vendorModels";
 
-export type VendorTab = AgentId;
-
-export interface VendorCustomModel {
-  id: string;
-  label: string;
-  description?: string;
-}
-
-export const VENDOR_MODEL_STORAGE_KEYS = {
-  claude: "claude-custom-models",
-  codex: "codex-custom-models",
-  gemini: "gemini-custom-models",
-} as const satisfies Record<VendorTab, string>;
+export { isValidVendorModelId, VENDOR_MODEL_STORAGE_KEYS };
+export type { VendorCustomModel, VendorTab };
 
 export type GeminiAuthMode =
   | "custom"
@@ -50,8 +44,3 @@ export const GEMINI_AUTH_MODES: GeminiAuthMode[] = [
   "vertex_service_account",
   "vertex_api_key",
 ];
-
-export function isValidVendorModelId(id: string) {
-  const trimmed = id.trim();
-  return trimmed.length > 0 && trimmed.length <= 256;
-}

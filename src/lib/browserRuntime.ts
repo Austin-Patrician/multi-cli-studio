@@ -367,6 +367,7 @@ function defaultSettings(): AppSettings {
     cliPaths: { codex: "auto", claude: "auto", gemini: "auto" },
     sshConnections: [],
     customAgents: [],
+    defaultNewWorkspaceCli: "codex",
     projectRoot: state?.workspace?.projectRoot ?? "C:\\Users\\admin\\source\\repos\\multi-cli-studio",
     maxTurnsPerAgent: 50,
     maxOutputCharsPerTurn: 100000,
@@ -533,6 +534,13 @@ function normalizeSettings(value: unknown): AppSettings {
           })
           .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
       : defaults.customAgents,
+    defaultNewWorkspaceCli:
+      raw.defaultNewWorkspaceCli === "auto" ||
+      raw.defaultNewWorkspaceCli === "codex" ||
+      raw.defaultNewWorkspaceCli === "claude" ||
+      raw.defaultNewWorkspaceCli === "gemini"
+        ? raw.defaultNewWorkspaceCli
+        : defaults.defaultNewWorkspaceCli,
     projectRoot:
       typeof raw.projectRoot === "string" && raw.projectRoot.trim()
         ? raw.projectRoot

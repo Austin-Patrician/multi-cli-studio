@@ -40,6 +40,7 @@ import {
   getCommandCategoryLabel,
   getPickerCatalog,
   isPickerCommandKind,
+  mergeAcpModelCatalog,
   parseSlashCommand,
 } from "../../lib/acp";
 import {
@@ -61,6 +62,7 @@ import { createChatAttachment } from "../../lib/chatAttachments";
 import { AgentIcon } from "../AgentIcon";
 import { resolveSelectedCustomAgent } from "../../lib/customAgents";
 import { useStore } from "../../lib/store";
+import { useVendorModels, VENDOR_MODEL_STORAGE_KEYS } from "../../lib/vendorModels";
 import { loadWorkspaceFileIndex } from "../../lib/workspaceFileIndex";
 import { CLI_OPTIONS } from "./CliSelector";
 import { PromptOverlay, PromptOverlayItem, PromptOverlaySection } from "./PromptOverlay";
@@ -289,9 +291,12 @@ function footerOptionDescription(option: AcpOptionDef) {
       ? "从当前 CLI 能力中检测"
       : option.source === "fallback"
         ? "内置预设"
+        : option.source === "custom"
+          ? "来自供应商设置里的自定义模型"
         : "手动输入值"
   );
 }
+
 
 function FooterMenuSection({
   title,
@@ -977,7 +982,7 @@ function buildArgumentOverlay(
         ? currentPermissionLabel(activeTab)
         : currentEffortLabel(activeTab);
 
-  if (capabilityStatus === "loading" || (capabilityStatus !== "error" && !catalog)) {
+  if (!catalog && (capabilityStatus === "loading" || capabilityStatus === "idle")) {
     return {
       kind: "command-argument",
       commandKind,
@@ -1050,13 +1055,21 @@ function buildArgumentOverlay(
         ? "runtime"
         : option.source === "fallback"
           ? "preset"
+          : option.source === "custom"
+            ? "custom"
           : "manual";
 
     const itemId = `${commandKind}-${option.value}`;
     appendSectionItem(
       sections,
       sourceKey,
-      sourceLabel === "runtime" ? "Detected" : sourceLabel === "preset" ? "Presets" : "Typed Value",
+      sourceLabel === "runtime"
+        ? "Detected"
+        : sourceLabel === "preset"
+          ? "Presets"
+          : sourceLabel === "custom"
+            ? "Custom"
+            : "Typed Value",
       {
         id: itemId,
         title: option.label,
@@ -1346,6 +1359,9 @@ export function ChatPromptBar({
   );
   const acpCapabilitiesByCli = useStore((s) => s.acpCapabilitiesByCli);
   const acpCapabilityStatusByCli = useStore((s) => s.acpCapabilityStatusByCli);
+  const { models: claudeVendorModels } = useVendorModels(VENDOR_MODEL_STORAGE_KEYS.claude);
+  const { models: codexVendorModels } = useVendorModels(VENDOR_MODEL_STORAGE_KEYS.codex);
+  const { models: geminiVendorModels } = useVendorModels(VENDOR_MODEL_STORAGE_KEYS.gemini);
   const cliSkillsByContext = useStore((s) => s.cliSkillsByContext);
   const cliSkillStatusByContext = useStore((s) => s.cliSkillStatusByContext);
   const setTabDraftPrompt = useStore((s) => s.setTabDraftPrompt);
@@ -1391,6 +1407,28 @@ export function ChatPromptBar({
   const cliSkillStatus = cliSkillCacheKey
     ? cliSkillStatusByContext[cliSkillCacheKey] ?? "idle"
     : "idle";
+  const capabilities = acpCapabilitiesByCli[effectiveCli] ?? null;
+  const capabilityStatus = acpCapabilityStatusByCli[effectiveCli] ?? "idle";
+  const currentVendorModels = useMemo(() => {
+    if (effectiveCli === "codex") return codexVendorModels;
+    if (effectiveCli === "gemini") return geminiVendorModels;
+    return claudeVendorModels;
+  }, [claudeVendorModels, codexVendorModels, effectiveCli, geminiVendorModels]);
+  const modelCatalog = useMemo(
+    () => mergeAcpModelCatalog(capabilities?.model, currentVendorModels),
+    [capabilities?.model, currentVendorModels],
+  );
+  const pickerCapabilities = useMemo(() => {
+    if (!capabilities && !modelCatalog) {
+      return null;
+    }
+    return {
+      cliId: effectiveCli,
+      model: modelCatalog ?? { supported: false, options: [], note: null },
+      permissions: capabilities?.permissions ?? { supported: false, options: [], note: null },
+      effort: capabilities?.effort ?? { supported: false, options: [], note: null },
+    } satisfies AcpCliCapabilities;
+  }, [capabilities, effectiveCli, modelCatalog]);
   const resolvedSelectedAgent = useMemo(
     () => resolveSelectedCustomAgent(activeTab?.selectedAgent ?? null, customAgents),
     [activeTab?.selectedAgent, customAgents]
@@ -1580,7 +1618,7 @@ export function ChatPromptBar({
       return buildArgumentOverlay(
         activeTab,
         commandKind,
-        acpCapabilitiesByCli[effectiveCli],
+        pickerCapabilities,
         acpCapabilityStatusByCli[effectiveCli],
         pickerMatch[2] ?? ""
       );
@@ -1589,11 +1627,11 @@ export function ChatPromptBar({
     return buildCommandListOverlay(activeTab, slashQuery);
   }, [
     activeTab,
-    acpCapabilitiesByCli,
     acpCapabilityStatusByCli,
     cliSkillStatus,
     cliSkills,
     effectiveCli,
+    pickerCapabilities,
     rawSlashPrompt,
     reviewPromptOpen,
     slashQuery,
@@ -2340,13 +2378,11 @@ export function ChatPromptBar({
   const usageTooltip = contextWindowTokens
     ? `真实 usage ${actualUsageTokens.toLocaleString()} tokens，占 ${titleCaseCli(effectiveCli)} 当前上报的 context window ${contextWindowTokens.toLocaleString()} tokens 的 ${usagePercentLabel}。`
     : `真实 usage ${actualUsageTokens.toLocaleString()} tokens。${titleCaseCli(effectiveCli)} 当前没有返回可用的 context window，因此不显示百分比。`;
-  const capabilities = acpCapabilitiesByCli[effectiveCli] ?? null;
-  const capabilityStatus = acpCapabilityStatusByCli[effectiveCli] ?? "idle";
   const currentProviderItem =
     providerItems.find((item) => item.id === activeTab.selectedCli) ??
     providerItems[0];
   const permissionOptions = capabilities?.permissions.options ?? [];
-  const modelOptions = capabilities?.model.options ?? [];
+  const modelOptions = modelCatalog?.options ?? [];
   const currentPermissionValue = currentPermissionLabel(activeTab);
   const currentModelValue = activeTab.modelOverrides[effectiveCli] ?? "";
   const currentPermissionDisplay =
@@ -2376,6 +2412,7 @@ export function ChatPromptBar({
     !capabilities?.permissions;
   const modelMenuLoading =
     !isAutoMode &&
+    modelOptions.length === 0 &&
     (capabilityStatus === "idle" || capabilityStatus === "loading") &&
     !capabilities?.model;
   const sendDisabled = !isStreaming && prompt.trim().length === 0 && draftAttachments.length === 0;

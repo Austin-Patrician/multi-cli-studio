@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { RefreshCw, Server, ShieldCheck, TriangleAlert, Wrench } from "lucide-react";
+import { RefreshCw, Settings, ShieldAlert, TerminalSquare, Wrench, CheckCircle2, AlertCircle, Box, Power } from "lucide-react";
 import { bridge } from "../../lib/bridge";
 import type { GlobalMcpServerEntry, SettingsEngineStatus, SettingsEngineType, WorkspaceRef } from "../../lib/models";
 
@@ -14,7 +14,29 @@ type CodexRuntimeServer = {
 const ENGINE_ORDER: SettingsEngineType[] = ["claude", "codex", "gemini"];
 
 function badgeClass(installed: boolean) {
-  return installed ? "refined-badge refined-badge-success" : "refined-badge refined-badge-warn";
+  return installed ? "status-badge status-badge-success" : "status-badge status-badge-warn";
+}
+
+function engineLabel(engine: SettingsEngineType) {
+  return engine === "codex" ? "Codex" : engine === "claude" ? "Claude Code" : "Gemini CLI";
+}
+
+function sourceLabel(source: GlobalMcpServerEntry["source"]) {
+  return source === "claude_json" ? "claude.json" : "Multi CLI Studio";
+}
+
+function serverEndpointLabel(server: GlobalMcpServerEntry) {
+  if (server.command?.trim()) return "Command";
+  if (server.url?.trim()) return "URL";
+  return "Endpoint";
+}
+
+function serverEndpointValue(server: GlobalMcpServerEntry) {
+  return server.command?.trim() || server.url?.trim() || "未知";
+}
+
+function transportDisplay(server: GlobalMcpServerEntry) {
+  return server.transport?.trim() || "未显式配置";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -116,438 +138,696 @@ export function DesktopMcpSection({
     return globalServers.filter((entry) => entry.source === "ccgui_config");
   }, [globalServers, selectedEngine]);
 
-  const selectedVisibleServerCount =
-    selectedEngine === "codex"
-      ? new Set(
-          [...selectedConfigServers.map((entry) => entry.name), ...codexRuntimeServers.map((entry) => entry.name)].map((name) =>
-            name.toLowerCase()
-          )
-        ).size
-      : selectedConfigServers.length;
-
   const selectedToolCount =
     selectedEngine === "codex"
       ? codexRuntimeServers.reduce((sum, server) => sum + server.toolNames.length, 0)
       : 0;
 
+  const engineName = engineLabel(selectedEngine);
+  const configuredEnabledCount = selectedConfigServers.filter((server) => server.enabled).length;
+  const configuredDisabledCount = Math.max(0, selectedConfigServers.length - configuredEnabledCount);
+  const engineSummaryFields: Array<{
+    label: string;
+    value: string;
+    tone: "default" | "muted" | "success" | "warn";
+    monospace?: boolean;
+  }> = [
+    {
+      label: "安装状态",
+      value: selectedStatus?.installed ? "已安装" : "未安装",
+      tone: selectedStatus?.installed ? "success" : "warn",
+    },
+    {
+      label: "版本",
+      value: selectedStatus?.version?.trim() || "未知",
+      tone: "default",
+      monospace: true,
+    },
+    {
+      label: "命令路径",
+      value: selectedStatus?.binPath?.trim() || "未检测到",
+      tone: selectedStatus?.binPath?.trim() ? "default" : "muted",
+      monospace: true,
+    },
+    {
+      label: "错误状态",
+      value: selectedStatus?.error?.trim() || "正常",
+      tone: selectedStatus?.error?.trim() ? "warn" : "success",
+    },
+  ];
+
   return (
-    <section className="settings-section" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+    <section className="settings-section" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
       <style>{`
         .refined-mcp-container {
           display: flex;
           flex-direction: column;
-          gap: 16px;
-          color: #333;
+          gap: 18px;
+          color: #09090b;
+          font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
         }
         .refined-header {
           display: flex;
-          flex-direction: column;
-          gap: 4px;
+          justify-content: space-between;
+          align-items: flex-end;
+          margin-bottom: 4px;
         }
         .refined-title {
-          font-size: 1.125rem;
+          font-size: 1.25rem;
           font-weight: 600;
-          color: #1a1a1a;
-          letter-spacing: -0.01em;
+          color: #09090b;
+          letter-spacing: -0.02em;
         }
         .refined-subtitle {
-          font-size: 0.8125rem;
-          color: #666;
+          font-size: 0.875rem;
+          color: #52525b;
+          margin-top: 6px;
         }
-        .refined-toolbar {
+        .refined-tabs {
+          display: inline-flex;
+          background: #f4f4f5;
+          padding: 4px;
+          border-radius: 10px;
+          gap: 4px;
+          align-self: flex-start;
+          border: 1px solid #e4e4e7;
+          box-shadow: inset 0 1px 2px rgba(0,0,0,0.02);
+        }
+        .refined-tab {
+          padding: 6px 16px;
+          font-size: 0.875rem;
+          font-weight: 500;
+          color: #52525b;
+          background: transparent;
+          border: none;
+          border-radius: 6px;
+          cursor: pointer;
+          transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .refined-tab:hover {
+          color: #09090b;
+        }
+        .refined-tab.is-active {
+          background: #ffffff;
+          color: #09090b;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px -1px rgba(0,0,0,0.1);
+        }
+        .refined-banner {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 14px;
+          padding: 16px 18px;
+          background: #ffffff;
+          border: 1px solid #e4e4e7;
+          border-left: 4px solid #18181b;
+          border-radius: 12px;
+          box-shadow: 0 10px 24px rgba(15, 23, 42, 0.035);
+        }
+        .refined-banner-left {
           display: flex;
-          align-items: center;
+          flex-direction: column;
           gap: 12px;
+          min-width: 0;
+        }
+        .refined-banner-head {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+        }
+        .refined-banner-title {
+          font-weight: 650;
+          font-size: 0.98rem;
+          color: #09090b;
+        }
+        .refined-banner-caption {
+          margin-top: 4px;
+          font-size: 0.78rem;
+          color: #71717a;
+          line-height: 1.5;
+        }
+        .refined-banner-meta {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .refined-banner-field {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          min-width: 0;
+          padding: 9px 10px;
+          border-radius: 10px;
+          background: linear-gradient(180deg, #fcfcfd 0%, #f8fafc 100%);
+          border: 1px solid #eceff3;
+        }
+        .refined-banner-field-label {
+          font-size: 0.6875rem;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.12em;
+          color: #71717a;
+        }
+        .refined-banner-field-value {
+          min-width: 0;
+          font-size: 0.77rem;
+          color: #111827;
+          line-height: 1.45;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+        }
+        .refined-banner-field-value.is-monospace {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+          font-size: 0.75rem;
+        }
+        .refined-banner-field-value.is-muted {
+          color: #71717a;
+        }
+        .refined-banner-field-value.is-success {
+          color: #047857;
+          font-weight: 600;
+        }
+        .refined-banner-field-value.is-warn {
+          color: #b45309;
+          font-weight: 600;
         }
         .refined-button {
           display: inline-flex;
           align-items: center;
           gap: 6px;
-          padding: 6px 12px;
+          padding: 7px 12px;
           background: #ffffff;
-          border: 1px solid #e5e5e5;
+          border: 1px solid #e4e4e7;
           border-radius: 6px;
-          font-size: 0.8125rem;
-          color: #333;
+          font-size: 0.875rem;
+          font-weight: 500;
+          color: #09090b;
           cursor: pointer;
-          transition: all 0.15s;
+          transition: all 0.15s ease;
+          white-space: nowrap;
+          box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+          align-self: start;
         }
-        .refined-button:hover {
-          background: #f9f9f9;
+        .refined-button:hover:not(:disabled) {
+          background: #fafafa;
           border-color: #d4d4d8;
+        }
+        .refined-button:active:not(:disabled) {
+          background: #f4f4f5;
         }
         .refined-button:disabled {
           opacity: 0.5;
           cursor: not-allowed;
         }
-        .refined-engine-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-          gap: 12px;
-        }
-        .refined-engine-card {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          padding: 16px;
-          background: #ffffff;
-          border: 1px solid #e5e5e5;
-          border-radius: 10px;
-          cursor: pointer;
-          transition: all 0.2s;
-          text-align: left;
-        }
-        .refined-engine-card:hover {
-          border-color: #d4d4d8;
-          box-shadow: 0 2px 4px rgba(0,0,0,0.02);
-        }
-        .refined-engine-card.is-active {
-          border-color: #18181b;
-          box-shadow: 0 0 0 1px #18181b;
-        }
-        .refined-engine-head {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-        }
-        .refined-engine-title {
-          font-size: 0.9375rem;
-          font-weight: 600;
-          color: #1a1a1a;
-        }
-        .refined-badge {
+        
+        /* Status Badges */
+        .status-badge {
           display: inline-flex;
           align-items: center;
-          padding: 2px 8px;
-          background: #f4f4f5;
-          border: 1px solid #e5e5e5;
-          border-radius: 6px;
+          gap: 6px;
+          padding: 4px 10px;
+          border-radius: 9999px;
           font-size: 0.75rem;
-          color: #555;
-          white-space: nowrap;
+          font-weight: 600;
+          border: 1px solid transparent;
+          letter-spacing: 0.02em;
         }
-        .refined-badge-success {
+        .status-badge::before {
+          content: "";
+          display: inline-block;
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+        }
+        .status-badge-success {
           background: #ecfdf5;
-          border-color: #a7f3d0;
           color: #065f46;
+          border-color: #a7f3d0;
         }
-        .refined-badge-warn {
+        .status-badge-success::before {
+          background-color: #10b981;
+        }
+        .status-badge-warn {
           background: #fef2f2;
-          border-color: #fecaca;
           color: #991b1b;
+          border-color: #fecaca;
         }
-        .refined-engine-meta {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
+        .status-badge-warn::before {
+          background-color: #ef4444;
         }
-        .refined-detail-row {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          font-size: 0.8125rem;
+        .status-badge-neutral {
+          background: #f4f4f5;
+          color: #3f3f46;
+          border-color: #e4e4e7;
         }
-        .refined-detail-label {
-          color: #71717a;
+        .status-badge-neutral::before {
+          background-color: #71717a;
         }
-        .refined-detail-value {
-          color: #18181b;
-          font-weight: 500;
-          max-width: 60%;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
+
+        /* Overview Cards */
         .refined-overview-grid {
           display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 12px;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 10px;
         }
         .refined-overview-card {
           display: flex;
           flex-direction: column;
           gap: 8px;
-          padding: 16px;
-          background: #fafafa;
-          border: 1px solid #f0f0f0;
+          padding: 14px;
+          background: #ffffff;
+          border: 1px solid #e4e4e7;
           border-radius: 10px;
+          box-shadow: 0 6px 18px rgba(15, 23, 42, 0.03);
         }
-        .refined-overview-icon {
-          color: #71717a;
-        }
-        .refined-overview-label {
-          font-size: 0.8125rem;
-          color: #71717a;
+        .refined-overview-header {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          color: #52525b;
+          font-size: 0.875rem;
+          font-weight: 500;
         }
         .refined-overview-value {
-          font-size: 1.5rem;
-          font-weight: 600;
-          color: #18181b;
+          font-size: 1.42rem;
+          font-weight: 650;
+          color: #09090b;
           line-height: 1;
+          letter-spacing: -0.02em;
         }
-        .refined-panels-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-          gap: 16px;
+        .refined-overview-note {
+          font-size: 0.75rem;
+          color: #71717a;
         }
-        .refined-panel {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          padding: 20px;
-          background: #ffffff;
-          border: 1px solid #e5e5e5;
-          border-radius: 10px;
-        }
-        .refined-panel-span-2 {
-          grid-column: 1 / -1;
-        }
-        .refined-panel-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 4px;
-        }
-        .refined-panel-title {
-          font-size: 0.9375rem;
+        .refined-section-title {
+          font-size: 1.125rem;
           font-weight: 600;
-          color: #1a1a1a;
+          color: #09090b;
+          margin-bottom: 12px;
+          padding-bottom: 10px;
+          border-bottom: 1px solid #e4e4e7;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          letter-spacing: -0.01em;
         }
+        
+        /* List Rows */
         .refined-server-list {
           display: flex;
           flex-direction: column;
-          gap: 8px;
+          gap: 10px;
         }
         .refined-server-row {
           display: flex;
           flex-direction: column;
-          gap: 4px;
-          padding: 12px;
+          gap: 10px;
+          padding: 14px 16px;
+          background: #ffffff;
+          border: 1px solid #e4e4e7;
+          border-radius: 10px;
+          box-shadow: 0 6px 18px rgba(15, 23, 42, 0.03);
+          min-width: 0;
+        }
+        .refined-server-row:hover {
           background: #fafafa;
-          border: 1px solid #f0f0f0;
-          border-radius: 8px;
+          border-color: #d4d4d8;
         }
         .refined-provider-name-row {
           display: flex;
           justify-content: space-between;
-          align-items: center;
+          align-items: flex-start;
+          gap: 10px;
         }
         .refined-provider-name {
-          font-size: 0.875rem;
-          font-weight: 600;
-          color: #1a1a1a;
+          font-size: 0.93rem;
+          font-weight: 650;
+          color: #09090b;
+          display: flex;
+          align-items: flex-start;
+          gap: 7px;
+          min-width: 0;
+          flex: 1 1 auto;
+          overflow-wrap: anywhere;
+          word-break: break-word;
         }
         .refined-provider-meta {
           font-size: 0.75rem;
-          color: #71717a;
+          color: #52525b;
+          min-width: 0;
         }
+        .refined-meta-strip {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          flex-wrap: wrap;
+        }
+        .refined-meta-pill {
+          display: inline-flex;
+          align-items: center;
+          padding: 3px 7px;
+          border-radius: 999px;
+          border: 1px solid #e5e7eb;
+          background: #f8fafc;
+          font-size: 0.6875rem;
+          color: #475569;
+          font-weight: 600;
+        }
+        .refined-server-fields {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .refined-server-field {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          min-width: 0;
+          padding: 9px 10px;
+          border-radius: 8px;
+          background: #f8fafc;
+          border: 1px solid #e8edf3;
+        }
+        .refined-server-field-label {
+          font-size: 0.6875rem;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.12em;
+          color: #64748b;
+        }
+        .refined-server-field-value {
+          min-width: 0;
+          font-size: 0.76rem;
+          color: #0f172a;
+          line-height: 1.45;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+        }
+        .refined-server-field-value.is-monospace {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+          font-size: 0.75rem;
+        }
+
+        /* Runtime Cards */
         .refined-runtime-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-          gap: 12px;
+          grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+          gap: 16px;
         }
         .refined-runtime-card {
           display: flex;
           flex-direction: column;
+          gap: 12px;
+          padding: 15px;
+          background: #ffffff;
+          border: 1px solid #e4e4e7;
+          border-radius: 10px;
+          box-shadow: 0 6px 18px rgba(15, 23, 42, 0.03);
+        }
+        .refined-runtime-stats {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 8px;
-          padding: 12px;
-          background: #fafafa;
-          border: 1px solid #f0f0f0;
+        }
+        .refined-runtime-stats span {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 2px;
+          min-width: 0;
+          padding: 8px 10px;
           border-radius: 8px;
+          background: #f8fafc;
+          border: 1px solid #e8edf3;
+          font-size: 0.75rem;
+          color: #64748b;
+        }
+        .refined-runtime-stats strong {
+          font-size: 0.92rem;
+          color: #0f172a;
         }
         .refined-chip-list {
           display: flex;
           flex-wrap: wrap;
-          gap: 4px;
-          margin-top: 4px;
+          gap: 6px;
         }
         .refined-chip {
-          padding: 2px 6px;
-          background: #f4f4f5;
-          border: 1px solid #e5e5e5;
-          border-radius: 4px;
-          font-size: 0.6875rem;
-          color: #555;
+          padding: 3px 8px;
+          background: #f1f5f9;
+          border: 1px solid #e2e8f0;
+          border-radius: 999px;
+          font-size: 0.75rem;
+          color: #334155;
           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+          word-break: break-all;
         }
         .refined-empty {
           display: flex;
           align-items: center;
-          gap: 8px;
-          color: #999;
-          font-size: 0.8125rem;
-          padding: 12px 0;
+          justify-content: center;
+          gap: 12px;
+          color: #71717a;
+          font-size: 0.9375rem;
+          padding: 48px 24px;
+          background: #fafafa;
+          border: 1px dashed #d4d4d8;
+          border-radius: 12px;
+          text-align: center;
         }
         .refined-error {
-          color: #ef4444;
-          font-size: 0.8125rem;
-          padding: 8px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          color: #b91c1c;
+          font-size: 0.875rem;
+          font-weight: 500;
+          padding: 16px;
           background: #fef2f2;
-          border-radius: 6px;
+          border: 1px solid #fecaca;
+          border-radius: 8px;
+        }
+        @media (max-width: 900px) {
+          .refined-banner {
+            grid-template-columns: 1fr;
+          }
+          .refined-banner-meta,
+          .refined-server-fields,
+          .refined-runtime-stats {
+            grid-template-columns: 1fr;
+          }
         }
       `}</style>
 
       <div className="refined-mcp-container">
         <div className="refined-header">
-          <div className="refined-title">MCP 服务器</div>
-          <div className="refined-subtitle">
-            查看并管理各个引擎下的 MCP (Model Context Protocol) 运行时与服务器配置。
+          <div>
+            <div className="refined-title">MCP 服务器 (Model Context Protocol)</div>
+            <div className="refined-subtitle">
+              统一查看并管理当前工作区内不同引擎下的 MCP 运行时状态与服务器配置。
+            </div>
           </div>
         </div>
 
-        <div className="refined-toolbar">
+        {/* 顶级选项卡 */}
+        <div className="refined-tabs">
+          {ENGINE_ORDER.map((engine) => (
+            <button
+              key={engine}
+              type="button"
+              className={`refined-tab ${selectedEngine === engine ? "is-active" : ""}`}
+              onClick={() => setSelectedEngine(engine)}
+            >
+              {engine === "codex" ? "Codex" : engine === "claude" ? "Claude Code" : "Gemini CLI"}
+            </button>
+          ))}
+        </div>
+
+        {/* 引擎状态横幅 */}
+        <div className="refined-banner">
+          <div className="refined-banner-left">
+            <div className="refined-banner-head">
+              <div>
+                <div className="refined-banner-title">{engineName} 引擎</div>
+                <div className="refined-banner-caption">
+                  当前工作区的 MCP 接入状态、命令路径与静态配置概览。
+                </div>
+              </div>
+            </div>
+            <div className="refined-banner-meta">
+              {engineSummaryFields.map((field) => (
+                <div key={field.label} className="refined-banner-field">
+                  <span className="refined-banner-field-label">{field.label}</span>
+                  <span
+                    className={`refined-banner-field-value${field.monospace ? " is-monospace" : ""}${field.tone === "muted" ? " is-muted" : ""}${field.tone === "success" ? " is-success" : ""}${field.tone === "warn" ? " is-warn" : ""}`}
+                    title={field.value}
+                  >
+                    {field.value}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
           <button type="button" className="refined-button" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={14} className={loading ? "dcc-spin" : ""} />
-            刷新
+            刷新状态
           </button>
         </div>
 
-        <div className="refined-engine-grid">
-          {ENGINE_ORDER.map((engine) => {
-            const status = engineStatusMap.get(engine) ?? null;
-            return (
-              <button
-                key={engine}
-                type="button"
-                className={`refined-engine-card ${selectedEngine === engine ? "is-active" : ""}`}
-                onClick={() => setSelectedEngine(engine)}
-              >
-                <div className="refined-engine-head">
-                  <div className="refined-engine-title">{engine === "codex" ? "Codex" : engine === "claude" ? "Claude Code" : "Gemini CLI"}</div>
-                  <span className={badgeClass(Boolean(status?.installed))}>
-                    {status?.installed ? "已安装" : "未安装"}
-                  </span>
+        {error && (
+          <div className="refined-error">
+            <AlertCircle size={16} />
+            {error}
+          </div>
+        )}
+        {selectedStatus?.error && (
+          <div className="refined-error">
+            <AlertCircle size={16} />
+            {selectedStatus.error}
+          </div>
+        )}
+
+        {selectedStatus?.installed ? (
+          <>
+            {/* 数据概览 */}
+          <div className="refined-overview-grid">
+              <div className="refined-overview-card">
+                <div className="refined-overview-header">
+                  <Settings size={16} color="#71717a" /> 静态配置服务器
                 </div>
-                <div className="refined-engine-meta">
-                  <div className="refined-detail-row">
-                    <span className="refined-detail-label">服务器数</span>
-                    <strong className="refined-detail-value">
-                      {engine === "codex"
-                        ? `${new Set(
-                            [...globalServers.filter((entry) => entry.source === "ccgui_config").map((entry) => entry.name), ...codexRuntimeServers.map((entry) => entry.name)].map((name) =>
-                              name.toLowerCase()
-                            )
-                          ).size}`
-                        : `${globalServers.filter((entry) => entry.source === (engine === "claude" ? "claude_json" : "ccgui_config")).length}`}
-                    </strong>
-                  </div>
-                  <div className="refined-detail-row">
-                    <span className="refined-detail-label">执行路径</span>
-                    <strong className="refined-detail-value" title={status?.binPath ?? "不可用"}>{status?.binPath ?? "不可用"}</strong>
-                  </div>
+                <div className="refined-overview-value">{selectedConfigServers.length}</div>
+                <div className="refined-overview-note">
+                  启用 {configuredEnabledCount} · 停用 {configuredDisabledCount}
                 </div>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="refined-overview-grid">
-          <div className="refined-overview-card">
-            <div className="refined-overview-icon"><Server size={16} /></div>
-            <div className="refined-overview-label">可见服务器</div>
-            <div className="refined-overview-value">{selectedVisibleServerCount}</div>
-          </div>
-          <div className="refined-overview-card">
-            <div className="refined-overview-icon"><Wrench size={16} /></div>
-            <div className="refined-overview-label">可用工具</div>
-            <div className="refined-overview-value">{selectedToolCount}</div>
-          </div>
-          <div className="refined-overview-card">
-            <div className="refined-overview-icon"><ShieldCheck size={16} /></div>
-            <div className="refined-overview-label">引擎状态</div>
-            <div className="refined-overview-value" style={{ fontSize: '1.125rem' }}>{selectedStatus?.installed ? "就绪" : "缺失"}</div>
-          </div>
-        </div>
-
-        <div className="refined-panels-grid">
-          <div className="refined-panel">
-            <div className="refined-panel-header">
-              <div className="refined-panel-title">引擎详情</div>
-              <span className={badgeClass(Boolean(selectedStatus?.installed))}>
-                {selectedStatus?.installed ? "就绪" : "缺失"}
-              </span>
-            </div>
-            <div style={{ color: '#18181b', fontWeight: 500, fontSize: '0.875rem' }}>
-              {selectedEngine === "codex" ? "Codex" : selectedEngine === "claude" ? "Claude" : "Gemini"}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '4px' }}>
-              <div className="refined-detail-row">
-                <span className="refined-detail-label">版本</span>
-                <strong className="refined-detail-value">{selectedStatus?.version ?? "未知"}</strong>
               </div>
-              <div className="refined-detail-row">
-                <span className="refined-detail-label">执行路径</span>
-                <strong className="refined-detail-value" title={selectedStatus?.binPath ?? "不可用"}>{selectedStatus?.binPath ?? "不可用"}</strong>
-              </div>
-              <div className="refined-detail-row">
-                <span className="refined-detail-label">工作区</span>
-                <strong className="refined-detail-value" title={activeWorkspace?.rootPath ?? "不可用"}>{activeWorkspace?.rootPath ?? "不可用"}</strong>
-              </div>
-            </div>
-            {selectedStatus?.error ? <div className="refined-error">{selectedStatus.error}</div> : null}
-            {error ? <div className="refined-error">{error}</div> : null}
-          </div>
-
-          <div className="refined-panel">
-            <div className="refined-panel-title" style={{ marginBottom: '8px' }}>已配置的服务器</div>
-            {selectedConfigServers.length > 0 ? (
-              <div className="refined-server-list">
-                {selectedConfigServers.map((server) => (
-                  <div key={`${server.source}:${server.name}`} className="refined-server-row">
-                    <div className="refined-provider-name-row">
-                      <span className="refined-provider-name">{server.name}</span>
-                      <span className={server.enabled ? "refined-badge refined-badge-success" : "refined-badge"}>
-                        {server.enabled ? "已启用" : "已禁用"}
-                      </span>
-                    </div>
-                    <div className="refined-provider-meta">
-                      {server.command || server.url || "无命令/链接"} · {server.transport || "未知传输协议"} · 参数数 {server.argsCount}
-                    </div>
+              {selectedEngine === "codex" && (
+                <div className="refined-overview-card">
+                  <div className="refined-overview-header">
+                    <TerminalSquare size={16} color="#71717a" /> 运行时服务器
                   </div>
-                ))}
+                  <div className="refined-overview-value">{codexRuntimeServers.length}</div>
+                  <div className="refined-overview-note">仅显示当前工作区运行时返回</div>
+                </div>
+              )}
+              <div className="refined-overview-card">
+                <div className="refined-overview-header">
+                  <Wrench size={16} color="#71717a" /> 累计可用工具
+                </div>
+                <div className="refined-overview-value">{selectedToolCount}</div>
+                <div className="refined-overview-note">Codex 运行时工具总数</div>
               </div>
-            ) : (
-              <div className="refined-empty">当前引擎未找到已配置的 MCP 服务器。</div>
-            )}
-          </div>
+            </div>
 
-          {selectedEngine === "codex" ? (
-            <div className="refined-panel refined-panel-span-2">
-              <div className="refined-panel-title" style={{ marginBottom: '8px' }}>Codex 运行时服务器</div>
-              {codexRuntimeServers.length > 0 ? (
-                <div className="refined-runtime-grid">
-                  {codexRuntimeServers.map((server) => (
-                    <div key={server.name} className="refined-runtime-card">
+            {/* 静态服务器列表 */}
+            <div>
+              <div className="refined-section-title">
+                <Settings size={18} /> 静态服务器配置 (Configured)
+              </div>
+              {selectedConfigServers.length > 0 ? (
+                <div className="refined-server-list">
+                  {selectedConfigServers.map((server) => (
+                    <div key={`${server.source}:${server.name}`} className="refined-server-row">
+                      {(() => {
+                        const transport = transportDisplay(server);
+                        return (
+                          <>
                       <div className="refined-provider-name-row">
-                        <span className="refined-provider-name">{server.name}</span>
-                        <span className="refined-badge">{server.authLabel ?? "未知验证"}</span>
+                        <span className="refined-provider-name">
+                          <Box size={16} color="#52525b" />
+                          {server.name}
+                        </span>
+                        <span className={server.enabled ? "status-badge status-badge-success" : "status-badge status-badge-neutral"}>
+                          {server.enabled ? "已启用" : "已禁用"}
+                        </span>
                       </div>
-                      <div className="refined-provider-meta">
-                        {server.resourcesCount} 资源 · {server.templatesCount} 模板 · {server.toolNames.length} 工具
+                      <div className="refined-meta-strip">
+                        <span className="refined-meta-pill">{sourceLabel(server.source)}</span>
+                        <span className="refined-meta-pill">{transport}</span>
                       </div>
-                      {server.toolNames.length > 0 ? (
-                        <div className="refined-chip-list">
-                          {server.toolNames.map((tool) => (
-                            <span key={`${server.name}:${tool}`} className="refined-chip">
-                              {tool}
-                            </span>
-                          ))}
+                      <div className="refined-server-fields">
+                        <div className="refined-server-field">
+                          <span className="refined-server-field-label">{serverEndpointLabel(server)}</span>
+                          <span className="refined-server-field-value is-monospace" title={serverEndpointValue(server)}>
+                            {serverEndpointValue(server)}
+                          </span>
                         </div>
-                      ) : (
-                        <div className="refined-empty" style={{ padding: 0 }}>运行时未返回工具。</div>
-                      )}
+                        <div className="refined-server-field">
+                          <span className="refined-server-field-label">Transport</span>
+                          <span className="refined-server-field-value">{transport}</span>
+                        </div>
+                        <div className="refined-server-field">
+                          <span className="refined-server-field-label">Args</span>
+                          <span className="refined-server-field-value">
+                            {server.argsCount}
+                          </span>
+                        </div>
+                      </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="refined-empty">
-                  <TriangleAlert size={14} />
-                  <span>运行时 MCP 列表为空，或者本地 Codex CLI 不支持。</span>
-                </div>
+                <div className="refined-empty">未发现静态配置的 MCP 服务器。</div>
               )}
             </div>
-          ) : null}
-        </div>
+
+            {/* 运行时卡片网格 (仅 Codex 展示) */}
+            {selectedEngine === "codex" && (
+              <div>
+                <div className="refined-section-title">
+                  <TerminalSquare size={18} /> 运行时服务器 (Runtime Workspace)
+                </div>
+                {codexRuntimeServers.length > 0 ? (
+                  <div className="refined-runtime-grid">
+                    {codexRuntimeServers.map((server) => (
+                      <div key={server.name} className="refined-runtime-card">
+                        <div className="refined-provider-name-row">
+                          <span className="refined-provider-name">
+                            <Power size={16} color="#059669" />
+                            {server.name}
+                          </span>
+                          <span className="status-badge status-badge-neutral">
+                            {server.authLabel ?? "无鉴权"}
+                          </span>
+                        </div>
+                        <div className="refined-runtime-stats">
+                          <span><strong>{server.resourcesCount}</strong>资源</span>
+                          <span><strong>{server.templatesCount}</strong>模板</span>
+                          <span><strong>{server.toolNames.length}</strong>工具</span>
+                        </div>
+                        {server.toolNames.length > 0 ? (
+                          <div className="refined-chip-list">
+                            {server.toolNames.map((tool) => (
+                              <span key={`${server.name}:${tool}`} className="refined-chip">
+                                {tool}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: '0.8125rem', color: '#a1a1aa' }}>无可用工具</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="refined-empty">
+                    当前工作区未检测到活跃的 Codex MCP 运行时节点。
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="refined-empty" style={{ padding: '80px 20px', flexDirection: 'column', border: 'none', background: 'transparent' }}>
+            <ShieldAlert size={48} color="#d4d4d8" style={{ marginBottom: '8px' }} />
+            <span style={{ fontSize: '1.125rem', color: '#3f3f46', fontWeight: 600 }}>引擎未就绪</span>
+            <span style={{ fontSize: '0.875rem', color: '#71717a', maxWidth: '400px', lineHeight: 1.5 }}>
+              未在本地环境中检测到 {engineName} 引擎。<br/>请完成安装和环境配置后，刷新以管理其 MCP 服务。
+            </span>
+          </div>
+        )}
       </div>
     </section>
   );

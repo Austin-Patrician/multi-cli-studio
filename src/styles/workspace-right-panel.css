@@ -1329,6 +1329,10 @@
   border-bottom-color: rgba(148, 163, 184, 0.08) !important;
 }
 
+.workspace-git-panel.git-history-changes.diff-panel .git-history-worktree-section-header.is-compact .diff-tree-summary-root {
+  margin-left: -13px;
+}
+
 .workspace-git-panel.git-history-changes.diff-panel .git-history-worktree-section-list,
 .workspace-git-panel.git-history-changes.diff-panel .diff-section-list {
   background: transparent !important;

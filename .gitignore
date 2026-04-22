@@ -8,3 +8,4 @@ src-tauri/target
 claude-code-main
 claudecode
 .local-release
+desktop-cc-gui

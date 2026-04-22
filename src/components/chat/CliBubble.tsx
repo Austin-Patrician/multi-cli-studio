@@ -227,6 +227,31 @@ function StatusIcon({ level }: { level: "error" | "warning" }) {
   );
 }
 
+function ApprovalOnceIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M5 12.5l4.2 4.2L19 7" />
+    </svg>
+  );
+}
+
+function ApprovalSessionIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.9}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4.75 12.5l3.4 3.4 3.9-4.4" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M11.75 12.5l3.1 3.1L19.25 8" />
+    </svg>
+  );
+}
+
+function ApprovalDenyIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M7 7l10 10M17 7L7 17" />
+    </svg>
+  );
+}
+
 function ToggleButton({
   expanded,
   label,
@@ -872,11 +897,15 @@ function ApprovalActionButton({
   onClick,
   disabled = false,
   tone = "neutral",
+  icon,
+  iconOnly = false,
 }: {
   label: string;
   onClick: () => void;
   disabled?: boolean;
   tone?: "neutral" | "danger";
+  icon?: ReactNode;
+  iconOnly?: boolean;
 }) {
   const toneClass =
     tone === "danger"
@@ -888,9 +917,13 @@ function ApprovalActionButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`rounded-[10px] border px-3.5 py-2 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${toneClass}`}
+      className={`rounded-[10px] border text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${toneClass} ${
+        iconOnly ? "flex h-9 w-9 items-center justify-center p-0" : "px-3.5 py-2"
+      }`}
+      title={label}
+      aria-label={label}
     >
-      {label}
+      {iconOnly ? icon : icon ? <span className="inline-flex items-center gap-2">{icon}<span>{label}</span></span> : label}
     </button>
   );
 }
@@ -948,15 +981,21 @@ function RuntimeApprovalRequestBlock({
           <ApprovalActionButton
             label="Yes"
             onClick={() => onDecision(block.requestId, "allowOnce")}
+            icon={<ApprovalOnceIcon />}
+            iconOnly
           />
           <ApprovalActionButton
             label={block.persistentLabel ?? "Yes, don't ask again"}
             onClick={() => onDecision(block.requestId, "allowAlways")}
+            icon={<ApprovalSessionIcon />}
+            iconOnly
           />
           <ApprovalActionButton
             label="No"
             tone="danger"
             onClick={() => onDecision(block.requestId, "deny")}
+            icon={<ApprovalDenyIcon />}
+            iconOnly
           />
         </div>
       )}

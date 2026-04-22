@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { bridge } from "../lib/bridge";
-import { AgentId, AgentResourceGroup, AgentResourceKind, AgentRuntimeResources, AppSettings } from "../lib/models";
+import { AgentId, AgentResourceGroup, AgentResourceKind, AgentRuntimeResources, AppSettings, TerminalCliId } from "../lib/models";
 import refreshIcon from "../media/svg/refresh.svg";
 import { useStore } from "../lib/store";
 import { requestDesktopNotificationPermission } from "../lib/desktopNotifications";
@@ -63,6 +63,13 @@ const SETTINGS_SECTION_LABEL: Record<SettingsSection, string> = {
   skills: "Skills",
 };
 
+const DEFAULT_ROUTE_OPTIONS: Array<{ id: TerminalCliId; label: string; description: string }> = [
+  { id: "codex", label: "Codex", description: "新建工作区默认直接路由到 Codex。" },
+  { id: "claude", label: "Claude", description: "新建工作区默认直接路由到 Claude Code。" },
+  { id: "gemini", label: "Gemini", description: "新建工作区默认直接路由到 Gemini CLI。" },
+  { id: "auto", label: "Auto", description: "新建工作区默认使用自动路由。" },
+];
+
 function parseSettingsSection(value: string | null): SettingsSection {
   switch (value) {
     case "vendors":
@@ -74,29 +81,6 @@ function parseSettingsSection(value: string | null): SettingsSection {
       return "settings";
   }
 }
-
-const GUIDES: Record<AgentId, { docs: string; install: Record<Platform, string> }> = {
-  codex: {
-    docs: "https://help.openai.com/en/articles/11096431-openai-codex-ci-getting-started",
-    install: { windows: "npm install -g @openai/codex", macos: "npm install -g @openai/codex", linux: "npm install -g @openai/codex" },
-  },
-  claude: {
-    docs: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
-    install: { windows: "npm install -g @anthropic-ai/claude-code", macos: "curl -fsSL https://claude.ai/install.sh | bash", linux: "curl -fsSL https://claude.ai/install.sh | bash" },
-  },
-  gemini: {
-    docs: "https://github.com/google-gemini/gemini-cli",
-    install: { windows: "npm install -g @google/gemini-cli", macos: "brew install gemini-cli", linux: "npm install -g @google/gemini-cli" },
-  },
-};
-
-// --- Icons ---
-const TerminalIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-5 h-5">
-    <path d="M4 17L10 12L4 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-    <path d="M12 18H20" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-  </svg>
-);
 
 const FolderIcon = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
@@ -384,7 +368,6 @@ export function SettingsPage({
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
-  const [copied, setCopied] = useState<string | null>(null);
   const [notificationBusy, setNotificationBusy] = useState(false);
   const [updateNotificationBusy, setUpdateNotificationBusy] = useState(false);
   const [emailTestBusy, setEmailTestBusy] = useState(false);
@@ -409,22 +392,19 @@ export function SettingsPage({
   }, []);
 
   useEffect(() => {
-    if (!banner && !copied) return;
+    if (!banner) return;
     const id = window.setTimeout(() => {
       setBanner(null);
-      setCopied(null);
     }, 2000);
     return () => window.clearTimeout(id);
-  }, [banner, copied]);
+  }, [banner]);
 
   const agents = CLI_ORDER.map((cli) => {
     const agent = appState?.agents.find((item) => item.id === cli);
     return (agent ? { id: agent.id, runtime: agent.runtime } : fallbackAgent(cli)) as SettingsAgent;
   });
 
-  const installedCount = agents.filter((agent) => agent.runtime.installed).length;
   const dirty = !!storedSettings && !!local && JSON.stringify(storedSettings) !== JSON.stringify(local);
-  const runtimeSummary = `${installedCount}/${CLI_ORDER.length} 个运行时已在 ${PLATFORM_LABEL[platform]} 上就绪。`;
   const branch = appState?.workspace.branch ?? "main";
   const updateStatusLabel =
     updaterState.stage === "available" && updaterState.version
@@ -474,16 +454,6 @@ export function SettingsPage({
     const next = new URLSearchParams(searchParams);
     next.set("section", section);
     setSearchParams(next, { replace: true });
-  }
-
-  async function copyText(value: string, key: string, label: string) {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(key);
-      setBanner(`已复制${label}`);
-    } catch {
-      setBanner(`无法复制${label}`);
-    }
   }
 
   async function refreshRuntime() {
@@ -959,89 +929,6 @@ export function SettingsPage({
 
           {activeSection === "settings" ? (
             <>
-          {/* CLI Runtimes */}
-          <div style={stageStyle(mounted, 50)}>
-            <Panel
-              title="CLI 运行时"
-              description="扫描并展示当前可用的 CLI 工具链与资源清单。"
-              icon={<TerminalIcon />}
-            >
-              <div className="divide-y divide-slate-100">
-                {agents.map((agent) => {
-                  const cli = agent.id;
-                  const guide = GUIDES[cli];
-                  const missing = !agent.runtime.installed;
-                  const resources = runtimeResources(agent);
-
-                  return (
-                    <div key={cli} className={cx("p-8 transition-colors", missing ? "bg-rose-50/10" : "hover:bg-slate-50/30")}>
-                      <div className="flex flex-col gap-8 lg:flex-row lg:items-center lg:justify-between">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-4">
-                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white font-bold text-lg shadow-sm">
-                              {CLI_META[cli].label.charAt(0)}
-                            </div>
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-3">
-                                <h3 className="text-[16px] font-bold text-slate-900 tracking-tight">{CLI_META[cli].label}</h3>
-                                <MetaChip tone={missing ? "warn" : "ready"}>{missing ? "未安装" : "已安装"}</MetaChip>
-                                {!missing && (
-                                  <span className="px-2 py-0.5 rounded-lg bg-indigo-50 text-indigo-600 font-mono text-xs font-bold ring-1 ring-indigo-500/10">
-                                    v{agent.runtime.version ?? "?.?.?"}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-
-                          {missing && (
-                            <div className="mt-6 pl-14 max-w-2xl">
-                              <div className="bg-white border border-rose-100 rounded-[10px] p-5 shadow-sm">
-                                <FieldLabel>请运行以下命令进行安装：</FieldLabel>
-                                <div className="bg-rose-50/30 border border-rose-100 rounded-xl px-4 py-3 font-mono text-[13px] font-bold text-rose-900 mb-4 break-all">
-                                  {guide.install[platform]}
-                                </div>
-                                <div className="flex items-center gap-6">
-                                  <button onClick={() => copyText(guide.install[platform], `${cli}-i`, '安装命令')} className="text-[11px] font-bold uppercase tracking-widest text-indigo-600 hover:text-indigo-700 underline underline-offset-4 transition-colors">复制命令</button>
-                                  <a href={guide.docs} target="_blank" rel="noreferrer" className="text-[11px] font-bold uppercase tracking-widest text-slate-400 hover:text-slate-900 transition-colors inline-flex items-center gap-1">查看文档 <ChevronRightIcon className="w-3 h-3" /></a>
-                                </div>
-                              </div>
-                            </div>
-                          )}
-
-                          {!missing && (
-                            <div className="mt-6 pl-14 flex flex-wrap gap-x-10 gap-y-4">
-                              {RESOURCE_ORDER.map((kind) => {
-                                const group = resources[kind];
-                                if (!group.supported) return null;
-                                return (
-                                  <div key={`${cli}-${kind}`} className="flex flex-col gap-1.5">
-                                    <div className="flex items-center gap-2 border-b border-slate-50 pb-1">
-                                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{RESOURCE_LABEL[kind]}</span>
-                                      <span className="text-[10px] font-bold text-slate-900 px-1.5 py-0.5 rounded bg-slate-100 ring-1 ring-slate-200">{group.items.length}</span>
-                                    </div>
-                                    {resourceNamesRow(group)}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      
-                      {agent.runtime.lastError && (
-                        <div className="mt-6 ml-14 rounded-[10px] border border-rose-200 bg-rose-50 p-4 font-mono text-[12px] text-rose-700 shadow-inner break-all">
-                          <span className="font-bold uppercase tracking-wider block mb-1 text-[10px]">严重错误</span>
-                          {agent.runtime.lastError}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </Panel>
-          </div>
-
           {/* Workspace */}
           {/* <div style={stageStyle(mounted, 100)}>
             <Panel title="工作区上下文" description="用于执行与上下文提取的根目录映射配置。" icon={<FolderIcon />}>
@@ -1058,6 +945,36 @@ export function SettingsPage({
               </div>
             </Panel>
           </div> */}
+
+          <div style={stageStyle(mounted, 125)}>
+            <Panel title="工作区默认值" description="配置新建工作区时的默认路由目标。" icon={<FolderIcon />}>
+              <div className="p-8">
+                <div className="max-w-xl rounded-[12px] border border-slate-200 bg-white px-5 py-5 shadow-sm">
+                  <FieldLabel>默认路由目标</FieldLabel>
+                  <div className="inline-flex flex-wrap gap-2 rounded-[12px] border border-slate-200 bg-slate-50 p-2">
+                    {DEFAULT_ROUTE_OPTIONS.map((option) => {
+                      const selected = local.defaultNewWorkspaceCli === option.id;
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          onClick={() => setLocal({ ...local, defaultNewWorkspaceCli: option.id })}
+                          className={cx(
+                            "rounded-[10px] px-4 py-2 text-sm font-semibold transition-colors",
+                            selected
+                              ? "bg-slate-900 text-white shadow-sm"
+                              : "bg-transparent text-slate-600 hover:bg-white hover:text-slate-900"
+                          )}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </Panel>
+          </div>
 
           {/* Alerts */}
           <div style={stageStyle(mounted, 150)}>
@@ -1158,13 +1075,6 @@ export function SettingsPage({
                 {!updateSupported ? (
                   <div className="rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
                     当前是开发环境或非桌面运行时，在线更新仅在发布版桌面应用中生效。
-                  </div>
-                ) : null}
-
-                {updateSupported ? (
-                  <div className="rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-                    当前桌面版采用 GitHub Releases 低成本分发，不包含 Apple notarization 或 Windows 代码签名。
-                    macOS 首次打开下载的应用时，可能需要前往系统“隐私与安全性”里手动点“仍要打开”。
                   </div>
                 ) : null}
 

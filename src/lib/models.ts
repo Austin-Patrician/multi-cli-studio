@@ -386,6 +386,7 @@ export interface AppSettings {
   cliPaths: { codex: string; claude: string; gemini: string };
   sshConnections: SshConnectionConfig[];
   customAgents: CustomAgentConfig[];
+  defaultNewWorkspaceCli: TerminalCliId;
   projectRoot: string;
   maxTurnsPerAgent: number;
   maxOutputCharsPerTurn: number;

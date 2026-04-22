@@ -394,6 +394,8 @@ struct AppSettings {
     ssh_connections: Vec<SshConnectionConfig>,
     #[serde(default)]
     custom_agents: Vec<CustomAgentConfig>,
+    #[serde(default = "default_new_workspace_cli")]
+    default_new_workspace_cli: String,
     project_root: String,
     max_turns_per_agent: usize,
     max_output_chars_per_turn: usize,
@@ -699,6 +701,10 @@ fn default_model_chat_context_turn_limit() -> usize {
     4
 }
 
+fn default_new_workspace_cli() -> String {
+    "codex".to_string()
+}
+
 fn default_remote_shell() -> String {
     "bash".to_string()
 }
@@ -940,6 +946,12 @@ fn normalize_custom_agents(settings: &mut AppSettings) {
 
 fn normalize_settings_providers(settings: &mut AppSettings) {
     settings.model_chat_context_turn_limit = settings.model_chat_context_turn_limit.max(1);
+    if !matches!(
+        settings.default_new_workspace_cli.as_str(),
+        "auto" | "codex" | "claude" | "gemini"
+    ) {
+        settings.default_new_workspace_cli = default_new_workspace_cli();
+    }
     normalize_ssh_connections(settings);
     normalize_custom_agents(settings);
     normalize_provider_entries(
@@ -3696,6 +3708,7 @@ struct AppStore {
     acp_session: Arc<Mutex<acp::AcpSession>>,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     live_chat_turns: Arc<Mutex<BTreeMap<String, Arc<LiveChatTurnHandle>>>>,
 }
@@ -3704,6 +3717,11 @@ struct AppStore {
 #[serde(rename_all = "camelCase")]
 struct ClaudeApprovalRules {
     #[serde(default)]
+    always_allow_by_project: BTreeMap<String, BTreeSet<String>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CodexSessionApprovalRules {
     always_allow_by_project: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -3716,6 +3734,8 @@ struct PendingClaudeApproval {
 
 #[derive(Debug)]
 struct PendingCodexApproval {
+    project_root: String,
+    tool_name: String,
     sender: mpsc::Sender<ClaudeApprovalDecision>,
 }
 
@@ -4130,6 +4150,7 @@ fn list_codex_skills_from_command(
     let mut reader = BufReader::new(stdout);
     let next_id = Arc::new(Mutex::new(1_u64));
     let mut stream_state = CodexStreamState::default();
+    let approval_rules = Arc::new(Mutex::new(CodexSessionApprovalRules::default()));
     let approvals = Arc::new(Mutex::new(BTreeMap::new()));
 
     let result = (|| {
@@ -4147,7 +4168,9 @@ fn list_codex_skills_from_command(
             app,
             "",
             "",
+            project_root,
             &mut stream_state,
+            &approval_rules,
             &approvals,
             None,
         )?;
@@ -4166,7 +4189,9 @@ fn list_codex_skills_from_command(
             app,
             "",
             "",
+            project_root,
             &mut stream_state,
+            &approval_rules,
             &approvals,
             None,
         )?;
@@ -5136,6 +5161,30 @@ fn project_has_claude_tool_approval(
 
 fn store_claude_tool_approval(
     rules: &mut ClaudeApprovalRules,
+    project_root: &str,
+    tool_name: &str,
+) {
+    rules
+        .always_allow_by_project
+        .entry(project_root.to_string())
+        .or_default()
+        .insert(tool_name.to_ascii_lowercase());
+}
+
+fn project_has_codex_tool_approval(
+    rules: &CodexSessionApprovalRules,
+    project_root: &str,
+    tool_name: &str,
+) -> bool {
+    rules
+        .always_allow_by_project
+        .get(project_root)
+        .map(|tools| tools.contains(&tool_name.to_ascii_lowercase()))
+        .unwrap_or(false)
+}
+
+fn store_codex_tool_approval(
+    rules: &mut CodexSessionApprovalRules,
     project_root: &str,
     tool_name: &str,
 ) {
@@ -6344,7 +6393,9 @@ fn codex_rpc_call<R: BufRead>(
     app: &AppHandle,
     terminal_tab_id: &str,
     message_id: &str,
+    project_root: &str,
     stream_state: &mut CodexStreamState,
+    codex_session_approval_rules: &Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     live_turn: Option<&Arc<LiveChatTurnHandle>>,
 ) -> Result<Value, String> {
@@ -6370,10 +6421,12 @@ fn codex_rpc_call<R: BufRead>(
                     app,
                     terminal_tab_id,
                     message_id,
+                    project_root,
                     server_request_id,
                     notification_method,
                     message.get("params").unwrap_or(&Value::Null),
                     stream_state,
+                    codex_session_approval_rules,
                     codex_pending_approvals,
                 )?;
             } else {
@@ -6438,10 +6491,12 @@ fn handle_codex_server_request(
     app: &AppHandle,
     terminal_tab_id: &str,
     message_id: &str,
+    project_root: &str,
     request_id: &Value,
     method: &str,
     params: &Value,
     stream_state: &mut CodexStreamState,
+    codex_session_approval_rules: &Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
 ) -> Result<(), String> {
     let request_key = request_id_key(request_id);
@@ -6479,6 +6534,43 @@ fn handle_codex_server_request(
         }
     };
 
+    let auto_allow = codex_session_approval_rules
+        .lock()
+        .map(|rules| project_has_codex_tool_approval(&rules, project_root, &tool_name))
+        .unwrap_or(false);
+
+    if auto_allow {
+        codex_upsert_approval_block(
+            &mut stream_state.blocks,
+            &mut stream_state.approval_block_by_request_id,
+            &request_key,
+            &tool_name,
+            title,
+            description,
+            summary,
+            Some("approvedAlways".to_string()),
+        );
+        emit_stream_block_update_with_prefix(
+            app,
+            terminal_tab_id,
+            message_id,
+            &stream_state.block_prefix,
+            &stream_state.blocks,
+        );
+
+        return write_jsonrpc_message_shared(
+            writer,
+            &json!({
+                "id": request_id.clone(),
+                "result": codex_build_approval_response(
+                    method,
+                    params,
+                    ClaudeApprovalDecision::AllowAlways
+                )
+            }),
+        );
+    }
+
     codex_upsert_approval_block(
         &mut stream_state.blocks,
         &mut stream_state.approval_block_by_request_id,
@@ -6502,7 +6594,14 @@ fn handle_codex_server_request(
         let mut approvals = codex_pending_approvals
             .lock()
             .map_err(|err| err.to_string())?;
-        approvals.insert(request_key.clone(), PendingCodexApproval { sender });
+        approvals.insert(
+            request_key.clone(),
+            PendingCodexApproval {
+                project_root: project_root.to_string(),
+                tool_name: tool_name.clone(),
+                sender,
+            },
+        );
     }
 
     let decision = receiver.recv().unwrap_or(ClaudeApprovalDecision::Deny);
@@ -6922,6 +7021,7 @@ fn run_codex_app_server_turn(
     terminal_tab_id: &str,
     message_id: &str,
     write_mode: bool,
+    codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     block_prefix: Vec<ChatMessageBlock>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
@@ -7012,7 +7112,9 @@ fn run_codex_app_server_turn(
         app,
         terminal_tab_id,
         message_id,
+        project_root,
         &mut stream_state,
+        &codex_session_approval_rules,
         &codex_pending_approvals,
         live_turn.as_ref(),
     ) {
@@ -7063,7 +7165,9 @@ fn run_codex_app_server_turn(
             app,
             terminal_tab_id,
             message_id,
+            project_root,
             &mut stream_state,
+            &codex_session_approval_rules,
             &codex_pending_approvals,
             live_turn.as_ref(),
         ) {
@@ -7098,7 +7202,9 @@ fn run_codex_app_server_turn(
             app,
             terminal_tab_id,
             message_id,
+            project_root,
             &mut stream_state,
+            &codex_session_approval_rules,
             &codex_pending_approvals,
             live_turn.as_ref(),
         ) {
@@ -7200,7 +7306,9 @@ fn run_codex_app_server_turn(
         app,
         terminal_tab_id,
         message_id,
+        project_root,
         &mut stream_state,
+        &codex_session_approval_rules,
         &codex_pending_approvals,
         live_turn.as_ref(),
     ) {
@@ -7234,10 +7342,12 @@ fn run_codex_app_server_turn(
                     app,
                     terminal_tab_id,
                     message_id,
+                    project_root,
                     server_request_id,
                     method,
                     message.get("params").unwrap_or(&Value::Null),
                     &mut stream_state,
+                    &codex_session_approval_rules,
                     &codex_pending_approvals,
                 )?;
             } else {
@@ -10296,6 +10406,7 @@ fn create_automation_run_from_job(
         store.terminal_storage.clone(),
         store.claude_approval_rules.clone(),
         store.claude_pending_approvals.clone(),
+        store.codex_session_approval_rules.clone(),
         store.codex_pending_approvals.clone(),
         store.automation_jobs.clone(),
         store.automation_runs.clone(),
@@ -10990,6 +11101,7 @@ fn execute_workflow_node_as_automation_run(
     terminal_storage: &TerminalStorage,
     claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: &Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: &Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: &Arc<Mutex<Vec<AutomationRun>>>,
@@ -11062,6 +11174,7 @@ fn execute_workflow_node_as_automation_run(
         terminal_storage,
         claude_approval_rules,
         claude_pending_approvals,
+        codex_session_approval_rules,
         codex_pending_approvals,
         automation_jobs,
         automation_runs,
@@ -11110,6 +11223,7 @@ fn create_automation_workflow_run_with_handles(
     terminal_storage: TerminalStorage,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
@@ -11169,6 +11283,7 @@ fn create_automation_workflow_run_with_handles(
         terminal_storage,
         claude_approval_rules,
         claude_pending_approvals,
+        codex_session_approval_rules,
         codex_pending_approvals,
         automation_jobs,
         automation_runs,
@@ -11196,6 +11311,7 @@ fn create_automation_workflow_run(
         store.terminal_storage.clone(),
         store.claude_approval_rules.clone(),
         store.claude_pending_approvals.clone(),
+        store.codex_session_approval_rules.clone(),
         store.codex_pending_approvals.clone(),
         store.automation_jobs.clone(),
         store.automation_runs.clone(),
@@ -11272,6 +11388,7 @@ fn resume_automation_workflow_run(
         store.terminal_storage.clone(),
         store.claude_approval_rules.clone(),
         store.claude_pending_approvals.clone(),
+        store.codex_session_approval_rules.clone(),
         store.codex_pending_approvals.clone(),
         store.automation_jobs.clone(),
         store.automation_runs.clone(),
@@ -11919,6 +12036,7 @@ fn send_chat_message(
         let codex_requested_transport_session = effective_previous_transport_session.clone();
         let codex_transport_kind = transport_kind.clone();
         let codex_pending_approvals = store.codex_pending_approvals.clone();
+        let codex_session_approval_rules = store.codex_session_approval_rules.clone();
         let codex_terminal_storage = terminal_storage.clone();
         let codex_workspace_id = workspace_id_for_thread.clone();
         let codex_project_name = project_name_for_thread.clone();
@@ -11942,6 +12060,7 @@ fn send_chat_message(
                 &stream_tab_id,
                 &msg_id,
                 turn_write_mode,
+                codex_session_approval_rules,
                 codex_pending_approvals,
                 Vec::new(),
                 Some(codex_live_turn.clone()),
@@ -12726,6 +12845,7 @@ fn run_auto_orchestration(
 
     let state_arc = store.state.clone();
     let ctx_arc = store.context.clone();
+    let codex_session_approval_rules = store.codex_session_approval_rules.clone();
     let codex_pending_approvals = store.codex_pending_approvals.clone();
     let app_handle = app.clone();
     let terminal_tab_id = request.terminal_tab_id.clone();
@@ -12999,6 +13119,7 @@ fn run_auto_orchestration(
                     &terminal_tab_id,
                     &msg_id,
                     step.write,
+                    codex_session_approval_rules.clone(),
                     codex_pending_approvals.clone(),
                     block_prefix,
                     Some(auto_live_turn.clone()),
@@ -13321,6 +13442,14 @@ fn respond_assistant_approval(
             .map_err(|err| err.to_string())?;
         approvals.remove(&request.request_id)
     } {
+        if matches!(parsed_decision, ClaudeApprovalDecision::AllowAlways) {
+            let mut rules = store
+                .codex_session_approval_rules
+                .lock()
+                .map_err(|err| err.to_string())?;
+            store_codex_tool_approval(&mut rules, &pending.project_root, &pending.tool_name);
+        }
+
         pending
             .sender
             .send(parsed_decision)
@@ -21006,6 +21135,7 @@ fn execute_auto_mode_goal(
     terminal_storage: &TerminalStorage,
     claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: &Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     run: &AutomationRun,
     goal: &AutomationGoal,
@@ -21162,6 +21292,7 @@ fn execute_auto_mode_goal(
                 &request.terminal_tab_id,
                 &message_id,
                 step.write,
+                codex_session_approval_rules.clone(),
                 codex_pending_approvals.clone(),
                 Vec::new(),
                 None,
@@ -21997,6 +22128,7 @@ fn schedule_automation_run(app: AppHandle, store: &State<'_, AppStore>, run_id: 
         store.terminal_storage.clone(),
         store.claude_approval_rules.clone(),
         store.claude_pending_approvals.clone(),
+        store.codex_session_approval_rules.clone(),
         store.codex_pending_approvals.clone(),
         store.automation_jobs.clone(),
         store.automation_runs.clone(),
@@ -22013,6 +22145,7 @@ fn schedule_automation_run_with_handles(
     terminal_storage: TerminalStorage,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
@@ -22061,6 +22194,7 @@ fn schedule_automation_run_with_handles(
             &terminal_storage,
             &claude_approval_rules,
             &claude_pending_approvals,
+            &codex_session_approval_rules,
             &codex_pending_approvals,
             &automation_jobs,
             &automation_runs,
@@ -22081,6 +22215,7 @@ fn schedule_existing_automation_runs(
     terminal_storage: TerminalStorage,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
@@ -22104,6 +22239,7 @@ fn schedule_existing_automation_runs(
             terminal_storage.clone(),
             claude_approval_rules.clone(),
             claude_pending_approvals.clone(),
+            codex_session_approval_rules.clone(),
             codex_pending_approvals.clone(),
             automation_jobs.clone(),
             automation_runs.clone(),
@@ -22121,6 +22257,7 @@ fn create_automation_run_from_job_with_handles(
     terminal_storage: TerminalStorage,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
@@ -22182,6 +22319,7 @@ fn create_automation_run_from_job_with_handles(
         terminal_storage,
         claude_approval_rules,
         claude_pending_approvals,
+        codex_session_approval_rules,
         codex_pending_approvals,
         automation_jobs,
         automation_runs,
@@ -22200,6 +22338,7 @@ fn schedule_cron_automation_jobs(
     terminal_storage: TerminalStorage,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
@@ -22263,6 +22402,7 @@ fn schedule_cron_automation_jobs(
                 terminal_storage.clone(),
                 claude_approval_rules.clone(),
                 claude_pending_approvals.clone(),
+                codex_session_approval_rules.clone(),
                 codex_pending_approvals.clone(),
                 automation_jobs.clone(),
                 automation_runs.clone(),
@@ -22288,6 +22428,7 @@ fn execute_automation_goal(
     terminal_storage: &TerminalStorage,
     claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: &Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     run: &AutomationRun,
     goal: &AutomationGoal,
@@ -22383,6 +22524,7 @@ fn execute_automation_goal(
             terminal_storage,
             claude_approval_rules,
             claude_pending_approvals,
+            codex_session_approval_rules,
             codex_pending_approvals,
             run,
             goal,
@@ -22464,6 +22606,7 @@ fn execute_automation_goal(
             &goal.synthetic_terminal_tab_id,
             &message_id,
             true,
+            codex_session_approval_rules.clone(),
             codex_pending_approvals.clone(),
             Vec::new(),
             None,
@@ -22630,6 +22773,7 @@ fn execute_automation_run_loop(
     terminal_storage: &TerminalStorage,
     claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: &Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: &Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: &Arc<Mutex<Vec<AutomationRun>>>,
@@ -22945,6 +23089,7 @@ fn execute_automation_run_loop(
                 terminal_storage,
                 claude_approval_rules,
                 claude_pending_approvals,
+                codex_session_approval_rules,
                 codex_pending_approvals,
                 &run_snapshot,
                 &working_goal,
@@ -26211,6 +26356,7 @@ fn schedule_automation_workflow_run_with_handles(
     terminal_storage: TerminalStorage,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
@@ -26262,6 +26408,7 @@ fn schedule_automation_workflow_run_with_handles(
             &terminal_storage,
             &claude_approval_rules,
             &claude_pending_approvals,
+            &codex_session_approval_rules,
             &codex_pending_approvals,
             &automation_jobs,
             &automation_runs,
@@ -26285,6 +26432,7 @@ fn schedule_existing_automation_workflow_runs(
     terminal_storage: TerminalStorage,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
@@ -26311,6 +26459,7 @@ fn schedule_existing_automation_workflow_runs(
             terminal_storage.clone(),
             claude_approval_rules.clone(),
             claude_pending_approvals.clone(),
+            codex_session_approval_rules.clone(),
             codex_pending_approvals.clone(),
             automation_jobs.clone(),
             automation_runs.clone(),
@@ -26331,6 +26480,7 @@ fn schedule_cron_automation_workflows(
     terminal_storage: TerminalStorage,
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: Arc<Mutex<Vec<AutomationRun>>>,
@@ -26397,6 +26547,7 @@ fn schedule_cron_automation_workflows(
                 terminal_storage.clone(),
                 claude_approval_rules.clone(),
                 claude_pending_approvals.clone(),
+                codex_session_approval_rules.clone(),
                 codex_pending_approvals.clone(),
                 automation_jobs.clone(),
                 automation_runs.clone(),
@@ -26424,6 +26575,7 @@ fn execute_workflow_run_loop(
     terminal_storage: &TerminalStorage,
     claude_approval_rules: &Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
+    codex_session_approval_rules: &Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     automation_jobs: &Arc<Mutex<Vec<AutomationJob>>>,
     automation_runs: &Arc<Mutex<Vec<AutomationRun>>>,
@@ -26527,6 +26679,7 @@ fn execute_workflow_run_loop(
             terminal_storage,
             claude_approval_rules,
             claude_pending_approvals,
+            codex_session_approval_rules,
             codex_pending_approvals,
             automation_jobs,
             automation_runs,
@@ -26971,6 +27124,7 @@ fn seed_settings(project_root: &str) -> AppSettings {
         },
         ssh_connections: Vec::new(),
         custom_agents: Vec::new(),
+        default_new_workspace_cli: default_new_workspace_cli(),
         project_root: project_root.to_string(),
         max_turns_per_agent: DEFAULT_MAX_TURNS,
         max_output_chars_per_turn: DEFAULT_MAX_OUTPUT_CHARS,
@@ -27410,6 +27564,7 @@ pub fn run() {
         load_or_seed_claude_approval_rules().unwrap_or_default(),
     ));
     let claude_pending_approvals = Arc::new(Mutex::new(BTreeMap::new()));
+    let codex_session_approval_rules = Arc::new(Mutex::new(CodexSessionApprovalRules::default()));
     let codex_pending_approvals = Arc::new(Mutex::new(BTreeMap::new()));
     let scheduler_claude_approval_rules = claude_approval_rules.clone();
     let scheduler_claude_pending_approvals = claude_pending_approvals.clone();
@@ -27434,6 +27589,7 @@ pub fn run() {
             acp_session: Arc::new(Mutex::new(acp::AcpSession::default())),
             claude_approval_rules,
             claude_pending_approvals,
+            codex_session_approval_rules: codex_session_approval_rules.clone(),
             codex_pending_approvals,
             live_chat_turns: Arc::new(Mutex::new(BTreeMap::new())),
         })
@@ -27450,6 +27606,7 @@ pub fn run() {
                 scheduler_storage.clone(),
                 scheduler_claude_approval_rules.clone(),
                 scheduler_claude_pending_approvals.clone(),
+                codex_session_approval_rules.clone(),
                 scheduler_codex_pending_approvals.clone(),
                 scheduler_jobs.clone(),
                 scheduler_runs.clone(),
@@ -27463,6 +27620,7 @@ pub fn run() {
                 scheduler_storage.clone(),
                 scheduler_claude_approval_rules.clone(),
                 scheduler_claude_pending_approvals.clone(),
+                codex_session_approval_rules.clone(),
                 scheduler_codex_pending_approvals.clone(),
                 scheduler_jobs.clone(),
                 scheduler_runs.clone(),
@@ -27476,6 +27634,7 @@ pub fn run() {
                 scheduler_storage.clone(),
                 scheduler_claude_approval_rules.clone(),
                 scheduler_claude_pending_approvals.clone(),
+                codex_session_approval_rules.clone(),
                 scheduler_codex_pending_approvals.clone(),
                 scheduler_jobs.clone(),
                 scheduler_runs.clone(),
@@ -27492,6 +27651,7 @@ pub fn run() {
                 scheduler_storage.clone(),
                 scheduler_claude_approval_rules.clone(),
                 scheduler_claude_pending_approvals.clone(),
+                codex_session_approval_rules.clone(),
                 scheduler_codex_pending_approvals.clone(),
                 scheduler_jobs.clone(),
                 scheduler_runs.clone(),

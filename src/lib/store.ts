@@ -53,7 +53,11 @@ import {
   resolveSelectedCustomAgent,
 } from "./customAgents";
 import { estimateSessionTokens } from "./tokenEstimation";
-import { ACP_COMMANDS, AcpCliCapabilities, AcpCommand } from "./acp";
+import {
+  ACP_COMMANDS,
+  AcpCliCapabilities,
+  AcpCommand,
+} from "./acp";
 import {
   detectAssistantContentFormat,
   normalizeAssistantContent,
@@ -254,13 +258,14 @@ function createWorkspaceRef(
 
 function createTerminalTab(
   workspace: WorkspaceRef,
-  partial?: Partial<TerminalTab>
+  partial?: Partial<TerminalTab>,
+  defaultSelectedCli?: TerminalCliId
 ): TerminalTab {
   return {
     id: partial?.id ?? createId("tab"),
     title: partial?.title ?? workspace.name,
     workspaceId: workspace.id,
-    selectedCli: partial?.selectedCli ?? workspace.activeAgent ?? workspace.currentWriter,
+    selectedCli: partial?.selectedCli ?? defaultSelectedCli ?? workspace.activeAgent ?? workspace.currentWriter,
     selectedAgent: normalizeSelectedCustomAgent(partial?.selectedAgent) ?? null,
     planMode: partial?.planMode ?? false,
     fastMode: partial?.fastMode ?? false,
@@ -274,6 +279,13 @@ function createTerminalTab(
     status: partial?.status ?? "idle",
     lastActiveAt: partial?.lastActiveAt ?? nowIso(),
   };
+}
+
+function defaultNewWorkspaceCli(settings?: AppSettings | null): TerminalCliId {
+  const value = settings?.defaultNewWorkspaceCli;
+  return value === "auto" || value === "codex" || value === "claude" || value === "gemini"
+    ? value
+    : "codex";
 }
 
 function createCliContextBoundary(
@@ -1022,6 +1034,7 @@ interface StoreState {
   cloneTerminalTab: (sourceTabId?: string) => void;
   reorderTerminalTabs: (sourceTabId: string, targetTabId: string) => void;
   closeTerminalTab: (tabId: string) => void;
+  deleteWorkspace: (workspaceId: string) => Promise<void>;
   setActiveTerminalTab: (tabId: string) => void;
   resetTerminalTabSession: (tabId?: string) => void;
   resetCliTransportSession: (cliId: AgentId, tabId?: string) => void;
@@ -1345,7 +1358,11 @@ export const useStore = create<StoreState>((set, get) => {
     if (terminalTabs.length === 0) {
       const fallbackWorkspace = workspaces[0];
       if (fallbackWorkspace) {
-        const fallbackTab = createTerminalTab(fallbackWorkspace);
+        const fallbackTab = createTerminalTab(
+          fallbackWorkspace,
+          undefined,
+          defaultNewWorkspaceCli(get().settings)
+        );
         terminalTabs = [fallbackTab];
         chatSessions[fallbackTab.id] = createConversationSession(fallbackTab, fallbackWorkspace);
         activeTerminalTabId = fallbackTab.id;
@@ -1654,7 +1671,7 @@ export const useStore = create<StoreState>((set, get) => {
     }
 
     const workspace = createWorkspaceRef(picked.rootPath, { name: picked.name });
-    const tab = createTerminalTab(workspace);
+    const tab = createTerminalTab(workspace, undefined, defaultNewWorkspaceCli(get().settings));
     const session = createConversationSession(tab, workspace);
 
     set((current) => {
@@ -1707,7 +1724,7 @@ export const useStore = create<StoreState>((set, get) => {
       locationLabel: locationLabel ?? null,
       branch: "workspace",
     });
-    const tab = createTerminalTab(workspace);
+    const tab = createTerminalTab(workspace, undefined, defaultNewWorkspaceCli(get().settings));
     const session = createConversationSession(tab, workspace);
 
     set((current) => {
@@ -1747,7 +1764,7 @@ export const useStore = create<StoreState>((set, get) => {
     if (!workspace) return;
 
     const tab = createTerminalTab(workspace, {
-      selectedCli: sourceTab?.selectedCli ?? workspace.activeAgent,
+      selectedCli: sourceTab?.selectedCli ?? defaultNewWorkspaceCli(current.settings),
       selectedAgent: sourceTab?.selectedAgent ?? null,
       contextBoundariesByCli: {},
     });
@@ -1895,6 +1912,94 @@ export const useStore = create<StoreState>((set, get) => {
       };
     });
     enqueueMessagePersistence(() => bridge.deleteChatSessionByTab(tabId));
+  },
+
+  deleteWorkspace: async (workspaceId) => {
+    const current = get();
+    const workspace = current.workspaces.find((item) => item.id === workspaceId) ?? null;
+    if (!workspace) return;
+
+    const tabsToDelete = current.terminalTabs.filter((tab) => tab.workspaceId === workspaceId);
+    const tabIds = tabsToDelete.map((tab) => tab.id);
+
+    try {
+      const sessionIds: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const page = await bridge.listWorkspaceSessions(workspaceId, {
+          query: { status: "all" },
+          cursor,
+          limit: 500,
+        });
+        page.data.forEach((entry) => {
+          if (entry.sessionId && !sessionIds.includes(entry.sessionId)) {
+            sessionIds.push(entry.sessionId);
+          }
+        });
+        cursor = page.nextCursor ?? null;
+      } while (cursor);
+
+      if (sessionIds.length > 0) {
+        await bridge.deleteWorkspaceSessions(workspaceId, sessionIds);
+      }
+    } catch {
+      // Keep local cleanup moving even if session catalog cleanup fails.
+    }
+
+    await Promise.allSettled(
+      tabIds.map(async (tabId) => {
+        await Promise.allSettled([
+          bridge.closePtySession(tabId),
+          bridge.deleteChatSessionByTab(tabId),
+        ]);
+      })
+    );
+
+    set((state) => {
+      const workspaces = state.workspaces.filter((item) => item.id !== workspaceId);
+      const terminalTabs = state.terminalTabs.filter((tab) => tab.workspaceId !== workspaceId);
+      const nextActiveTabId =
+        state.activeTerminalTabId && tabIds.includes(state.activeTerminalTabId)
+          ? terminalTabs[terminalTabs.length - 1]?.id ?? null
+          : state.activeTerminalTabId;
+
+      const chatSessions = { ...state.chatSessions };
+      const sharedContext = { ...state.sharedContext };
+      const queuedChatByTab = { ...state.queuedChatByTab };
+      tabIds.forEach((tabId) => {
+        delete chatSessions[tabId];
+        delete sharedContext[tabId];
+        delete queuedChatByTab[tabId];
+      });
+
+      const gitPanelsByWorkspace = { ...state.gitPanelsByWorkspace };
+      const gitCommitMessageByWorkspace = { ...state.gitCommitMessageByWorkspace };
+      const gitCommitLoadingByWorkspace = { ...state.gitCommitLoadingByWorkspace };
+      const gitCommitErrorByWorkspace = { ...state.gitCommitErrorByWorkspace };
+      delete gitPanelsByWorkspace[workspaceId];
+      delete gitCommitMessageByWorkspace[workspaceId];
+      delete gitCommitLoadingByWorkspace[workspaceId];
+      delete gitCommitErrorByWorkspace[workspaceId];
+
+      const appState = state.appState
+        ? deriveActiveWorkspaceState(state.appState, workspaces, terminalTabs, nextActiveTabId)
+        : null;
+
+      persistTerminalState(workspaces, terminalTabs, nextActiveTabId, chatSessions);
+      return {
+        appState,
+        workspaces,
+        terminalTabs,
+        activeTerminalTabId: nextActiveTabId,
+        chatSessions,
+        sharedContext,
+        queuedChatByTab,
+        gitPanelsByWorkspace,
+        gitCommitMessageByWorkspace,
+        gitCommitLoadingByWorkspace,
+        gitCommitErrorByWorkspace,
+      };
+    });
   },
 
   resetTerminalTabSession: (tabId) => {
@@ -3885,7 +3990,7 @@ export const useStore = create<StoreState>((set, get) => {
           pushSystemMessage("No active session.");
           return;
         }
-        pushSystemMessage(sessionId);
+        pushSystemMessage(`SessionId: ${sessionId}`);
         return;
       }
       case "help": {

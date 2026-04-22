@@ -933,46 +933,17 @@ export function CustomModelDialog({
             为当前 CLI 维护一组额外模型 ID，便于在模型选择器中直接使用。
           </div>
 
-          <div className="vendor-model-manager-list" role="list">
-            {models.length === 0 ? (
-              <div className="vendor-empty">当前还没有自定义 Plugin Models。</div>
-            ) : (
-              models.map((model) => (
-                <div key={model.id} className="vendor-model-manager-item" role="listitem">
-                  <div className="vendor-model-manager-main">
-                    <div className="vendor-model-manager-id">{model.id}</div>
-                    {model.label !== model.id ? (
-                      <div className="vendor-model-manager-label">{model.label}</div>
-                    ) : null}
-                    {model.description ? (
-                      <div className="vendor-model-manager-desc">{model.description}</div>
-                    ) : null}
-                  </div>
-                  <div className="vendor-model-manager-actions">
-                    <VendorButton
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => handleStartEdit(model)}
-                    >
-                      <Pencil size={14} />
-                    </VendorButton>
-                    <VendorButton
-                      variant="ghost"
-                      size="icon"
-                      className="vendor-btn-danger"
-                      onClick={() =>
-                        onModelsChange(models.filter((item) => item.id !== model.id))
-                      }
-                    >
-                      <Trash2 size={14} />
-                    </VendorButton>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-
           <div className="vendor-model-manager-form">
+            <div className="vendor-model-manager-form-header">
+              <div className="vendor-model-manager-form-title">
+                {editingId ? "编辑模型" : "新增模型"}
+              </div>
+              {editingId ? (
+                <VendorButton variant="outline" size="sm" onClick={resetEditor}>
+                  新建空白模型
+                </VendorButton>
+              ) : null}
+            </div>
             <div className="vendor-model-add">
               <input
                 type="text"
@@ -1035,9 +1006,48 @@ export function CustomModelDialog({
                   resetEditor();
                 }}
               >
-                {editingId ? "保存变更" : "新增模型"}
+                {editingId ? "保存变更" : "保存模型"}
               </VendorButton>
             </div>
+          </div>
+
+          <div className="vendor-model-manager-list" role="list">
+            {models.length === 0 ? (
+              <div className="vendor-empty">当前还没有自定义 Plugin Models。</div>
+            ) : (
+              models.map((model) => (
+                <div key={model.id} className="vendor-model-manager-item" role="listitem">
+                  <div className="vendor-model-manager-main">
+                    <div className="vendor-model-manager-id">{model.id}</div>
+                    {model.label !== model.id ? (
+                      <div className="vendor-model-manager-label">{model.label}</div>
+                    ) : null}
+                    {model.description ? (
+                      <div className="vendor-model-manager-desc">{model.description}</div>
+                    ) : null}
+                  </div>
+                  <div className="vendor-model-manager-actions">
+                    <VendorButton
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleStartEdit(model)}
+                    >
+                      <Pencil size={14} />
+                    </VendorButton>
+                    <VendorButton
+                      variant="ghost"
+                      size="icon"
+                      className="vendor-btn-danger"
+                      onClick={() =>
+                        onModelsChange(models.filter((item) => item.id !== model.id))
+                      }
+                    >
+                      <Trash2 size={14} />
+                    </VendorButton>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>

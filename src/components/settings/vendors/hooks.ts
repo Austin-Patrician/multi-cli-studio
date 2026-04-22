@@ -1,28 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AgentCard, ModelProviderConfig } from "../../../lib/models";
 import { bridge } from "../../../lib/bridge";
+import { useVendorModels } from "../../../lib/vendorModels";
 import type {
   GeminiAuthMode,
   GeminiPreflightCheck,
   GeminiVendorDraft,
-  VendorCustomModel,
 } from "./types";
-import { GEMINI_AUTH_MODES, isValidVendorModelId } from "./types";
-
-const LEGACY_STORAGE_KEY_ALIASES: Record<string, string[]> = {
-  "claude-custom-models": [
-    "mossx-claude-custom-models",
-    "codemoss-claude-custom-models",
-  ],
-  "codex-custom-models": [
-    "mossx-codex-custom-models",
-    "codemoss-codex-custom-models",
-  ],
-  "gemini-custom-models": [
-    "mossx-gemini-custom-models",
-    "codemoss-gemini-custom-models",
-  ],
-};
+import { GEMINI_AUTH_MODES } from "./types";
 
 const GEMINI_VENDOR_STORAGE_KEY = "multi-cli-studio:gemini-vendor-settings-v1";
 
@@ -85,121 +70,8 @@ function defaultExternalTextState(path = ""): ExternalTextState {
   };
 }
 
-function parseModels(value: string | null): VendorCustomModel[] {
-  if (!value) {
-    return [];
-  }
-  try {
-    const raw = JSON.parse(value);
-    if (!Array.isArray(raw)) {
-      return [];
-    }
-    const models: VendorCustomModel[] = [];
-    for (const item of raw) {
-      if (!item || typeof item !== "object") continue;
-      const candidate = item as Partial<VendorCustomModel>;
-      if (typeof candidate.id !== "string" || !isValidVendorModelId(candidate.id)) {
-        continue;
-      }
-      const id = candidate.id.trim();
-      const label =
-        typeof candidate.label === "string" && candidate.label.trim()
-          ? candidate.label.trim()
-          : id;
-      const description =
-        typeof candidate.description === "string" && candidate.description.trim()
-          ? candidate.description.trim()
-          : undefined;
-      models.push({ id, label, description });
-    }
-    return models;
-  } catch {
-    return [];
-  }
-}
-
-function readPluginModels(storageKey: string): VendorCustomModel[] {
-  if (typeof window === "undefined" || !window.localStorage) {
-    return [];
-  }
-  const canonicalRaw = window.localStorage.getItem(storageKey);
-  const canonical = parseModels(canonicalRaw);
-  if (canonicalRaw !== null) {
-    return canonical;
-  }
-
-  const legacyKeys = LEGACY_STORAGE_KEY_ALIASES[storageKey] ?? [];
-  for (const legacyKey of legacyKeys) {
-    const legacyModels = parseModels(window.localStorage.getItem(legacyKey));
-    if (legacyModels.length === 0) {
-      continue;
-    }
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(legacyModels));
-      window.dispatchEvent(
-        new CustomEvent("localStorageChange", { detail: { key: storageKey } }),
-      );
-    } catch {
-      // ignore migration write failures
-    }
-    return legacyModels;
-  }
-
-  return [];
-}
-
-function writePluginModels(storageKey: string, models: VendorCustomModel[]) {
-  if (typeof window === "undefined" || !window.localStorage) {
-    return;
-  }
-  try {
-    window.localStorage.setItem(storageKey, JSON.stringify(models));
-    window.dispatchEvent(
-      new CustomEvent("localStorageChange", { detail: { key: storageKey } }),
-    );
-  } catch {
-    // ignore localStorage write failures
-  }
-}
-
 export function usePluginModels(storageKey: string) {
-  const [models, setModels] = useState<VendorCustomModel[]>(() =>
-    readPluginModels(storageKey),
-  );
-
-  useEffect(() => {
-    const handleStorageChange = (event: StorageEvent) => {
-      if (event.key === storageKey) {
-        setModels(readPluginModels(storageKey));
-      }
-    };
-    const handleCustomChange = (event: Event) => {
-      const detail = (event as CustomEvent<{ key?: string }>).detail;
-      if (detail?.key === storageKey) {
-        setModels(readPluginModels(storageKey));
-      }
-    };
-
-    window.addEventListener("storage", handleStorageChange);
-    window.addEventListener("localStorageChange", handleCustomChange);
-    return () => {
-      window.removeEventListener("storage", handleStorageChange);
-      window.removeEventListener("localStorageChange", handleCustomChange);
-    };
-  }, [storageKey]);
-
-  const updateModels = useCallback(
-    (nextModels: VendorCustomModel[]) => {
-      setModels(nextModels);
-      writePluginModels(storageKey, nextModels);
-    },
-    [storageKey],
-  );
-
-  return {
-    models,
-    updateModels,
-  };
+  return useVendorModels(storageKey);
 }
 
 function siblingPath(path: string, fileName: string) {

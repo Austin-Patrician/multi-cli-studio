@@ -5456,6 +5456,7 @@
   justify-content: flex-end;
   justify-self: end;
   min-width: 0;
+  position: relative;
 }
 
 .git-history-changes.diff-panel .diff-row:hover {
@@ -5469,26 +5470,24 @@
 }
 
 .git-history-changes.diff-panel .diff-row-actions {
+  position: absolute;
+  top: 50%;
+  right: 0;
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  max-width: 0;
-  overflow: hidden;
-  margin-left: 0;
+  justify-content: flex-end;
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transform: translateX(6px);
-  transition: max-width 180ms ease, opacity 140ms ease, transform 140ms ease, margin-left 180ms ease;
+  transform: translateY(-50%);
 }
 
 .git-history-changes.diff-panel .diff-row:hover .diff-row-actions,
 .git-history-changes.diff-panel .diff-row:focus-within .diff-row-actions {
-  max-width: 90px;
-  margin-left: 4px;
   opacity: 1;
+  visibility: visible;
   pointer-events: auto;
-  overflow: visible;
-  transform: translateX(0);
 }
 
 .git-history-changes.diff-panel .diff-row-action {
@@ -5641,6 +5640,11 @@
 .git-history-changes.diff-panel .diff-row:hover .diff-counts-inline {
   border-color: rgba(15, 23, 42, 0.12);
   background: rgba(255, 255, 255, 0.92);
+  opacity: 0;
+}
+
+.git-history-changes.diff-panel .diff-row:focus-within .diff-counts-inline {
+  opacity: 0;
 }
 
 .git-history-changes.diff-panel .diff-add {
@@ -5978,6 +5982,10 @@
 
 .vendor-settings-panel {
   margin-top: 12px;
+}
+
+.vendor-settings-panel,
+.vendor-dialog-overlay {
   --vendor-primary: #0f172a;
   --vendor-primary-hover: #111c32;
   --vendor-primary-border: rgba(15, 23, 42, 0.18);
@@ -6742,6 +6750,24 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(248, 250, 252, 0.82);
+}
+
+.vendor-model-manager-form-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.vendor-model-manager-form-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
 }
 
 .vendor-form-group {
@@ -8240,6 +8266,43 @@
   color: #0f172a;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.dcc-project-delete-dialog {
+  width: min(500px, calc(100vw - 48px));
+}
+
+.dcc-project-delete-header {
+  align-items: flex-start;
+}
+
+.dcc-project-delete-title-wrap {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.dcc-project-delete-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fff1f2 0%, #ffe4e6 100%);
+  color: #be123c;
+  box-shadow: inset 0 0 0 1px rgba(244, 63, 94, 0.12);
+}
+
+.dcc-project-delete-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #64748b;
+}
+
+.dcc-project-delete-footer {
+  justify-content: flex-end;
 }
 
 .settings-agent-export-list,

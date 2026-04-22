@@ -668,6 +668,17 @@ export function DesktopSessionManagementSection({
   const [selectedIds, setSelectedIds] = useState<Record<string, true>>({});
   const [deleteArmed, setDeleteArmed] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(null);
+
+  useEffect(() => {
+    if (!notice || notice.kind !== "success") {
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      setNotice((current) => (current === notice ? null : current));
+    }, 3000);
+    return () => window.clearTimeout(timeoutId);
+  }, [notice]);
+
   const summaryQuery = useMemo(
     () => ({
       keyword: filters.keyword,

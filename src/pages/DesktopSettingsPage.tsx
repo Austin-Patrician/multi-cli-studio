@@ -14,6 +14,7 @@ import {
   Plus,
   Server,
   Settings,
+  Trash2,
 } from "lucide-react";
 import { DesktopConnectionsSection } from "../components/settings/DesktopConnectionsSection";
 import { DesktopMcpSection } from "../components/settings/DesktopMcpSection";
@@ -57,7 +58,7 @@ type ProjectView = {
 
 const NAV_ITEMS: SidebarNavItem[] = [
   { id: "settings", label: "设置", icon: Settings },
-  { id: "models", label: "模型管理", icon: Cpu },
+  { id: "models", label: "对话模型管理", icon: Cpu },
   { id: "agents", label: "智能体", icon: Bot },
   { id: "vendors", label: "供应商", icon: Settings },
   { id: "projects", label: "项目", icon: FolderOpen },
@@ -172,9 +173,12 @@ export function DesktopSettingsPage() {
   const createTerminalTab = useStore((state) => state.createTerminalTab);
   const openWorkspaceFolder = useStore((state) => state.openWorkspaceFolder);
   const openGitWorkbench = useStore((state) => state.openGitWorkbench);
+  const deleteWorkspace = useStore((state) => state.deleteWorkspace);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeVendorTab, setActiveVendorTab] = useState<AgentId>("claude");
+  const [deleteTarget, setDeleteTarget] = useState<ProjectView | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   const isGeneralSettingsRoute = location.pathname.startsWith("/settings/general");
   const isModelProvidersRoute = location.pathname.startsWith("/settings/model-providers");
@@ -312,6 +316,17 @@ export function DesktopSettingsPage() {
     }
 
     openGitWorkbench();
+  }
+
+  async function confirmDeleteWorkspace() {
+    if (!deleteTarget || deleteBusy) return;
+    setDeleteBusy(true);
+    try {
+      await deleteWorkspace(deleteTarget.workspace.id);
+      setDeleteTarget(null);
+    } finally {
+      setDeleteBusy(false);
+    }
   }
 
   return (
@@ -579,6 +594,14 @@ export function DesktopSettingsPage() {
                               >
                                 Git
                               </button>
+                              <button
+                                type="button"
+                                className="dcc-action-button danger"
+                                onClick={() => setDeleteTarget(project)}
+                              >
+                                <Trash2 size={14} />
+                                删除
+                              </button>
                             </div>
                           </article>
                         );
@@ -611,6 +634,38 @@ export function DesktopSettingsPage() {
           </div>
         </main>
       </div>
+      {deleteTarget ? (
+        <div className="vendor-dialog-overlay" onClick={() => !deleteBusy && setDeleteTarget(null)}>
+          <div className="vendor-dialog vendor-dialog-sm dcc-project-delete-dialog" onClick={(event) => event.stopPropagation()}>
+            <div className="vendor-dialog-header dcc-project-delete-header">
+              <div className="dcc-project-delete-title-wrap">
+                <div className="dcc-project-delete-icon" aria-hidden>
+                  <Trash2 size={18} />
+                </div>
+                <div>
+                  <h3>删除项目</h3>
+                </div>
+              </div>
+              <button type="button" className="vendor-dialog-close" onClick={() => !deleteBusy && setDeleteTarget(null)}>
+                ×
+              </button>
+            </div>
+            <div className="vendor-dialog-body">
+              <div className="settings-agent-confirm-copy">
+                删除 '{deleteTarget.workspace.name}' 后，会移除该项目关联的会话、终端标签页、本地持久化记录，以及后台保存的项目级 session 数据。此操作不可撤销。
+              </div>
+            </div>
+            <div className="vendor-dialog-footer dcc-project-delete-footer">
+              <button type="button" className="dcc-action-button secondary" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}>
+                取消
+              </button>
+              <button type="button" className="dcc-action-button danger" onClick={() => void confirmDeleteWorkspace()} disabled={deleteBusy}>
+                {deleteBusy ? "删除中..." : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <GlobalGitDrawer />
     </div>
   );

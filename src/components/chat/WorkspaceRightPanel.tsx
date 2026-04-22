@@ -1612,26 +1612,6 @@ export function WorkspaceRightPanel({
               </button>
             )}
           </div>
-          {/* <div className="workspace-right-panel-summary">
-            <div className="min-w-0">
-              <div className="workspace-right-panel-kicker">Workspace</div>
-              <div className="workspace-right-panel-title">{workspace.name}</div>
-              <div className="workspace-right-panel-path">{workspace.rootPath}</div>
-            </div>
-          </div> */}
-          {/* <div className="workspace-right-panel-meta">
-            <span className="workspace-right-panel-chip">
-              {workspace.branch}
-            </span>
-            <span className="workspace-right-panel-chip workspace-right-panel-chip-muted">
-              {workspaceTabs.length} tab{workspaceTabs.length === 1 ? "" : "s"}
-            </span>
-            {activeTabId ? (
-              <span className="workspace-right-panel-chip workspace-right-panel-chip-accent">
-                Active tab
-              </span>
-            ) : null}
-          </div> */}
         </div>
 
         <div className="workspace-right-panel-body">
