@@ -649,12 +649,13 @@ function RuntimeStreamingMarker({
   let label = "Responding";
 
   if (lastBlock) {
-    switch (lastBlock.kind) {
-      case "command":
-      case "tool":
-      case "approvalRequest":
-        label = "Running tools";
-        break;
+      switch (lastBlock.kind) {
+        case "command":
+        case "tool":
+        case "subagent":
+        case "approvalRequest":
+          label = "Running tools";
+          break;
       case "fileChange":
         label = "Updating files";
         break;
@@ -925,6 +926,31 @@ function ApprovalActionButton({
     >
       {iconOnly ? icon : icon ? <span className="inline-flex items-center gap-2">{icon}<span>{label}</span></span> : label}
     </button>
+  );
+}
+
+function RuntimeSubagentBlock({
+  block,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "subagent" }>;
+}) {
+  return (
+    <div className="rounded-[12px] border border-sky-200 bg-sky-50/70 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold uppercase tracking-[0.16em] text-sky-700">
+          Subagent
+        </span>
+        <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-700">
+          {block.label}
+        </span>
+        <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-sky-700">
+          {block.status}
+        </span>
+      </div>
+      <div className="mt-2 whitespace-pre-wrap break-words text-[12px] leading-6 text-slate-600">
+        {block.description}
+      </div>
+    </div>
   );
 }
 
@@ -1595,6 +1621,8 @@ function RuntimeStructuredBlocks({
             return <RuntimeFileChangeBlock key={key} block={block} />;
           case "tool":
             return <RuntimeToolBlock key={key} block={block} />;
+          case "subagent":
+            return <RuntimeSubagentBlock key={key} block={block} />;
           case "approvalRequest":
             return (
               <RuntimeApprovalRequestBlock

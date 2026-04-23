@@ -24,6 +24,7 @@ import {
   PickedChatAttachment,
   SelectedCustomAgent,
   SharedContextEntry,
+  TabSubagentState,
   TerminalCliId,
   ToolApprovalMode,
   TerminalLine,
@@ -941,6 +942,314 @@ function rebuildLivePlanMap(chatSessions: Record<string, ConversationSession>) {
   return next;
 }
 
+function isSubagentCapableCli(cliId: AgentId | null | undefined): cliId is "codex" | "claude" {
+  return cliId === "codex" || cliId === "claude";
+}
+
+function normalizeTabSubagentStatus(value: string | null | undefined): TabSubagentState["status"] | null {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return null;
+  if (
+    normalized.includes("fail") ||
+    normalized.includes("error") ||
+    normalized.includes("denied") ||
+    normalized.includes("interrupt") ||
+    normalized.includes("cancel")
+  ) {
+    return "error";
+  }
+  if (
+    normalized.includes("complete") ||
+    normalized.includes("done") ||
+    normalized.includes("finish") ||
+    normalized.includes("success") ||
+    normalized.includes("closed")
+  ) {
+    return "completed";
+  }
+  if (
+    normalized.includes("run") ||
+    normalized.includes("plan") ||
+    normalized.includes("progress") ||
+    normalized.includes("pending") ||
+    normalized.includes("queued") ||
+    normalized.includes("spawn") ||
+    normalized.includes("wait")
+  ) {
+    return "running";
+  }
+  return null;
+}
+
+function inferToolSubagentStatus(
+  tool: string,
+  status: string | null | undefined
+): TabSubagentState["status"] | null {
+  const explicit = normalizeTabSubagentStatus(status);
+  if (explicit) return explicit;
+  const normalizedTool = tool.trim().toLowerCase();
+  if (
+    normalizedTool.includes("wait") ||
+    normalizedTool.includes("close")
+  ) {
+    return "completed";
+  }
+  if (
+    normalizedTool.includes("spawn") ||
+    normalizedTool.includes("resume") ||
+    normalizedTool.includes("send_input") ||
+    normalizedTool.includes("send-input") ||
+    normalizedTool === "task" ||
+    normalizedTool === "agent" ||
+    normalizedTool.includes("agent")
+  ) {
+    return "running";
+  }
+  return null;
+}
+
+function prettifySubagentLabel(value: string) {
+  const normalized = value.trim();
+  if (!normalized) return "Subagent";
+  return normalized
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function normalizeSubagentDescription(value: string | null | undefined, fallback: string) {
+  const normalized = value?.replace(/\s+/g, " ").trim();
+  if (!normalized) return fallback;
+  return normalized.length > 160 ? `${normalized.slice(0, 157)}...` : normalized;
+}
+
+type ParsedSubagentCandidate = {
+  id: string;
+  label: string;
+  description: string;
+  status: TabSubagentState["status"] | null;
+};
+
+function parseSubagentCandidateObject(
+  value: unknown,
+  idFallback?: string | null
+): ParsedSubagentCandidate | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const id =
+    typeof record.id === "string"
+      ? record.id.trim()
+      : typeof record.agentId === "string"
+        ? record.agentId.trim()
+        : typeof record.threadId === "string"
+          ? record.threadId.trim()
+          : idFallback?.trim() ?? "";
+  const label =
+    typeof record.label === "string"
+      ? record.label.trim()
+      : typeof record.name === "string"
+        ? record.name.trim()
+        : typeof record.agent === "string"
+          ? record.agent.trim()
+          : typeof record.subagent_type === "string"
+            ? record.subagent_type.trim()
+            : id;
+  const description =
+    typeof record.description === "string"
+      ? record.description.trim()
+      : typeof record.prompt === "string"
+        ? record.prompt.trim()
+        : typeof record.summary === "string"
+          ? record.summary.trim()
+          : label;
+  const status = normalizeTabSubagentStatus(
+    typeof record.status === "string"
+      ? record.status
+      : typeof record.state === "string"
+        ? record.state
+        : null
+  );
+  if (!id && !label && !description) return null;
+  return {
+    id: id || label || description,
+    label: label || id || "Subagent",
+    description: description || label || id || "Subagent",
+    status,
+  };
+}
+
+function parseToolSummarySubagents(summary: string): ParsedSubagentCandidate[] {
+  const trimmed = summary.trim();
+  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((entry, index) => parseSubagentCandidateObject(entry, `subagent-${index + 1}`))
+        .filter((entry): entry is ParsedSubagentCandidate => Boolean(entry));
+    }
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      const direct = parseSubagentCandidateObject(record, null);
+      const nested = Object.entries(record)
+        .map(([key, value]) => parseSubagentCandidateObject(value, key))
+        .filter((entry): entry is ParsedSubagentCandidate => Boolean(entry));
+      return nested.length > 0 ? nested : direct ? [direct] : [];
+    }
+  } catch {
+    return [];
+  }
+  return [];
+}
+
+function buildDerivedSubagentId(
+  cliId: AgentId,
+  tool: string,
+  description: string,
+  messageId: string,
+  blockIndex: number
+) {
+  const normalizedDescription = description.trim().toLowerCase();
+  if (normalizedDescription) {
+    return `${cliId}:${tool.trim().toLowerCase()}:${normalizedDescription}`;
+  }
+  return `${cliId}:${messageId}:${blockIndex}:${tool.trim().toLowerCase()}`;
+}
+
+function extractMessageSubagents(message: ChatMessage): TabSubagentState[] {
+  if (!isSubagentCapableCli(message.cliId)) return [];
+  const cliId = message.cliId;
+  const updatedAt = message.timestamp;
+  const subagents: TabSubagentState[] = [];
+  const blocks = message.blocks ?? [];
+  const hasStructuredSubagentBlocks = blocks.some((block) => block.kind === "subagent");
+
+  blocks.forEach((block, index) => {
+    if (block.kind === "subagent") {
+      subagents.push({
+        id: `${cliId}:block:${block.id}`,
+        cliId,
+        label: block.label.trim() || "Subagent",
+        description: normalizeSubagentDescription(block.description, block.label || "Subagent"),
+        status: block.status,
+        source: "block",
+        sourceTool: block.sourceTool ?? null,
+        updatedAt,
+      });
+      return;
+    }
+
+    if (block.kind !== "tool") return;
+    if (hasStructuredSubagentBlocks) return;
+
+    const tool = block.tool.trim();
+    const normalizedTool = tool.toLowerCase();
+    const looksLikeClaudeSubagent =
+      cliId === "claude" && (normalizedTool === "task" || normalizedTool === "agent");
+    const looksLikeCodexSubagent =
+      cliId === "codex" &&
+      (block.source === "agent-collab" ||
+        normalizedTool.includes("agent") ||
+        normalizedTool.includes("spawn") ||
+        normalizedTool.includes("wait") ||
+        normalizedTool.includes("resume") ||
+        normalizedTool.includes("close"));
+
+    if (!looksLikeClaudeSubagent && !looksLikeCodexSubagent) {
+      return;
+    }
+
+    const parsed = block.summary ? parseToolSummarySubagents(block.summary) : [];
+    if (parsed.length > 0) {
+      parsed.forEach((entry) => {
+        subagents.push({
+          id: `${cliId}:tool:${entry.id}`,
+          cliId,
+          label: entry.label || prettifySubagentLabel(tool),
+          description: normalizeSubagentDescription(entry.description, entry.label || tool),
+          status: entry.status ?? inferToolSubagentStatus(tool, block.status) ?? "running",
+          source: "tool",
+          sourceTool: tool,
+          updatedAt,
+        });
+      });
+      return;
+    }
+
+    const inferredStatus = inferToolSubagentStatus(tool, block.status);
+    if (!inferredStatus) return;
+    const label = prettifySubagentLabel(tool);
+    const description = normalizeSubagentDescription(block.summary ?? block.source ?? label, label);
+    subagents.push({
+      id: buildDerivedSubagentId(cliId, tool, description, message.id, index),
+      cliId,
+      label,
+      description,
+      status: inferredStatus,
+      source: "tool",
+      sourceTool: tool,
+      updatedAt,
+    });
+  });
+
+  return subagents;
+}
+
+function upsertTabSubagent(
+  target: Map<string, TabSubagentState>,
+  next: TabSubagentState
+) {
+  const existing = target.get(next.id);
+  if (!existing) {
+    target.set(next.id, next);
+    return;
+  }
+
+  target.set(next.id, {
+    ...existing,
+    ...next,
+    label: next.label.trim() ? next.label : existing.label,
+    description:
+      next.description.trim() && next.description !== prettifySubagentLabel(next.sourceTool ?? "")
+        ? next.description
+        : existing.description,
+  });
+}
+
+function buildTabSubagents(session: ConversationSession): TabSubagentState[] {
+  const byId = new Map<string, TabSubagentState>();
+  session.messages.forEach((message) => {
+    extractMessageSubagents(message).forEach((subagent) => {
+      upsertTabSubagent(byId, subagent);
+    });
+  });
+
+  const statusWeight: Record<TabSubagentState["status"], number> = {
+    running: 0,
+    error: 1,
+    completed: 2,
+  };
+
+  return Array.from(byId.values()).sort((left, right) => {
+    const statusDiff = statusWeight[left.status] - statusWeight[right.status];
+    if (statusDiff !== 0) return statusDiff;
+    return left.label.localeCompare(right.label, undefined, { sensitivity: "base" });
+  });
+}
+
+function rebuildTabSubagentMap(chatSessions: Record<string, ConversationSession>) {
+  const next: Record<string, TabSubagentState[]> = {};
+  Object.entries(chatSessions).forEach(([tabId, session]) => {
+    const subagents = buildTabSubagents(session);
+    if (subagents.length > 0) {
+      next[tabId] = subagents;
+    }
+  });
+  return next;
+}
+
 function appendSystemMessageToSession(
   chatSessions: Record<string, ConversationSession>,
   tabId: string,
@@ -1060,6 +1369,7 @@ interface StoreState {
   sharedContext: Record<string, SharedContextEntry>;
   queuedChatByTab: Record<string, QueuedChatMessage>;
   livePlanByTab: Record<string, LivePlanState>;
+  tabSubagentsByTab: Record<string, TabSubagentState[]>;
 
   loadInitialState: (projectRoot?: string) => Promise<void>;
   switchAgent: (agentId: AgentId) => Promise<void>;
@@ -1206,6 +1516,7 @@ export const useStore = create<StoreState>((set, get) => {
   sharedContext: {},
   queuedChatByTab: {},
   livePlanByTab: {},
+  tabSubagentsByTab: {},
 
   setAppState: (state) =>
     set((current) => ({
@@ -1299,8 +1610,9 @@ export const useStore = create<StoreState>((set, get) => {
         if (livePlanByTab[tabId]?.messageId === messageId) {
           delete livePlanByTab[tabId];
         }
+        const tabSubagentsByTab = rebuildTabSubagentMap(chatSessions);
         persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
-        return { chatSessions, livePlanByTab };
+        return { chatSessions, livePlanByTab, tabSubagentsByTab };
       });
     enqueueMessagePersistence(() =>
       bridge.deleteChatMessage({
@@ -1337,6 +1649,7 @@ export const useStore = create<StoreState>((set, get) => {
         return {
           chatSessions,
           livePlanByTab: rebuildLivePlanMap(chatSessions),
+          tabSubagentsByTab: rebuildTabSubagentMap(chatSessions),
           sharedContext: rebuildSharedContextMap(chatSessions, state.terminalTabs, state.workspaces),
         };
       });
@@ -1473,6 +1786,7 @@ export const useStore = create<StoreState>((set, get) => {
       sharedContext: rebuildSharedContextMap(chatSessions, terminalTabs, workspaces),
       queuedChatByTab: {},
       livePlanByTab: rebuildLivePlanMap(chatSessions),
+      tabSubagentsByTab: rebuildTabSubagentMap(chatSessions),
     });
 
     persistTerminalState(workspaces, terminalTabs, activeTerminalTabId, chatSessions);
@@ -1499,6 +1813,7 @@ export const useStore = create<StoreState>((set, get) => {
           terminalTabs: nextTerminalTabs,
           chatSessions: nextChatSessions,
           livePlanByTab: rebuildLivePlanMap(nextChatSessions),
+          tabSubagentsByTab: rebuildTabSubagentMap(nextChatSessions),
           busyAction: state.busyAction === "chat" ? null : state.busyAction,
         }));
       }
@@ -1968,6 +2283,8 @@ export const useStore = create<StoreState>((set, get) => {
       delete queuedChatByTab[tabId];
       const livePlanByTab = { ...state.livePlanByTab };
       delete livePlanByTab[tabId];
+      const tabSubagentsByTab = { ...state.tabSubagentsByTab };
+      delete tabSubagentsByTab[tabId];
       return {
         appState,
         terminalTabs: remainingTabs,
@@ -1976,6 +2293,7 @@ export const useStore = create<StoreState>((set, get) => {
         sharedContext,
         queuedChatByTab,
         livePlanByTab,
+        tabSubagentsByTab,
       };
     });
     enqueueMessagePersistence(() => bridge.deleteChatSessionByTab(tabId));
@@ -2036,11 +2354,13 @@ export const useStore = create<StoreState>((set, get) => {
       const sharedContext = { ...state.sharedContext };
       const queuedChatByTab = { ...state.queuedChatByTab };
       const livePlanByTab = { ...state.livePlanByTab };
+      const tabSubagentsByTab = { ...state.tabSubagentsByTab };
       tabIds.forEach((tabId) => {
         delete chatSessions[tabId];
         delete sharedContext[tabId];
         delete queuedChatByTab[tabId];
         delete livePlanByTab[tabId];
+        delete tabSubagentsByTab[tabId];
       });
 
       const gitPanelsByWorkspace = { ...state.gitPanelsByWorkspace };
@@ -2066,6 +2386,7 @@ export const useStore = create<StoreState>((set, get) => {
         sharedContext,
         queuedChatByTab,
         livePlanByTab,
+        tabSubagentsByTab,
         gitPanelsByWorkspace,
         gitCommitMessageByWorkspace,
         gitCommitLoadingByWorkspace,
@@ -2107,6 +2428,8 @@ export const useStore = create<StoreState>((set, get) => {
       delete queuedChatByTab[targetTabId];
       const livePlanByTab = { ...state.livePlanByTab };
       delete livePlanByTab[targetTabId];
+      const tabSubagentsByTab = { ...state.tabSubagentsByTab };
+      delete tabSubagentsByTab[targetTabId];
       const sharedContext = rebuildSharedContextMap(chatSessions, terminalTabs, state.workspaces);
       const appState = state.appState
         ? deriveActiveWorkspaceState(state.appState, state.workspaces, terminalTabs, state.activeTerminalTabId)
@@ -2118,6 +2441,7 @@ export const useStore = create<StoreState>((set, get) => {
         chatSessions,
         queuedChatByTab,
         livePlanByTab,
+        tabSubagentsByTab,
         sharedContext,
       };
     });
@@ -2184,6 +2508,7 @@ export const useStore = create<StoreState>((set, get) => {
       if (livePlanByTab[targetTabId]?.cliId === cliId) {
         delete livePlanByTab[targetTabId];
       }
+      const tabSubagentsByTab = rebuildTabSubagentMap(chatSessions);
       const sharedContext = rebuildSharedContextMap(chatSessions, terminalTabs, state.workspaces);
       const appState = state.appState
         ? deriveActiveWorkspaceState(state.appState, state.workspaces, terminalTabs, state.activeTerminalTabId)
@@ -2194,6 +2519,7 @@ export const useStore = create<StoreState>((set, get) => {
         terminalTabs,
         chatSessions,
         livePlanByTab,
+        tabSubagentsByTab,
         sharedContext,
       };
     });
@@ -3009,8 +3335,9 @@ export const useStore = create<StoreState>((set, get) => {
       };
       const livePlanByTab = { ...current.livePlanByTab };
       delete livePlanByTab[tabId];
+      const tabSubagentsByTab = rebuildTabSubagentMap(chatSessions);
       persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
-      return { busyAction: "chat", terminalTabs, chatSessions, livePlanByTab };
+      return { busyAction: "chat", terminalTabs, chatSessions, livePlanByTab, tabSubagentsByTab };
     });
     const seededSession = get().chatSessions[tabId];
     if (seededSession) {
@@ -3036,6 +3363,7 @@ export const useStore = create<StoreState>((set, get) => {
         set((state) => ({
           terminalTabs: nextTerminalTabs,
           chatSessions: nextChatSessions,
+          tabSubagentsByTab: rebuildTabSubagentMap(nextChatSessions),
           busyAction: state.busyAction === "chat" ? null : state.busyAction,
         }));
       }
@@ -3176,7 +3504,10 @@ export const useStore = create<StoreState>((set, get) => {
             },
           };
           persistTerminalState(current.workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
-          return { chatSessions };
+          return {
+            chatSessions,
+            tabSubagentsByTab: rebuildTabSubagentMap(chatSessions),
+          };
         });
       }
     } catch {
@@ -3233,7 +3564,12 @@ export const useStore = create<StoreState>((set, get) => {
           },
         };
         persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
-        return { busyAction: null, terminalTabs, chatSessions };
+        return {
+          busyAction: null,
+          terminalTabs,
+          chatSessions,
+          tabSubagentsByTab: rebuildTabSubagentMap(chatSessions),
+        };
       });
       const failureSession = get().chatSessions[tabId];
       const failureMessage =
@@ -3322,7 +3658,10 @@ export const useStore = create<StoreState>((set, get) => {
         },
       };
       if (!blocks) {
-        return { chatSessions };
+        return {
+          chatSessions,
+          tabSubagentsByTab: rebuildTabSubagentMap(chatSessions),
+        };
       }
       const targetMessage =
         chatSessions[tabId]?.messages.find((message) => message.id === targetMessageId) ?? null;
@@ -3337,7 +3676,11 @@ export const useStore = create<StoreState>((set, get) => {
       } else if (livePlanByTab[tabId]?.messageId === targetMessageId) {
         delete livePlanByTab[tabId];
       }
-      return { chatSessions, livePlanByTab };
+      return {
+        chatSessions,
+        livePlanByTab,
+        tabSubagentsByTab: rebuildTabSubagentMap(chatSessions),
+      };
     });
     const session = get().chatSessions[tabId];
     if (!session) return;
@@ -3498,12 +3841,14 @@ export const useStore = create<StoreState>((set, get) => {
       if (livePlanByTab[tabId]?.messageId === targetMessageId) {
         delete livePlanByTab[tabId];
       }
+      const tabSubagentsByTab = rebuildTabSubagentMap(chatSessions);
       persistTerminalState(state.workspaces, nextTerminalTabs, state.activeTerminalTabId, chatSessions);
       return {
         busyAction: null,
         terminalTabs: nextTerminalTabs,
         chatSessions,
         livePlanByTab,
+        tabSubagentsByTab,
       };
     });
     const session = get().chatSessions[tabId];
@@ -3557,6 +3902,7 @@ export const useStore = create<StoreState>((set, get) => {
           terminalTabs: nextTerminalTabs,
           chatSessions: nextChatSessions,
           livePlanByTab: rebuildLivePlanMap(nextChatSessions),
+          tabSubagentsByTab: rebuildTabSubagentMap(nextChatSessions),
           busyAction: state.busyAction === "chat" ? null : state.busyAction,
         }));
       }
@@ -3927,6 +4273,14 @@ export const useStore = create<StoreState>((set, get) => {
         .filter((item) => {
           const relativePath = item.relativePath.toLowerCase();
           return relativePath.includes(normalized) || item.name.toLowerCase().includes(normalized);
+        })
+        .sort((left, right) => {
+          if (left.kind !== right.kind) {
+            return left.kind === "directory" ? -1 : 1;
+          }
+          return left.relativePath.localeCompare(right.relativePath, undefined, {
+            sensitivity: "base",
+          });
         })
         .slice(0, 40);
     } catch {

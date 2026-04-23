@@ -1257,6 +1257,19 @@ export interface LivePlanState {
   updatedAt: string;
 }
 
+export type TabSubagentStatus = "running" | "completed" | "error";
+
+export interface TabSubagentState {
+  id: string;
+  cliId: AgentId;
+  label: string;
+  description: string;
+  status: TabSubagentStatus;
+  source: "block" | "tool" | "output";
+  sourceTool?: string | null;
+  updatedAt: string;
+}
+
 /** Streaming event from backend */
 export interface StreamEvent {
   terminalTabId: string;
@@ -1288,6 +1301,7 @@ export interface FileMentionCandidate {
   name: string;
   relativePath: string;
   absolutePath?: string | null;
+  kind: "file" | "directory";
 }
 
 export interface WorkspaceTextSearchMatch {
@@ -1750,6 +1764,15 @@ export type ChatMessageBlock =
       source?: string | null;
       status?: string | null;
       summary?: string | null;
+    }
+  | {
+      kind: "subagent";
+      id: string;
+      label: string;
+      description: string;
+      status: TabSubagentStatus;
+      provider?: "claude" | "codex" | null;
+      sourceTool?: string | null;
     }
   | {
       kind: "approvalRequest";

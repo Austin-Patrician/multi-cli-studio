@@ -3074,15 +3074,18 @@ export const browserRuntime = {
     _workspaceId?: string | null
   ): Promise<FileMentionCandidate[]> {
     const lower = query.toLowerCase();
-    return MOCK_WORKSPACE_FILE_PATHS
-      .filter((path) => path.toLowerCase().includes(lower))
+    return buildMockWorkspaceFileIndex().files
+      .filter((item) => item.relativePath.toLowerCase().includes(lower) || item.name.toLowerCase().includes(lower))
+      .sort((left, right) => {
+        if (left.kind !== right.kind) {
+          return left.kind === "directory" ? -1 : 1;
+        }
+        return left.relativePath.localeCompare(right.relativePath, undefined, {
+          sensitivity: "base",
+        });
+      })
       .slice(0, 20)
-      .map((relativePath) => ({
-        id: relativePath,
-        name: basename(relativePath),
-        relativePath,
-        absolutePath: null,
-      }));
+      .map((item) => ({ ...item }));
   },
 
   async searchWorkspaceText(
@@ -4239,12 +4242,21 @@ function listMockWorkspaceEntries(relativePath?: string | null): WorkspaceTreeEn
 
 function buildMockWorkspaceFileIndex(): WorkspaceFileIndexResponse {
   const entriesByParent: Record<string, WorkspaceTreeEntry[]> = { "": listMockWorkspaceEntries("") };
+  const mentionsByPath = new Map<string, FileMentionCandidate>();
   for (const filePath of MOCK_WORKSPACE_FILE_PATHS) {
     const normalizedPath = normalizeMockWorkspaceRelativePath(filePath);
     if (!normalizedPath) continue;
     const segments = normalizedPath.split("/");
+    mentionsByPath.set(normalizedPath, {
+      id: normalizedPath,
+      name: basename(normalizedPath),
+      relativePath: normalizedPath,
+      absolutePath: null,
+      kind: "file",
+    });
     let parentPath = "";
     for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index];
       const nextParent = segments.slice(0, index + 1).join("/");
       if (!(parentPath in entriesByParent)) {
         entriesByParent[parentPath] = listMockWorkspaceEntries(parentPath);
@@ -4252,16 +4264,28 @@ function buildMockWorkspaceFileIndex(): WorkspaceFileIndexResponse {
       if (!(nextParent in entriesByParent)) {
         entriesByParent[nextParent] = listMockWorkspaceEntries(nextParent);
       }
+      if (!mentionsByPath.has(nextParent)) {
+        mentionsByPath.set(nextParent, {
+          id: nextParent,
+          name: segment,
+          relativePath: nextParent,
+          absolutePath: null,
+          kind: "directory",
+        });
+      }
       parentPath = nextParent;
     }
   }
+  const files = Array.from(mentionsByPath.values()).sort((left, right) => {
+    if (left.kind !== right.kind) {
+      return left.kind === "directory" ? -1 : 1;
+    }
+    return left.relativePath.localeCompare(right.relativePath, undefined, {
+      sensitivity: "base",
+    });
+  });
   return {
     entriesByParent,
-    files: MOCK_WORKSPACE_FILE_PATHS.map((relativePath) => ({
-      id: relativePath,
-      name: basename(relativePath),
-      relativePath,
-      absolutePath: null,
-    })),
+    files,
   };
 }

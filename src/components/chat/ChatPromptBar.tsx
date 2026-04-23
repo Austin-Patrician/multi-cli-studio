@@ -157,7 +157,7 @@ type CommandOverlayState =
 
 function findMentionToken(value: string, caret: number) {
   const prefix = value.slice(0, caret);
-  const match = prefix.match(/(?:^|\s)@([^\s@/]*)$/);
+  const match = prefix.match(/(?:^|\s)@([^\s@]*)$/);
   if (!match || match.index == null) return null;
   const start = match.index + match[0].lastIndexOf("@");
   return {
@@ -1444,8 +1444,9 @@ export function ChatPromptBar({
             id: "mentions",
             items: mentionItems.map((item) => ({
               id: item.id,
-              title: item.relativePath,
-              subtitle: item.name,
+              title: item.kind === "directory" ? `${item.relativePath}/` : item.relativePath,
+              subtitle: item.kind === "directory" ? "文件夹" : item.name,
+              badge: item.kind === "directory" ? "DIR" : "FILE",
             })),
           },
         ]
@@ -1848,13 +1849,15 @@ export function ChatPromptBar({
 
   function selectMention(item: FileMentionCandidate) {
     if (!activeTab || !mentionToken) return;
-    const next = `${prompt.slice(0, mentionToken.start)}@${item.relativePath} ${prompt.slice(mentionToken.end)}`;
+    const mentionPath = item.kind === "directory" ? `${item.relativePath}/` : item.relativePath;
+    const suffix = item.kind === "directory" ? "" : " ";
+    const next = `${prompt.slice(0, mentionToken.start)}@${mentionPath}${suffix}${prompt.slice(mentionToken.end)}`;
     setPrompt(next);
     setDismissedMentionKey(null);
     requestAnimationFrame(() => {
       const el = textareaRef.current;
       if (!el) return;
-      const nextCaret = mentionToken.start + item.relativePath.length + 2;
+      const nextCaret = mentionToken.start + mentionPath.length + 1 + suffix.length;
       el.focus();
       el.setSelectionRange(nextCaret, nextCaret);
     });
@@ -2054,8 +2057,8 @@ export function ChatPromptBar({
       ? "响应中，队列已满 · Ctrl+B 编辑队列 · Shift+Enter 换行 · ↑↓ 历史"
       : "响应中，可继续输入 · Enter 加入队列 · Shift+Enter 换行 · ↑↓ 历史"
     : isAutoMode
-      ? "/指令中心 · @引用文件 · #智能体 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
-      : "/指令中心 · @引用文件 · #智能体 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
+      ? "/指令中心 · @引用文件或文件夹 · #智能体 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
+      : "/指令中心 · @引用文件或文件夹 · #智能体 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
   const tabUsageTokens = activeSession
     ? activeSession.messages.reduce((sum, message) => sum + (message.totalTokens ?? 0), 0)
     : 0;
@@ -2609,7 +2612,7 @@ export function ChatPromptBar({
     {
       key: "file",
       trigger: "@",
-      label: "引用文件",
+      label: "引用文件/文件夹",
       onClick: () => handlePromptShortcutAction("@"),
     },
     {

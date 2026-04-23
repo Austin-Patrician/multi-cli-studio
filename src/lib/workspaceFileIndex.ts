@@ -77,5 +77,13 @@ export function searchWorkspaceFileIndex(
       const relativePath = item.relativePath.toLowerCase();
       return relativePath.includes(normalized) || item.name.toLowerCase().includes(normalized);
     })
+    .sort((left, right) => {
+      if (left.kind !== right.kind) {
+        return left.kind === "directory" ? -1 : 1;
+      }
+      return left.relativePath.localeCompare(right.relativePath, undefined, {
+        sensitivity: "base",
+      });
+    })
     .slice(0, limit);
 }

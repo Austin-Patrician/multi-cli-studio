@@ -3224,6 +3224,14 @@ enum ChatMessageBlock {
         status: Option<String>,
         summary: Option<String>,
     },
+    Subagent {
+        id: String,
+        label: String,
+        description: String,
+        status: String,
+        provider: Option<String>,
+        source_tool: Option<String>,
+    },
     ApprovalRequest {
         request_id: String,
         tool_name: String,
@@ -3384,6 +3392,7 @@ struct FileMentionCandidate {
     name: String,
     relative_path: String,
     absolute_path: Option<String>,
+    kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5244,6 +5253,26 @@ fn claude_build_tool_block(
 ) -> ChatMessageBlock {
     let lower = tool_name.to_ascii_lowercase();
     match lower.as_str() {
+        "task" | "agent" => {
+            let description = claude_tool_input_summary(tool_name, input)
+                .unwrap_or_else(|| tool_name.to_string());
+            let label = claude_input_string(input, "subagent_type")
+                .or_else(|| claude_input_string(input, "agent"))
+                .or_else(|| claude_input_string(input, "type"))
+                .or_else(|| claude_input_string(input, "name"))
+                .unwrap_or_else(|| tool_name.to_string());
+            let id = claude_input_string(input, "task_id")
+                .or_else(|| claude_input_string(input, "taskId"))
+                .unwrap_or_else(|| format!("{}:{}", lower, label));
+            ChatMessageBlock::Subagent {
+                id,
+                label,
+                description,
+                status: "running".to_string(),
+                provider: Some("claude".to_string()),
+                source_tool: Some(tool_name.to_string()),
+            }
+        }
         "bash" => {
             let command =
                 claude_input_string(input, "command").unwrap_or_else(|| tool_name.to_string());
@@ -5477,6 +5506,11 @@ fn claude_apply_tool_result(
                 };
                 *summary = Some(merged);
             }
+        }
+        ChatMessageBlock::Subagent {
+            status: block_status, ..
+        } => {
+            *block_status = status;
         }
         _ => {}
     }
@@ -6258,6 +6292,19 @@ fn render_chat_blocks(
                 }
                 sections.push(section);
             }
+            ChatMessageBlock::Subagent {
+                label,
+                description,
+                status,
+                ..
+            } => {
+                sections.push(format!(
+                    "Subagent: {}\nStatus: {}\n\n{}",
+                    label.trim(),
+                    status.trim(),
+                    description.trim()
+                ));
+            }
             ChatMessageBlock::ApprovalRequest {
                 tool_name,
                 title,
@@ -6850,23 +6897,126 @@ fn handle_codex_notification(
                     blocks_changed = true;
                 }
                 "collabAgentToolCall" => {
+                    let tool_name = item
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .unwrap_or("collabAgent")
+                        .to_string();
+                    let tool_status = item
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .map(|value| value.to_string());
+                    let prompt = item
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .map(|value| value.to_string());
                     stream_state.blocks.push(ChatMessageBlock::Tool {
-                        tool: item
-                            .get("tool")
-                            .and_then(Value::as_str)
-                            .unwrap_or("collabAgent")
-                            .to_string(),
+                        tool: tool_name.clone(),
                         source: Some("agent-collab".to_string()),
-                        status: item
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .map(|value| value.to_string()),
-                        summary: item
-                            .get("prompt")
-                            .and_then(Value::as_str)
-                            .map(|value| value.to_string())
+                        status: tool_status.clone(),
+                        summary: prompt
+                            .clone()
                             .or_else(|| item.get("agentsStates").and_then(json_value_as_text)),
                     });
+                    let inferred_status = match tool_status.as_deref().map(|value| value.to_ascii_lowercase()) {
+                        Some(status)
+                            if status.contains("fail")
+                                || status.contains("error")
+                                || status.contains("interrupt")
+                                || status.contains("cancel") =>
+                        {
+                            "error".to_string()
+                        }
+                        Some(status)
+                            if status.contains("complete")
+                                || status.contains("done")
+                                || status.contains("finish") =>
+                        {
+                            "completed".to_string()
+                        }
+                        _ if tool_name.to_ascii_lowercase().contains("wait")
+                            || tool_name.to_ascii_lowercase().contains("close") =>
+                        {
+                            "completed".to_string()
+                        }
+                        _ => "running".to_string(),
+                    };
+                    let mut emitted_subagent = false;
+                    if let Some(agent_states) = item.get("agentsStates").and_then(Value::as_object) {
+                        for (agent_id, state_value) in agent_states {
+                            let state_record = state_value.as_object();
+                            let label = state_record
+                                .and_then(|record| {
+                                    record
+                                        .get("label")
+                                        .and_then(Value::as_str)
+                                        .or_else(|| record.get("name").and_then(Value::as_str))
+                                        .or_else(|| record.get("agent").and_then(Value::as_str))
+                                })
+                                .unwrap_or(agent_id)
+                                .to_string();
+                            let description = state_record
+                                .and_then(|record| {
+                                    record
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .or_else(|| record.get("prompt").and_then(Value::as_str))
+                                        .or_else(|| record.get("summary").and_then(Value::as_str))
+                                })
+                                .or(prompt.as_deref())
+                                .unwrap_or(agent_id)
+                                .to_string();
+                            let subagent_status = state_record
+                                .and_then(|record| {
+                                    record
+                                        .get("status")
+                                        .and_then(Value::as_str)
+                                        .or_else(|| record.get("state").and_then(Value::as_str))
+                                })
+                                .map(|value| value.to_ascii_lowercase())
+                                .map(|value| {
+                                    if value.contains("fail") || value.contains("error") {
+                                        "error".to_string()
+                                    } else if value.contains("complete")
+                                        || value.contains("done")
+                                        || value.contains("finish")
+                                    {
+                                        "completed".to_string()
+                                    } else {
+                                        "running".to_string()
+                                    }
+                                })
+                                .unwrap_or_else(|| inferred_status.clone());
+                            stream_state.blocks.push(ChatMessageBlock::Subagent {
+                                id: agent_id.to_string(),
+                                label,
+                                description,
+                                status: subagent_status,
+                                provider: Some("codex".to_string()),
+                                source_tool: Some(tool_name.clone()),
+                            });
+                            emitted_subagent = true;
+                        }
+                    }
+                    if !emitted_subagent {
+                        stream_state.blocks.push(ChatMessageBlock::Subagent {
+                            id: format!(
+                                "{}:{}",
+                                tool_name.to_ascii_lowercase(),
+                                prompt
+                                    .clone()
+                                    .unwrap_or_else(|| "subagent".to_string())
+                                    .chars()
+                                    .take(32)
+                                    .collect::<String>()
+                            ),
+                            label: tool_name.clone(),
+                            description: prompt.unwrap_or_else(|| tool_name.clone()),
+                            status: inferred_status,
+                            provider: Some("codex".to_string()),
+                            source_tool: Some(tool_name),
+                        });
+                    }
                     blocks_changed = true;
                 }
                 "webSearch" => {
@@ -7646,6 +7796,7 @@ fn handle_claude_stream_event(
                                 ChatMessageBlock::Command { status, .. } => status.clone(),
                                 ChatMessageBlock::FileChange { status, .. } => status.clone(),
                                 ChatMessageBlock::Tool { status, .. } => status.clone(),
+                                ChatMessageBlock::Subagent { status, .. } => Some(status.clone()),
                                 _ => None,
                             };
 
@@ -7688,6 +7839,21 @@ fn handle_claude_stream_event(
                                     source,
                                     status: current_status.or_else(|| Some("running".to_string())),
                                     summary,
+                                },
+                                ChatMessageBlock::Subagent {
+                                    id,
+                                    label,
+                                    description,
+                                    provider,
+                                    source_tool,
+                                    ..
+                                } => ChatMessageBlock::Subagent {
+                                    id,
+                                    label,
+                                    description,
+                                    status: current_status.unwrap_or_else(|| "running".to_string()),
+                                    provider,
+                                    source_tool,
                                 },
                                 other => other,
                             };
@@ -17583,6 +17749,13 @@ fn search_workspace_files(
             let lower_query = query.to_lowercase();
             let mut results = Vec::new();
             collect_workspace_files(&root, &root, &lower_query, &mut results)?;
+            results.sort_by(|left, right| {
+                let left_kind = if left.kind == "directory" { 0 } else { 1 };
+                let right_kind = if right.kind == "directory" { 0 } else { 1 };
+                left_kind
+                    .cmp(&right_kind)
+                    .then_with(|| left.relative_path.to_lowercase().cmp(&right.relative_path.to_lowercase()))
+            });
             Ok(results)
         }
         remote_target @ WorkspaceTarget::Ssh { .. } => {
@@ -17596,6 +17769,23 @@ results = []
 
 for dirpath, dirnames, filenames in os.walk(root):
     dirnames[:] = [name for name in dirnames if name not in IGNORED_DIRS]
+    dirnames.sort(key=lambda item: item.lower())
+    filenames.sort(key=lambda item: item.lower())
+    for name in dirnames:
+        full_path = os.path.join(dirpath, name)
+        relative = os.path.relpath(full_path, root).replace(os.sep, "/")
+        haystack = relative.lower()
+        if (not query) or query in haystack or query in name.lower():
+            results.append({
+                "id": relative,
+                "name": name,
+                "relativePath": relative,
+                "absolutePath": None,
+                "kind": "directory",
+            })
+            if len(results) >= 40:
+                print(json.dumps(results))
+                raise SystemExit(0)
     for name in filenames:
         full_path = os.path.join(dirpath, name)
         relative = os.path.relpath(full_path, root).replace(os.sep, "/")
@@ -17606,6 +17796,7 @@ for dirpath, dirnames, filenames in os.walk(root):
                 "name": name,
                 "relativePath": relative,
                 "absolutePath": None,
+                "kind": "file",
             })
             if len(results) >= 40:
                 print(json.dumps(results))
@@ -17918,10 +18109,20 @@ fn collect_workspace_file_index_local_recursive(
                 .or_default()
                 .push(WorkspaceTreeEntry {
                     name,
-                    path: relative,
+                    path: relative.clone(),
                     kind: "directory".to_string(),
                     has_children,
                 });
+            files.push(FileMentionCandidate {
+                id: relative.clone(),
+                name: path
+                    .file_name()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                relative_path: relative,
+                absolute_path: Some(path.to_string_lossy().to_string()),
+                kind: "directory".to_string(),
+            });
             continue;
         }
 
@@ -17943,6 +18144,7 @@ fn collect_workspace_file_index_local_recursive(
             name,
             relative_path: relative,
             absolute_path: Some(path.to_string_lossy().to_string()),
+            kind: "file".to_string(),
         });
     }
 
@@ -17976,9 +18178,11 @@ fn build_workspace_file_index_local(
         &mut files,
     )?;
     files.sort_by(|left, right| {
-        left.relative_path
-            .to_lowercase()
-            .cmp(&right.relative_path.to_lowercase())
+        let left_kind = if left.kind == "directory" { 0 } else { 1 };
+        let right_kind = if right.kind == "directory" { 0 } else { 1 };
+        left_kind
+            .cmp(&right_kind)
+            .then_with(|| left.relative_path.to_lowercase().cmp(&right.relative_path.to_lowercase()))
     });
     Ok(WorkspaceFileIndexResponse {
         entries_by_parent,
@@ -18030,6 +18234,13 @@ for dirpath, dirnames, filenames in os.walk(root):
             "kind": "directory",
             "hasChildren": False,
         })
+        files.append({
+            "id": relative,
+            "name": name,
+            "relativePath": relative,
+            "absolutePath": None,
+            "kind": "directory",
+        })
 
     for name in filenames:
         child = os.path.join(dirpath, name)
@@ -18045,6 +18256,7 @@ for dirpath, dirnames, filenames in os.walk(root):
             "name": name,
             "relativePath": relative,
             "absolutePath": None,
+            "kind": "file",
         })
 
     children.sort(key=lambda item: (0 if item["kind"] == "directory" else 1, item["path"].lower()))
@@ -18055,7 +18267,7 @@ for items in entries_by_parent.values():
         if item["kind"] == "directory":
             item["hasChildren"] = bool(entries_by_parent.get(item["path"], []))
 
-files.sort(key=lambda item: item["relativePath"].lower())
+files.sort(key=lambda item: (0 if item["kind"] == "directory" else 1, item["relativePath"].lower()))
 print(json.dumps({"entriesByParent": entries_by_parent, "files": files}))
 "#;
             let value = run_workspace_python_json(&remote_target, script, &[])?;
@@ -26185,6 +26397,27 @@ fn collect_workspace_files(
             if is_ignored_workspace_dir(&name) {
                 continue;
             }
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let haystack = relative.to_lowercase();
+            if lower_query.is_empty()
+                || haystack.contains(lower_query)
+                || name.to_lowercase().contains(lower_query)
+            {
+                results.push(FileMentionCandidate {
+                    id: relative.clone(),
+                    name: name.clone(),
+                    relative_path: relative,
+                    absolute_path: Some(path.to_string_lossy().to_string()),
+                    kind: "directory".to_string(),
+                });
+                if results.len() >= 40 {
+                    return Ok(());
+                }
+            }
             collect_workspace_files(root, &path, lower_query, results)?;
             if results.len() >= 40 {
                 return Ok(());
@@ -26207,6 +26440,7 @@ fn collect_workspace_files(
                 name,
                 relative_path: relative,
                 absolute_path: Some(path.to_string_lossy().to_string()),
+                kind: "file".to_string(),
             });
         }
     }

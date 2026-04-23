@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { isTauri } from "@tauri-apps/api/core";
+import tauriConfig from "../../src-tauri/tauri.conf.json";
 import { bridge } from "../lib/bridge";
 import { AgentId, AgentResourceGroup, AgentResourceKind, AgentRuntimeResources, AppSettings, TerminalCliId } from "../lib/models";
 import { useStore } from "../lib/store";
@@ -52,6 +54,9 @@ const DEFAULT_ROUTE_OPTIONS: Array<{ id: TerminalCliId; label: string }> = [
   { id: "gemini", label: "Gemini" },
   { id: "auto", label: "Auto" },
 ];
+
+const FALLBACK_APP_VERSION =
+  (tauriConfig as { version?: string }).version?.trim() || "0.0.0";
 
 function parseSettingsSection(value: string | null): SettingsSection {
   switch (value) {
@@ -276,6 +281,7 @@ export function SettingsPage({
   const [updateNotificationBusy, setUpdateNotificationBusy] = useState(false);
   const [emailTestBusy, setEmailTestBusy] = useState(false);
   const [emailRecipientsInput, setEmailRecipientsInput] = useState("");
+  const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION);
 
   const activeSection = forcedSection ?? parseSettingsSection(searchParams.get("section"));
 
@@ -296,6 +302,35 @@ export function SettingsPage({
     const id = window.setTimeout(() => setBanner(null), 3000);
     return () => window.clearTimeout(id);
   }, [banner]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAppVersion() {
+      if (!isTauri()) {
+        setAppVersion(FALLBACK_APP_VERSION);
+        return;
+      }
+
+      try {
+        const { getVersion } = await import("@tauri-apps/api/app");
+        const version = await getVersion();
+        if (!cancelled) {
+          setAppVersion(version?.trim() || FALLBACK_APP_VERSION);
+        }
+      } catch {
+        if (!cancelled) {
+          setAppVersion(FALLBACK_APP_VERSION);
+        }
+      }
+    }
+
+    void loadAppVersion();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const agents = CLI_ORDER.map((cli) => {
     const agent = appState?.agents.find((item) => item.id === cli);
@@ -541,6 +576,15 @@ export function SettingsPage({
                 </FormGroup>
 
                 <FormGroup title="系统通知与更新">
+                  <FormRow
+                    label="当前版本"
+                    description="显示当前正在运行的桌面应用版本号。"
+                    control={
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[13px] font-semibold text-slate-700 shadow-[inset_0_1px_2px_rgba(0,0,0,0.03)]">
+                        v{appVersion}
+                      </div>
+                    }
+                  />
                   <FormRow
                     label="任务完成通知"
                     description="长耗时智能体任务完成时，通过桌面系统通知提醒。"

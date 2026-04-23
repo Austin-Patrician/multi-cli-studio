@@ -1898,6 +1898,12 @@
   color: var(--workspace-panel-text);
 }
 
+.workspace-task-pill.is-active {
+  border-color: rgba(37, 99, 235, 0.22);
+  background: rgba(37, 99, 235, 0.1);
+  color: #1d4ed8;
+}
+
 .workspace-task-pill-label {
   display: inline-flex;
   align-items: center;

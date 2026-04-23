@@ -22,6 +22,7 @@ import {
   ShieldCheck,
   TerminalSquare,
   Trash2,
+  XCircle,
 } from "lucide-react";
 import type {
   AgentId,
@@ -31,6 +32,7 @@ import type {
   FileMentionCandidate,
   GitFileChange,
   TerminalTab,
+  TabSubagentState,
   WorkspaceRef,
   WorkspaceTextSearchFileResult,
   WorkspaceTextSearchResponse,
@@ -73,7 +75,7 @@ type ActivityEntry = {
   timestamp: number;
   tabId: string;
   cliId: AgentId;
-  kind: "command" | "fileChange" | "tool" | "status" | "approval" | "task" | "reasoning" | "routing" | "message";
+  kind: "command" | "fileChange" | "tool" | "subagent" | "status" | "approval" | "task" | "reasoning" | "routing" | "message";
   label: string;
   detail: string;
   filePath?: string | null;
@@ -82,6 +84,7 @@ type ActivityEntry = {
 const EMPTY_TREE: WorkspaceTreeEntry[] = [];
 const EMPTY_CHAT_SESSIONS: Record<string, ConversationSession> = {};
 const EMPTY_GIT_CHANGES: GitFileChange[] = [];
+const EMPTY_SUBAGENTS: TabSubagentState[] = [];
 const REMOTE_FILE_TREE_CACHE_TTL_MS = 30_000;
 const workspaceTreeUiStateByWorkspace = new Map<
   string,
@@ -209,6 +212,8 @@ function formatActivityDetail(message: ChatMessage, block: ChatMessageBlock | nu
       return block.path;
     case "tool":
       return block.summary?.trim() || block.tool;
+    case "subagent":
+      return block.description;
     case "status":
       return block.text;
     case "approvalRequest":
@@ -243,6 +248,8 @@ function formatActivityLabel(message: ChatMessage, block: ChatMessageBlock | nul
       return "File change";
     case "tool":
       return "Tool";
+    case "subagent":
+      return "Subagent";
     case "status":
       return block.level === "error" ? "Error" : block.level === "warning" ? "Warning" : "Status";
     case "approvalRequest":
@@ -276,6 +283,8 @@ function formatActivityKind(message: ChatMessage, block: ChatMessageBlock | null
       return "fileChange";
     case "tool":
       return "tool";
+    case "subagent":
+      return "subagent";
     case "status":
       return "status";
     case "approvalRequest":
@@ -540,49 +549,145 @@ function WorkspaceSessionRadarPanel({
   );
 }
 
-function WorkspaceTaskRail({
-  tabTitle,
+function WorkspaceStatusRail({
   tasks,
+  subagents,
 }: {
-  tabTitle: string;
   tasks: TaskNode[];
+  subagents: TabSubagentState[];
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [activeTab, setActiveTab] = useState<"tasks" | "subagents">(() =>
+    tasks.length > 0 ? "tasks" : "subagents"
+  );
   const hasMoreTasks = tasks.length > 10;
   const visibleTasks = expanded ? tasks : tasks.slice(0, 10);
+  const visibleSubagents = subagents.slice(0, expanded ? subagents.length : 10);
+
+  useEffect(() => {
+    if (activeTab === "tasks" && tasks.length === 0 && subagents.length > 0) {
+      setActiveTab("subagents");
+      return;
+    }
+    if (activeTab === "subagents" && subagents.length === 0 && tasks.length > 0) {
+      setActiveTab("tasks");
+    }
+  }, [activeTab, subagents.length, tasks.length]);
 
   return (
     <section className="workspace-task-rail">
       <div className="workspace-task-rail-header">
         <div className="workspace-task-rail-pills">
-          <div className="workspace-task-pill is-primary">
+          <button
+            type="button"
+            onClick={() => setActiveTab("tasks")}
+            className={`workspace-task-pill is-primary${activeTab === "tasks" ? " is-active" : ""}`}
+          >
             <span className="workspace-task-pill-label">任务</span>
             <span className="workspace-task-pill-value">{tasks.length}</span>
-          </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("subagents")}
+            className={`workspace-task-pill${activeTab === "subagents" ? " is-active" : ""}`}
+          >
+            <span className="workspace-task-pill-label">子代理</span>
+            <span className="workspace-task-pill-value">{subagents.length}</span>
+          </button>
         </div>
       </div>
 
-      {tasks.length === 0 ? (
+      {activeTab === "tasks" ? (
+        tasks.length === 0 ? (
+          <div className="workspace-task-rail-empty">
+            当前会话里的用户消息会在这里形成任务节点。
+          </div>
+        ) : (
+          <>
+            <div className="workspace-task-rail-list">
+              {visibleTasks.map((task, index) => {
+                const isLastVisibleTask = index === visibleTasks.length - 1;
+                return (
+                  <Fragment key={task.id}>
+                    <div className={`workspace-task-node${task.isLatest ? " is-latest" : ""}`}>
+                      <div className="workspace-task-node-marker" aria-hidden>
+                        <div className="workspace-task-node-dot" />
+                      </div>
+                      <div className="workspace-task-node-main">
+                        <div className="workspace-task-node-detail">{task.detail}</div>
+                        <div className="workspace-task-node-time">{task.timestamp || "just now"}</div>
+                      </div>
+                    </div>
+                    {!expanded && hasMoreTasks && isLastVisibleTask ? (
+                      <button
+                        type="button"
+                        className="workspace-task-rail-more"
+                        onClick={() => {
+                          setExpanded(true);
+                        }}
+                      >
+                        Load More
+                      </button>
+                    ) : null}
+                  </Fragment>
+                );
+              })}
+            </div>
+          </>
+        )
+      ) : subagents.length === 0 ? (
         <div className="workspace-task-rail-empty">
-          当前会话里的用户消息会在这里形成任务节点。
+          当前还没有识别到子代理执行记录。
         </div>
       ) : (
         <>
           <div className="workspace-task-rail-list">
-            {visibleTasks.map((task, index) => {
-              const isLastVisibleTask = index === visibleTasks.length - 1;
+            {visibleSubagents.map((subagent, index) => {
+              const isLastVisibleSubagent = index === visibleSubagents.length - 1;
+              const StatusIcon =
+                subagent.status === "completed"
+                  ? CheckCircle2
+                  : subagent.status === "error"
+                    ? XCircle
+                    : SpinnerIcon;
               return (
-                <Fragment key={task.id}>
-                  <div className={`workspace-task-node${task.isLatest ? " is-latest" : ""}`}>
+                <Fragment key={subagent.id}>
+                  <div className="workspace-task-node">
                     <div className="workspace-task-node-marker" aria-hidden>
-                      <div className="workspace-task-node-dot" />
+                      <div
+                        className={`workspace-task-node-dot${
+                          subagent.status === "completed"
+                            ? " bg-emerald-500"
+                            : subagent.status === "error"
+                              ? " bg-rose-500"
+                              : " bg-sky-500"
+                        }`}
+                      />
                     </div>
-                    <div className="workspace-task-node-main">
-                      <div className="workspace-task-node-detail">{task.detail}</div>
-                      <div className="workspace-task-node-time">{task.timestamp || "just now"}</div>
+                    <div className="workspace-task-node-main min-w-0">
+                      <div className="flex items-center gap-2">
+                        <StatusIcon
+                          className={`h-3.5 w-3.5 shrink-0 ${
+                            subagent.status === "running" ? "animate-spin text-sky-500" : ""
+                          } ${
+                            subagent.status === "completed"
+                              ? "text-emerald-500"
+                              : subagent.status === "error"
+                                ? "text-rose-500"
+                                : ""
+                          }`}
+                        />
+                        <div className="workspace-task-node-detail">{subagent.label}</div>
+                      </div>
+                      <div className="mt-1 text-[12px] leading-5 text-secondary break-words">
+                        {subagent.description}
+                      </div>
+                      <div className="workspace-task-node-time">
+                        {subagent.status} · {subagent.cliId}
+                      </div>
                     </div>
                   </div>
-                  {!expanded && hasMoreTasks && isLastVisibleTask ? (
+                  {!expanded && subagents.length > 10 && isLastVisibleSubagent ? (
                     <button
                       type="button"
                       className="workspace-task-rail-more"
@@ -711,6 +816,7 @@ function WorkspaceSessionActivityPanel({
     command: <TerminalSquare className="h-3.5 w-3.5" />,
     fileChange: <FileCode2 className="h-3.5 w-3.5" />,
     tool: <Braces className="h-3.5 w-3.5" />,
+    subagent: <Bot className="h-3.5 w-3.5" />,
     status: <CheckCircle2 className="h-3.5 w-3.5" />,
     approval: <ShieldCheck className="h-3.5 w-3.5" />,
     task: <RadarIcon className="h-3.5 w-3.5" />,
@@ -1522,6 +1628,11 @@ export function WorkspaceRightPanel({
     [activeTabId, chatSessions]
   );
   const taskNodes = useMemo(() => buildTaskNodes(activeSession), [activeSession]);
+  const tabSubagentsByTab = useStore((state) => state.tabSubagentsByTab);
+  const activeSubagents = useMemo(
+    () => (activeTabId ? tabSubagentsByTab[activeTabId] ?? EMPTY_SUBAGENTS : EMPTY_SUBAGENTS),
+    [activeTabId, tabSubagentsByTab]
+  );
 
   const sessionSummaries = useMemo(() => {
     if (!workspace || mode !== "radar") return [];
@@ -1578,10 +1689,7 @@ export function WorkspaceRightPanel({
           </div>
 
           {!statusPanelCollapsed ? (
-            <WorkspaceTaskRail
-              tabTitle={activeTab?.title || workspace.name}
-              tasks={taskNodes}
-            />
+            <WorkspaceStatusRail tasks={taskNodes} subagents={activeSubagents} />
           ) : null}
         </div>
       </div>
