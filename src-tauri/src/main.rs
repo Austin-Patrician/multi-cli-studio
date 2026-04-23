@@ -6946,6 +6946,10 @@ fn handle_codex_notification(
         }
         "turn/plan/updated" => {
             stream_state.latest_plan_text = format_turn_plan(params);
+            if let Some(plan_text) = stream_state.latest_plan_text.clone() {
+                upsert_plan_block(&mut stream_state.blocks, &plan_text);
+                blocks_changed = true;
+            }
         }
         "turn/completed" => {
             if stream_state

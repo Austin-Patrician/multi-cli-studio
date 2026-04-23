@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
   AlertTriangle,
   Bot,
+  Check,
+  ChevronDown,
   Download,
   Pencil,
   Plus,
@@ -10,9 +12,15 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { AgentIcon } from "../AgentIcon";
 import { bridge } from "../../lib/bridge";
-import { AGENT_ICON_GROUPS, DEFAULT_AGENT_ICON, resolveAgentIconForAgent } from "../../lib/agentIcons";
+import {
+  AGENT_ICON_CHOICES,
+  DEFAULT_AGENT_ICON,
+  resolveAgentIconForAgent,
+} from "../../lib/agentIcons";
 import type { CustomAgentConfig } from "../../lib/models";
 import { useStore } from "../../lib/store";
 
@@ -151,6 +159,8 @@ function cx(...values: Array<string | false | null | undefined>) {
 export function DesktopAgentsSection() {
   const settings = useStore((state) => state.settings);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const avatarMenuRef = useRef<HTMLDivElement | null>(null);
+  const avatarListRef = useRef<HTMLDivElement | null>(null);
 
   const agents = settings?.customAgents ?? [];
   const [notice, setNotice] = useState<AgentNotice>(null);
@@ -181,12 +191,51 @@ export function DesktopAgentsSection() {
     selectedIds: new Set<string>(),
     strategy: "skip",
   });
+  const [avatarMenuOpen, setAvatarMenuOpen] = useState(false);
+  const [promptPreviewOpen, setPromptPreviewOpen] = useState(false);
 
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(null), 2800);
     return () => window.clearTimeout(timer);
   }, [notice]);
+
+  useEffect(() => {
+    if (!dialog.open) {
+      setAvatarMenuOpen(false);
+      setPromptPreviewOpen(false);
+    }
+  }, [dialog.open]);
+
+  useEffect(() => {
+    if (!avatarMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!avatarMenuRef.current?.contains(event.target as Node)) {
+        setAvatarMenuOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAvatarMenuOpen(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+
+    const frame = window.requestAnimationFrame(() => {
+      const selected = avatarListRef.current?.querySelector<HTMLElement>('[data-selected="true"]');
+      selected?.scrollIntoView({ block: "nearest" });
+    });
+
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+      window.cancelAnimationFrame(frame);
+    };
+  }, [avatarMenuOpen]);
 
   async function saveAgents(nextAgents: CustomAgentConfig[]) {
     if (!settings) {
@@ -460,6 +509,8 @@ export function DesktopAgentsSection() {
     }),
     [importState.items]
   );
+  const selectedIconChoice =
+    AGENT_ICON_CHOICES.find((choice) => choice.id === dialog.icon) ?? AGENT_ICON_CHOICES[0];
 
   return (
     <>
@@ -594,52 +645,129 @@ export function DesktopAgentsSection() {
 
               <div className="vendor-form-group">
                 <label>头像</label>
-                <div className="settings-agent-icon-groups">
-                  {AGENT_ICON_GROUPS.map((group) => (
-                    <div key={group.id} className="settings-agent-icon-group">
-                      <div className="settings-agent-icon-group-label">{group.label}</div>
-                      <div className="settings-agent-icon-grid">
-                        {group.icons.map((icon) => {
-                          const selected = dialog.icon === icon;
+                <div className="settings-agent-avatar-select" ref={avatarMenuRef}>
+                  <button
+                    type="button"
+                    className={cx(
+                      "settings-agent-avatar-trigger",
+                      avatarMenuOpen && "is-open"
+                    )}
+                    aria-expanded={avatarMenuOpen}
+                    aria-haspopup="listbox"
+                    onClick={() => setAvatarMenuOpen((current) => !current)}
+                  >
+                    <span className="settings-agent-avatar-trigger-value">
+                      <span className="settings-agent-avatar-trigger-icon">
+                        <AgentIcon icon={selectedIconChoice?.id ?? dialog.icon} size={32} />
+                      </span>
+                      <span className="settings-agent-avatar-trigger-copy">
+                        <span className="settings-agent-avatar-trigger-title">
+                          {selectedIconChoice?.label ?? "选择头像"}
+                        </span>
+                      </span>
+                    </span>
+                    <ChevronDown
+                      size={16}
+                      className={cx(
+                        "settings-agent-avatar-trigger-chevron",
+                        avatarMenuOpen && "is-open"
+                      )}
+                    />
+                  </button>
+                  {avatarMenuOpen ? (
+                    <div className="settings-agent-avatar-popup-shell">
+                      <div
+                        ref={avatarListRef}
+                        className="settings-agent-avatar-popup"
+                        role="listbox"
+                        aria-label="角色头像"
+                      >
+                        {AGENT_ICON_CHOICES.map((choice) => {
+                          const isSelected = choice.id === dialog.icon;
                           return (
                             <button
-                              key={icon}
+                              key={choice.id}
                               type="button"
-                              className={cx("settings-agent-icon-option", selected && "is-selected")}
-                              onClick={() =>
+                              role="option"
+                              aria-selected={isSelected}
+                              data-selected={isSelected ? "true" : "false"}
+                              className={cx(
+                                "settings-agent-avatar-item",
+                                isSelected && "is-selected"
+                              )}
+                              onClick={() => {
                                 setDialog((current) => ({
                                   ...current,
-                                  icon,
-                                }))
-                              }
+                                  icon: choice.id,
+                                }));
+                                setAvatarMenuOpen(false);
+                              }}
                             >
-                              <AgentIcon icon={icon} size={28} />
+                              <div className="settings-agent-avatar-option">
+                                <span className="settings-agent-avatar-option-icon">
+                                  <AgentIcon icon={choice.id} size={30} />
+                                </span>
+                                <span className="settings-agent-avatar-option-copy">
+                                  <span className="settings-agent-avatar-option-title">
+                                    {choice.label}
+                                  </span>
+                                </span>
+                              </div>
+                              <span className="settings-agent-avatar-item-check">
+                                {isSelected ? <Check size={14} aria-hidden /> : null}
+                              </span>
                             </button>
                           );
                         })}
                       </div>
                     </div>
-                  ))}
+                  ) : null}
                 </div>
               </div>
 
               <div className="vendor-form-group">
-                <label htmlFor="agent-prompt-input">角色提示词</label>
-                <textarea
-                  id="agent-prompt-input"
-                  className="vendor-code-editor settings-agent-prompt-editor"
-                  rows={8}
-                  maxLength={100000}
-                  placeholder="描述这个智能体的职责、风格、限制和交付方式。"
-                  value={dialog.prompt}
-                  onChange={(event) =>
-                    setDialog((current) => ({
-                      ...current,
-                      prompt: event.target.value,
-                      error: null,
-                    }))
-                  }
-                />
+                <div className="settings-agent-field-header">
+                  <label htmlFor="agent-prompt-input">角色提示词</label>
+                  <button
+                    type="button"
+                    className={cx(
+                      "settings-agent-preview-toggle",
+                      promptPreviewOpen && "is-active"
+                    )}
+                    onClick={() => setPromptPreviewOpen((current) => !current)}
+                  >
+                    {promptPreviewOpen ? "编辑" : "预览"}
+                  </button>
+                </div>
+                {promptPreviewOpen ? (
+                  <div className="dcc-markdown-preview settings-agent-prompt-preview">
+                    {dialog.prompt.trim() ? (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {dialog.prompt}
+                      </ReactMarkdown>
+                    ) : (
+                      <div className="settings-agent-prompt-preview-empty">
+                        暂无内容可预览
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <textarea
+                    id="agent-prompt-input"
+                    className="vendor-code-editor settings-agent-prompt-editor"
+                    rows={8}
+                    maxLength={100000}
+                    placeholder="描述这个智能体的职责、风格、限制和交付方式。"
+                    value={dialog.prompt}
+                    onChange={(event) =>
+                      setDialog((current) => ({
+                        ...current,
+                        prompt: event.target.value,
+                        error: null,
+                      }))
+                    }
+                  />
+                )}
                 <div className="settings-agent-counter">{dialog.prompt.length}/100000</div>
               </div>
 

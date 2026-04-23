@@ -1250,6 +1250,13 @@ export type AutoRouteAction = "run" | "switch" | "cancel";
 
 export type AssistantContentFormat = NonNullable<ChatMessage["contentFormat"]>;
 
+export interface LivePlanState {
+  messageId: string;
+  cliId: AgentId;
+  blocks: ChatMessageBlock[];
+  updatedAt: string;
+}
+
 /** Streaming event from backend */
 export interface StreamEvent {
   terminalTabId: string;

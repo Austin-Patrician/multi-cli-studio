@@ -8164,6 +8164,14 @@
   padding-right: 16px;
 }
 
+.settings-agent-editor-dialog .vendor-input,
+.settings-agent-editor-dialog .vendor-code-editor,
+.settings-agent-editor-dialog .dcc-markdown-preview,
+.settings-agent-editor-dialog .settings-agent-avatar-trigger,
+.settings-agent-editor-dialog .settings-agent-avatar-popup-shell {
+  border-radius: 12px;
+}
+
 .settings-agent-card-main {
   min-width: 0;
   display: flex;
@@ -8248,54 +8256,229 @@
   text-align: right;
 }
 
-.settings-agent-icon-groups {
+.settings-agent-field-header {
   display: flex;
-  flex-direction: column;
-  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.settings-agent-icon-group {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.settings-agent-icon-group-label {
-  font-size: 12px;
+.settings-agent-preview-toggle {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(255, 255, 255, 0.92);
+  color: #334155;
+  font-size: 11px;
   font-weight: 700;
-  color: rgba(15, 23, 42, 0.56);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
 }
 
-.settings-agent-icon-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
+.settings-agent-preview-toggle:hover {
+  border-color: rgba(59, 130, 246, 0.28);
+  color: #1d4ed8;
 }
 
-.settings-agent-icon-option {
+.settings-agent-preview-toggle.is-active {
+  border-color: rgba(59, 130, 246, 0.32);
+  background: rgba(239, 246, 255, 0.96);
+  color: #1d4ed8;
+}
+
+.settings-agent-avatar-select {
+  position: relative;
+}
+
+.settings-agent-avatar-trigger {
+  width: 100%;
+  min-height: 52px;
+  padding: 8px 12px;
+  border-color: rgba(15, 23, 42, 0.1);
+  border-style: solid;
+  border-width: 1px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+}
+
+.settings-agent-avatar-trigger.is-open {
+  border-color: rgba(59, 130, 246, 0.32);
+  box-shadow: 0 12px 28px rgba(37, 99, 235, 0.12);
+}
+
+.settings-agent-avatar-trigger-value {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-agent-avatar-trigger-icon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(241, 245, 249, 0.98));
+}
+
+.settings-agent-avatar-trigger-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.settings-agent-avatar-trigger-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.settings-agent-avatar-trigger-chevron {
+  flex-shrink: 0;
+  color: rgba(71, 85, 105, 0.82);
+  transition: transform 140ms ease;
+}
+
+.settings-agent-avatar-trigger-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.settings-agent-avatar-popup-shell {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 140;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 20px 44px rgba(15, 23, 42, 0.16);
+  backdrop-filter: blur(16px);
+  overflow: hidden;
+}
+
+.settings-agent-avatar-popup {
+  display: block;
+  max-height: min(262px, calc(100vh - 220px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.9) transparent;
+  padding: 6px;
+}
+
+.settings-agent-avatar-popup::-webkit-scrollbar {
+  width: 10px;
+}
+
+.settings-agent-avatar-popup::-webkit-scrollbar-track {
+  background: rgba(226, 232, 240, 0.72);
+  border-radius: 999px;
+}
+
+.settings-agent-avatar-popup::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.9);
+  border-radius: 999px;
+  border: 2px solid rgba(226, 232, 240, 0.72);
+}
+
+.settings-agent-avatar-popup::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.95);
+}
+
+.settings-agent-avatar-item {
+  width: 100%;
   min-height: 48px;
-  border-radius: 14px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  background: rgba(248, 250, 252, 0.96);
-  color: rgba(15, 23, 42, 0.8);
-  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 12px;
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
 }
 
-.settings-agent-icon-option:hover,
-.settings-agent-icon-option.is-selected {
-  border-color: rgba(37, 99, 235, 0.24);
-  background: rgba(239, 246, 255, 0.96);
+.settings-agent-avatar-item:hover {
+  background: rgba(241, 245, 249, 0.92);
 }
 
-.settings-agent-icon-option.is-selected {
-  transform: translateY(-1px);
+.settings-agent-avatar-item.is-selected {
+  background: rgba(219, 234, 254, 0.72);
+}
+
+.settings-agent-avatar-option {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-agent-avatar-option-icon {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(241, 245, 249, 0.92));
+}
+
+.settings-agent-avatar-option-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-agent-avatar-option-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.settings-agent-avatar-item-check {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #2563eb;
 }
 
 .settings-agent-prompt-editor {
   min-height: 200px;
+}
+
+.settings-agent-prompt-preview {
+  min-height: 200px;
+  margin-top: 0;
+  background:
+    linear-gradient(180deg, rgba(250, 251, 255, 0.96), rgba(244, 247, 250, 0.92));
+}
+
+.settings-agent-prompt-preview-empty {
+  min-height: 164px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(71, 85, 105, 0.72);
+  font-size: 13px;
 }
 
 .settings-agent-confirm-copy {
@@ -8458,10 +8641,6 @@
 
   .settings-agent-card-actions {
     align-self: flex-end;
-  }
-
-  .settings-agent-icon-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .settings-agent-export-row,

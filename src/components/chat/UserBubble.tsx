@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronUp, FileText, Image as ImageIcon } from "lucide-react";
 import { ChatMessage } from "../../lib/models";
 import { AgentIcon } from "../AgentIcon";
@@ -10,6 +10,8 @@ const CLI_COLORS: Record<string, string> = {
   claude: "bg-amber-100 text-amber-700",
   gemini: "bg-emerald-100 text-emerald-700",
 };
+
+const USER_BUBBLE_COLLAPSED_MAX_HEIGHT_PX = 120;
 
 function CopyIcon({ copied = false }: { copied?: boolean }) {
   if (copied) {
@@ -111,6 +113,9 @@ export function UserBubble({
   deleteDisabled?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [isCollapsible, setIsCollapsible] = useState(false);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   const cliBadge = message.cliId ? CLI_COLORS[message.cliId] ?? "bg-gray-100 text-gray-600" : null;
   const time = new Date(message.timestamp).toLocaleTimeString("en-US", {
     hour: "2-digit",
@@ -122,10 +127,6 @@ export function UserBubble({
     (message.content?.trim() ? message.content : message.rawContent) ?? ""
   );
   const hasTextContent = displayContent.trim().length > 0;
-  const contentLines = displayContent.split(/\r?\n/);
-  const isCollapsible = contentLines.length > 5;
-  const [expanded, setExpanded] = useState(false);
-  const visibleContent = isCollapsible && !expanded ? `${contentLines.slice(0, 5).join("\n")}\n…` : displayContent;
 
   useEffect(() => {
     if (!copied) return;
@@ -136,6 +137,29 @@ export function UserBubble({
   useEffect(() => {
     setExpanded(false);
   }, [message.id, displayContent]);
+
+  useEffect(() => {
+    const node = contentRef.current;
+    if (!node || !hasTextContent) {
+      setIsCollapsible(false);
+      return;
+    }
+
+    const measure = () => {
+      setIsCollapsible(node.scrollHeight > USER_BUBBLE_COLLAPSED_MAX_HEIGHT_PX + 1);
+    };
+
+    measure();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => window.removeEventListener("resize", measure);
+    }
+
+    const observer = new ResizeObserver(() => measure());
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [displayContent, hasTextContent]);
 
   async function handleCopy() {
     if (!onCopy) return;
@@ -213,12 +237,26 @@ export function UserBubble({
         )}
 
         {hasTextContent && (
-          <div
-            data-chat-searchable-content="true"
-            data-chat-search-message-id={message.id}
-            className="max-w-full rounded-2xl rounded-br-md bg-accent px-3.5 py-2.5 text-sm whitespace-pre-wrap text-white"
-          >
-            {visibleContent}
+          <div className="relative max-w-full">
+            <div
+              ref={contentRef}
+              data-chat-searchable-content="true"
+              data-chat-search-message-id={message.id}
+              className="max-w-full rounded-2xl rounded-br-md bg-accent px-3.5 py-2.5 text-sm leading-6 whitespace-pre-wrap text-white"
+              style={
+                isCollapsible && !expanded
+                  ? {
+                      maxHeight: `${USER_BUBBLE_COLLAPSED_MAX_HEIGHT_PX}px`,
+                      overflow: "hidden",
+                    }
+                  : undefined
+              }
+            >
+              {displayContent}
+            </div>
+            {isCollapsible && !expanded ? (
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 rounded-b-2xl rounded-br-md bg-gradient-to-t from-accent via-accent/90 to-transparent" />
+            ) : null}
           </div>
         )}
 

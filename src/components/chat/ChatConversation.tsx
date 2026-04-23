@@ -21,6 +21,10 @@ import {
 } from "../../lib/models";
 import { formatAttachmentSummary } from "../../lib/chatAttachments";
 import { useStore } from "../../lib/store";
+import {
+  ActivePlanFloatingCard,
+  resolveActivePlanSurface,
+} from "./ActivePlanFloatingCard";
 import { CliBubble } from "./CliBubble";
 import { CLI_OPTIONS } from "./CliSelector";
 import { ChatSearchBar } from "./ChatSearchBar";
@@ -441,6 +445,7 @@ export function ChatConversation() {
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
   const [matchCount, setMatchCount] = useState(0);
   const [searchRefreshTick, setSearchRefreshTick] = useState(0);
+  const [planExpanded, setPlanExpanded] = useState(false);
 
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const compiledSearch = useMemo(
@@ -472,6 +477,9 @@ export function ChatConversation() {
   );
   const queuedPrompt = useStore((state) =>
     state.activeTerminalTabId ? state.queuedChatByTab[state.activeTerminalTabId] ?? null : null
+  );
+  const activeLivePlan = useStore((state) =>
+    state.activeTerminalTabId ? state.livePlanByTab[state.activeTerminalTabId] ?? null : null
   );
   const workspace = useStore(
     useShallow((state) => {
@@ -512,6 +520,13 @@ export function ChatConversation() {
     !shouldShowAllMessages && allMessages.length > visibleMessages.length;
   const hiddenMessageCount = Math.max(0, allMessages.length - visibleMessages.length);
   const shouldShowFinalMessageBoundary = activeTab?.status !== "streaming" && !queuedPrompt;
+  const activePlanSurface = useMemo(
+    () => resolveActivePlanSurface(activeSession?.messages, activeLivePlan),
+    [activeSession?.messages, activeLivePlan]
+  );
+  const showFloatingPlan = Boolean(activePlanSurface) && !isSearchOpen;
+  const showStickyControls =
+    showFloatingPlan || (hasHiddenMessages && showLoadOlderHint);
 
   useEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -565,9 +580,14 @@ export function ChatConversation() {
     setSearchRefreshTick(0);
     setVisibleMessageCount(INITIAL_VISIBLE_MESSAGE_COUNT);
     setShowLoadOlderHint(false);
+    setPlanExpanded(false);
     pendingPrependScrollRef.current = null;
     searchMatchesRef.current = [];
   }, [activeTab?.id]);
+
+  useEffect(() => {
+    setPlanExpanded(false);
+  }, [activeLivePlan?.messageId]);
 
   useEffect(() => {
     if (shouldShowAllMessages) {
@@ -951,21 +971,31 @@ export function ChatConversation() {
             </div>
           </div>
 
-          {hasHiddenMessages && showLoadOlderHint && (
-            <div className="sticky top-2 z-10 flex justify-center px-2">
-              <button
-                type="button"
-                onClick={loadOlderMessages}
-                aria-label={`加载更早消息，还有 ${hiddenMessageCount} 条历史记录`}
-                className="group inline-flex items-center gap-2 rounded-full border border-[#e6ddd0] bg-white/92 px-3.5 py-1.5 text-[12px] font-medium text-slate-600 shadow-[0_10px_24px_rgba(15,23,42,0.06)] ring-1 ring-white/75 backdrop-blur-md transition-all hover:-translate-y-[1px] hover:border-[#d8cfbf] hover:bg-white hover:text-slate-900 hover:shadow-[0_14px_30px_rgba(15,23,42,0.1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d7cdbd]"
-              >
-                <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#f4efe6] text-[#8b7b63] transition-colors group-hover:bg-[#eee6d8] group-hover:text-slate-800">
-                  <ChevronsUp size={12} aria-hidden />
-                </span>
-                <span>加载更早消息</span>
-              </button>
+          {showStickyControls ? (
+            <div className="sticky top-2 z-10 flex flex-col items-center gap-2 px-2">
+              {showFloatingPlan && activePlanSurface ? (
+                <ActivePlanFloatingCard
+                  group={activePlanSurface.group}
+                  cliId={activePlanSurface.cliId}
+                  collapsed={!planExpanded}
+                  onToggle={() => setPlanExpanded((current) => !current)}
+                />
+              ) : null}
+              {hasHiddenMessages && showLoadOlderHint ? (
+                <button
+                  type="button"
+                  onClick={loadOlderMessages}
+                  aria-label={`加载更早消息，还有 ${hiddenMessageCount} 条历史记录`}
+                  className="group inline-flex items-center gap-2 rounded-full border border-[#e6ddd0] bg-white/92 px-3.5 py-1.5 text-[12px] font-medium text-slate-600 shadow-[0_10px_24px_rgba(15,23,42,0.06)] ring-1 ring-white/75 backdrop-blur-md transition-all hover:-translate-y-[1px] hover:border-[#d8cfbf] hover:bg-white hover:text-slate-900 hover:shadow-[0_14px_30px_rgba(15,23,42,0.1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d7cdbd]"
+                >
+                  <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#f4efe6] text-[#8b7b63] transition-colors group-hover:bg-[#eee6d8] group-hover:text-slate-800">
+                    <ChevronsUp size={12} aria-hidden />
+                  </span>
+                  <span>加载更早消息</span>
+                </button>
+              ) : null}
             </div>
-          )}
+          ) : null}
 
           {allMessages.length === 0 && (
             <div className="flex items-center justify-center rounded-[22px] border border-dashed border-border bg-white px-6 py-12 text-sm text-muted">

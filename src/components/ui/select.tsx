@@ -32,6 +32,7 @@ function SelectTrigger({
 
 function SelectPopup({
   className = "",
+  listClassName = "",
   children,
   side = "bottom",
   sideOffset = 4,
@@ -47,6 +48,7 @@ function SelectPopup({
   alignOffset?: SelectPrimitive.Positioner.Props["alignOffset"];
   alignItemWithTrigger?: SelectPrimitive.Positioner.Props["alignItemWithTrigger"];
   anchor?: SelectPrimitive.Positioner.Props["anchor"];
+  listClassName?: string;
 }) {
   return (
     <SelectPrimitive.Portal>
@@ -57,11 +59,11 @@ function SelectPopup({
         alignOffset={alignOffset}
         alignItemWithTrigger={alignItemWithTrigger}
         anchor={anchor}
-        className="z-50 select-none"
+        className="z-[120] select-none"
         data-slot="select-positioner"
       >
         <SelectPrimitive.Popup
-          className="origin-(--transform-origin) text-slate-900"
+          className={`origin-(--transform-origin) text-slate-900 ${className}`.trim()}
           data-slot="select-popup"
           {...props}
         >
@@ -71,9 +73,9 @@ function SelectPopup({
           >
             <ChevronUp className="h-4 w-4" />
           </SelectPrimitive.ScrollUpArrow>
-          <div className="rounded-lg border border-slate-200 bg-white shadow-lg">
+          <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-lg">
             <SelectPrimitive.List
-              className={`max-h-[min(320px,var(--available-height))] overflow-y-auto p-1 ${className}`.trim()}
+              className={`block max-h-[min(320px,var(--available-height))] overflow-y-scroll overscroll-contain p-1 [scrollbar-gutter:stable] ${listClassName}`.trim()}
               data-slot="select-list"
             >
               {children}

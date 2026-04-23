@@ -19,6 +19,7 @@ import {
   FileMentionCandidate,
   GitPanelData,
   GitFileStatus,
+  LivePlanState,
   PersistedTerminalState,
   PickedChatAttachment,
   SelectedCustomAgent,
@@ -889,6 +890,57 @@ function resolveStreamingAssistantMessageId(
   return null;
 }
 
+function isLivePlanBlock(
+  block: ChatMessageBlock
+): block is
+  | Extract<ChatMessageBlock, { kind: "plan" }>
+  | Extract<ChatMessageBlock, { kind: "orchestrationPlan" }>
+  | Extract<ChatMessageBlock, { kind: "orchestrationStep" }> {
+  return (
+    block.kind === "plan" ||
+    block.kind === "orchestrationPlan" ||
+    block.kind === "orchestrationStep"
+  );
+}
+
+function createLivePlanState(
+  messageId: string,
+  cliId: AgentId | null | undefined,
+  blocks: ChatMessageBlock[] | null | undefined
+): LivePlanState | null {
+  if (!cliId || !blocks?.length) return null;
+  const liveBlocks = blocks.filter((block) => isLivePlanBlock(block));
+  if (liveBlocks.length === 0) return null;
+  return {
+    messageId,
+    cliId,
+    blocks: liveBlocks.map((block) => ({ ...block })),
+    updatedAt: nowIso(),
+  };
+}
+
+function rebuildLivePlanMap(chatSessions: Record<string, ConversationSession>) {
+  const next: Record<string, LivePlanState> = {};
+  Object.entries(chatSessions).forEach(([tabId, session]) => {
+    const liveMessage =
+      [...session.messages]
+        .reverse()
+        .find(
+          (message) =>
+            message.role === "assistant" &&
+            message.isStreaming &&
+            Boolean(message.cliId) &&
+            Boolean(message.blocks?.some((block) => isLivePlanBlock(block)))
+        ) ?? null;
+    if (!liveMessage?.cliId) return;
+    const livePlan = createLivePlanState(liveMessage.id, liveMessage.cliId, liveMessage.blocks);
+    if (livePlan) {
+      next[tabId] = livePlan;
+    }
+  });
+  return next;
+}
+
 function appendSystemMessageToSession(
   chatSessions: Record<string, ConversationSession>,
   tabId: string,
@@ -1007,6 +1059,7 @@ interface StoreState {
   gitWorkbenchOpen: boolean;
   sharedContext: Record<string, SharedContextEntry>;
   queuedChatByTab: Record<string, QueuedChatMessage>;
+  livePlanByTab: Record<string, LivePlanState>;
 
   loadInitialState: (projectRoot?: string) => Promise<void>;
   switchAgent: (agentId: AgentId) => Promise<void>;
@@ -1152,6 +1205,7 @@ export const useStore = create<StoreState>((set, get) => {
   gitWorkbenchOpen: false,
   sharedContext: {},
   queuedChatByTab: {},
+  livePlanByTab: {},
 
   setAppState: (state) =>
     set((current) => ({
@@ -1233,17 +1287,21 @@ export const useStore = create<StoreState>((set, get) => {
       const messages = session.messages.filter((message) => message.id !== messageId);
       if (messages.length === session.messages.length) return {};
 
-      const chatSessions = {
-        ...state.chatSessions,
-        [tabId]: {
-          ...session,
-          messages,
-          updatedAt: nowIso(),
-        },
-      };
-      persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
-      return { chatSessions };
-    });
+        const chatSessions = {
+          ...state.chatSessions,
+          [tabId]: {
+            ...session,
+            messages,
+            updatedAt: nowIso(),
+          },
+        };
+        const livePlanByTab = { ...state.livePlanByTab };
+        if (livePlanByTab[tabId]?.messageId === messageId) {
+          delete livePlanByTab[tabId];
+        }
+        persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
+        return { chatSessions, livePlanByTab };
+      });
     enqueueMessagePersistence(() =>
       bridge.deleteChatMessage({
         terminalTabId: tabId,
@@ -1278,6 +1336,7 @@ export const useStore = create<StoreState>((set, get) => {
         };
         return {
           chatSessions,
+          livePlanByTab: rebuildLivePlanMap(chatSessions),
           sharedContext: rebuildSharedContextMap(chatSessions, state.terminalTabs, state.workspaces),
         };
       });
@@ -1413,6 +1472,7 @@ export const useStore = create<StoreState>((set, get) => {
       gitPanelsByWorkspace: {},
       sharedContext: rebuildSharedContextMap(chatSessions, terminalTabs, workspaces),
       queuedChatByTab: {},
+      livePlanByTab: rebuildLivePlanMap(chatSessions),
     });
 
     persistTerminalState(workspaces, terminalTabs, activeTerminalTabId, chatSessions);
@@ -1438,6 +1498,7 @@ export const useStore = create<StoreState>((set, get) => {
         set((state) => ({
           terminalTabs: nextTerminalTabs,
           chatSessions: nextChatSessions,
+          livePlanByTab: rebuildLivePlanMap(nextChatSessions),
           busyAction: state.busyAction === "chat" ? null : state.busyAction,
         }));
       }
@@ -1905,6 +1966,8 @@ export const useStore = create<StoreState>((set, get) => {
       persistTerminalState(state.workspaces, remainingTabs, nextActive, chatSessions);
       const queuedChatByTab = { ...state.queuedChatByTab };
       delete queuedChatByTab[tabId];
+      const livePlanByTab = { ...state.livePlanByTab };
+      delete livePlanByTab[tabId];
       return {
         appState,
         terminalTabs: remainingTabs,
@@ -1912,6 +1975,7 @@ export const useStore = create<StoreState>((set, get) => {
         chatSessions,
         sharedContext,
         queuedChatByTab,
+        livePlanByTab,
       };
     });
     enqueueMessagePersistence(() => bridge.deleteChatSessionByTab(tabId));
@@ -1971,10 +2035,12 @@ export const useStore = create<StoreState>((set, get) => {
       const chatSessions = { ...state.chatSessions };
       const sharedContext = { ...state.sharedContext };
       const queuedChatByTab = { ...state.queuedChatByTab };
+      const livePlanByTab = { ...state.livePlanByTab };
       tabIds.forEach((tabId) => {
         delete chatSessions[tabId];
         delete sharedContext[tabId];
         delete queuedChatByTab[tabId];
+        delete livePlanByTab[tabId];
       });
 
       const gitPanelsByWorkspace = { ...state.gitPanelsByWorkspace };
@@ -1999,6 +2065,7 @@ export const useStore = create<StoreState>((set, get) => {
         chatSessions,
         sharedContext,
         queuedChatByTab,
+        livePlanByTab,
         gitPanelsByWorkspace,
         gitCommitMessageByWorkspace,
         gitCommitLoadingByWorkspace,
@@ -2038,6 +2105,8 @@ export const useStore = create<StoreState>((set, get) => {
       };
       const queuedChatByTab = { ...state.queuedChatByTab };
       delete queuedChatByTab[targetTabId];
+      const livePlanByTab = { ...state.livePlanByTab };
+      delete livePlanByTab[targetTabId];
       const sharedContext = rebuildSharedContextMap(chatSessions, terminalTabs, state.workspaces);
       const appState = state.appState
         ? deriveActiveWorkspaceState(state.appState, state.workspaces, terminalTabs, state.activeTerminalTabId)
@@ -2048,6 +2117,7 @@ export const useStore = create<StoreState>((set, get) => {
         terminalTabs,
         chatSessions,
         queuedChatByTab,
+        livePlanByTab,
         sharedContext,
       };
     });
@@ -2110,6 +2180,10 @@ export const useStore = create<StoreState>((set, get) => {
           }),
         },
       };
+      const livePlanByTab = { ...state.livePlanByTab };
+      if (livePlanByTab[targetTabId]?.cliId === cliId) {
+        delete livePlanByTab[targetTabId];
+      }
       const sharedContext = rebuildSharedContextMap(chatSessions, terminalTabs, state.workspaces);
       const appState = state.appState
         ? deriveActiveWorkspaceState(state.appState, state.workspaces, terminalTabs, state.activeTerminalTabId)
@@ -2119,6 +2193,7 @@ export const useStore = create<StoreState>((set, get) => {
         appState,
         terminalTabs,
         chatSessions,
+        livePlanByTab,
         sharedContext,
       };
     });
@@ -2932,8 +3007,10 @@ export const useStore = create<StoreState>((set, get) => {
           }),
         },
       };
+      const livePlanByTab = { ...current.livePlanByTab };
+      delete livePlanByTab[tabId];
       persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
-      return { busyAction: "chat", terminalTabs, chatSessions };
+      return { busyAction: "chat", terminalTabs, chatSessions, livePlanByTab };
     });
     const seededSession = get().chatSessions[tabId];
     if (seededSession) {
@@ -3244,7 +3321,23 @@ export const useStore = create<StoreState>((set, get) => {
           }),
         },
       };
-      return { chatSessions };
+      if (!blocks) {
+        return { chatSessions };
+      }
+      const targetMessage =
+        chatSessions[tabId]?.messages.find((message) => message.id === targetMessageId) ?? null;
+      const nextLivePlan = createLivePlanState(
+        targetMessageId,
+        targetMessage?.cliId ?? null,
+        blocks
+      );
+      const livePlanByTab = { ...state.livePlanByTab };
+      if (nextLivePlan) {
+        livePlanByTab[tabId] = nextLivePlan;
+      } else if (livePlanByTab[tabId]?.messageId === targetMessageId) {
+        delete livePlanByTab[tabId];
+      }
+      return { chatSessions, livePlanByTab };
     });
     const session = get().chatSessions[tabId];
     if (!session) return;
@@ -3401,11 +3494,16 @@ export const useStore = create<StoreState>((set, get) => {
         ...state.chatSessions,
         [tabId]: finalizedSession,
       };
+      const livePlanByTab = { ...state.livePlanByTab };
+      if (livePlanByTab[tabId]?.messageId === targetMessageId) {
+        delete livePlanByTab[tabId];
+      }
       persistTerminalState(state.workspaces, nextTerminalTabs, state.activeTerminalTabId, chatSessions);
       return {
         busyAction: null,
         terminalTabs: nextTerminalTabs,
         chatSessions,
+        livePlanByTab,
       };
     });
     const session = get().chatSessions[tabId];
@@ -3458,6 +3556,7 @@ export const useStore = create<StoreState>((set, get) => {
         set((state) => ({
           terminalTabs: nextTerminalTabs,
           chatSessions: nextChatSessions,
+          livePlanByTab: rebuildLivePlanMap(nextChatSessions),
           busyAction: state.busyAction === "chat" ? null : state.busyAction,
         }));
       }
