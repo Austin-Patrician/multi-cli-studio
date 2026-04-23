@@ -45,13 +45,19 @@ const AppUpdateContext = createContext<UpdateController | null>(null);
 export function AppUpdateProvider({ children }: { children: ReactNode }) {
   const settings = useStore((state) => state.settings);
   const [state, setState] = useState<UpdateState>({ stage: "idle" });
+  const stateRef = useRef<UpdateState>(state);
   const updateRef = useRef<Update | null>(null);
   const latestTimeoutRef = useRef<number | null>(null);
   const notifiedVersionRef = useRef<string | null>(null);
 
   const supported = !import.meta.env.DEV && isTauri();
+  const settingsReady = settings != null;
   const autoCheckForUpdates = settings?.updateConfig.autoCheckForUpdates ?? true;
   const notifyOnUpdateAvailable = settings?.updateConfig.notifyOnUpdateAvailable ?? false;
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const clearLatestTimeout = useCallback(() => {
     if (latestTimeoutRef.current !== null) {
@@ -90,7 +96,12 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      if (state.stage === "downloading" || state.stage === "installing" || state.stage === "restarting") {
+      const currentStage = stateRef.current.stage;
+      if (
+        currentStage === "downloading" ||
+        currentStage === "installing" ||
+        currentStage === "restarting"
+      ) {
         return;
       }
 
@@ -137,7 +148,7 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [clearLatestTimeout, state.stage, supported]
+    [clearLatestTimeout, supported]
   );
 
   const startUpdate = useCallback(async () => {
@@ -218,7 +229,7 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
   }, [checkForUpdates, supported]);
 
   useEffect(() => {
-    if (!supported || !updaterConfigured || settings == null || !autoCheckForUpdates) {
+    if (!supported || !updaterConfigured || !settingsReady || !autoCheckForUpdates) {
       return;
     }
 
@@ -230,7 +241,7 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [autoCheckForUpdates, checkForUpdates, settings, supported]);
+  }, [autoCheckForUpdates, checkForUpdates, settingsReady, supported]);
 
   useEffect(() => {
     if (state.stage !== "available" || !notifyOnUpdateAvailable || !state.version) {

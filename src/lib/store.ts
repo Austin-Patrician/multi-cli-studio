@@ -2031,12 +2031,8 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   updateSettings: async (settings) => {
-    try {
-      const updated = await bridge.updateSettings(settings);
-      set({ settings: updated });
-    } catch {
-      // ignore
-    }
+    const updated = await bridge.updateSettings(settings);
+    set({ settings: updated });
   },
 
   openWorkspaceFolder: async () => {

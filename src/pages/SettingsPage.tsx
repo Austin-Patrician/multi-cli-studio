@@ -592,12 +592,12 @@ export function SettingsPage({
                   />
                   <FormRow
                     label="应用内自动更新"
-                    description="启动及后台自动检测新版本。"
+                    description="启动及后台自动检测新版本。切换后需点击保存才会生效。"
                     control={<RefinedToggle enabled={local.updateConfig.autoCheckForUpdates} onClick={() => setLocal({ ...local, updateConfig: { ...local.updateConfig, autoCheckForUpdates: !local.updateConfig.autoCheckForUpdates } })} />}
                   />
                   <FormRow
                     label="新版本可用提醒"
-                    description="发现应用更新时发送桌面通知。"
+                    description="发现应用更新时发送桌面通知。切换后需点击保存才会生效。"
                     control={<RefinedToggle enabled={local.updateConfig.notifyOnUpdateAvailable} onClick={toggleUpdateNotifications} disabled={updateNotificationBusy} />}
                   />
                   <FormRow
