@@ -24,6 +24,7 @@ import {
   SelectedCustomAgent,
   SharedContextEntry,
   TerminalCliId,
+  ToolApprovalMode,
   TerminalLine,
   TerminalTab,
   WorkspacePickResult,
@@ -267,6 +268,7 @@ function createTerminalTab(
     workspaceId: workspace.id,
     selectedCli: partial?.selectedCli ?? defaultSelectedCli ?? workspace.activeAgent ?? workspace.currentWriter,
     selectedAgent: normalizeSelectedCustomAgent(partial?.selectedAgent) ?? null,
+    toolApprovalMode: partial?.toolApprovalMode ?? "manual",
     planMode: partial?.planMode ?? false,
     fastMode: partial?.fastMode ?? false,
     effortLevel: partial?.effortLevel ?? null,
@@ -1038,6 +1040,7 @@ interface StoreState {
   setActiveTerminalTab: (tabId: string) => void;
   resetTerminalTabSession: (tabId?: string) => void;
   resetCliTransportSession: (cliId: AgentId, tabId?: string) => void;
+  setTabToolApprovalMode: (tabId: string, mode: ToolApprovalMode) => Promise<void>;
   setTabSelectedCli: (tabId: string, cliId: TerminalCliId) => void;
   setTabSelectedAgent: (tabId: string, agent: SelectedCustomAgent | null) => void;
   setTabDraftPrompt: (tabId: string, prompt: string) => void;
@@ -1912,6 +1915,7 @@ export const useStore = create<StoreState>((set, get) => {
       };
     });
     enqueueMessagePersistence(() => bridge.deleteChatSessionByTab(tabId));
+    void bridge.setTabToolApprovalMode(tabId, "manual").catch(() => undefined);
   },
 
   deleteWorkspace: async (workspaceId) => {
@@ -1951,6 +1955,7 @@ export const useStore = create<StoreState>((set, get) => {
         await Promise.allSettled([
           bridge.closePtySession(tabId),
           bridge.deleteChatSessionByTab(tabId),
+          bridge.setTabToolApprovalMode(tabId, "manual"),
         ]);
       })
     );
@@ -2013,6 +2018,7 @@ export const useStore = create<StoreState>((set, get) => {
 
     const nextTab: TerminalTab = {
       ...currentTab,
+      toolApprovalMode: "manual",
       transportSessions: {},
       contextBoundariesByCli: {},
       draftPrompt: "",
@@ -2052,6 +2058,7 @@ export const useStore = create<StoreState>((set, get) => {
         seeds: [toPersistedSessionSeed(nextSession, targetTabId, nextSession.messages)],
       })
     );
+    void bridge.setTabToolApprovalMode(targetTabId, "manual").catch(() => undefined);
   },
 
   resetCliTransportSession: (cliId, tabId) => {
@@ -2123,6 +2130,54 @@ export const useStore = create<StoreState>((set, get) => {
           seeds: [toPersistedSessionSeed(nextSession, targetTabId, [systemMessage])],
         })
       );
+    }
+  },
+
+  setTabToolApprovalMode: async (tabId, mode) => {
+    const previousMode =
+      get().terminalTabs.find((tab) => tab.id === tabId)?.toolApprovalMode ?? "manual";
+    if (previousMode === mode) return;
+
+    set((state) => {
+      const terminalTabs = state.terminalTabs.map((tab) =>
+        tab.id === tabId ? { ...tab, toolApprovalMode: mode } : tab
+      );
+      persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
+      return { terminalTabs };
+    });
+
+    try {
+      await bridge.setTabToolApprovalMode(tabId, mode);
+    } catch (error) {
+      set((state) => {
+        const terminalTabs = state.terminalTabs.map((tab) =>
+          tab.id === tabId ? { ...tab, toolApprovalMode: previousMode } : tab
+        );
+        persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
+        return { terminalTabs };
+      });
+
+      const current = get();
+      const tab = current.terminalTabs.find((item) => item.id === tabId) ?? null;
+      const workspace = current.workspaces.find((item) => item.id === tab?.workspaceId) ?? null;
+      const approvalCli = resolveTerminalCliId(tab?.selectedCli, workspace?.activeAgent ?? "codex");
+      const detail =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "Unknown error";
+      set((state) => {
+        const chatSessions = appendSystemMessageToSession(
+          state.chatSessions,
+          tabId,
+          approvalCli,
+          `Failed to update tool approval mode: ${detail}`,
+          1
+        );
+        persistTerminalState(state.workspaces, state.terminalTabs, state.activeTerminalTabId, chatSessions);
+        return { chatSessions };
+      });
     }
   },
 
@@ -3462,6 +3517,15 @@ export const useStore = create<StoreState>((set, get) => {
       });
 
     updateApprovalState(nextState);
+    const matchingTabIds = Object.entries(get().chatSessions)
+      .filter(([, session]) =>
+        session.messages.some((message) =>
+          message.blocks?.some(
+            (block) => block.kind === "approvalRequest" && block.requestId === requestId
+          )
+        )
+      )
+      .map(([tabId]) => tabId);
     const messagesToUpdate = Object.values(get().chatSessions).flatMap((session) =>
       session.messages.filter((message) =>
         message.blocks?.some(
@@ -3469,6 +3533,15 @@ export const useStore = create<StoreState>((set, get) => {
         )
       )
     );
+    if (decision === "allowAlways" && matchingTabIds.length > 0) {
+      set((state) => {
+        const terminalTabs = state.terminalTabs.map((tab) =>
+          matchingTabIds.includes(tab.id) ? { ...tab, toolApprovalMode: "auto" as const } : tab
+        );
+        persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
+        return { terminalTabs };
+      });
+    }
     messagesToUpdate.forEach((message) => {
       enqueueMessagePersistence(() =>
         bridge.updateChatMessageBlocks({
@@ -3487,6 +3560,17 @@ export const useStore = create<StoreState>((set, get) => {
       const applied = await bridge.respondAssistantApproval(requestId, decision);
       if (!applied) {
         updateApprovalState("pending");
+        if (decision === "allowAlways" && matchingTabIds.length > 0) {
+          set((state) => {
+            const terminalTabs = state.terminalTabs.map((tab) =>
+              matchingTabIds.includes(tab.id)
+                ? { ...tab, toolApprovalMode: "manual" as const }
+                : tab
+            );
+            persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
+            return { terminalTabs };
+          });
+        }
         set((state) => {
           const chatSessions = appendSystemMessageToSession(
             state.chatSessions,
@@ -3501,6 +3585,17 @@ export const useStore = create<StoreState>((set, get) => {
       }
     } catch (error) {
       updateApprovalState("pending");
+      if (decision === "allowAlways" && matchingTabIds.length > 0) {
+        set((state) => {
+          const terminalTabs = state.terminalTabs.map((tab) =>
+            matchingTabIds.includes(tab.id)
+              ? { ...tab, toolApprovalMode: "manual" as const }
+              : tab
+          );
+          persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
+          return { terminalTabs };
+        });
+      }
       const detail =
         error instanceof Error
           ? error.message

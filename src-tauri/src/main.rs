@@ -57,6 +57,7 @@ use storage::{
     SemanticRecallRequest, TaskContextBundle, TaskKernel, TaskRecentTurn, TerminalStorage,
 };
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 use uuid::Uuid;
 
@@ -3104,6 +3105,13 @@ struct ClaudeApprovalResponseRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TabToolApprovalModeRequest {
+    terminal_tab_id: String,
+    mode: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CliHandoffRequest {
     terminal_tab_id: String,
     workspace_id: String,
@@ -3718,24 +3726,24 @@ struct AppStore {
 struct ClaudeApprovalRules {
     #[serde(default)]
     always_allow_by_project: BTreeMap<String, BTreeSet<String>>,
+    #[serde(skip)]
+    auto_approve_tabs: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct CodexSessionApprovalRules {
-    always_allow_by_project: BTreeMap<String, BTreeSet<String>>,
+    auto_approve_tabs: BTreeSet<String>,
 }
 
 #[derive(Debug)]
 struct PendingClaudeApproval {
-    project_root: String,
-    tool_name: String,
+    terminal_tab_id: String,
     sender: mpsc::Sender<ClaudeApprovalDecision>,
 }
 
 #[derive(Debug)]
 struct PendingCodexApproval {
-    project_root: String,
-    tool_name: String,
+    terminal_tab_id: String,
     sender: mpsc::Sender<ClaudeApprovalDecision>,
 }
 
@@ -5147,52 +5155,39 @@ fn claude_decision_classification(decision: ClaudeApprovalDecision) -> &'static 
     }
 }
 
-fn project_has_claude_tool_approval(
-    rules: &ClaudeApprovalRules,
-    project_root: &str,
-    tool_name: &str,
-) -> bool {
-    rules
-        .always_allow_by_project
-        .get(project_root)
-        .map(|tools| tools.contains(&tool_name.to_ascii_lowercase()))
-        .unwrap_or(false)
+fn claude_tab_auto_approval_enabled(rules: &ClaudeApprovalRules, terminal_tab_id: &str) -> bool {
+    rules.auto_approve_tabs.contains(terminal_tab_id)
 }
 
-fn store_claude_tool_approval(
+fn set_claude_tab_auto_approval(
     rules: &mut ClaudeApprovalRules,
-    project_root: &str,
-    tool_name: &str,
+    terminal_tab_id: &str,
+    enabled: bool,
 ) {
-    rules
-        .always_allow_by_project
-        .entry(project_root.to_string())
-        .or_default()
-        .insert(tool_name.to_ascii_lowercase());
+    if enabled {
+        rules.auto_approve_tabs.insert(terminal_tab_id.to_string());
+    } else {
+        rules.auto_approve_tabs.remove(terminal_tab_id);
+    }
 }
 
-fn project_has_codex_tool_approval(
+fn codex_tab_auto_approval_enabled(
     rules: &CodexSessionApprovalRules,
-    project_root: &str,
-    tool_name: &str,
+    terminal_tab_id: &str,
 ) -> bool {
-    rules
-        .always_allow_by_project
-        .get(project_root)
-        .map(|tools| tools.contains(&tool_name.to_ascii_lowercase()))
-        .unwrap_or(false)
+    rules.auto_approve_tabs.contains(terminal_tab_id)
 }
 
-fn store_codex_tool_approval(
+fn set_codex_tab_auto_approval(
     rules: &mut CodexSessionApprovalRules,
-    project_root: &str,
-    tool_name: &str,
+    terminal_tab_id: &str,
+    enabled: bool,
 ) {
-    rules
-        .always_allow_by_project
-        .entry(project_root.to_string())
-        .or_default()
-        .insert(tool_name.to_ascii_lowercase());
+    if enabled {
+        rules.auto_approve_tabs.insert(terminal_tab_id.to_string());
+    } else {
+        rules.auto_approve_tabs.remove(terminal_tab_id);
+    }
 }
 
 fn upsert_claude_approval_block(
@@ -6491,7 +6486,7 @@ fn handle_codex_server_request(
     app: &AppHandle,
     terminal_tab_id: &str,
     message_id: &str,
-    project_root: &str,
+    _project_root: &str,
     request_id: &Value,
     method: &str,
     params: &Value,
@@ -6499,6 +6494,7 @@ fn handle_codex_server_request(
     codex_session_approval_rules: &Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: &Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
 ) -> Result<(), String> {
+    let _ = _project_root;
     let request_key = request_id_key(request_id);
 
     let (title, summary, description, tool_name) = match method {
@@ -6536,7 +6532,7 @@ fn handle_codex_server_request(
 
     let auto_allow = codex_session_approval_rules
         .lock()
-        .map(|rules| project_has_codex_tool_approval(&rules, project_root, &tool_name))
+        .map(|rules| codex_tab_auto_approval_enabled(&rules, terminal_tab_id))
         .unwrap_or(false);
 
     if auto_allow {
@@ -6597,8 +6593,7 @@ fn handle_codex_server_request(
         approvals.insert(
             request_key.clone(),
             PendingCodexApproval {
-                project_root: project_root.to_string(),
-                tool_name: tool_name.clone(),
+                terminal_tab_id: terminal_tab_id.to_string(),
                 sender,
             },
         );
@@ -7786,7 +7781,7 @@ fn handle_claude_stream_record(
 
                 let auto_allow = claude_approval_rules
                     .lock()
-                    .map(|rules| project_has_claude_tool_approval(&rules, project_root, &tool_name))
+                    .map(|rules| claude_tab_auto_approval_enabled(&rules, terminal_tab_id))
                     .unwrap_or(false);
 
                 if auto_allow {
@@ -7814,7 +7809,7 @@ fn handle_claude_stream_record(
                         title,
                         description,
                         summary,
-                        Some("Yes, don't ask again".to_string()),
+                        Some("Yes, for this tab".to_string()),
                         Some("pending".to_string()),
                     );
                     emit_stream_block_update(
@@ -7832,8 +7827,7 @@ fn handle_claude_stream_record(
                         approvals.insert(
                             request_id.clone(),
                             PendingClaudeApproval {
-                                project_root: project_root.to_string(),
-                                tool_name: tool_name.clone(),
+                                terminal_tab_id: terminal_tab_id.to_string(),
                                 sender,
                             },
                         );
@@ -8059,7 +8053,7 @@ fn codex_upsert_approval_block(
         title,
         description,
         summary,
-        persistent_label: Some("Yes, for this session".to_string()),
+        persistent_label: Some("Yes, for this tab".to_string()),
         state,
     };
 
@@ -13424,8 +13418,7 @@ fn respond_assistant_approval(
                 .claude_approval_rules
                 .lock()
                 .map_err(|err| err.to_string())?;
-            store_claude_tool_approval(&mut rules, &pending.project_root, &pending.tool_name);
-            persist_claude_approval_rules(&rules)?;
+            set_claude_tab_auto_approval(&mut rules, &pending.terminal_tab_id, true);
         }
 
         pending
@@ -13447,7 +13440,7 @@ fn respond_assistant_approval(
                 .codex_session_approval_rules
                 .lock()
                 .map_err(|err| err.to_string())?;
-            store_codex_tool_approval(&mut rules, &pending.project_root, &pending.tool_name);
+            set_codex_tab_auto_approval(&mut rules, &pending.terminal_tab_id, true);
         }
 
         pending
@@ -13458,6 +13451,36 @@ fn respond_assistant_approval(
     }
 
     Ok(ClaudeApprovalResponseResult { applied: false })
+}
+
+#[tauri::command]
+fn set_tab_tool_approval_mode(
+    store: State<'_, AppStore>,
+    request: TabToolApprovalModeRequest,
+) -> Result<(), String> {
+    let enabled = match request.mode.as_str() {
+        "auto" => true,
+        "manual" => false,
+        _ => return Err("Unknown tool approval mode.".to_string()),
+    };
+
+    {
+        let mut rules = store
+            .claude_approval_rules
+            .lock()
+            .map_err(|err| err.to_string())?;
+        set_claude_tab_auto_approval(&mut rules, &request.terminal_tab_id, enabled);
+    }
+
+    {
+        let mut rules = store
+            .codex_session_approval_rules
+            .lock()
+            .map_err(|err| err.to_string())?;
+        set_codex_tab_auto_approval(&mut rules, &request.terminal_tab_id, enabled);
+    }
+
+    Ok(())
 }
 
 // ── ACP commands ────────────────────────────────────────────────────────
@@ -17420,13 +17443,13 @@ fn best_git_diff_for_path(project_root: &str, path: &str, status: &str) -> Strin
 }
 
 #[tauri::command]
-fn pick_workspace_folder() -> Result<Option<WorkspacePickResult>, String> {
-    pick_workspace_folder_impl()
+async fn pick_workspace_folder(app: AppHandle) -> Result<Option<WorkspacePickResult>, String> {
+    pick_workspace_folder_impl(&app)
 }
 
 #[tauri::command]
-fn pick_chat_attachments() -> Result<Vec<PickedChatAttachment>, String> {
-    pick_chat_attachments_impl()
+async fn pick_chat_attachments(app: AppHandle) -> Result<Vec<PickedChatAttachment>, String> {
+    pick_chat_attachments_impl(&app)
 }
 
 #[tauri::command]
@@ -26187,15 +26210,6 @@ fn collect_workspace_files(
     Ok(())
 }
 
-fn parse_selected_paths_output(output: &[u8]) -> Vec<String> {
-    String::from_utf8_lossy(output)
-        .lines()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-        .collect()
-}
-
 fn to_picked_chat_attachments(paths: Vec<String>) -> Vec<PickedChatAttachment> {
     paths
         .into_iter()
@@ -26209,143 +26223,38 @@ fn to_picked_chat_attachments(paths: Vec<String>) -> Vec<PickedChatAttachment> {
         .collect()
 }
 
-#[cfg(target_os = "windows")]
-fn pick_workspace_folder_impl() -> Result<Option<WorkspacePickResult>, String> {
-    let script = r#"
-Add-Type -AssemblyName System.Windows.Forms | Out-Null
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.ShowNewFolderButton = $true
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  $dialog.SelectedPath
-}
-"#;
-
-    let output = Command::new("powershell.exe")
-        .args(["-NoLogo", "-NoProfile", "-STA", "-Command", script])
-        .output()
-        .map_err(|err| err.to_string())?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-
-    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if selected.is_empty() {
+fn pick_workspace_folder_impl(app: &AppHandle) -> Result<Option<WorkspacePickResult>, String> {
+    let Some(selected_path) = app.dialog().file().blocking_pick_folder() else {
         return Ok(None);
-    }
+    };
 
-    let name = Path::new(&selected)
+    let selected = selected_path
+        .into_path()
+        .map_err(|_| "Selected folder is not a local filesystem path.".to_string())?;
+    let root_path = selected.to_string_lossy().to_string();
+    let name = selected
         .file_name()
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".to_string());
 
-    Ok(Some(WorkspacePickResult {
-        name,
-        root_path: selected,
-    }))
+    Ok(Some(WorkspacePickResult { name, root_path }))
 }
 
-#[cfg(target_os = "windows")]
-fn pick_chat_attachments_impl() -> Result<Vec<PickedChatAttachment>, String> {
-    let script = r#"
-Add-Type -AssemblyName System.Windows.Forms | Out-Null
-$dialog = New-Object System.Windows.Forms.OpenFileDialog
-$dialog.Title = "Choose attachments"
-$dialog.Multiselect = $true
-$dialog.CheckFileExists = $true
-$dialog.Filter = "All files (*.*)|*.*"
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  $dialog.FileNames
-}
-"#;
+fn pick_chat_attachments_impl(app: &AppHandle) -> Result<Vec<PickedChatAttachment>, String> {
+    let Some(paths) = app.dialog().file().blocking_pick_files() else {
+        return Ok(Vec::new());
+    };
 
-    let output = Command::new("powershell.exe")
-        .args(["-NoLogo", "-NoProfile", "-STA", "-Command", script])
-        .output()
-        .map_err(|err| err.to_string())?;
+    let selected_paths = paths
+        .into_iter()
+        .map(|path| {
+            path.into_path()
+                .map_err(|_| "Selected attachment is not a local filesystem path.".to_string())
+                .map(|value| value.to_string_lossy().to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-
-    Ok(to_picked_chat_attachments(parse_selected_paths_output(
-        &output.stdout,
-    )))
-}
-
-#[cfg(target_os = "macos")]
-fn pick_workspace_folder_impl() -> Result<Option<WorkspacePickResult>, String> {
-    let output = Command::new("osascript")
-        .args([
-            "-e",
-            r#"try
-POSIX path of (choose folder with prompt "Choose a workspace folder")
-on error number -128
-return ""
-end try"#,
-        ])
-        .output()
-        .map_err(|err| err.to_string())?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-
-    let selected = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
-    if selected.is_empty() {
-        return Ok(None);
-    }
-
-    let name = Path::new(&selected)
-        .file_name()
-        .map(|value| value.to_string_lossy().to_string())
-        .unwrap_or_else(|| "workspace".to_string());
-
-    Ok(Some(WorkspacePickResult {
-        name,
-        root_path: selected,
-    }))
-}
-
-#[cfg(target_os = "macos")]
-fn pick_chat_attachments_impl() -> Result<Vec<PickedChatAttachment>, String> {
-    let output = Command::new("osascript")
-        .args([
-            "-e",
-            r#"try
-set pickedFiles to choose file with prompt "Choose attachments" with multiple selections allowed
-set outputText to ""
-repeat with pickedFile in pickedFiles
-  set outputText to outputText & POSIX path of pickedFile & linefeed
-end repeat
-return outputText
-on error number -128
-return ""
-end try"#,
-        ])
-        .output()
-        .map_err(|err| err.to_string())?;
-
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-
-    Ok(to_picked_chat_attachments(parse_selected_paths_output(
-        &output.stdout,
-    )))
-}
-
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn pick_workspace_folder_impl() -> Result<Option<WorkspacePickResult>, String> {
-    Err("Workspace picking is not implemented on this platform yet.".to_string())
-}
-
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn pick_chat_attachments_impl() -> Result<Vec<PickedChatAttachment>, String> {
-    Err("Attachment picking is not implemented on this platform yet.".to_string())
+    Ok(to_picked_chat_attachments(selected_paths))
 }
 
 fn schedule_automation_workflow_run_with_handles(
@@ -27570,6 +27479,7 @@ pub fn run() {
     let scheduler_claude_pending_approvals = claude_pending_approvals.clone();
     let scheduler_codex_pending_approvals = codex_pending_approvals.clone();
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .manage(AppStore {
@@ -27723,6 +27633,7 @@ pub fn run() {
             interrupt_chat_turn,
             run_auto_orchestration,
             respond_assistant_approval,
+            set_tab_tool_approval_mode,
             get_git_panel,
             get_git_overview,
             get_git_file_diff,

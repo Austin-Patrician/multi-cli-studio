@@ -6,11 +6,13 @@ import {
   BarChart3,
   BookOpen,
   Bot,
+  Building2,
   ChevronLeft,
   ChevronRight,
   Cpu,
   FolderOpen,
   Link2,
+  Monitor,
   Plus,
   Server,
   Settings,
@@ -58,10 +60,10 @@ type ProjectView = {
 };
 
 const NAV_ITEMS: SidebarNavItem[] = [
-  { id: "settings", label: "设置", icon: Settings },
+  { id: "settings", label: "通用设置", icon: Settings },
   { id: "models", label: "对话模型", icon: Cpu },
   { id: "agents", label: "智能体", icon: Bot },
-  { id: "vendors", label: "供应商", icon: Settings },
+  { id: "vendors", label: "供应商", icon: Building2 },
   { id: "projects", label: "项目", icon: FolderOpen },
   { id: "session-management", label: "会话", icon: Archive },
   { id: "connections", label: "连接", icon: Link2 },
@@ -588,34 +590,34 @@ export function DesktopSettingsPage() {
                             </div>
 
                             <div className="dcc-project-row-actions">
-                              <button
-                                type="button"
+                                <button
+                                  type="button"
                                 className="dcc-action-button secondary"
-                                onClick={() => openWorkspaceTerminal(project.workspace.id)}
-                              >
+                                  onClick={() => openWorkspaceTerminal(project.workspace.id)}
+                                >
                                 {primaryActionLabel}
-                              </button>
-                              <button
-                                type="button"
+                                </button>
+                                <button
+                                  type="button"
                                 className="dcc-action-button secondary"
-                                onClick={() => openWorkspaceGitPanel(project.workspace.id)}
-                              >
-                                Git
-                              </button>
-                              <button
-                                type="button"
+                                  onClick={() => openWorkspaceGitPanel(project.workspace.id)}
+                                >
+                                  Git
+                                </button>
+                                <button
+                                  type="button"
                                 className="dcc-action-button danger"
-                                onClick={() => setDeleteTarget(project)}
-                              >
-                                <Trash2 size={14} />
+                                  onClick={() => setDeleteTarget(project)}
+                                >
+                                  <Trash2 size={14} />
                                 删除
-                              </button>
-                            </div>
+                                </button>
+                              </div>
                           </article>
                         );
                       })}
                     </div>
-                  </div>
+                </div>
                 )}
               </section>
             ) : null}

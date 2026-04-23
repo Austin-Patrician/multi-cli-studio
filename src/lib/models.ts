@@ -185,12 +185,15 @@ export interface TerminalCliContextBoundary {
   workingMemorySnapshot?: WorkingMemory | null;
 }
 
+export type ToolApprovalMode = "manual" | "auto";
+
 export interface TerminalTab {
   id: string;
   title: string;
   workspaceId: string;
   selectedCli: TerminalCliId;
   selectedAgent?: SelectedCustomAgent | null;
+  toolApprovalMode: ToolApprovalMode;
   planMode: boolean;
   fastMode: boolean;
   effortLevel: string | null;

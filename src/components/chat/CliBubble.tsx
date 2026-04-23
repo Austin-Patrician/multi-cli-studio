@@ -938,9 +938,7 @@ function RuntimeApprovalRequestBlock({
   const pending = !block.state || block.state === "pending";
   const statusLabel =
     block.state === "approvedAlways"
-      ? block.provider === "codex"
-        ? "Approved for session"
-      : "Always allowed"
+      ? "Approved for this tab"
       : block.state === "approved"
         ? "Approved"
         : block.state === "denied"
@@ -985,7 +983,7 @@ function RuntimeApprovalRequestBlock({
             iconOnly
           />
           <ApprovalActionButton
-            label={block.persistentLabel ?? "Yes, don't ask again"}
+            label={block.persistentLabel ?? "Yes, for this tab"}
             onClick={() => onDecision(block.requestId, "allowAlways")}
             icon={<ApprovalSessionIcon />}
             iconOnly
@@ -1197,20 +1195,20 @@ function buildTimelineGroup(
         status: normalizeTimelineStatus(block.status ?? "planned"),
         source: "orchestration",
       }))
-    : parsedPlan.steps.map((step, index) => ({
-        id: `plan-step-${index + 1}`,
-        title: step.title,
-        summary: step.summary,
-        result: null,
-        owner: null,
-        status:
-          isStreaming && index === 0
-            ? "running"
-            : !isStreaming && index === parsedPlan.steps.length - 1
-              ? "completed"
-              : "planned",
-        source: "plan",
-      }));
+      : parsedPlan.steps.map((step, index) => ({
+          id: `plan-step-${index + 1}`,
+          title: step.title,
+          summary: step.summary,
+          result: null,
+          owner: null,
+          status:
+            isStreaming
+              ? index === 0
+                ? "running"
+                : "planned"
+              : "completed",
+          source: "plan",
+        }));
 
   return {
     plan,

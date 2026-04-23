@@ -72,7 +72,9 @@
   min-height: 0;
   padding: 0 10px 12px;
   border-right: 1px solid rgba(15, 23, 42, 0.06);
-  background: rgba(248, 249, 252, 0.92);
+  background:
+    linear-gradient(180deg, rgba(246, 247, 250, 0.98) 0%, rgba(240, 242, 246, 0.96) 100%);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.6);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -114,7 +116,7 @@
 }
 
 .settings-nav-return {
-  margin-top: 0;
+  margin-top: 10px;
   margin-bottom: 10px;
 }
 

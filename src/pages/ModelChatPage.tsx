@@ -1200,6 +1200,7 @@ function ApiAssistantBlocks({
                   contentFormat={block.format}
                   isStreaming={isStreaming}
                   renderMode="rich"
+                  codeBlockRadiusClass="rounded-[12px]"
                 />
               </div>
             );
@@ -2101,15 +2102,6 @@ export function ModelChatPage() {
 
                         <div className="button-area" data-provider={activeSelection?.serviceType ?? "openaiCompatible"}>
                           <div className="button-area-left">
-                            <ModelSelectionControl
-                              optionGroups={optionGroups}
-                              activeSelection={activeSelection}
-                              activeSelectionOrigin={activeSelectionOrigin}
-                              onSelectServiceType={selectServiceType}
-                              onSelectModel={selectModel}
-                              className="min-w-0 flex-1"
-                            />
-
                             <div className="terminal-chat-footer-control">
                               <button
                                 type="button"
@@ -2125,12 +2117,21 @@ export function ModelChatPage() {
                                 </svg>
                               </button>
                             </div>
+
+                            <ModelSelectionControl
+                              optionGroups={optionGroups}
+                              activeSelection={activeSelection}
+                              activeSelectionOrigin={activeSelectionOrigin}
+                              onSelectServiceType={selectServiceType}
+                              onSelectModel={selectModel}
+                              className="min-w-0 flex-1"
+                            />
                           </div>
 
                           <div className="button-area-right">
-                            <div className="text-[11px] text-slate-400">
+                            {/* <div className="text-[11px] text-slate-400">
                               Enter 发送
-                            </div>
+                            </div> */}
                             <button
                               type="button"
                               onClick={() => void sendMessage()}

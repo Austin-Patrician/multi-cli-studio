@@ -3051,6 +3051,9 @@ export const browserRuntime = {
   async respondAssistantApproval(_requestId: string, _decision: AssistantApprovalDecision) {
     return false;
   },
+  async setTabToolApprovalMode(_terminalTabId: string, _mode: "manual" | "auto") {
+    return;
+  },
 
   async pickWorkspaceFolder(): Promise<WorkspacePickResult | null> {
     const rootPath = window.prompt("Enter a workspace folder path");

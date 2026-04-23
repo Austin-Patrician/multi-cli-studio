@@ -406,7 +406,7 @@ function FinalMessageBoundary({ timestamp }: { timestamp?: string | null }) {
       <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-300/80 to-slate-300/90" />
       <span className="inline-flex items-center gap-2 rounded-full border border-slate-200/90 bg-white/92 px-3 py-1 font-semibold text-slate-600 shadow-[0_8px_22px_rgba(15,23,42,0.05)]">
         <span className="inline-flex items-center gap-1.5">
-          <Flag size={13} aria-hidden className="text-amber-600" />
+          <Flag size={13} aria-hidden className="text-red-600" />
           <span>最终消息</span>
         </span>
         {metaText ? (
@@ -527,6 +527,35 @@ export function ChatConversation() {
   useEffect(() => {
     shouldAutoFollowRef.current = true;
   }, [activeTab?.id]);
+
+  useEffect(() => {
+    function handleScrollToBottomRequest(event: Event) {
+      const detail =
+        "detail" in event
+          ? (event as CustomEvent<{ tabId?: string }>).detail
+          : null;
+      if (!activeTab || !detail?.tabId || detail.tabId !== activeTab.id) {
+        return;
+      }
+
+      shouldAutoFollowRef.current = true;
+      const scrollContainer = scrollContainerRef.current;
+      if (!scrollContainer) return;
+
+      requestAnimationFrame(() => {
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+        bottomRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "end",
+        });
+      });
+    }
+
+    window.addEventListener("terminal-chat-scroll-bottom", handleScrollToBottomRequest as EventListener);
+    return () => {
+      window.removeEventListener("terminal-chat-scroll-bottom", handleScrollToBottomRequest as EventListener);
+    };
+  }, [activeTab]);
 
   useEffect(() => {
     setIsSearchOpen(false);

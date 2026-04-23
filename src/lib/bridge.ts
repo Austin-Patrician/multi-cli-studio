@@ -58,6 +58,7 @@ import {
   PersistedTerminalState,
   SemanticMemoryChunk,
   SemanticRecallRequest,
+  ToolApprovalMode,
   WorkspaceSessionBatchMutationResponse,
   WorkspaceSessionCatalogPage,
   WorkspaceSessionCatalogQuery,
@@ -185,6 +186,7 @@ export interface RuntimeBridge {
   interruptChatTurn: (terminalTabId: string, messageId: string) => Promise<ChatInterruptResult>;
   runAutoOrchestration: (request: AutoOrchestrationRequest) => Promise<string>;
   respondAssistantApproval: (requestId: string, decision: AssistantApprovalDecision) => Promise<boolean>;
+  setTabToolApprovalMode: (terminalTabId: string, mode: ToolApprovalMode) => Promise<void>;
   getGitPanel: (projectRoot: string, workspaceId?: string | null) => Promise<GitPanelData>;
   getGitOverview: (projectRoot: string, workspaceId?: string | null) => Promise<GitOverviewResponse>;
   getGitFileDiff: (projectRoot: string, path: string, workspaceId?: string | null) => Promise<GitFileDiff>;
@@ -691,6 +693,15 @@ const tauriRuntime: RuntimeBridge = {
       },
     });
     return result.applied;
+  },
+  async setTabToolApprovalMode(terminalTabId, mode) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("set_tab_tool_approval_mode", {
+      request: {
+        terminalTabId,
+        mode,
+      },
+    });
   },
   async getGitPanel(projectRoot, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");

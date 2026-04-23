@@ -56,6 +56,7 @@ import {
   SshConnectionConfig,
   TerminalTab,
   TerminalCliId,
+  ToolApprovalMode,
 } from "../../lib/models";
 import { bridge } from "../../lib/bridge";
 import { createChatAttachment } from "../../lib/chatAttachments";
@@ -204,6 +205,17 @@ function titleCaseCli(cliId: TerminalCliId) {
   return cliId.charAt(0).toUpperCase() + cliId.slice(1);
 }
 
+const CODEX_CONTEXT_COMPACTION_TEXT = "Codex compacted the thread context.";
+
+function formatCompactCount(value: number) {
+  if (!Number.isFinite(value)) return "0";
+  if (Math.abs(value) < 1000) return String(Math.round(value));
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    maximumFractionDigits: Math.abs(value) < 100_000 ? 1 : 0,
+  }).format(value);
+}
+
 function hasRemoteCliDetection(connection: SshConnectionConfig | null | undefined) {
   if (!connection) return false;
   return Boolean(
@@ -295,6 +307,56 @@ function footerOptionDescription(option: AcpOptionDef) {
           ? "来自供应商设置里的自定义模型"
         : "手动输入值"
   );
+}
+
+function toolApprovalModeLabel(value: ToolApprovalMode) {
+  return value === "auto" ? "AUTO" : "MANUAL";
+}
+
+function isCliSessionRestartMessage(message: ChatMessage, cliId: AgentId) {
+  return (
+    message.role === "system" &&
+    message.cliId === cliId &&
+    message.content === `${titleCaseCli(cliId)} session restarted for this tab.`
+  );
+}
+
+function hasContextCompactionStatus(message: ChatMessage, cliId: AgentId) {
+  return (
+    message.role === "assistant" &&
+    message.cliId === cliId &&
+    (message.blocks?.some(
+      (block) =>
+        block.kind === "status" &&
+        block.level === "info" &&
+        block.text === CODEX_CONTEXT_COMPACTION_TEXT
+    ) ??
+      false)
+  );
+}
+
+function calculateCliSessionUsageTokens(
+  messages: ChatMessage[] | null | undefined,
+  cliId: AgentId
+) {
+  if (!messages?.length) return 0;
+
+  let sessionBoundaryIndex = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (
+      isCliSessionRestartMessage(message, cliId) ||
+      hasContextCompactionStatus(message, cliId)
+    ) {
+      sessionBoundaryIndex = index;
+    }
+  }
+
+  return messages.reduce((sum, message, index) => {
+    if (index < sessionBoundaryIndex) return sum;
+    if (message.cliId !== cliId) return sum;
+    return sum + (message.totalTokens ?? 0);
+  }, 0);
 }
 
 
@@ -1338,7 +1400,7 @@ export function ChatPromptBar({
   const [dismissedSkillKey, setDismissedSkillKey] = useState<string | null>(null);
   const [dismissedAgentKey, setDismissedAgentKey] = useState<string | null>(null);
   const [openFooterMenu, setOpenFooterMenu] = useState<FooterMenuId | null>(null);
-  const [hoveredConfigSubmenu, setHoveredConfigSubmenu] = useState<"agent" | "speed" | "session" | null>(null);
+  const [hoveredConfigSubmenu, setHoveredConfigSubmenu] = useState<"agent" | "approval" | "speed" | "session" | null>(null);
   const [queueFeedback, setQueueFeedback] = useState<string | null>(null);
   const [reviewPrompt, setReviewPrompt] = useState<ReviewInlinePromptState | null>(null);
   const [highlightedPresetIndex, setHighlightedPresetIndex] = useState(0);
@@ -1374,6 +1436,7 @@ export function ChatPromptBar({
   const togglePlanMode = useStore((s) => s.togglePlanMode);
   const resetTerminalTabSession = useStore((s) => s.resetTerminalTabSession);
   const resetCliTransportSession = useStore((s) => s.resetCliTransportSession);
+  const setTabToolApprovalMode = useStore((s) => s.setTabToolApprovalMode);
   const searchWorkspaceFiles = useStore((s) => s.searchWorkspaceFiles);
   const loadCliSkills = useStore((s) => s.loadCliSkills);
   const loadAcpCapabilities = useStore((s) => s.loadAcpCapabilities);
@@ -1458,6 +1521,15 @@ export function ChatPromptBar({
     if (timelineBlocks.length === 0) return null;
     return buildActivePlanGroup(timelineBlocks, Boolean(activePlanMessage?.isStreaming));
   }, [activePlanMessage]);
+
+  function requestConversationScrollToBottom(tabId: string) {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(
+      new CustomEvent("terminal-chat-scroll-bottom", {
+        detail: { tabId },
+      })
+    );
+  }
 
   useEffect(() => {
     if (!activeTab) return;
@@ -1997,6 +2069,7 @@ export function ChatPromptBar({
         return;
       }
       setPrompt("");
+      requestConversationScrollToBottom(activeTab.id);
       void sendChatMessage(activeTab.id, normalized, {
         cliIdOverride: activeTab.selectedCli,
       }).catch((error) => {
@@ -2059,10 +2132,12 @@ export function ChatPromptBar({
         setQueueFeedback("当前仅 Codex 支持图片附件，请切换到 Codex 后再排队。");
       } else if (result === "queued") {
         setQueueFeedback(null);
+        requestConversationScrollToBottom(activeTab.id);
       }
       return;
     }
 
+    requestConversationScrollToBottom(activeTab.id);
     void sendChatMessage(activeTab.id).catch((error) => {
       const detail =
         error instanceof Error
@@ -2356,16 +2431,19 @@ export function ChatPromptBar({
     : isAutoMode
       ? "/指令中心 · @引用文件 · #智能体 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
       : "/指令中心 · @引用文件 · #智能体 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
-  const actualUsageTokens = activeSession
+  const tabUsageTokens = activeSession
     ? activeSession.messages.reduce((sum, message) => sum + (message.totalTokens ?? 0), 0)
+    : 0;
+  const sessionUsageTokens = activeSession
+    ? calculateCliSessionUsageTokens(activeSession.messages, effectiveCli)
     : 0;
   const activeTransportSession = activeTab?.transportSessions[effectiveCli] ?? null;
   const contextWindowTokens =
     activeTransportSession?.contextWindowTokens && activeTransportSession.contextWindowTokens > 0
       ? activeTransportSession.contextWindowTokens
       : null;
-  const usagePercent = actualUsageTokens > 0 && contextWindowTokens
-    ? Math.min(100, (actualUsageTokens / contextWindowTokens) * 100)
+  const usagePercent = sessionUsageTokens > 0 && contextWindowTokens
+    ? Math.min(100, (sessionUsageTokens / contextWindowTokens) * 100)
     : null;
   const usageRingPercentLabel = `${Math.round(usagePercent ?? 0)}%`;
   const usagePercentLabel = usagePercent === null ? "--" : `${Math.round(usagePercent)}%`;
@@ -2374,10 +2452,12 @@ export function ChatPromptBar({
         (message) => message.role === "user" || message.role === "assistant"
       ).length
     : 0;
-  const compactedSummaryCount = activeSession?.compactedSummaries.length ?? 0;
+  const sessionUsageCompact = formatCompactCount(sessionUsageTokens);
+  const tabUsageCompact = formatCompactCount(tabUsageTokens);
+  const contextWindowCompact = formatCompactCount(contextWindowTokens ?? 0);
   const usageTooltip = contextWindowTokens
-    ? `真实 usage ${actualUsageTokens.toLocaleString()} tokens，占 ${titleCaseCli(effectiveCli)} 当前上报的 context window ${contextWindowTokens.toLocaleString()} tokens 的 ${usagePercentLabel}。`
-    : `真实 usage ${actualUsageTokens.toLocaleString()} tokens。${titleCaseCli(effectiveCli)} 当前没有返回可用的 context window，因此不显示百分比。`;
+    ? `当前 session usage ${sessionUsageTokens.toLocaleString()} tokens，占 ${titleCaseCli(effectiveCli)} 当前上报的 context window ${contextWindowTokens.toLocaleString()} tokens 的 ${usagePercentLabel}。当前 tab 累计 usage 为 ${tabUsageTokens.toLocaleString()} tokens。`
+    : `当前 session usage ${sessionUsageTokens.toLocaleString()} tokens。${titleCaseCli(effectiveCli)} 当前没有返回可用的 context window，因此不显示百分比。当前 tab 累计 usage 为 ${tabUsageTokens.toLocaleString()} tokens。`;
   const currentProviderItem =
     providerItems.find((item) => item.id === activeTab.selectedCli) ??
     providerItems[0];
@@ -2831,6 +2911,13 @@ export function ChatPromptBar({
     focusPromptAtEnd();
   }
 
+  function handleToolApprovalModeChange(mode: ToolApprovalMode) {
+    if (!activeTab || footerSelectorsLocked || isBusy || activeTab.toolApprovalMode === mode) return;
+    void setTabToolApprovalMode(activeTab.id, mode);
+    closeFooterMenus();
+    focusPromptAtEnd();
+  }
+
   function handleFastToggle() {
     if (!activeTab || footerSelectorsLocked || !supportsFastMode) return;
     closeFooterMenus();
@@ -3143,6 +3230,26 @@ export function ChatPromptBar({
                                 }
                               />
                             </div>
+                            <div
+                              className="footer-submenu-trigger"
+                              onPointerEnter={() => setHoveredConfigSubmenu("approval")}
+                            >
+                              <FooterMenuItem
+                                label="Tool Approval"
+                                onClick={() =>
+                                  setHoveredConfigSubmenu((current) => (current === "approval" ? null : "approval"))
+                                }
+                                disabled={sessionActionsLocked}
+                                trailing={
+                                  <span className="footer-option-trailing">
+                                    <span className="footer-option-inline-value">
+                                      {toolApprovalModeLabel(activeTab.toolApprovalMode)}
+                                    </span>
+                                    <ChevronRight size={14} aria-hidden />
+                                  </span>
+                                }
+                              />
+                            </div>
                             <div className="footer-menu-divider" aria-hidden />
                             {supportsReviewQuickAction ? (
                               <FooterMenuItem
@@ -3264,6 +3371,26 @@ export function ChatPromptBar({
                                 label="Reset Gemini Session"
                                 description="Start a fresh Gemini transport session for this tab."
                                 onClick={() => handleCliSessionReset("gemini")}
+                                disabled={sessionActionsLocked}
+                              />
+                            </div>
+                          ) : hoveredConfigSubmenu === "approval" ? (
+                            <div
+                              className="footer-submenu-panel"
+                              onPointerEnter={() => setHoveredConfigSubmenu("approval")}
+                            >
+                              <FooterMenuItem
+                                label="Manual approval"
+                                description="Always ask before running tools in this tab."
+                                onClick={() => handleToolApprovalModeChange("manual")}
+                                selected={activeTab.toolApprovalMode === "manual"}
+                                disabled={sessionActionsLocked}
+                              />
+                              <FooterMenuItem
+                                label="Auto-approve for This Tab"
+                                description="Automatically approve tool requests in this tab until you turn it off."
+                                onClick={() => handleToolApprovalModeChange("auto")}
+                                selected={activeTab.toolApprovalMode === "auto"}
                                 disabled={sessionActionsLocked}
                               />
                             </div>
@@ -3611,32 +3738,28 @@ export function ChatPromptBar({
                     <div className="context-dual-tooltip-title">上下文与用量</div>
                     <div className="context-dual-tooltip-grid">
                       <div className="context-dual-tooltip-kv">
-                        <span className="context-dual-tooltip-key">真实 usage</span>
-                        <span className="context-dual-tooltip-value">
-                          {actualUsageTokens.toLocaleString()}
-                        </span>
+                        <span className="context-dual-tooltip-key">Session usage</span>
+                        <span className="context-dual-tooltip-value">{sessionUsageCompact}</span>
                       </div>
                       <div className="context-dual-tooltip-kv">
                         <span className="context-dual-tooltip-key">Context window</span>
-                        <span className="context-dual-tooltip-value">
-                          {contextWindowTokens ? contextWindowTokens.toLocaleString() : "未知"}
-                        </span>
+                        <span className="context-dual-tooltip-value">{contextWindowCompact}</span>
+                      </div>
+                      <div className="context-dual-tooltip-kv">
+                        <span className="context-dual-tooltip-key">Tab usage</span>
+                        <span className="context-dual-tooltip-value">{tabUsageCompact}</span>
                       </div>
                       <div className="context-dual-tooltip-kv">
                         <span className="context-dual-tooltip-key">消息数量</span>
                         <span className="context-dual-tooltip-value">{messageCount}</span>
-                      </div>
-                      <div className="context-dual-tooltip-kv">
-                        <span className="context-dual-tooltip-key">摘要数量</span>
-                        <span className="context-dual-tooltip-value">{compactedSummaryCount}</span>
                       </div>
                     </div>
                     <div className="context-dual-tooltip-divider" />
                     <div className="context-dual-tooltip-foot">
                       <div className="context-dual-tooltip-note">
                         {contextWindowTokens
-                          ? `百分比按 ${titleCaseCli(effectiveCli)} 最近一次上报的 context window 计算。`
-                          : `${titleCaseCli(effectiveCli)} 当前未上报 context window，百分比已隐藏，避免把估算值伪装成真实值。`}
+                          ? `百分比按当前 ${titleCaseCli(effectiveCli)} session usage 计算；发生 context compaction 或手动 reset 后会重新累计。`
+                          : `${titleCaseCli(effectiveCli)} 当前未上报 context window，百分比已隐藏；session usage 仍会在 context compaction 或手动 reset 后重新累计。`}
                         </div>
                     </div>
                   </div>
