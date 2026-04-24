@@ -178,6 +178,18 @@ export interface CustomAgentConfig extends SelectedCustomAgent {
   createdAt?: number | null;
 }
 
+export interface CustomPromptTemplate {
+  id: string;
+  name: string;
+  description?: string | null;
+  argumentHint?: string | null;
+  content: string;
+  scope: "workspace" | "global";
+  workspaceId?: string | null;
+  createdAt?: number | null;
+  updatedAt?: number | null;
+}
+
 export interface TerminalCliContextBoundary {
   lastSeenMessageId: string | null;
   lastSeenAt: string | null;
@@ -389,6 +401,7 @@ export interface AppSettings {
   cliPaths: { codex: string; claude: string; gemini: string };
   sshConnections: SshConnectionConfig[];
   customAgents: CustomAgentConfig[];
+  customPrompts: CustomPromptTemplate[];
   defaultNewWorkspaceCli: TerminalCliId;
   projectRoot: string;
   maxTurnsPerAgent: number;

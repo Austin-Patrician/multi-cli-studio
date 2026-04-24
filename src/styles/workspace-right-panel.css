@@ -941,7 +941,7 @@
   flex: 1 1 auto;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 6px 10px 14px;
+  padding: 0 10px 14px;
   background: var(--workspace-panel-bg);
 }
 
@@ -1119,8 +1119,8 @@
   margin-left: -10px;
   margin-right: -10px;
   margin-bottom: 6px;
-  padding: 0 10px 6px;
-  background: color-mix(in srgb, var(--workspace-panel-bg) 98%, white);
+  padding: 6px 10px 6px;
+  background: var(--workspace-panel-bg-strong);
 }
 
 .file-tree-root-row-wrap::after {
@@ -1131,7 +1131,7 @@
   bottom: 0;
   height: 6px;
   pointer-events: none;
-  background: color-mix(in srgb, var(--workspace-panel-bg) 98%, white);
+  background: var(--workspace-panel-bg-strong);
 }
 
 .file-tree-root-label {

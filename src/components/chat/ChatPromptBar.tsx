@@ -44,10 +44,18 @@ import {
   parseSlashCommand,
 } from "../../lib/acp";
 import {
+  buildPromptInsertText,
+  expandCustomPromptText,
+  filterCustomPromptsForWorkspace,
+  getPromptArgumentHint,
+  parseSlashName,
+} from "../../lib/customPrompts";
+import {
   AgentId,
   ChatAttachment,
   ChatMessage,
   CliSkillItem,
+  CustomPromptTemplate,
   FileMentionCandidate,
   GitBranchListItem,
   GitHistoryCommit,
@@ -76,11 +84,20 @@ type InteractiveOverlayEntry =
   | { id: string; kind: "command"; command: AcpCommandDef }
   | { id: string; kind: "shortcut"; shortcut: "skills" }
   | { id: string; kind: "skill"; skill: CliSkillItem }
+  | { id: string; kind: "prompt"; prompt: CustomPromptTemplate }
   | { id: string; kind: "mention"; mention: FileMentionCandidate }
   | { id: string; kind: "agent"; agent: SelectedCustomAgent | null; action: "select" | "create" }
   | { id: string; kind: "option"; commandKind: SelectableCommandKind; option: AcpOptionDef };
 
 interface SkillOverlayState {
+  title: string;
+  description: string;
+  footer: string;
+  sections: PromptOverlaySection[];
+  entries: InteractiveOverlayEntry[];
+}
+
+interface PromptTemplateOverlayState {
   title: string;
   description: string;
   footer: string;
@@ -185,6 +202,19 @@ function findAgentToken(value: string, caret: number) {
   const lineStart = prefix.lastIndexOf("\n") + 1;
   const linePrefix = prefix.slice(lineStart);
   const match = linePrefix.match(/^#([^\s#]*)$/);
+  if (!match) return null;
+  return {
+    start: lineStart,
+    end: caret,
+    query: match[1] ?? "",
+  };
+}
+
+function findPromptTemplateToken(value: string, caret: number) {
+  const prefix = value.slice(0, caret);
+  const lineStart = prefix.lastIndexOf("\n") + 1;
+  const linePrefix = prefix.slice(lineStart);
+  const match = linePrefix.match(/^!([^\s!]*)$/);
   if (!match) return null;
   return {
     start: lineStart,
@@ -550,7 +580,8 @@ function orderInteractiveEntries(
 
 function buildCommandListOverlay(
   activeTab: TerminalTab,
-  query: string
+  query: string,
+  customPrompts: CustomPromptTemplate[],
 ): CommandOverlayState {
   const supportedCommands = ACP_COMMANDS.filter((command) =>
     activeTab.selectedCli === "auto" || command.supportedClis.includes(activeTab.selectedCli)
@@ -584,10 +615,9 @@ function buildCommandListOverlay(
     activeTab.selectedCli !== "auto" &&
     (!normalized ||
       "skills".startsWith(normalized) ||
-      "skill".startsWith(normalized) ||
-      "prompt skills".includes(normalized))
+      "skill".startsWith(normalized))
   ) {
-    appendSectionItem(sections, "prompt-tools", "Prompt Tools", {
+    appendSectionItem(sections, "skills", "Skills", {
       id: "shortcut-skills",
       title: "/skills",
       subtitle: "Browse installed skills for the active CLI and insert one into the prompt.",
@@ -595,6 +625,29 @@ function buildCommandListOverlay(
     });
     entryById.set("shortcut-skills", { id: "shortcut-skills", kind: "shortcut", shortcut: "skills" });
   }
+
+  customPrompts
+    .filter((prompt) => {
+      const normalized = query.trim().toLowerCase();
+      if (!normalized) return true;
+      return (
+        `prompts:${prompt.name}`.startsWith(normalized) ||
+        prompt.name.toLowerCase().includes(normalized) ||
+        prompt.description?.toLowerCase().includes(normalized) === true
+      );
+    })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .forEach((prompt) => {
+      const itemId = `prompt:${prompt.id}`;
+      appendSectionItem(sections, "prompt-templates", "Prompt Templates", {
+        id: itemId,
+        title: `/prompts:${prompt.name}${getPromptArgumentHint(prompt) ? ` ${getPromptArgumentHint(prompt)}` : ""}`,
+        subtitle: prompt.description?.trim() || "Inject this prompt template into the composer.",
+        meta: prompt.scope === "workspace" ? "workspace" : "global",
+        badge: "prompt",
+      });
+      entryById.set(itemId, { id: itemId, kind: "prompt", prompt });
+    });
 
   if (sections.length === 0) {
     sections.push({
@@ -1019,6 +1072,74 @@ function buildSkillCommandOverlay(
   };
 }
 
+function buildPromptTemplateOverlay(
+  query: string,
+  prompts: CustomPromptTemplate[]
+): PromptTemplateOverlayState {
+  const normalized = query.trim().toLowerCase();
+  const filteredPrompts = prompts
+    .filter((prompt) => {
+      if (!normalized) return true;
+      return (
+        prompt.name.toLowerCase().includes(normalized) ||
+        prompt.description?.toLowerCase().includes(normalized) === true
+      );
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  if (filteredPrompts.length === 0) {
+    return {
+      title: "提示词模板",
+      description: "选择一个模板，将它插入到当前输入框。",
+      footer: "Esc dismisses the picker.",
+      sections: [
+        {
+          id: "empty",
+          items: [
+            {
+              id: "empty",
+              title: prompts.length === 0 ? "还没有提示词模板" : "没有匹配的提示词模板",
+              subtitle:
+                prompts.length === 0
+                  ? "去设置页的 Prompts 区域新建模板后，这里就会出现可选项。"
+                  : "换个关键词，或按 Esc 返回输入框。",
+            },
+          ],
+        },
+      ],
+      entries: [],
+    };
+  }
+
+  const sections: PromptOverlaySection[] = [
+    {
+      id: "prompts",
+      title: "提示词模板",
+      items: filteredPrompts.map((prompt) => ({
+        id: `prompt:${prompt.id}`,
+        title: prompt.name,
+        subtitle: prompt.description?.trim() || "插入这个提示词模板到当前输入框。",
+        meta: prompt.scope === "workspace" ? "workspace" : "global",
+        badge: "prompt",
+      })),
+    },
+  ];
+
+  const entries = filteredPrompts.map<InteractiveOverlayEntry>((prompt) => ({
+    id: `prompt:${prompt.id}`,
+    kind: "prompt",
+    prompt,
+  }));
+
+  return {
+    title: "提示词模板",
+    description: "选择一个模板，将它插入到当前输入框。",
+    footer: "Arrow keys move, Enter inserts the template, Esc dismisses.",
+    sections,
+    entries,
+  };
+}
+
 export function ChatPromptBar({
   statusPanelExpanded = false,
   onToggleStatusPanel,
@@ -1033,6 +1154,7 @@ export function ChatPromptBar({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [mentionItems, setMentionItems] = useState<FileMentionCandidate[]>([]);
   const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
+  const [dismissedPromptKey, setDismissedPromptKey] = useState<string | null>(null);
   const [dismissedSkillKey, setDismissedSkillKey] = useState<string | null>(null);
   const [dismissedAgentKey, setDismissedAgentKey] = useState<string | null>(null);
   const [openFooterMenu, setOpenFooterMenu] = useState<FooterMenuId | null>(null);
@@ -1097,6 +1219,10 @@ export function ChatPromptBar({
   );
   const remoteCliValidationKnown = hasRemoteCliDetection(activeSshConnection);
   const customAgents = settings?.customAgents ?? [];
+  const customPrompts = useMemo(
+    () => filterCustomPromptsForWorkspace(settings?.customPrompts, workspace?.id),
+    [settings?.customPrompts, workspace?.id]
+  );
   const prompt = activeTab?.draftPrompt ?? "";
   const draftAttachments = activeTab?.draftAttachments ?? [];
   const isStreaming = activeTab?.status === "streaming";
@@ -1207,8 +1333,13 @@ export function ChatPromptBar({
     const caret = textareaRef.current?.selectionStart ?? prompt.length;
     return findSkillToken(prompt, caret);
   }, [prompt]);
+  const promptTemplateToken = useMemo(() => {
+    const caret = textareaRef.current?.selectionStart ?? prompt.length;
+    return findPromptTemplateToken(prompt, caret);
+  }, [prompt]);
 
   const mentionKey = mentionToken ? `${mentionToken.start}:${mentionToken.query}` : null;
+  const promptTemplateKey = promptTemplateToken ? `${promptTemplateToken.start}:${promptTemplateToken.query}` : null;
   const agentKey = agentToken ? `${agentToken.start}:${agentToken.query}` : null;
   const skillKey = skillToken ? `${skillToken.start}:${skillToken.query}` : null;
 
@@ -1245,6 +1376,16 @@ export function ChatPromptBar({
       projectRoot: workspace.rootPath,
     });
   }, [workspace]);
+
+  useEffect(() => {
+    if (!promptTemplateToken) {
+      setDismissedPromptKey(null);
+      return;
+    }
+    if (promptTemplateKey && dismissedPromptKey && promptTemplateKey !== dismissedPromptKey) {
+      setDismissedPromptKey(null);
+    }
+  }, [dismissedPromptKey, promptTemplateKey, promptTemplateToken]);
 
   useEffect(() => {
     if (!agentToken) {
@@ -1321,7 +1462,18 @@ export function ChatPromptBar({
       );
     }
 
-    return buildCommandListOverlay(activeTab, slashQuery);
+    const parsedSlash = parseSlashName(rawSlashPrompt.trim());
+    const customPromptName = parsedSlash?.name.startsWith("prompts:")
+      ? parsedSlash.name.slice("prompts:".length)
+      : null;
+    const hasExactPromptMatch = customPromptName
+      ? customPrompts.some((prompt) => prompt.name === customPromptName)
+      : false;
+    if (hasExactPromptMatch) {
+      return null;
+    }
+
+    return buildCommandListOverlay(activeTab, slashQuery, customPrompts);
   }, [
     activeTab,
     acpCapabilityStatusByCli,
@@ -1329,6 +1481,7 @@ export function ChatPromptBar({
     cliSkills,
     effectiveCli,
     pickerCapabilities,
+    customPrompts,
     rawSlashPrompt,
     reviewPromptOpen,
     slashQuery,
@@ -1342,6 +1495,13 @@ export function ChatPromptBar({
     }
     return buildSkillOverlay(effectiveCli, skillToken.query, cliSkills, cliSkillStatus);
   }, [activeTab, cliSkillStatus, cliSkills, commandOverlay, effectiveCli, skillToken, workspace]);
+
+  const promptTemplateOverlay = useMemo<PromptTemplateOverlayState | null>(() => {
+    if (!promptTemplateToken || commandOverlay) {
+      return null;
+    }
+    return buildPromptTemplateOverlay(promptTemplateToken.query, customPrompts);
+  }, [commandOverlay, customPrompts, promptTemplateToken]);
 
   const agentOverlay = useMemo(() => {
     if (!agentToken || commandOverlay || !activeTab) {
@@ -1417,8 +1577,16 @@ export function ChatPromptBar({
     skillKey !== dismissedSkillKey &&
     !!skillOverlay;
 
+  const showPromptTemplateOverlay =
+    !commandOverlay &&
+    !showSkillOverlay &&
+    !!promptTemplateToken &&
+    promptTemplateKey !== dismissedPromptKey &&
+    !!promptTemplateOverlay;
+
   const showAgentOverlay =
     !commandOverlay &&
+    !showPromptTemplateOverlay &&
     !showSkillOverlay &&
     !!agentToken &&
     agentKey !== dismissedAgentKey &&
@@ -1427,6 +1595,7 @@ export function ChatPromptBar({
   const showMentionOverlay =
     !commandOverlay &&
     !showAgentOverlay &&
+    !showPromptTemplateOverlay &&
     !showSkillOverlay &&
     !!mentionToken &&
     mentionItems.length > 0 &&
@@ -1434,6 +1603,8 @@ export function ChatPromptBar({
 
   const activeSections = commandOverlay
     ? commandOverlay.sections
+    : showPromptTemplateOverlay && promptTemplateOverlay
+      ? promptTemplateOverlay.sections
     : showAgentOverlay && agentOverlay
       ? agentOverlay.sections
     : showSkillOverlay && skillOverlay
@@ -1456,6 +1627,8 @@ export function ChatPromptBar({
     ? "entries" in commandOverlay
       ? commandOverlay.entries
       : []
+    : showPromptTemplateOverlay && promptTemplateOverlay
+      ? promptTemplateOverlay.entries
     : showAgentOverlay && agentOverlay
       ? agentOverlay.entries
     : showSkillOverlay && skillOverlay
@@ -1472,7 +1645,7 @@ export function ChatPromptBar({
 
   useEffect(() => {
     setSelectedIndex(0);
-  }, [commandOverlay?.kind, rawSlashPrompt, mentionKey, agentKey, skillKey, skillSlashQuery]);
+  }, [commandOverlay?.kind, rawSlashPrompt, mentionKey, promptTemplateKey, agentKey, skillKey, skillSlashQuery]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -1714,6 +1887,52 @@ export function ChatPromptBar({
       return;
     }
 
+    const normalizedSlashPrompt = rawSlashPrompt.trim();
+    const customPromptExpansion = expandCustomPromptText(normalizedSlashPrompt, customPrompts);
+    if (normalizedSlashPrompt.startsWith("/prompts:")) {
+      if (!customPromptExpansion) {
+        setQueueFeedback("未找到对应的提示词模板。");
+        return;
+      }
+      if ("error" in customPromptExpansion) {
+        setQueueFeedback(customPromptExpansion.error);
+        return;
+      }
+
+      promptHistoryStateRef.current = {
+        index: null,
+        draft: "",
+      };
+
+      setPrompt("");
+      if (isStreaming) {
+        const result = queueChatMessage(activeTab.id, customPromptExpansion.expanded, activeTab.selectedCli);
+        if (result === "full") {
+          setQueueFeedback("Only one queued message is allowed. Press Ctrl+B to edit it.");
+        } else if (result === "unsupportedAttachments") {
+          setQueueFeedback("当前仅 Codex 支持图片附件，请切换到 Codex 后再排队。");
+        } else if (result === "queued") {
+          setQueueFeedback(null);
+          requestConversationScrollToBottom(activeTab.id);
+        }
+        return;
+      }
+
+      requestConversationScrollToBottom(activeTab.id);
+      void sendChatMessage(activeTab.id, customPromptExpansion.expanded, {
+        cliIdOverride: activeTab.selectedCli,
+      }).catch((error) => {
+        const detail =
+          error instanceof Error
+            ? error.message
+            : typeof error === "string"
+              ? error
+              : "发送失败";
+        setQueueFeedback(detail);
+      });
+      return;
+    }
+
     if (commandOverlay) {
       if (commandOverlay.kind === "command-help" || commandOverlay.kind === "skill-command") {
         return;
@@ -1863,6 +2082,33 @@ export function ChatPromptBar({
     });
   }
 
+  function selectPromptTemplate(template: CustomPromptTemplate) {
+    if (promptTemplateToken) {
+      const insert = buildPromptInsertText(template);
+      const nextPrompt = `${prompt.slice(0, promptTemplateToken.start)}${insert.text}${prompt.slice(promptTemplateToken.end)}`;
+      setPrompt(nextPrompt);
+      setDismissedPromptKey(promptTemplateKey);
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        const nextCaret = promptTemplateToken.start + (insert.cursorOffset ?? insert.text.length);
+        el.focus();
+        el.setSelectionRange(nextCaret, nextCaret);
+      });
+      return;
+    }
+
+    const insert = buildPromptInsertText(template);
+    setPrompt(insert.text);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const nextCaret = insert.cursorOffset ?? insert.text.length;
+      el.focus();
+      el.setSelectionRange(nextCaret, nextCaret);
+    });
+  }
+
   function selectAgent(agent: SelectedCustomAgent | null, action: "select" | "create") {
     if (!activeTab || !agentToken) return;
     const nextPrompt = `${prompt.slice(0, agentToken.start)}${prompt.slice(agentToken.end)}`.replace(/^\s+/, "");
@@ -1923,6 +2169,10 @@ export function ChatPromptBar({
       selectSkill(entry.skill);
       return;
     }
+    if (entry.kind === "prompt") {
+      selectPromptTemplate(entry.prompt);
+      return;
+    }
     if (entry.kind === "mention") {
       selectMention(entry.mention);
       return;
@@ -1954,6 +2204,11 @@ export function ChatPromptBar({
       return;
     }
 
+    if (showPromptTemplateOverlay && promptTemplateKey) {
+      setDismissedPromptKey(promptTemplateKey);
+      return;
+    }
+
     if (showAgentOverlay && agentKey) {
       setDismissedAgentKey(agentKey);
       return;
@@ -1977,7 +2232,7 @@ export function ChatPromptBar({
     const atPromptStart = !hasSelection && selectionStart === 0;
     const atPromptEnd = !hasSelection && selectionEnd === event.currentTarget.value.length;
 
-    if (event.key === "Tab" && event.shiftKey && activeTab && !commandOverlay && !showAgentOverlay && !showSkillOverlay && !showMentionOverlay) {
+    if (event.key === "Tab" && event.shiftKey && activeTab && !commandOverlay && !showPromptTemplateOverlay && !showAgentOverlay && !showSkillOverlay && !showMentionOverlay) {
       event.preventDefault();
       togglePlanMode(activeTab.id);
       return;
@@ -2019,7 +2274,7 @@ export function ChatPromptBar({
       }
     }
 
-    if (!commandOverlay && !showAgentOverlay && !showSkillOverlay && !showMentionOverlay && !openFooterMenu) {
+    if (!commandOverlay && !showPromptTemplateOverlay && !showAgentOverlay && !showSkillOverlay && !showMentionOverlay && !openFooterMenu) {
       if (event.key === "ArrowUp" && atPromptStart) {
         event.preventDefault();
         navigatePromptHistory(-1);
@@ -2032,7 +2287,7 @@ export function ChatPromptBar({
       }
     }
 
-    if (event.key === "Escape" && (commandOverlay || showAgentOverlay || showSkillOverlay || showMentionOverlay || openFooterMenu)) {
+    if (event.key === "Escape" && (commandOverlay || showPromptTemplateOverlay || showAgentOverlay || showSkillOverlay || showMentionOverlay || openFooterMenu)) {
       event.preventDefault();
       handleEscape();
       return;
@@ -2057,8 +2312,8 @@ export function ChatPromptBar({
       ? "响应中，队列已满 · Ctrl+B 编辑队列 · Shift+Enter 换行 · ↑↓ 历史"
       : "响应中，可继续输入 · Enter 加入队列 · Shift+Enter 换行 · ↑↓ 历史"
     : isAutoMode
-      ? "/指令中心 · @引用文件或文件夹 · #智能体 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
-      : "/指令中心 · @引用文件或文件夹 · #智能体 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
+      ? "/指令中心 · @引用文件或文件夹 · #智能体 · !提示词 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史"
+      : "/指令中心 · @引用文件或文件夹 · #智能体 · !提示词 · $调用技能 · Enter 发送 · Shift+Enter 换行 · ↑↓ 历史";
   const tabUsageTokens = activeSession
     ? activeSession.messages.reduce((sum, message) => sum + (message.totalTokens ?? 0), 0)
     : 0;
@@ -2580,11 +2835,11 @@ export function ChatPromptBar({
     focusPromptAtEnd();
   }
 
-  function handlePromptShortcutAction(trigger: "@" | "/" | "#" | "$") {
+  function handlePromptShortcutAction(trigger: "@" | "/" | "#" | "!" | "$") {
     closeFooterMenus();
     if (!activeTab) return;
-    if (trigger === "#") {
-      const nextPrompt = prompt.trim().length === 0 ? "#" : `${prompt.replace(/\s*$/, "")}\n#`;
+    if (trigger === "#" || trigger === "!") {
+      const nextPrompt = prompt.trim().length === 0 ? trigger : `${prompt.replace(/\s*$/, "")}\n${trigger}`;
       setPrompt(nextPrompt);
       requestAnimationFrame(() => {
         const el = textareaRef.current;
@@ -2627,6 +2882,12 @@ export function ChatPromptBar({
       label: "智能体",
       onClick: () => handlePromptShortcutAction("#"),
     },
+    {
+      key: "prompt",
+      trigger: "!",
+      label: "提示词",
+      onClick: () => handlePromptShortcutAction("!"),
+    },
     ...(!isAutoMode
       ? [
           {
@@ -2646,26 +2907,40 @@ export function ChatPromptBar({
     >
       <div className="mx-auto max-w-5xl">
         <div className="relative overflow-visible">
-          {(commandOverlay || showAgentOverlay || showSkillOverlay || showMentionOverlay) && (
+          {(commandOverlay || showPromptTemplateOverlay || showAgentOverlay || showSkillOverlay || showMentionOverlay) && (
             <PromptOverlay
               title={
                 commandOverlay?.title ??
-                (showAgentOverlay ? agentOverlay?.title : showSkillOverlay ? skillOverlay?.title : undefined)
+                (showPromptTemplateOverlay
+                  ? promptTemplateOverlay?.title
+                  : showAgentOverlay
+                    ? agentOverlay?.title
+                    : showSkillOverlay
+                      ? skillOverlay?.title
+                      : undefined)
               }
               description={
                 commandOverlay?.description ??
-                (showAgentOverlay
-                  ? agentOverlay?.description
-                  : showSkillOverlay
-                    ? skillOverlay?.description
-                    : undefined)
+                (showPromptTemplateOverlay
+                  ? promptTemplateOverlay?.description
+                  : showAgentOverlay
+                    ? agentOverlay?.description
+                    : showSkillOverlay
+                      ? skillOverlay?.description
+                      : undefined)
               }
               sections={activeSections}
               selectedIndex={safeSelectedIndex}
               interactive={interactiveEntries.length > 0}
               footer={
                 commandOverlay?.footer ??
-                (showAgentOverlay ? agentOverlay?.footer : showSkillOverlay ? skillOverlay?.footer : undefined)
+                (showPromptTemplateOverlay
+                  ? promptTemplateOverlay?.footer
+                  : showAgentOverlay
+                    ? agentOverlay?.footer
+                    : showSkillOverlay
+                      ? skillOverlay?.footer
+                      : undefined)
               }
               onBack={
                 commandOverlay?.kind === "command-argument" ||

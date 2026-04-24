@@ -367,6 +367,7 @@ function defaultSettings(): AppSettings {
     cliPaths: { codex: "auto", claude: "auto", gemini: "auto" },
     sshConnections: [],
     customAgents: [],
+    customPrompts: [],
     defaultNewWorkspaceCli: "codex",
     projectRoot: state?.workspace?.projectRoot ?? "C:\\Users\\admin\\source\\repos\\multi-cli-studio",
     maxTurnsPerAgent: 50,
@@ -534,6 +535,36 @@ function normalizeSettings(value: unknown): AppSettings {
           })
           .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
       : defaults.customAgents,
+    customPrompts: Array.isArray(raw.customPrompts)
+      ? raw.customPrompts
+          .map((entry) => {
+            if (!entry || typeof entry !== "object") return null;
+            const item = entry as AppSettings["customPrompts"][number];
+            const id = typeof item.id === "string" ? item.id.trim() : "";
+            const name = typeof item.name === "string" ? item.name.trim() : "";
+            const content = typeof item.content === "string" ? item.content : "";
+            if (!id || !name) return null;
+            return {
+              id,
+              name,
+              description:
+                typeof item.description === "string" && item.description.trim() ? item.description.trim() : null,
+              argumentHint:
+                typeof item.argumentHint === "string" && item.argumentHint.trim() ? item.argumentHint.trim() : null,
+              content,
+              scope: item.scope === "workspace" ? "workspace" : "global",
+              workspaceId:
+                item.scope === "workspace" && typeof item.workspaceId === "string" && item.workspaceId.trim()
+                  ? item.workspaceId.trim()
+                  : null,
+              createdAt:
+                typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : null,
+              updatedAt:
+                typeof item.updatedAt === "number" && Number.isFinite(item.updatedAt) ? item.updatedAt : null,
+            } satisfies AppSettings["customPrompts"][number];
+          })
+          .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+      : defaults.customPrompts,
     defaultNewWorkspaceCli:
       raw.defaultNewWorkspaceCli === "auto" ||
       raw.defaultNewWorkspaceCli === "codex" ||

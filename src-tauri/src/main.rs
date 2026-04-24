@@ -395,6 +395,8 @@ struct AppSettings {
     ssh_connections: Vec<SshConnectionConfig>,
     #[serde(default)]
     custom_agents: Vec<CustomAgentConfig>,
+    #[serde(default)]
+    custom_prompts: Vec<CustomPromptTemplate>,
     #[serde(default = "default_new_workspace_cli")]
     default_new_workspace_cli: String,
     project_root: String,
@@ -702,6 +704,25 @@ fn default_model_chat_context_turn_limit() -> usize {
     4
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomPromptTemplate {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    argument_hint: Option<String>,
+    content: String,
+    scope: String,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    created_at: Option<i64>,
+    #[serde(default)]
+    updated_at: Option<i64>,
+}
+
 fn default_new_workspace_cli() -> String {
     "codex".to_string()
 }
@@ -945,6 +966,51 @@ fn normalize_custom_agents(settings: &mut AppSettings) {
     settings.custom_agents = normalized;
 }
 
+fn normalize_custom_prompts(settings: &mut AppSettings) {
+    let mut normalized = Vec::new();
+    let mut seen = BTreeSet::new();
+    for mut prompt in settings.custom_prompts.clone() {
+        let id = prompt.id.trim().to_string();
+        let name = prompt.name.trim().to_string();
+        if id.is_empty() || name.is_empty() {
+            continue;
+        }
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        prompt.id = id;
+        prompt.name = name;
+        prompt.description = prompt
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        prompt.argument_hint = prompt
+            .argument_hint
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        prompt.scope = if prompt.scope == "workspace" {
+            "workspace".to_string()
+        } else {
+            "global".to_string()
+        };
+        prompt.workspace_id = prompt
+            .workspace_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        if prompt.scope != "workspace" {
+            prompt.workspace_id = None;
+        }
+        normalized.push(prompt);
+    }
+    settings.custom_prompts = normalized;
+}
+
 fn normalize_settings_providers(settings: &mut AppSettings) {
     settings.model_chat_context_turn_limit = settings.model_chat_context_turn_limit.max(1);
     if !matches!(
@@ -955,6 +1021,7 @@ fn normalize_settings_providers(settings: &mut AppSettings) {
     }
     normalize_ssh_connections(settings);
     normalize_custom_agents(settings);
+    normalize_custom_prompts(settings);
     normalize_provider_entries(
         &mut settings.openai_compatible_providers,
         "openaiCompatible",
@@ -27271,6 +27338,7 @@ fn seed_settings(project_root: &str) -> AppSettings {
         },
         ssh_connections: Vec::new(),
         custom_agents: Vec::new(),
+        custom_prompts: Vec::new(),
         default_new_workspace_cli: default_new_workspace_cli(),
         project_root: project_root.to_string(),
         max_turns_per_agent: DEFAULT_MAX_TURNS,

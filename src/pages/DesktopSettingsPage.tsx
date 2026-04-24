@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Cpu,
+  FileText,
   FolderOpen,
   Link2,
   Monitor,
@@ -21,6 +22,7 @@ import {
 import { DesktopConnectionsSection } from "../components/settings/DesktopConnectionsSection";
 import { DesktopMcpSection } from "../components/settings/DesktopMcpSection";
 import { DesktopAgentsSection } from "../components/settings/DesktopAgentsSection";
+import { DesktopPromptsSection } from "../components/settings/DesktopPromptsSection";
 import { DesktopSkillsSection } from "../components/settings/DesktopSkillsSection";
 import { DesktopUsageSection } from "../components/settings/DesktopUsageSection";
 import { DesktopVendorsSection } from "../components/settings/DesktopVendorsSection";
@@ -33,6 +35,7 @@ type SettingsSection =
   | "settings"
   | "models"
   | "agents"
+  | "prompts"
   | "vendors"
   | "projects"
   | "connections"
@@ -63,6 +66,7 @@ const NAV_ITEMS: SidebarNavItem[] = [
   { id: "settings", label: "通用设置", icon: Settings },
   { id: "models", label: "对话模型", icon: Cpu },
   { id: "agents", label: "智能体", icon: Bot },
+  { id: "prompts", label: "提示词", icon: FileText },
   { id: "vendors", label: "供应商", icon: Building2 },
   { id: "projects", label: "项目", icon: FolderOpen },
   { id: "session-management", label: "会话", icon: Archive },
@@ -76,6 +80,7 @@ function parseSettingsSection(value: string | null): SettingsSection {
   switch (value) {
     case "models":
     case "agents":
+    case "prompts":
     case "projects":
     case "connections":
     case "mcp":
@@ -628,6 +633,10 @@ export function DesktopSettingsPage() {
 
             {!outlet && activeSection === "agents" ? (
               <DesktopAgentsSection />
+            ) : null}
+
+            {!outlet && activeSection === "prompts" ? (
+              <DesktopPromptsSection activeWorkspace={activeWorkspace} workspaces={workspaces} />
             ) : null}
 
             {!outlet && activeSection === "mcp" ? (

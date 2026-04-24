@@ -23,6 +23,7 @@ import { formatAttachmentSummary } from "../../lib/chatAttachments";
 import { useStore } from "../../lib/store";
 import {
   ActivePlanFloatingCard,
+  ActivePlanSurface,
   resolveActivePlanSurface,
 } from "./ActivePlanFloatingCard";
 import { CliBubble } from "./CliBubble";
@@ -33,6 +34,7 @@ import { UserBubble } from "./UserBubble";
 const AUTO_FOLLOW_THRESHOLD_PX = 120;
 const LOAD_MORE_THRESHOLD_PX = 72;
 const INITIAL_VISIBLE_MESSAGE_COUNT = 8;
+const PLAN_CARD_EXIT_MS = 2400;
 const VISIBLE_MESSAGE_BATCH = 60;
 const SEARCHABLE_SELECTOR = "[data-chat-searchable-content='true']";
 const SEARCH_MATCH_SELECTOR = "mark[data-chat-search-match='true']";
@@ -446,6 +448,7 @@ export function ChatConversation() {
   const [matchCount, setMatchCount] = useState(0);
   const [searchRefreshTick, setSearchRefreshTick] = useState(0);
   const [planExpanded, setPlanExpanded] = useState(false);
+  const [retainedPlanSurface, setRetainedPlanSurface] = useState<ActivePlanSurface | null>(null);
 
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const compiledSearch = useMemo(
@@ -524,9 +527,23 @@ export function ChatConversation() {
     () => resolveActivePlanSurface(activeSession?.messages, activeLivePlan),
     [activeSession?.messages, activeLivePlan]
   );
-  const showFloatingPlan = Boolean(activePlanSurface) && !isSearchOpen;
+  const planSurfaceToRender = activePlanSurface ?? retainedPlanSurface;
+  const isPlanExiting = !activePlanSurface && Boolean(retainedPlanSurface);
+  const showFloatingPlan = Boolean(planSurfaceToRender) && !isSearchOpen;
   const showStickyControls =
     showFloatingPlan || (hasHiddenMessages && showLoadOlderHint);
+
+  useEffect(() => {
+    if (activePlanSurface) {
+      setRetainedPlanSurface(activePlanSurface);
+      return;
+    }
+    if (!retainedPlanSurface) return;
+    const timeoutId = window.setTimeout(() => {
+      setRetainedPlanSurface(null);
+    }, PLAN_CARD_EXIT_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [activePlanSurface, retainedPlanSurface]);
 
   useEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -581,6 +598,7 @@ export function ChatConversation() {
     setVisibleMessageCount(INITIAL_VISIBLE_MESSAGE_COUNT);
     setShowLoadOlderHint(false);
     setPlanExpanded(false);
+    setRetainedPlanSurface(null);
     pendingPrependScrollRef.current = null;
     searchMatchesRef.current = [];
   }, [activeTab?.id]);
@@ -973,11 +991,12 @@ export function ChatConversation() {
 
           {showStickyControls ? (
             <div className="sticky top-2 z-10 flex flex-col items-center gap-2 px-2">
-              {showFloatingPlan && activePlanSurface ? (
+              {showFloatingPlan && planSurfaceToRender ? (
                 <ActivePlanFloatingCard
-                  group={activePlanSurface.group}
-                  cliId={activePlanSurface.cliId}
+                  group={planSurfaceToRender.group}
+                  cliId={planSurfaceToRender.cliId}
                   collapsed={!planExpanded}
+                  exiting={isPlanExiting}
                   onToggle={() => setPlanExpanded((current) => !current)}
                 />
               ) : null}

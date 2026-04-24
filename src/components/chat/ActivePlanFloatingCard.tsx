@@ -60,14 +60,27 @@ function isActivePlanBlock(
 }
 
 function normalizeActivePlanStatus(status?: string | null): ActivePlanStatus {
-  switch (status) {
+  const normalized = status?.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  switch (normalized) {
+    case "in-progress":
+    case "active":
+      return "running";
+    case "done":
+    case "success":
+      return "completed";
+    case "pending":
+    case "queued":
+    case "todo":
+      return "planned";
+    case "error":
+      return "failed";
     case "planned":
     case "running":
     case "synthesizing":
     case "completed":
     case "failed":
     case "skipped":
-      return status;
+      return normalized;
     default:
       return "planning";
   }
@@ -75,14 +88,27 @@ function normalizeActivePlanStatus(status?: string | null): ActivePlanStatus {
 
 function parseActivePlanText(text: string) {
   const introLines: string[] = [];
-  const steps: Array<{ title: string; summary?: string | null }> = [];
-  let current: { title: string; details: string[] } | null = null;
+  const steps: Array<{ title: string; summary?: string | null; status?: ActivePlanStatus | null }> = [];
+  let current: { title: string; details: string[]; status?: ActivePlanStatus | null } | null = null;
+
+  const extractStatusFromTitle = (rawTitle: string) => {
+    const title = rawTitle.trim();
+    const statusMatch = title.match(/^\[([^\]]+)\]\s*(.+)$/);
+    if (!statusMatch) {
+      return { title, status: null };
+    }
+    return {
+      title: statusMatch[2]?.trim() || title,
+      status: normalizeActivePlanStatus(statusMatch[1]),
+    };
+  };
 
   const flushCurrent = () => {
     if (!current) return;
     steps.push({
       title: current.title.trim(),
       summary: current.details.join("\n").trim() || null,
+      status: current.status ?? null,
     });
     current = null;
   };
@@ -106,7 +132,8 @@ function parseActivePlanText(text: string) {
 
     if (stepTitle) {
       flushCurrent();
-      current = { title: stepTitle, details: [] };
+      const parsedTitle = extractStatusFromTitle(stepTitle);
+      current = { title: parsedTitle.title, details: [], status: parsedTitle.status };
       continue;
     }
 
@@ -183,27 +210,34 @@ function buildActivePlanGroup(
     ? parseActivePlanText(planText)
     : { intro: null, steps: [] };
 
-  const steps: ActivePlanStep[] =
-    orchestrationSteps.length > 0
-      ? orchestrationSteps.map((block, index) => ({
-          id: block.stepId || `overlay-step-${index + 1}`,
-          owner: block.owner,
-          title: block.title,
-          summary: block.summary,
-          status: normalizeActivePlanStatus(block.status ?? "planned"),
-        }))
-      : parsedPlan.steps.map((step, index) => ({
-          id: `overlay-plan-${index + 1}`,
-          owner: null,
-          title: step.title,
-          summary: step.summary,
-          status:
-            isStreaming && index === 0
-              ? "running"
-              : !isStreaming && index === parsedPlan.steps.length - 1
-                ? "completed"
-                : "planned",
-        }));
+  const steps: ActivePlanStep[] = orchestrationSteps.length > 0
+    ? orchestrationSteps.map((block, index) => ({
+        id: block.stepId || `overlay-step-${index + 1}`,
+        owner: block.owner,
+        title: block.title,
+        summary: block.summary,
+        status: normalizeActivePlanStatus(block.status ?? "planned"),
+      }))
+    : parsedPlan.steps.map((step, index) => ({
+        id: `overlay-plan-${index + 1}`,
+        owner: null,
+        title: step.title,
+        summary: step.summary,
+        status: step.status ?? (isStreaming && index === 0 ? "running" : "planned"),
+      }));
+
+  if (orchestrationSteps.length === 0 && isStreaming && steps.length > 0) {
+    const hasExplicitRunningStep = steps.some(
+      (step) => step.status === "running" || step.status === "synthesizing",
+    );
+    const hasFailedStep = steps.some((step) => step.status === "failed");
+    if (!hasExplicitRunningStep && !hasFailedStep) {
+      const nextPlannedStep = steps.find((step) => step.status === "planned");
+      if (nextPlannedStep) {
+        nextPlannedStep.status = "running";
+      }
+    }
+  }
 
   return {
     plan,
@@ -318,11 +352,13 @@ export function ActivePlanFloatingCard({
   group,
   cliId,
   collapsed,
+  exiting = false,
   onToggle,
 }: {
   group: ActivePlanGroup;
   cliId: AgentId;
   collapsed: boolean;
+  exiting?: boolean;
   onToggle: () => void;
 }) {
   const currentStep = currentActiveStep(group);
@@ -332,7 +368,11 @@ export function ActivePlanFloatingCard({
   const heading = currentStep?.title ?? group.plan?.title ?? `${activePlanOwnerLabel(cliId)} plan`;
 
   return (
-    <div className="pointer-events-auto w-full max-w-[min(34rem,calc(100vw-3rem))]">
+    <div
+      className={`pointer-events-auto w-full max-w-[min(34rem,calc(100vw-3rem))] transform-gpu transition-all duration-[2400ms] ease-out ${
+        exiting ? "-translate-y-1 scale-[0.98] opacity-0" : "translate-y-0 scale-100 opacity-100"
+      }`}
+    >
       <div className="overflow-hidden rounded-[14px] border border-slate-200/90 bg-white/92 shadow-[0_14px_34px_rgba(15,23,42,0.08)] ring-1 ring-white/80 backdrop-blur-md">
         <button
           type="button"
