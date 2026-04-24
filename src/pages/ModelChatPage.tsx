@@ -4,6 +4,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ClipboardEvent as ReactClipboardEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
@@ -681,10 +682,17 @@ function formatTokenUsage(message: ApiChatMessage) {
 }
 
 function attachmentLabel(attachment: ChatAttachment) {
-  return attachment.displayPath?.trim() || attachment.fileName;
+  return attachment.fileName;
 }
 
 function attachmentPreviewSrc(attachment: ChatAttachment) {
+  if (attachment.previewSource?.startsWith("data:")) return attachment.previewSource;
+  if (
+    attachment.previewSource?.startsWith("http://") ||
+    attachment.previewSource?.startsWith("https://")
+  ) {
+    return attachment.previewSource;
+  }
   if (attachment.source.startsWith("data:")) return attachment.source;
   if (attachment.source.startsWith("http://") || attachment.source.startsWith("https://")) {
     return attachment.source;
@@ -695,6 +703,52 @@ function attachmentPreviewSrc(attachment: ChatAttachment) {
   } catch {
     return "";
   }
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("读取剪贴板图片失败。"));
+    reader.onload = () => {
+      if (typeof reader.result === "string" && reader.result.trim()) {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("读取剪贴板图片失败。"));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function extensionForImageMediaType(mediaType: string | null | undefined) {
+  switch (mediaType?.toLowerCase()) {
+    case "image/jpeg":
+      return "jpg";
+    case "image/png":
+      return "png";
+    case "image/gif":
+      return "gif";
+    case "image/webp":
+      return "webp";
+    case "image/svg+xml":
+      return "svg";
+    case "image/bmp":
+      return "bmp";
+    case "image/tiff":
+      return "tiff";
+    case "image/x-icon":
+      return "ico";
+    case "image/avif":
+      return "avif";
+    default:
+      return "png";
+  }
+}
+
+function createPastedImageFileName(mediaType: string | null | undefined) {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `pasted-image-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.${extensionForImageMediaType(mediaType)}`;
 }
 
 function describeUiError(error: unknown, fallback: string) {
@@ -1449,6 +1503,24 @@ export function ModelChatPage() {
     }
   }
 
+  function appendComposerAttachments(attachments: ChatAttachment[]) {
+    if (!activeSession || attachments.length === 0) return;
+    setComposerAttachments((current) => {
+      const existing = current[activeSession.id] ?? [];
+      const seen = new Set(existing.map((attachment) => attachment.source));
+      const merged = [...existing];
+      attachments.forEach((attachment) => {
+        if (seen.has(attachment.source)) return;
+        seen.add(attachment.source);
+        merged.push(attachment);
+      });
+      return {
+        ...current,
+        [activeSession.id]: merged,
+      };
+    });
+  }
+
   async function pickComposerAttachments() {
     if (!activeSession || loading) return;
     setErrorText(null);
@@ -1469,22 +1541,50 @@ export function ModelChatPage() {
       if (images.length !== prepared.length) {
         setStatusText("已忽略非图片附件，仅保留图片。");
       }
-      setComposerAttachments((current) => {
-        const existing = current[activeSession.id] ?? [];
-        const seen = new Set(existing.map((attachment) => attachment.source));
-        const merged = [...existing];
-        images.forEach((attachment) => {
-          if (seen.has(attachment.source)) return;
-          seen.add(attachment.source);
-          merged.push(attachment);
-        });
-        return {
-          ...current,
-          [activeSession.id]: merged,
-        };
-      });
+      appendComposerAttachments(images);
     } catch (error) {
       setErrorText(describeUiError(error, "选择附件失败。"));
+    }
+  }
+
+  async function pasteComposerImages(items: DataTransferItemList) {
+    if (!activeSession || loading) return;
+    const imageItems = Array.from(items).filter((item) => item.kind === "file" && item.type.startsWith("image/"));
+    if (imageItems.length === 0) return;
+
+    setErrorText(null);
+    setStatusText(null);
+
+    try {
+      const attachments = (
+        await Promise.all(
+          imageItems.map(async (item) => {
+            const file = item.getAsFile();
+            if (!file) return null;
+            const mediaType = file.type || item.type || "image/png";
+            const source = await readFileAsDataUrl(file);
+            return createChatAttachment(
+              {
+                fileName: file.name?.trim() || createPastedImageFileName(mediaType),
+                mediaType,
+                source,
+                previewSource: source,
+              },
+              null
+            );
+          })
+        )
+      ).filter(Boolean) as ChatAttachment[];
+
+      if (attachments.length === 0) {
+        setErrorText("剪贴板里没有可用的图片。");
+        return;
+      }
+
+      appendComposerAttachments(attachments);
+      setStatusText(attachments.length > 1 ? `已粘贴 ${attachments.length} 张图片。` : "已粘贴图片。");
+    } catch (error) {
+      setErrorText(describeUiError(error, "粘贴图片失败。"));
     }
   }
 
@@ -1742,6 +1842,17 @@ export function ModelChatPage() {
     event.preventDefault();
     if (loading) return;
     void sendMessage();
+  }
+
+  function handleComposerPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+    const hasImage = Array.from(items).some(
+      (item) => item.kind === "file" && item.type.startsWith("image/")
+    );
+    if (!hasImage) return;
+    event.preventDefault();
+    void pasteComposerImages(items);
   }
 
   if (loadingSettings) {
@@ -2093,6 +2204,7 @@ export function ModelChatPage() {
                                 [activeSession.id]: event.target.value,
                               }))
                             }
+                            onPaste={handleComposerPaste}
                             onKeyDown={handleComposerKeyDown}
                             rows={1}
                             placeholder="有问题，尽管问，也可以直接附图"

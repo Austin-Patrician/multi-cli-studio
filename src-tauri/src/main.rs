@@ -3428,6 +3428,7 @@ struct WorkspacePickResult {
 struct PickedChatAttachment {
     file_name: String,
     path: String,
+    preview_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26515,15 +26516,25 @@ fn collect_workspace_files(
     Ok(())
 }
 
+fn picked_chat_attachment_preview_source(path: &str, file_name: &str) -> Option<String> {
+    let media_type = guess_api_image_media_type(file_name).or_else(|| guess_api_image_media_type(path))?;
+    let bytes = fs::read(path).ok()?;
+    Some(format!("data:{};base64,{}", media_type, encode_base64(&bytes)))
+}
+
 fn to_picked_chat_attachments(paths: Vec<String>) -> Vec<PickedChatAttachment> {
     paths
         .into_iter()
-        .map(|path| PickedChatAttachment {
-            file_name: Path::new(&path)
+        .map(|path| {
+            let file_name = Path::new(&path)
                 .file_name()
                 .map(|value| value.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.clone()),
-            path,
+                .unwrap_or_else(|| path.clone());
+            PickedChatAttachment {
+                preview_source: picked_chat_attachment_preview_source(&path, &file_name),
+                file_name,
+                path,
+            }
         })
         .collect()
 }

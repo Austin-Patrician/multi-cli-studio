@@ -196,7 +196,9 @@ export function UserBubble({
             {attachments.map((attachment) => {
               const label = attachmentLabel(attachment.displayPath, attachment.fileName);
               if (attachment.kind === "image") {
-                const previewSrc = attachmentPreviewSrc(attachment.source);
+                const previewSrc = attachmentPreviewSrc(
+                  attachment.previewSource?.trim() || attachment.source
+                );
                 return (
                   <div
                     key={attachment.id}

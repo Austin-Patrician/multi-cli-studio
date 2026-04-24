@@ -260,6 +260,15 @@ function attachmentLabel(attachment: ChatAttachment) {
 }
 
 function attachmentPreviewSrc(attachment: ChatAttachment) {
+  if (attachment.previewSource?.startsWith("data:")) {
+    return attachment.previewSource;
+  }
+  if (
+    attachment.previewSource?.startsWith("http://") ||
+    attachment.previewSource?.startsWith("https://")
+  ) {
+    return attachment.previewSource;
+  }
   if (attachment.source.startsWith("data:")) {
     return attachment.source;
   }

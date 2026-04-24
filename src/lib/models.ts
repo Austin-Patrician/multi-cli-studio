@@ -871,6 +871,7 @@ export interface ChatAttachment {
   fileName: string;
   mediaType?: string | null;
   source: string;
+  previewSource?: string | null;
   displayPath?: string | null;
 }
 
@@ -879,6 +880,7 @@ export interface PickedChatAttachment {
   mediaType?: string | null;
   path?: string | null;
   source?: string | null;
+  previewSource?: string | null;
 }
 
 export interface ChatMessage {

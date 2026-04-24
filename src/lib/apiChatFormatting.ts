@@ -29,6 +29,10 @@ function normalizeApiChatAttachment(value: unknown): ChatAttachment | null {
   if (!kind || !fileName || !source) return null;
   const mediaType =
     typeof raw.mediaType === "string" && raw.mediaType.trim() ? raw.mediaType.trim() : null;
+  const previewSource =
+    typeof raw.previewSource === "string" && raw.previewSource.trim()
+      ? raw.previewSource.trim()
+      : null;
   const displayPath =
     typeof raw.displayPath === "string" && raw.displayPath.trim() ? raw.displayPath.trim() : null;
   return {
@@ -43,6 +47,7 @@ function normalizeApiChatAttachment(value: unknown): ChatAttachment | null {
     fileName,
     mediaType,
     source,
+    previewSource,
     displayPath,
   };
 }

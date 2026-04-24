@@ -110,6 +110,11 @@ export function createChatAttachment(
     fileName,
     mediaType,
     source,
+    previewSource:
+      picked.previewSource?.trim() ||
+      (source.startsWith("data:") || source.startsWith("http://") || source.startsWith("https://")
+        ? source
+        : null),
     displayPath: localPath ? relativeAttachmentDisplayPath(localPath, workspaceRoot) : fileName,
   };
 }
