@@ -13,7 +13,7 @@ import type { DownloadEvent, Update } from "@tauri-apps/plugin-updater";
 import tauriConfig from "../../../src-tauri/tauri.conf.json";
 import { notifyUpdateAvailable } from "../../lib/desktopNotifications";
 import { useStore } from "../../lib/store";
-import { UpdateToast, type UpdateState } from "./UpdateToast";
+import type { UpdateState } from "./UpdateToast";
 
 type UpdateCheckOptions = {
   announceNoUpdate?: boolean;
@@ -275,7 +275,6 @@ export function AppUpdateProvider({ children }: { children: ReactNode }) {
   return (
     <AppUpdateContext.Provider value={contextValue}>
       {children}
-      <UpdateToast state={state} onUpdate={() => void startUpdate()} onDismiss={() => void resetToIdle()} />
     </AppUpdateContext.Provider>
   );
 }

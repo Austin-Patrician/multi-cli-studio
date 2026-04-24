@@ -87,6 +87,7 @@ import {
   SemanticMemoryChunk,
   CodexRuntimeReloadResult,
   SettingsEngineStatus,
+  SaveGeneratedImageArtifactRequest,
   SshConnectionTestResult,
   WorkspaceFileIndexResponse,
   WorkspacePickResult,
@@ -2354,6 +2355,20 @@ export const browserRuntime = {
   },
   async finalizeChatMessage(_request: ChatMessageFinalizeRequest) {
     return;
+  },
+  async saveGeneratedImageArtifact(request: SaveGeneratedImageArtifactRequest) {
+    return {
+      id: `artifact-${Date.now()}`,
+      fileName: request.suggestedName?.trim() || `generated-image-${request.index ?? 1}.png`,
+      mediaType: request.mediaType,
+      path: `data:${request.mediaType};base64,${request.base64Data}`,
+      source: `data:${request.mediaType};base64,${request.base64Data}`,
+      alt: request.alt ?? null,
+      sizeBytes: Math.ceil((request.base64Data.length * 3) / 4),
+    };
+  },
+  async revealPathInFileManager(_path: string) {
+    return false;
   },
   async deleteChatMessage(_request: ChatMessageDeleteRequest) {
     return;

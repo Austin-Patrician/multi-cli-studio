@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
+import { FloatingNotificationViewport } from "./components/notifications/FloatingNotificationViewport";
 import { AppUpdateProvider } from "./features/update/AppUpdateProvider";
 import "./styles/globals.css";
 import "./styles/runtime-console.css";
@@ -15,6 +16,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <BrowserRouter>
       <AppUpdateProvider>
         <App />
+        <FloatingNotificationViewport />
       </AppUpdateProvider>
     </BrowserRouter>
   </React.StrictMode>

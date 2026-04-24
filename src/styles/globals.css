@@ -43,11 +43,15 @@ button {
   cursor: pointer;
 }
 
-.app-update-toasts {
+.app-notification-stack {
   position: fixed;
   top: 20px;
   right: 20px;
   z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-end;
   pointer-events: none;
 }
 
@@ -64,6 +68,71 @@ button {
     0 24px 64px rgba(15, 23, 42, 0.16),
     0 8px 20px rgba(15, 23, 42, 0.08);
   backdrop-filter: blur(18px);
+}
+
+.app-floating-notice-card {
+  width: min(360px, calc(100vw - 32px));
+  pointer-events: auto;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 18px;
+  padding: 16px;
+  color: #0f172a;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+  box-shadow:
+    0 24px 64px rgba(15, 23, 42, 0.16),
+    0 8px 20px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(18px);
+}
+
+.app-floating-notice-card.is-warning {
+  border-color: rgba(245, 158, 11, 0.25);
+}
+
+.app-floating-notice-card.is-error {
+  border-color: rgba(239, 68, 68, 0.24);
+}
+
+.app-floating-notice-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.app-floating-notice-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.app-floating-notice-card.is-warning .app-floating-notice-eyebrow {
+  color: #b45309;
+}
+
+.app-floating-notice-card.is-error .app-floating-notice-eyebrow {
+  color: #b91c1c;
+}
+
+.app-floating-notice-title {
+  margin-top: 2px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.app-floating-notice-message {
+  max-height: min(240px, 42vh);
+  overflow: auto;
+  padding-right: 4px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #334155;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .app-update-toast-header {
@@ -184,14 +253,16 @@ button {
 }
 
 @media (max-width: 640px) {
-  .app-update-toasts {
+  .app-notification-stack {
     top: auto;
     right: 16px;
     bottom: 16px;
     left: 16px;
+    align-items: stretch;
   }
 
-  .app-update-toast {
+  .app-update-toast,
+  .app-floating-notice-card {
     width: 100%;
   }
 }
@@ -258,11 +329,6 @@ button {
 .launch-script-textarea:focus {
   border-color: rgba(37, 99, 235, 0.32);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.08);
-}
-
-.launch-script-error {
-  font-size: 12px;
-  color: #b91c1c;
 }
 
 .launch-script-actions {

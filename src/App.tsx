@@ -119,7 +119,7 @@ function App() {
       if (cancelled) return;
       if (event.done) {
         flushPendingChunks();
-        finalizeStream(
+        void finalizeStream(
           event.terminalTabId,
           event.messageId,
           event.exitCode ?? null,

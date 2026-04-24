@@ -61,6 +61,18 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatImageArtifact {
+    id: String,
+    file_name: String,
+    media_type: String,
+    path: String,
+    source: Option<String>,
+    alt: Option<String>,
+    size_bytes: Option<u64>,
+}
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -1243,6 +1255,94 @@ fn encode_base64(bytes: &[u8]) -> String {
         index += 3;
     }
     encoded
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let mut output = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buffer: u32 = 0;
+    let mut bits: u8 = 0;
+    for byte in input.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        if byte == b'=' {
+            break;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return Err("Invalid base64 image data.".to_string()),
+        } as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+    Ok(output)
+}
+
+fn image_extension_for_media_type(media_type: &str) -> &'static str {
+    match media_type.to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        "image/svg+xml" => "svg",
+        _ => "png",
+    }
+}
+
+fn save_generated_image_artifact_to_disk(
+    request: SaveGeneratedImageArtifactRequest,
+) -> Result<ChatImageArtifact, String> {
+    if !request.media_type.starts_with("image/") {
+        return Err("Generated artifact must be an image.".to_string());
+    }
+    let bytes = decode_base64(&request.base64_data)?;
+    if bytes.is_empty() {
+        return Err("Generated image data is empty.".to_string());
+    }
+
+    let base_dir = data_local_dir()
+        .ok_or_else(|| "Unable to resolve local data directory.".to_string())?
+        .join("multi-cli-studio")
+        .join("generated-images")
+        .join(&request.terminal_tab_id)
+        .join(&request.message_id);
+    fs::create_dir_all(&base_dir).map_err(|err| err.to_string())?;
+
+    let artifact_id = format!("image-{}", Uuid::new_v4());
+    let extension = image_extension_for_media_type(&request.media_type);
+    let fallback_name = format!("generated-image-{}.{}", request.index.unwrap_or(1), extension);
+    let requested_name = request
+        .suggested_name
+        .as_deref()
+        .map(|name| sanitize_download_filename(name))
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(fallback_name);
+    let file_name = if Path::new(&requested_name).extension().is_some() {
+        requested_name
+    } else {
+        format!("{}.{}", requested_name, extension)
+    };
+    let path = unique_download_path(&base_dir, &file_name);
+    fs::write(&path, &bytes).map_err(|err| err.to_string())?;
+
+    Ok(ChatImageArtifact {
+        id: artifact_id,
+        file_name: path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&file_name)
+            .to_string(),
+        media_type: request.media_type,
+        path: path.to_string_lossy().to_string(),
+        source: None,
+        alt: request.alt,
+        size_bytes: Some(bytes.len() as u64),
+    })
 }
 
 fn decode_api_image_data_url(source: &str) -> Result<(String, String), String> {
@@ -3337,6 +3437,21 @@ enum ChatMessageBlock {
         level: String,
         text: String,
     },
+    Image {
+        artifact: ChatImageArtifact,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveGeneratedImageArtifactRequest {
+    terminal_tab_id: String,
+    message_id: String,
+    media_type: String,
+    base64_data: String,
+    suggested_name: Option<String>,
+    alt: Option<String>,
+    index: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -6483,6 +6598,9 @@ fn render_chat_blocks(
                     sections.push(format!("{}:\n{}", level.to_uppercase(), trimmed));
                 }
             }
+            ChatMessageBlock::Image { artifact } => {
+                sections.push(format!("Generated image: {}", artifact.path));
+            }
         }
     }
 
@@ -7112,26 +7230,54 @@ fn handle_codex_notification(
                     blocks_changed = true;
                 }
                 "imageGeneration" => {
-                    stream_state.blocks.push(ChatMessageBlock::Tool {
-                        tool: "imageGeneration".to_string(),
-                        source: item
-                            .get("result")
-                            .and_then(Value::as_str)
-                            .map(|value| value.to_string()),
-                        status: item
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .map(|value| value.to_string()),
-                        summary: item
-                            .get("revisedPrompt")
-                            .and_then(Value::as_str)
-                            .map(|value| value.to_string())
-                            .or_else(|| {
-                                item.get("result")
-                                    .and_then(Value::as_str)
-                                    .map(|value| value.to_string())
-                            }),
-                    });
+                    let result = item.get("result").and_then(Value::as_str).unwrap_or("");
+                    let revised_prompt = item
+                        .get("revised_prompt")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.get("revisedPrompt").and_then(Value::as_str))
+                        .map(|value| value.to_string());
+                    if !result.trim().is_empty() {
+                        let (media_type, base64_data) = if result.trim_start().starts_with("data:") {
+                            decode_api_image_data_url(result)?
+                        } else {
+                            ("image/png".to_string(), result.trim().to_string())
+                        };
+                        let artifact = save_generated_image_artifact_to_disk(
+                            SaveGeneratedImageArtifactRequest {
+                                terminal_tab_id: terminal_tab_id.to_string(),
+                                message_id: message_id.to_string(),
+                                media_type,
+                                base64_data,
+                                suggested_name: Some("codex-generated-image".to_string()),
+                                alt: revised_prompt,
+                                index: Some(
+                                    stream_state
+                                        .blocks
+                                        .iter()
+                                        .filter(|block| matches!(block, ChatMessageBlock::Image { .. }))
+                                        .count() as u32
+                                        + 1,
+                                ),
+                            },
+                        )?;
+                        stream_state.blocks.push(ChatMessageBlock::Image { artifact });
+                    } else if let Some(saved_path) = item.get("saved_path").and_then(Value::as_str) {
+                        stream_state.blocks.push(ChatMessageBlock::Image {
+                            artifact: ChatImageArtifact {
+                                id: format!("image-{}", Uuid::new_v4()),
+                                file_name: Path::new(saved_path)
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("generated-image.png")
+                                    .to_string(),
+                                media_type: "image/png".to_string(),
+                                path: saved_path.to_string(),
+                                source: None,
+                                alt: revised_prompt,
+                                size_bytes: None,
+                            },
+                        });
+                    }
                     blocks_changed = true;
                 }
                 "enteredReviewMode" => {
@@ -9944,6 +10090,13 @@ fn finalize_chat_message(
     request: MessageFinalizeRequest,
 ) -> Result<(), String> {
     store.terminal_storage.finalize_chat_message(&request)
+}
+
+#[tauri::command]
+fn save_generated_image_artifact(
+    request: SaveGeneratedImageArtifactRequest,
+) -> Result<ChatImageArtifact, String> {
+    save_generated_image_artifact_to_disk(request)
 }
 
 #[tauri::command]
@@ -17468,6 +17621,44 @@ fn open_workspace_with_default_app(path: &Path) -> Result<std::process::ExitStat
     command
         .status()
         .map_err(|error| format!("Failed to open workspace (default opener): {error}"))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevealPathResult {
+    opened: bool,
+}
+
+#[tauri::command]
+fn reveal_path_in_file_manager(path: String) -> Result<RevealPathResult, String> {
+    let absolute_path = PathBuf::from(path);
+    if !absolute_path.exists() {
+        return Err("File does not exist.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    let status = {
+        let mut command = Command::new("explorer");
+        command.arg("/select,");
+        command.arg(&absolute_path);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command.status()
+    };
+
+    #[cfg(target_os = "macos")]
+    let status = Command::new("open").args(["-R"]).arg(&absolute_path).status();
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let status = Command::new("xdg-open")
+        .arg(absolute_path.parent().unwrap_or_else(|| Path::new("/")))
+        .status();
+
+    let status = status.map_err(|err| err.to_string())?;
+    if !status.success() {
+        return Err("Failed to reveal file location.".to_string());
+    }
+
+    Ok(RevealPathResult { opened: true })
 }
 
 #[tauri::command]
@@ -27909,6 +28100,7 @@ pub fn run() {
             append_chat_messages,
             update_chat_message_stream,
             finalize_chat_message,
+            save_generated_image_artifact,
             delete_chat_message_record,
             delete_chat_session_by_tab,
             update_chat_message_blocks,
@@ -27975,6 +28167,7 @@ pub fn run() {
             discard_git_file,
             commit_git_changes,
             open_workspace_in,
+            reveal_path_in_file_manager,
             open_workspace_file,
             pick_workspace_folder,
             pick_chat_attachments,

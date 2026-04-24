@@ -883,6 +883,26 @@ export interface PickedChatAttachment {
   previewSource?: string | null;
 }
 
+export interface ChatImageArtifact {
+  id: string;
+  fileName: string;
+  mediaType: string;
+  path: string;
+  source?: string | null;
+  alt?: string | null;
+  sizeBytes?: number | null;
+}
+
+export interface SaveGeneratedImageArtifactRequest {
+  terminalTabId: string;
+  messageId: string;
+  mediaType: string;
+  base64Data: string;
+  suggestedName?: string | null;
+  alt?: string | null;
+  index?: number | null;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -1832,4 +1852,8 @@ export type ChatMessageBlock =
       kind: "status";
       level: "info" | "warning" | "error";
       text: string;
+    }
+  | {
+      kind: "image";
+      artifact: ChatImageArtifact;
     };

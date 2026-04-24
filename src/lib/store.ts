@@ -9,6 +9,7 @@ import {
   AppSettings,
   AppState,
   AssistantApprovalDecision,
+  ChatImageArtifact,
   ChatMessage,
   ChatMessageBlock,
   ChatContextTurn,
@@ -78,9 +79,19 @@ const STREAM_RUNTIME_STALE_MIN_MS = 60000;
 const STREAM_STALE_CHECK_MS = 3000;
 const INTERRUPTED_STREAM_TEXT = "Response interrupted before completion. You can retry this prompt.";
 const PARTIAL_STREAM_TEXT = "Streaming stopped before completion. This response may be partial.";
+const GENERATED_IMAGE_DATA_URL_PATTERN = /data:(image\/(?:png|jpe?g|webp|gif|bmp|svg\+xml));base64,([A-Za-z0-9+/=\r\n]+)(?=[\s)\]}>"']|$)/gi;
 const UNSUPPORTED_IMAGE_ATTACHMENT_MESSAGE = "当前仅 Codex 支持图片附件，请切换到 Codex 后发送。";
 
 type PersistenceScope = "terminalState" | "chatMessages";
+
+type ExtractedGeneratedImage = {
+  mediaType: string;
+  base64Data: string;
+  alt: string | null;
+  suggestedName: string | null;
+  fullMatch: string;
+  markdownMatch: string | null;
+};
 
 interface QueuedChatMessage {
   text: string;
@@ -102,6 +113,75 @@ function createId(prefix: string) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function generatedImageExtension(mediaType: string) {
+  switch (mediaType.toLowerCase()) {
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpg";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+    case "image/bmp":
+      return "bmp";
+    case "image/svg+xml":
+      return "svg";
+    default:
+      return "png";
+  }
+}
+
+function extractGeneratedImagesFromContent(content: string): {
+  cleanedContent: string;
+  images: ExtractedGeneratedImage[];
+} {
+  const images: ExtractedGeneratedImage[] = [];
+  const cleanedContent = content.replace(
+    /!?\[([^\]]*)\]\((data:image\/(?:png|jpe?g|webp|gif|bmp|svg\+xml);base64,[A-Za-z0-9+/=\r\n]+)\)|data:(image\/(?:png|jpe?g|webp|gif|bmp|svg\+xml));base64,([A-Za-z0-9+/=\r\n]+)/gi,
+    (match, altText: string | undefined, markdownDataUrl: string | undefined, bareMediaType: string | undefined, bareBase64: string | undefined) => {
+      const dataUrl = markdownDataUrl ?? match;
+      GENERATED_IMAGE_DATA_URL_PATTERN.lastIndex = 0;
+      const parsed = GENERATED_IMAGE_DATA_URL_PATTERN.exec(dataUrl);
+      if (!parsed) return match;
+      const mediaType = parsed[1];
+      const base64Data = (parsed[2] ?? bareBase64 ?? "").replace(/\s+/g, "");
+      if (!base64Data) return match;
+      const index = images.length + 1;
+      images.push({
+        mediaType: mediaType ?? bareMediaType ?? "image/png",
+        base64Data,
+        alt: altText?.trim() || null,
+        suggestedName: `generated-image-${index}.${generatedImageExtension(mediaType ?? bareMediaType ?? "image/png")}`,
+        fullMatch: dataUrl,
+        markdownMatch: markdownDataUrl ? match : null,
+      });
+      return markdownDataUrl ? "" : "[generated image saved as artifact]";
+    }
+  );
+
+  return {
+    cleanedContent: cleanedContent.replace(/\n{3,}/g, "\n\n").trim(),
+    images,
+  };
+}
+
+function mergeGeneratedImageBlocks(
+  blocks: ChatMessageBlock[] | null | undefined,
+  artifacts: ChatImageArtifact[]
+) {
+  if (artifacts.length === 0) return blocks ?? null;
+  const existingBlocks = blocks ?? [];
+  const existingIds = new Set(
+    existingBlocks
+      .filter((block): block is Extract<ChatMessageBlock, { kind: "image" }> => block.kind === "image")
+      .map((block) => block.artifact.id)
+  );
+  const imageBlocks = artifacts
+    .filter((artifact) => !existingIds.has(artifact.id))
+    .map((artifact) => ({ kind: "image" as const, artifact }));
+  return imageBlocks.length > 0 ? [...existingBlocks, ...imageBlocks] : existingBlocks;
 }
 
 function basename(path: string) {
@@ -1346,12 +1426,23 @@ function buildTerminalCompletionNotice(
   };
 }
 
+export type FloatingNotificationTone = "info" | "warning" | "error";
+
+export interface FloatingNotification {
+  id: string;
+  eyebrow: string;
+  title: string;
+  message: string;
+  tone: FloatingNotificationTone;
+}
+
 interface StoreState {
   appState: AppState | null;
   contextStore: ContextStore | null;
   settings: AppSettings | null;
   busyAction: string | null;
   persistenceIssue: string | null;
+  floatingNotifications: FloatingNotification[];
   acpCapabilitiesByCli: Partial<Record<AgentId, AcpCliCapabilities>>;
   acpCapabilityStatusByCli: Partial<Record<AgentId, "idle" | "loading" | "ready" | "error">>;
   cliSkillsByContext: Record<string, CliSkillItem[]>;
@@ -1384,6 +1475,8 @@ interface StoreState {
   setAppState: (state: AppState) => void;
   appendTerminalLine: (agentId: AgentId, line: TerminalLine) => void;
   setBusyAction: (action: string | null) => void;
+  upsertFloatingNotification: (notification: FloatingNotification) => void;
+  removeFloatingNotification: (id: string) => void;
   appendChatSystemMessage: (tabId: string, cliId: AgentId, content: string, exitCode?: number) => void;
   deleteChatMessage: (tabId: string, messageId: string) => void;
   hydrateTerminalSession: (tabId: string) => Promise<void>;
@@ -1445,7 +1538,7 @@ interface StoreState {
     completionTokens?: number | null,
     totalTokens?: number | null,
     interruptedByUser?: boolean | null
-  ) => void;
+  ) => Promise<void>;
   applyGitPanel: (workspaceId: string, gitPanel: GitPanelData) => void;
   loadGitPanel: (workspaceId: string, projectRoot: string) => Promise<void>;
   refreshGitPanel: (workspaceId?: string) => Promise<void>;
@@ -1500,6 +1593,7 @@ export const useStore = create<StoreState>((set, get) => {
   settings: null,
   busyAction: null,
   persistenceIssue: null,
+  floatingNotifications: [],
   acpCapabilitiesByCli: {},
   acpCapabilityStatusByCli: {},
   cliSkillsByContext: {},
@@ -1544,6 +1638,36 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   setBusyAction: (action) => set({ busyAction: action }),
+
+  upsertFloatingNotification: (notification) =>
+    set((state) => {
+      const index = state.floatingNotifications.findIndex((item) => item.id === notification.id);
+      if (index === -1) {
+        return { floatingNotifications: [...state.floatingNotifications, notification] };
+      }
+      const current = state.floatingNotifications[index];
+      if (
+        current.eyebrow === notification.eyebrow &&
+        current.title === notification.title &&
+        current.message === notification.message &&
+        current.tone === notification.tone
+      ) {
+        return {};
+      }
+      const floatingNotifications = [...state.floatingNotifications];
+      floatingNotifications[index] = notification;
+      return { floatingNotifications };
+    }),
+
+  removeFloatingNotification: (id) =>
+    set((state) => {
+      if (!state.floatingNotifications.some((item) => item.id === id)) {
+        return {};
+      }
+      return {
+        floatingNotifications: state.floatingNotifications.filter((item) => item.id !== id),
+      };
+    }),
 
   appendChatSystemMessage: (tabId, cliId, content, exitCode = 0) => {
     const message: ChatMessage = {
@@ -3697,7 +3821,7 @@ export const useStore = create<StoreState>((set, get) => {
     );
   },
 
-  finalizeStream: (
+  finalizeStream: async (
     tabId,
     messageId,
     exitCode,
@@ -3712,6 +3836,9 @@ export const useStore = create<StoreState>((set, get) => {
     totalTokens,
     interruptedByUser
   ) => {
+    const imageExtraction = extractGeneratedImagesFromContent(finalContent ?? "");
+    const contentForMessage =
+      imageExtraction.images.length > 0 ? imageExtraction.cleanedContent : finalContent;
     const completionNotice = interruptedByUser
       ? null
       : buildTerminalCompletionNotice(
@@ -3774,7 +3901,7 @@ export const useStore = create<StoreState>((set, get) => {
               return message;
             }
 
-            const resolvedRawContent = finalContent ?? message.rawContent ?? message.content;
+            const resolvedRawContent = contentForMessage ?? message.rawContent ?? message.content;
             const needsInterruptedFallback =
               Boolean(interruptedByUser) &&
               !resolvedRawContent.trim() &&
@@ -3872,6 +3999,58 @@ export const useStore = create<StoreState>((set, get) => {
             updatedAt: session.updatedAt,
           })
         );
+
+        if (imageExtraction.images.length > 0) {
+          void (async () => {
+            try {
+              const artifacts = await Promise.all(
+                imageExtraction.images.map((image, index) =>
+                  bridge.saveGeneratedImageArtifact({
+                    terminalTabId: tabId,
+                    messageId: message.id,
+                    mediaType: image.mediaType,
+                    base64Data: image.base64Data,
+                    suggestedName: image.suggestedName,
+                    alt: image.alt,
+                    index: index + 1,
+                  })
+                )
+              );
+              set((current) => {
+                const currentSession = current.chatSessions[tabId];
+                if (!currentSession) return {};
+                const currentMessage = currentSession.messages.find((item) => item.id === message.id);
+                if (!currentMessage) return {};
+                const nextBlocks = mergeGeneratedImageBlocks(currentMessage.blocks, artifacts);
+                const nextSession: ConversationSession = {
+                  ...currentSession,
+                  messages: currentSession.messages.map((item) =>
+                    item.id === message.id ? { ...item, blocks: nextBlocks } : item
+                  ),
+                  updatedAt: nowIso(),
+                };
+                nextSession.estimatedTokens = calculateConversationSessionEstimatedTokens(nextSession);
+                const chatSessions = {
+                  ...current.chatSessions,
+                  [tabId]: nextSession,
+                };
+                persistTerminalState(current.workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
+                enqueueMessagePersistence(() =>
+                  bridge.updateChatMessageBlocks({
+                    messageId: message.id,
+                    blocks: nextBlocks,
+                  })
+                );
+                return {
+                  chatSessions,
+                  tabSubagentsByTab: rebuildTabSubagentMap(chatSessions),
+                };
+              });
+            } catch {
+              // Keep the textual response if artifact persistence fails.
+            }
+          })();
+        }
       }
       if (systemMessage) {
         enqueueMessagePersistence(() =>

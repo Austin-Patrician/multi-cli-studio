@@ -24,6 +24,7 @@ import {
   ChatMessageFinalizeRequest,
   ChatMessagesAppendRequest,
   ChatMessageStreamUpdateRequest,
+  ChatImageArtifact,
   ChatInterruptResult,
   ChatPromptRequest,
   PickedChatAttachment,
@@ -65,6 +66,7 @@ import {
   WorkspaceSessionProjectionSummary,
   CodexRuntimeReloadResult,
   SettingsEngineStatus,
+  SaveGeneratedImageArtifactRequest,
   SshConnectionConfig,
   SshConnectionTestResult,
   StreamEvent,
@@ -145,6 +147,8 @@ export interface RuntimeBridge {
   appendChatMessages: (request: ChatMessagesAppendRequest) => Promise<void>;
   updateChatMessageStream: (request: ChatMessageStreamUpdateRequest) => Promise<void>;
   finalizeChatMessage: (request: ChatMessageFinalizeRequest) => Promise<void>;
+  saveGeneratedImageArtifact: (request: SaveGeneratedImageArtifactRequest) => Promise<ChatImageArtifact>;
+  revealPathInFileManager: (path: string) => Promise<boolean>;
   deleteChatMessage: (request: ChatMessageDeleteRequest) => Promise<void>;
   deleteChatSessionByTab: (terminalTabId: string) => Promise<void>;
   updateChatMessageBlocks: (request: ChatMessageBlocksUpdateRequest) => Promise<void>;
@@ -525,6 +529,15 @@ const tauriRuntime: RuntimeBridge = {
   async finalizeChatMessage(request) {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("finalize_chat_message", { request });
+  },
+  async saveGeneratedImageArtifact(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<ChatImageArtifact>("save_generated_image_artifact", { request });
+  },
+  async revealPathInFileManager(path) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const result = await invoke<{ opened: boolean }>("reveal_path_in_file_manager", { path });
+    return result.opened;
   },
   async deleteChatMessage(request) {
     const { invoke } = await import("@tauri-apps/api/core");

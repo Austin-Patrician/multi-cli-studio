@@ -22,6 +22,9 @@ const STATUS_PANEL_STORAGE_KEY = "multi-cli-studio::terminal-status-panel-collap
 export function TerminalPage() {
   const activeTerminalTabId = useStore((state) => state.activeTerminalTabId);
   const hydrateTerminalSession = useStore((state) => state.hydrateTerminalSession);
+  const persistenceIssue = useStore((state) => state.persistenceIssue);
+  const upsertFloatingNotification = useStore((state) => state.upsertFloatingNotification);
+  const removeFloatingNotification = useStore((state) => state.removeFloatingNotification);
   const { open: terminalDockOpen, toggle: toggleTerminalDock, openDock, closeDock } =
     useTerminalDockState();
   const activeWorkspace = useStore(
@@ -70,6 +73,43 @@ export function TerminalPage() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(WORKSPACE_PANEL_STORAGE_KEY, rightPanelMode);
   }, [rightPanelMode]);
+
+  useEffect(() => {
+    if (persistenceIssue) {
+      upsertFloatingNotification({
+        id: "projectbar-persistence-issue",
+        eyebrow: "Workspace Status",
+        title: "Persistence warning",
+        message: persistenceIssue,
+        tone: "warning",
+      });
+      return;
+    }
+    removeFloatingNotification("projectbar-persistence-issue");
+  }, [persistenceIssue, removeFloatingNotification, upsertFloatingNotification]);
+
+  useEffect(() => {
+    const launchScriptError = launchScriptState.error;
+    if (launchScriptError) {
+      upsertFloatingNotification({
+        id: "projectbar-launch-script-error",
+        eyebrow: "Launch Script",
+        title: "Project bar action failed",
+        message: launchScriptError,
+        tone: "error",
+      });
+      return;
+    }
+    removeFloatingNotification("projectbar-launch-script-error");
+  }, [launchScriptState.error, removeFloatingNotification, upsertFloatingNotification]);
+
+  useEffect(
+    () => () => {
+      removeFloatingNotification("projectbar-persistence-issue");
+      removeFloatingNotification("projectbar-launch-script-error");
+    },
+    [removeFloatingNotification]
+  );
 
   function toggleRightPanel() {
     setRightPanelCollapsed((current) => {
@@ -122,7 +162,6 @@ export function TerminalPage() {
         launchScriptEditorOpen={launchScriptState.editorOpen}
         launchScriptDraft={launchScriptState.draftScript}
         launchScriptSaving={launchScriptState.isSaving}
-        launchScriptError={launchScriptState.error}
         onRunLaunchScript={() => {
           void launchScriptState.onRunLaunchScript();
         }}

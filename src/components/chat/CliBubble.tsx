@@ -1,4 +1,6 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   ChatMessage,
   ChatMessageBlock,
@@ -12,6 +14,7 @@ import {
   normalizeAssistantContent,
   parseAssistantDisplayBlocks,
 } from "../../lib/messageFormatting";
+import { bridge } from "../../lib/bridge";
 import { AssistantMessageContent } from "./AssistantMessageContent";
 
 const CLI_BADGE: Record<AgentId, { bg: string; text: string; label: string }> = {
@@ -19,6 +22,110 @@ const CLI_BADGE: Record<AgentId, { bg: string; text: string; label: string }> = 
   claude: { bg: "bg-amber-500", text: "text-white", label: "Claude" },
   gemini: { bg: "bg-emerald-500", text: "text-white", label: "Gemini" },
 };
+
+function imageArtifactSrc(path: string, source?: string | null) {
+  if (source?.startsWith("data:")) return source;
+  if (path.startsWith("data:")) return path;
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  try {
+    return convertFileSrc(path);
+  } catch {
+    return "";
+  }
+}
+
+function ImagePreviewOverlay({
+  src,
+  alt,
+  fileName,
+  mediaType,
+  imagePath,
+  onClose,
+}: {
+  src: string;
+  alt: string;
+  fileName: string;
+  mediaType: string;
+  imagePath: string;
+  onClose: () => void;
+}) {
+  const [openingFolder, setOpeningFolder] = useState(false);
+  const canRevealPath = !imagePath.startsWith("data:") && !imagePath.startsWith("http://") && !imagePath.startsWith("https://");
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose]);
+
+  async function handleRevealPath() {
+    if (!canRevealPath || openingFolder) return;
+    setOpeningFolder(true);
+    try {
+      await bridge.revealPathInFileManager(imagePath);
+    } finally {
+      setOpeningFolder(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/86 px-6 py-6 backdrop-blur-sm"
+      onMouseDown={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={alt}
+    >
+      <div
+        className="relative flex max-h-[94vh] w-full max-w-[min(96vw,1600px)] flex-col overflow-hidden rounded-[24px] border border-white/10 bg-slate-950/92 shadow-[0_30px_90px_rgba(15,23,42,0.6)]"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-4 border-b border-white/10 px-5 py-3 text-white">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold">{fileName}</div>
+            <div className="truncate text-xs text-slate-400">{mediaType}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {canRevealPath ? (
+              <button
+                type="button"
+                onClick={() => void handleRevealPath()}
+                disabled={openingFolder}
+                className="inline-flex items-center justify-center rounded-full border border-white/12 bg-white/6 px-3 py-2 text-xs font-medium text-white transition hover:bg-white/12 disabled:cursor-wait disabled:opacity-60"
+              >
+                {openingFolder ? "Opening..." : "Show in folder"}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/12 bg-white/6 text-xl text-white transition hover:bg-white/12"
+              aria-label="Close image preview"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.08),transparent_58%)] p-4">
+          <img src={src} alt={alt} className="max-h-full max-w-full object-contain select-none" />
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
 
 function basename(path: string) {
   const normalized = path.replace(/[\\/]+$/, "");
@@ -640,6 +747,59 @@ function RuntimeTextBlock({
   );
 }
 
+function RuntimeImageBlock({
+  block,
+}: {
+  block: Extract<ChatMessageBlock, { kind: "image" }>;
+}) {
+  const artifact = block.artifact;
+  const src = imageArtifactSrc(artifact.path, artifact.source);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const alt = artifact.alt ?? artifact.fileName;
+
+  return (
+    <>
+    <figure className="overflow-hidden rounded-[16px] border border-slate-200 bg-slate-50/80 shadow-[0_18px_44px_rgba(15,23,42,0.08)]">
+      {src ? (
+        <button
+          type="button"
+          onClick={() => setPreviewOpen(true)}
+          className="group relative block w-full overflow-hidden bg-slate-950/5 text-left"
+          aria-label={`Open image preview for ${artifact.fileName}`}
+        >
+          <img
+            src={src}
+            alt={alt}
+            className="max-h-[70vh] w-full object-contain transition duration-200 group-hover:scale-[1.01]"
+          />
+          <span className="pointer-events-none absolute right-3 top-3 rounded-full border border-white/20 bg-slate-950/70 px-2.5 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition group-hover:opacity-100">
+            Click to enlarge
+          </span>
+        </button>
+      ) : (
+        <div className="flex min-h-40 items-center justify-center px-4 py-8 text-sm text-slate-500">
+          Unable to preview generated image.
+        </div>
+      )}
+      <figcaption className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white/90 px-3 py-2 text-[11px] text-slate-600">
+        <span className="min-w-0 truncate font-medium">{artifact.fileName}</span>
+        <span className="shrink-0 text-slate-400">{artifact.mediaType}</span>
+      </figcaption>
+    </figure>
+    {previewOpen && src ? (
+      <ImagePreviewOverlay
+        src={src}
+        alt={alt}
+        fileName={artifact.fileName}
+        mediaType={artifact.mediaType}
+        imagePath={artifact.path}
+        onClose={() => setPreviewOpen(false)}
+      />
+    ) : null}
+    </>
+  );
+}
+
 function RuntimeStreamingMarker({
   blocks,
 }: {
@@ -650,6 +810,9 @@ function RuntimeStreamingMarker({
 
   if (lastBlock) {
       switch (lastBlock.kind) {
+        case "image":
+          label = "Saving image";
+          break;
         case "command":
         case "tool":
         case "subagent":
@@ -1098,14 +1261,27 @@ function isTimelineBlock(
 function normalizeTimelineStatus(
   status?: string | null
 ): RuntimePlanTimelineStatus {
-  switch (status) {
+  const normalized = status?.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  switch (normalized) {
+    case "in-progress":
+    case "active":
+      return "running";
+    case "done":
+    case "success":
+      return "completed";
+    case "pending":
+    case "queued":
+    case "todo":
+      return "planned";
+    case "error":
+      return "failed";
     case "planned":
     case "running":
     case "completed":
     case "failed":
     case "skipped":
     case "synthesizing":
-      return status;
+      return normalized;
     default:
       return "planning";
   }
@@ -1113,14 +1289,32 @@ function normalizeTimelineStatus(
 
 function parsePlanTextToSteps(text: string) {
   const introLines: string[] = [];
-  const steps: Array<{ title: string; summary?: string | null }> = [];
-  let current: { title: string; details: string[] } | null = null;
+  const steps: Array<{
+    title: string;
+    summary?: string | null;
+    status?: RuntimePlanTimelineStatus | null;
+  }> = [];
+  let current: { title: string; details: string[]; status?: RuntimePlanTimelineStatus | null } | null =
+    null;
+
+  const extractStatusFromTitle = (rawTitle: string) => {
+    const title = rawTitle.trim();
+    const statusMatch = title.match(/^\[([^\]]+)\]\s*(.+)$/);
+    if (!statusMatch) {
+      return { title, status: null };
+    }
+    return {
+      title: statusMatch[2]?.trim() || title,
+      status: normalizeTimelineStatus(statusMatch[1].trim().toLowerCase().replace(/[\s_]+/g, "-")),
+    };
+  };
 
   const flushCurrent = () => {
     if (!current) return;
     steps.push({
       title: current.title.trim(),
       summary: current.details.join("\n").trim() || null,
+      status: current.status ?? null,
     });
     current = null;
   };
@@ -1144,7 +1338,8 @@ function parsePlanTextToSteps(text: string) {
 
     if (stepTitle) {
       flushCurrent();
-      current = { title: stepTitle, details: [] };
+      const parsedTitle = extractStatusFromTitle(stepTitle);
+      current = { title: parsedTitle.title, details: [], status: parsedTitle.status };
       continue;
     }
 
@@ -1209,6 +1404,7 @@ function buildTimelineGroup(
   const planBlocks = blocks.filter((block): block is RuntimePlanTextBlock => block.kind === "plan");
   const planText = planBlocks.map((block) => block.text.trim()).filter(Boolean).join("\n\n");
   const parsedPlan = planText ? parsePlanTextToSteps(planText) : { intro: null, steps: [] };
+  const hasExplicitPlanStatuses = parsedPlan.steps.some((step) => Boolean(step.status));
   const hasOrchestration = orchestrationSteps.length > 0 || Boolean(plan);
 
   const steps: RuntimePlanTimelineStep[] = hasOrchestration
@@ -1227,14 +1423,29 @@ function buildTimelineGroup(
           summary: step.summary,
           result: null,
           owner: null,
-          status:
-            isStreaming
-              ? index === 0
-                ? "running"
-                : "planned"
-              : "completed",
+          status: step.status ?? (isStreaming ? "planned" : "completed"),
           source: "plan",
         }));
+
+  if (!hasOrchestration && isStreaming && steps.length > 0) {
+    const hasRunningStep = steps.some(
+      (step) => step.status === "running" || step.status === "synthesizing"
+    );
+    const hasFailedStep = steps.some((step) => step.status === "failed");
+    if (!hasExplicitPlanStatuses && !hasRunningStep && !hasFailedStep) {
+      const firstIncompleteStep = steps.find(
+        (step) => step.status !== "completed" && step.status !== "skipped"
+      );
+      if (firstIncompleteStep) {
+        firstIncompleteStep.status = "running";
+      }
+    } else if (hasExplicitPlanStatuses && !hasRunningStep && !hasFailedStep) {
+      const nextPlannedStep = steps.find((step) => step.status === "planned");
+      if (nextPlannedStep) {
+        nextPlannedStep.status = "running";
+      }
+    }
+  }
 
   return {
     plan,
@@ -1615,6 +1826,8 @@ function RuntimeStructuredBlocks({
             return <RuntimeTextBlock key={key} block={block} />;
           case "reasoning":
             return <RuntimeReasoningBlock key={key} block={block} />;
+          case "image":
+            return <RuntimeImageBlock key={key} block={block} />;
           case "command":
             return <RuntimeCommandBlock key={key} block={block} workspaceRoot={workspaceRoot} />;
           case "fileChange":

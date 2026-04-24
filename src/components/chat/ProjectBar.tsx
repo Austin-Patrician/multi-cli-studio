@@ -36,7 +36,6 @@ export function ProjectBar({
   launchScriptEditorOpen,
   launchScriptDraft,
   launchScriptSaving,
-  launchScriptError,
   onRunLaunchScript,
   onOpenLaunchScriptEditor,
   onCloseLaunchScriptEditor,
@@ -55,7 +54,6 @@ export function ProjectBar({
   launchScriptEditorOpen: boolean;
   launchScriptDraft: string;
   launchScriptSaving: boolean;
-  launchScriptError: string | null;
   onRunLaunchScript: () => void;
   onOpenLaunchScriptEditor: () => void;
   onCloseLaunchScriptEditor: () => void;
@@ -64,7 +62,6 @@ export function ProjectBar({
   panelMode: WorkspacePanelMode;
   onSelectPanelMode: (mode: WorkspacePanelMode) => void;
 }) {
-  const persistenceIssue = useStore((state) => state.persistenceIssue);
   const workspaces = useStore((state) => state.workspaces);
   const terminalTabs = useStore((state) => state.terminalTabs);
   const activeTerminalTabId = useStore((state) => state.activeTerminalTabId);
@@ -164,11 +161,6 @@ export function ProjectBar({
                   </span>
                 ) : null}
               </div>
-              {persistenceIssue ? (
-                <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                  Persistence warning: {persistenceIssue}
-                </div>
-              ) : null}
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
               <OpenWorkspaceMenu path={workspace.rootPath} disabled={workspace.locationKind === "ssh"} />
@@ -177,7 +169,6 @@ export function ProjectBar({
                 editorOpen={launchScriptEditorOpen}
                 draftScript={launchScriptDraft}
                 isSaving={launchScriptSaving}
-                error={launchScriptError}
                 onRun={onRunLaunchScript}
                 onOpenEditor={onOpenLaunchScriptEditor}
                 onCloseEditor={onCloseLaunchScriptEditor}

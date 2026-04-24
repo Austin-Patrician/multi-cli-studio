@@ -6,7 +6,6 @@ export function LaunchScriptButton({
   editorOpen,
   draftScript,
   isSaving,
-  error,
   onRun,
   onOpenEditor,
   onCloseEditor,
@@ -17,7 +16,6 @@ export function LaunchScriptButton({
   editorOpen: boolean;
   draftScript: string;
   isSaving: boolean;
-  error: string | null;
   onRun: () => void;
   onOpenEditor: () => void;
   onCloseEditor: () => void;
@@ -73,7 +71,6 @@ export function LaunchScriptButton({
             onChange={(event) => onDraftChange(event.target.value)}
             rows={6}
           />
-          {error ? <div className="launch-script-error">{error}</div> : null}
           <div className="launch-script-actions">
             <button type="button" className="launch-script-secondary" onClick={onCloseEditor}>
               取消

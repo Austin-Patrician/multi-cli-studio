@@ -209,6 +209,7 @@ function buildActivePlanGroup(
   const parsedPlan = planText
     ? parseActivePlanText(planText)
     : { intro: null, steps: [] };
+  const hasExplicitPlanStatuses = parsedPlan.steps.some((step) => Boolean(step.status));
 
   const steps: ActivePlanStep[] = orchestrationSteps.length > 0
     ? orchestrationSteps.map((block, index) => ({
@@ -223,7 +224,7 @@ function buildActivePlanGroup(
         owner: null,
         title: step.title,
         summary: step.summary,
-        status: step.status ?? (isStreaming && index === 0 ? "running" : "planned"),
+        status: step.status ?? "planned",
       }));
 
   if (orchestrationSteps.length === 0 && isStreaming && steps.length > 0) {
@@ -231,7 +232,14 @@ function buildActivePlanGroup(
       (step) => step.status === "running" || step.status === "synthesizing",
     );
     const hasFailedStep = steps.some((step) => step.status === "failed");
-    if (!hasExplicitRunningStep && !hasFailedStep) {
+    if (!hasExplicitPlanStatuses && !hasExplicitRunningStep && !hasFailedStep) {
+      const firstIncompleteStep = steps.find(
+        (step) => step.status !== "completed" && step.status !== "skipped",
+      );
+      if (firstIncompleteStep) {
+        firstIncompleteStep.status = "running";
+      }
+    } else if (hasExplicitPlanStatuses && !hasExplicitRunningStep && !hasFailedStep) {
       const nextPlannedStep = steps.find((step) => step.status === "planned");
       if (nextPlannedStep) {
         nextPlannedStep.status = "running";
