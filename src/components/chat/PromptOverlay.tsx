@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 export interface PromptOverlayItem {
   id: string;
@@ -18,6 +18,7 @@ export interface PromptOverlaySection {
 
 interface PromptOverlayProps {
   title?: string;
+  titleAction?: ReactNode;
   description?: string;
   sections: PromptOverlaySection[];
   selectedIndex?: number;
@@ -43,6 +44,7 @@ function BackIcon() {
 
 export function PromptOverlay({
   title,
+  titleAction,
   description,
   sections,
   selectedIndex = -1,
@@ -98,9 +100,16 @@ export function PromptOverlay({
             )}
 
             <div className="min-w-0 flex-1">
-              {title && (
-                <div className="text-[13px] font-semibold tracking-[0.01em] text-text">
-                  {title}
+              {(title || titleAction) && (
+                <div className="flex items-center justify-between gap-3">
+                  {title ? (
+                    <div className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-[0.01em] text-text">
+                      {title}
+                    </div>
+                  ) : (
+                    <div className="flex-1" />
+                  )}
+                  {titleAction ? <div className="shrink-0">{titleAction}</div> : null}
                 </div>
               )}
               {description && (

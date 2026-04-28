@@ -4516,13 +4516,28 @@ fn normalized_identity_key(value: &str) -> String {
         .join("_")
 }
 
+fn stable_identity_hash(parts: &[&str]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for part in parts {
+        for byte in part.trim().to_ascii_lowercase().bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0x1fu64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 fn stable_fact_id(task_id: &str, kind: &str, subject: &str, statement: &str) -> String {
+    let content_hash = stable_identity_hash(&[task_id, kind, subject, statement]);
     format!(
-        "fact::{}::{}::{}::{}",
+        "fact::{}::{}::{}::{}::{}",
         task_id,
         normalized_identity_key(kind),
         normalized_identity_key(subject),
-        normalized_identity_key(statement)
+        normalized_identity_key(statement),
+        content_hash
     )
 }
 

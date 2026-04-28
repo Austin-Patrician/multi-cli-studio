@@ -18,6 +18,7 @@ const WorkspaceRightPanel = lazy(async () =>
 
 const RIGHT_PANEL_STORAGE_KEY = "multi-cli-studio::terminal-right-panel-collapsed";
 const STATUS_PANEL_STORAGE_KEY = "multi-cli-studio::terminal-status-panel-collapsed";
+const PERSISTENCE_WARNING_AUTO_DISMISS_MS = 8000;
 
 export function TerminalPage() {
   const activeTerminalTabId = useStore((state) => state.activeTerminalTabId);
@@ -83,7 +84,10 @@ export function TerminalPage() {
         message: persistenceIssue,
         tone: "warning",
       });
-      return;
+      const dismissTimer = window.setTimeout(() => {
+        removeFloatingNotification("projectbar-persistence-issue");
+      }, PERSISTENCE_WARNING_AUTO_DISMISS_MS);
+      return () => window.clearTimeout(dismissTimer);
     }
     removeFloatingNotification("projectbar-persistence-issue");
   }, [persistenceIssue, removeFloatingNotification, upsertFloatingNotification]);

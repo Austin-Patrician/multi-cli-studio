@@ -103,9 +103,11 @@ function ImagePreviewOverlay({
                 type="button"
                 onClick={() => void handleRevealPath()}
                 disabled={openingFolder}
-                className="inline-flex items-center justify-center rounded-full border border-white/12 bg-white/6 px-3 py-2 text-xs font-medium text-white transition hover:bg-white/12 disabled:cursor-wait disabled:opacity-60"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/12 bg-white/6 text-white transition hover:bg-white/12 disabled:cursor-wait disabled:opacity-60"
+                aria-label="Show image in folder"
+                title={openingFolder ? "Opening folder..." : "Show in folder"}
               >
-                {openingFolder ? "Opening..." : "Show in folder"}
+                {openingFolder ? "…" : "↗"}
               </button>
             ) : null}
             <button

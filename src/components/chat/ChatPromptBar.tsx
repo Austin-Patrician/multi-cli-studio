@@ -20,6 +20,7 @@ import {
   LoaderCircle,
   Paperclip,
   Image as ImageIcon,
+  RefreshCw,
   Route,
   SendHorizontal,
   Settings2,
@@ -400,14 +401,21 @@ function calculateCliSessionUsageTokens(
 
 function FooterMenuSection({
   title,
+  action,
   children,
 }: {
   title?: string;
+  action?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <div className="footer-menu-section">
-      {title ? <div className="selector-dropdown-title">{title}</div> : null}
+      {title || action ? (
+        <div className="flex items-center justify-between gap-3">
+          {title ? <div className="selector-dropdown-title">{title}</div> : <div />}
+          {action ? <div className="mr-1 shrink-0">{action}</div> : null}
+        </div>
+      ) : null}
       {children}
     </div>
   );
@@ -450,6 +458,29 @@ function FooterMenuItem({
         ) : null}
       </span>
       {trailing ?? (selected ? <Check className="selector-option-check" size={14} aria-hidden /> : null)}
+    </button>
+  );
+}
+
+function RefreshIconButton({
+  loading,
+  onClick,
+  label,
+}: {
+  loading: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-transparent text-secondary transition-colors hover:bg-[#eef3f8] hover:text-text disabled:cursor-wait disabled:opacity-60"
+      onClick={onClick}
+      disabled={loading}
+      aria-label={label}
+      title={label}
+    >
+      <RefreshCw size={13} className={loading ? "animate-spin" : undefined} aria-hidden="true" />
     </button>
   );
 }
@@ -1497,6 +1528,8 @@ export function ChatPromptBar({
     skillSlashQuery,
     supportsReviewQuickAction,
   ]);
+  const showModelRefreshAction =
+    commandOverlay?.kind === "command-argument" && commandOverlay.commandKind === "model";
 
   const skillOverlay = useMemo<SkillOverlayState | null>(() => {
     if (!skillToken || !workspace || !activeTab || activeTab.selectedCli === "auto" || commandOverlay) {
@@ -2936,7 +2969,16 @@ export function ChatPromptBar({
                     ? agentOverlay?.description
                     : showSkillOverlay
                       ? skillOverlay?.description
-                      : undefined)
+                  : undefined)
+              }
+              titleAction={
+                showModelRefreshAction ? (
+                  <RefreshIconButton
+                    loading={capabilityStatus === "loading"}
+                    onClick={() => void loadAcpCapabilities(effectiveCli, true)}
+                    label={`Refresh ${titleCaseCli(effectiveCli)} model options`}
+                  />
+                ) : undefined
               }
               sections={activeSections}
               selectedIndex={safeSelectedIndex}
@@ -3530,7 +3572,16 @@ export function ChatPromptBar({
                             <span>正在加载该 CLI 的模型列表…</span>
                           </div>
                         ) : modelOptions.length > 0 ? (
-                          <FooterMenuSection title="模型选择">
+                          <FooterMenuSection
+                            title="模型选择"
+                            action={
+                              <RefreshIconButton
+                                loading={capabilityStatus === "loading"}
+                                onClick={() => void loadAcpCapabilities(effectiveCli, true)}
+                                label={`Refresh ${titleCaseCli(effectiveCli)} model options`}
+                              />
+                            }
+                          >
                             {modelOptions.map((option) => (
                               <FooterMenuItem
                                 key={option.value}
