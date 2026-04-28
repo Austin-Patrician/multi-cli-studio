@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { Link } from "react-router-dom";
 import { AssistantMessageContent } from "../components/chat/AssistantMessageContent";
 import { SERVICE_ICONS } from "../components/modelProviders/ui";
@@ -37,6 +37,7 @@ import type {
   ApiChatSession,
   AppSettings,
   ChatAttachment,
+  ChatImageArtifact,
   ChatMessageBlock,
   ModelProviderConfig,
   ModelProviderModel,
@@ -45,6 +46,8 @@ import type {
 
 const STORAGE_KEY = "multi-cli-studio::api-chat-sessions";
 const DEFAULT_MODEL_CHAT_CONTEXT_TURN_LIMIT = 4;
+const GENERATED_IMAGE_MARKDOWN_RE = /!\[([^\]]*)\]\((data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+)\)/g;
+const GENERATED_IMAGE_DATA_URL_RE = /data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+/g;
 
 type PersistedChatState = {
   activeSessionId: string | null;
@@ -67,6 +70,13 @@ type ResolvedModelOption = {
   modelLabel: string;
 };
 
+type PendingGeneratedImage = {
+  mediaType: string;
+  base64Data: string;
+  alt?: string | null;
+  suggestedName?: string | null;
+};
+
 function cx(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
@@ -82,6 +92,93 @@ function truncate(value: string, maxChars = 42) {
   const trimmed = value.trim();
   if (trimmed.length <= maxChars) return trimmed;
   return `${trimmed.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
+function imageArtifactSrc(path: string, source?: string | null) {
+  if (source?.startsWith("data:")) return source;
+  if (path.startsWith("data:")) return path;
+  if (path.startsWith("http://") || path.startsWith("https://")) return path;
+  try {
+    return convertFileSrc(path);
+  } catch {
+    return "";
+  }
+}
+
+function parseImageDataUrl(value: string) {
+  const match = value.trim().match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (!match) return null;
+  return {
+    mediaType: match[1],
+    base64Data: match[2].replace(/\s/g, ""),
+  };
+}
+
+function extensionForGeneratedImage(mediaType: string) {
+  switch (mediaType.toLowerCase()) {
+    case "image/jpeg":
+    case "image/jpg":
+      return "jpg";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+    case "image/bmp":
+      return "bmp";
+    case "image/svg+xml":
+      return "svg";
+    case "image/avif":
+      return "avif";
+    default:
+      return "png";
+  }
+}
+
+function normalizeGeneratedImageName(value: string | null | undefined, mediaType: string, index: number) {
+  const extension = extensionForGeneratedImage(mediaType);
+  const fallback = `model-generated-image-${index}.${extension}`;
+  const cleaned = value
+    ?.trim()
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  if (!cleaned) return fallback;
+  return /\.[a-zA-Z0-9]+$/.test(cleaned) ? cleaned : `${cleaned}.${extension}`;
+}
+
+function extractGeneratedImagesFromContent(rawContent: string) {
+  const images: PendingGeneratedImage[] = [];
+  const seen = new Set<string>();
+
+  for (const match of rawContent.matchAll(GENERATED_IMAGE_MARKDOWN_RE)) {
+    const parsed = parseImageDataUrl(match[2]);
+    if (!parsed || seen.has(match[2])) continue;
+    seen.add(match[2]);
+    images.push({
+      ...parsed,
+      alt: match[1]?.trim() || null,
+      suggestedName: match[1]?.trim() || null,
+    });
+  }
+
+  for (const match of rawContent.matchAll(GENERATED_IMAGE_DATA_URL_RE)) {
+    const dataUrl = match[0];
+    const parsed = parseImageDataUrl(dataUrl);
+    if (!parsed || seen.has(dataUrl)) continue;
+    seen.add(dataUrl);
+    images.push(parsed);
+  }
+
+  return images;
+}
+
+function stripGeneratedImageDataFromContent(rawContent: string) {
+  return rawContent
+    .replace(GENERATED_IMAGE_MARKDOWN_RE, "")
+    .replace(GENERATED_IMAGE_DATA_URL_RE, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function isServiceType(value: unknown): value is ModelProviderServiceType {
@@ -377,12 +474,19 @@ function getSessionPreview(session: ApiChatSession, settings: AppSettings) {
     .find((message) => {
       if (message.role === "system") return false;
       const normalized = normalizeApiChatMessage(message);
-      return normalized.content.trim().length > 0 || (normalized.attachments?.length ?? 0) > 0;
+      return (
+        normalized.content.trim().length > 0 ||
+        (normalized.attachments?.length ?? 0) > 0 ||
+        (normalized.blocks?.some((block) => block.kind === "image") ?? false)
+      );
     });
   if (previewMessage) {
     const normalized = normalizeApiChatMessage(previewMessage);
     if (normalized.content.trim()) {
       return truncate(normalized.content.replace(/\s+/g, " "), 58);
+    }
+    if (normalized.blocks?.some((block) => block.kind === "image")) {
+      return "生成图片";
     }
     return formatAttachmentSummary(normalized.attachments) || "等待第一条消息";
   }
@@ -422,22 +526,12 @@ function buildReplayHistory(
     return systemMessages;
   }
 
-  let userTurnCount = 0;
-  let startIndex = 0;
-
-  for (let index = conversationMessages.length - 1; index >= 0; index -= 1) {
-    if (conversationMessages[index].role !== "user") continue;
-    userTurnCount += 1;
-    if (userTurnCount === normalizedTurnLimit) {
-      startIndex = index;
-      break;
-    }
-  }
-
-  const trimmedConversation =
-    userTurnCount < normalizedTurnLimit
-      ? conversationMessages
-      : conversationMessages.slice(startIndex);
+  const latestMessage = conversationMessages[conversationMessages.length - 1];
+  const historyMessages = conversationMessages.slice(0, -1);
+  const trimmedHistory = historyMessages.slice(-normalizedTurnLimit);
+  const trimmedConversation = latestMessage
+    ? [...trimmedHistory, latestMessage]
+    : trimmedHistory;
 
   return [...systemMessages, ...trimmedConversation];
 }
@@ -571,6 +665,28 @@ function CopyIcon() {
         strokeWidth="1.6"
         strokeLinecap="round"
       />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+      <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function FolderRevealIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+      <path
+        d="M4 7.8A2.8 2.8 0 016.8 5h3.1l1.7 2h5.6A2.8 2.8 0 0120 9.8v6.4a2.8 2.8 0 01-2.8 2.8H6.8A2.8 2.8 0 014 16.2V7.8z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <path d="M11 13h5m0 0l-2-2m2 2l-2 2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -751,6 +867,44 @@ function createPastedImageFileName(mediaType: string | null | undefined) {
   return `pasted-image-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.${extensionForImageMediaType(mediaType)}`;
 }
 
+async function materializeGeneratedImages(message: ApiChatMessage) {
+  const normalized = normalizeApiChatMessage(message);
+  const rawContent = normalized.rawContent ?? normalized.content;
+  const pendingImages = extractGeneratedImagesFromContent(rawContent);
+  if (pendingImages.length === 0) return normalized;
+
+  const imageBlocks: ChatMessageBlock[] = [];
+  for (let index = 0; index < pendingImages.length; index += 1) {
+    const image = pendingImages[index];
+    const artifact = await bridge.saveGeneratedImageArtifact({
+      terminalTabId: "model-chat",
+      messageId: normalized.id,
+      mediaType: image.mediaType,
+      base64Data: image.base64Data,
+      suggestedName: normalizeGeneratedImageName(image.suggestedName, image.mediaType, index + 1),
+      alt: image.alt ?? null,
+      index: index + 1,
+    });
+    imageBlocks.push({ kind: "image", artifact });
+  }
+
+  const strippedRawContent = stripGeneratedImageDataFromContent(rawContent);
+  const textMessage = normalizeApiChatMessage({
+    ...normalized,
+    content: strippedRawContent,
+    rawContent: strippedRawContent,
+    blocks: null,
+  });
+  const textBlocks = textMessage.blocks ?? [];
+  return normalizeApiChatMessage({
+    ...normalized,
+    content: textMessage.content,
+    rawContent: textMessage.rawContent,
+    contentFormat: textMessage.contentFormat,
+    blocks: [...textBlocks, ...imageBlocks],
+  });
+}
+
 function describeUiError(error: unknown, fallback: string) {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
@@ -814,6 +968,137 @@ function MessageActionIconButton({
     >
       {children}
     </button>
+  );
+}
+
+function ModelImagePreviewOverlay({
+  src,
+  alt,
+  artifact,
+  onClose,
+}: {
+  src: string;
+  alt: string;
+  artifact: ChatImageArtifact;
+  onClose: () => void;
+}) {
+  const [openingFolder, setOpeningFolder] = useState(false);
+  const canRevealPath =
+    !artifact.path.startsWith("data:") &&
+    !artifact.path.startsWith("http://") &&
+    !artifact.path.startsWith("https://");
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  async function handleRevealPath() {
+    if (!canRevealPath || openingFolder) return;
+    setOpeningFolder(true);
+    try {
+      await bridge.revealPathInFileManager(artifact.path);
+    } finally {
+      setOpeningFolder(false);
+    }
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/88 px-6 py-6 backdrop-blur-sm"
+      onMouseDown={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={alt}
+    >
+      <div
+        className="relative flex max-h-[94vh] w-full max-w-[min(96vw,1480px)] flex-col overflow-hidden rounded-[24px] border border-white/10 bg-slate-950/95 shadow-[0_30px_90px_rgba(15,23,42,0.62)]"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-4 border-b border-white/10 px-5 py-3 text-white">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold">{artifact.fileName}</div>
+            <div className="truncate text-xs text-slate-400">{artifact.mediaType}</div>
+          </div>
+          <div className="flex items-center gap-2">
+            {canRevealPath ? (
+              <button
+                type="button"
+                onClick={() => void handleRevealPath()}
+                disabled={openingFolder}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/12 bg-white/6 text-white transition hover:bg-white/12 disabled:cursor-wait disabled:opacity-60"
+                aria-label="Show image in folder"
+                title={openingFolder ? "Opening folder..." : "Show in folder"}
+              >
+                <FolderRevealIcon />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/12 bg-white/6 text-white transition hover:bg-white/12"
+              aria-label="Close image preview"
+            >
+              <CloseIcon />
+            </button>
+          </div>
+        </div>
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.08),transparent_58%)] p-4">
+          <img src={src} alt={alt} className="max-h-full max-w-full select-none object-contain" />
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function ApiImageBlock({ block }: { block: Extract<ChatMessageBlock, { kind: "image" }> }) {
+  const artifact = block.artifact;
+  const src = imageArtifactSrc(artifact.path, artifact.source);
+  const alt = artifact.alt ?? artifact.fileName;
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  return (
+    <>
+      <figure className="overflow-hidden rounded-[18px] border border-slate-200 bg-white shadow-[0_18px_44px_rgba(15,23,42,0.08)] ring-1 ring-black/[0.02]">
+        {src ? (
+          <button
+            type="button"
+            onClick={() => setPreviewOpen(true)}
+            className="group relative block w-full overflow-hidden bg-[#f4f4f1] text-left"
+            aria-label={`Open image preview for ${artifact.fileName}`}
+          >
+            <img
+              src={src}
+              alt={alt}
+              className="max-h-[68vh] w-full object-contain transition duration-200 group-hover:scale-[1.01]"
+            />
+            <span className="pointer-events-none absolute right-3 top-3 rounded-full border border-white/20 bg-slate-950/70 px-2.5 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition group-hover:opacity-100">
+              Preview
+            </span>
+          </button>
+        ) : (
+          <div className="flex min-h-40 items-center justify-center px-4 py-8 text-sm text-slate-500">
+            Unable to preview generated image.
+          </div>
+        )}
+        <figcaption className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white/95 px-3 py-2 text-[11px] text-slate-600">
+          <span className="min-w-0 truncate font-medium">{artifact.fileName}</span>
+          <span className="shrink-0 text-slate-400">{artifact.mediaType}</span>
+        </figcaption>
+      </figure>
+      {previewOpen && src ? (
+        <ModelImagePreviewOverlay
+          src={src}
+          alt={alt}
+          artifact={artifact}
+          onClose={() => setPreviewOpen(false)}
+        />
+      ) : null}
+    </>
   );
 }
 
@@ -1260,6 +1545,10 @@ function ApiAssistantBlocks({
             );
           }
 
+          if (block.kind === "image") {
+            return <ApiImageBlock key={`${message.id}-image-${index}`} block={block} />;
+          }
+
           return null;
         })}
 
@@ -1696,14 +1985,14 @@ export function ModelChatPage() {
         messages: requestMessages,
         streamId,
       });
-      const normalizedMessage = normalizeApiChatMessage({
+      const normalizedMessage = await materializeGeneratedImages(normalizeApiChatMessage({
         ...response.message,
         generationMeta:
           normalizeApiChatGenerationMeta(response.message.generationMeta) ?? {
             ...origin,
             completedAt: new Date().toISOString(),
           },
-      });
+      }));
       updateSession(session.id, (currentSession) => ({
         ...currentSession,
         title,
@@ -1738,7 +2027,7 @@ export function ModelChatPage() {
         updatedAt: new Date().toISOString(),
       }));
       setLiveStream((current) => (current?.streamId === streamId ? null : current));
-      setErrorText(message);
+      setErrorText(null);
     } finally {
       setLoading(false);
     }
