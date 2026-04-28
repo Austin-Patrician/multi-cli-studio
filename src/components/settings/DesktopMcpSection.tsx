@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw, Settings, ShieldAlert, TerminalSquare, Wrench, CheckCircle2, AlertCircle, Box, Power } from "lucide-react";
 import { bridge } from "../../lib/bridge";
 import type { GlobalMcpServerEntry, SettingsEngineStatus, SettingsEngineType, WorkspaceRef } from "../../lib/models";
+import { SERVICE_ICONS } from "../modelProviders/ui";
 
 type CodexRuntimeServer = {
   name: string;
@@ -12,6 +13,12 @@ type CodexRuntimeServer = {
 };
 
 const ENGINE_ORDER: SettingsEngineType[] = ["claude", "codex", "gemini"];
+
+const ENGINE_ICONS: Record<SettingsEngineType, string> = {
+  claude: SERVICE_ICONS.claude,
+  codex: SERVICE_ICONS.openaiCompatible,
+  gemini: SERVICE_ICONS.gemini,
+};
 
 function badgeClass(installed: boolean) {
   return installed ? "status-badge status-badge-success" : "status-badge status-badge-warn";
@@ -199,34 +206,8 @@ export function DesktopMcpSection({
           color: #52525b;
           margin-top: 6px;
         }
-        .refined-tabs {
-          display: inline-flex;
-          background: #f4f4f5;
-          padding: 4px;
-          border-radius: 10px;
-          gap: 4px;
-          align-self: flex-start;
-          border: 1px solid #e4e4e7;
-          box-shadow: inset 0 1px 2px rgba(0,0,0,0.02);
-        }
-        .refined-tab {
-          padding: 6px 16px;
-          font-size: 0.875rem;
-          font-weight: 500;
-          color: #52525b;
-          background: transparent;
-          border: none;
-          border-radius: 6px;
-          cursor: pointer;
-          transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        .refined-tab:hover {
-          color: #09090b;
-        }
-        .refined-tab.is-active {
-          background: #ffffff;
-          color: #09090b;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px -1px rgba(0,0,0,0.1);
+        .refined-mcp-tabs {
+          margin-bottom: 0;
         }
         .refined-banner {
           display: grid;
@@ -621,15 +602,20 @@ export function DesktopMcpSection({
         </div>
 
         {/* 顶级选项卡 */}
-        <div className="refined-tabs">
+        <div className="vendor-tabs refined-mcp-tabs" role="tablist" aria-label="MCP CLI">
           {ENGINE_ORDER.map((engine) => (
             <button
               key={engine}
               type="button"
-              className={`refined-tab ${selectedEngine === engine ? "is-active" : ""}`}
+              className="vendor-tab"
+              data-state={selectedEngine === engine ? "active" : "inactive"}
+              data-active={selectedEngine === engine ? "" : undefined}
               onClick={() => setSelectedEngine(engine)}
             >
-              {engine === "codex" ? "Codex" : engine === "claude" ? "Claude Code" : "Gemini CLI"}
+              <span className="vendor-tab-label">
+                <img src={ENGINE_ICONS[engine]} alt="" className="dcc-vendors-tab-icon" />
+                <span>{engine === "codex" ? "Codex" : engine === "claude" ? "Claude Code" : "Gemini CLI"}</span>
+              </span>
             </button>
           ))}
         </div>
@@ -705,7 +691,7 @@ export function DesktopMcpSection({
                   累计可用工具
                 </div>
                 <div className="refined-overview-value">{selectedToolCount}</div>
-                <div className="refined-overview-note">Codex 运行时工具总数</div>
+                <div className="refined-overview-note">运行时工具总数</div>
               </div>
             </div>
 

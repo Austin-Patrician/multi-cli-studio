@@ -470,10 +470,6 @@ export function DesktopPromptsSection({
               <Upload size={14} />
               导入 JSON
             </button>
-            <button type="button" className="dcc-action-button" onClick={() => startCreate("workspace")}>
-              <Plus size={14} />
-              新建提示词
-            </button>
           </div>
 
           <div className="settings-prompt-toolbar settings-prompt-toolbar--secondary">

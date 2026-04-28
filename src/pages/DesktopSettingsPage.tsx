@@ -14,7 +14,6 @@ import {
   FolderOpen,
   Link2,
   Monitor,
-  Plus,
   Server,
   Settings,
   Trash2,
@@ -28,6 +27,7 @@ import { DesktopSkillsSection } from "../components/settings/DesktopSkillsSectio
 import { DesktopUsageSection } from "../components/settings/DesktopUsageSection";
 import { DesktopVendorsSection } from "../components/settings/DesktopVendorsSection";
 import { DesktopHooksSection } from "../components/settings/DesktopHooksSection";
+import { DesktopProjectsSection, type DesktopProjectHealthTone, type DesktopProjectView } from "../components/settings/DesktopProjectsSection";
 import { DesktopWindowControls } from "../components/DesktopWindowChrome";
 import { GlobalGitDrawer } from "../components/settings/GlobalGitDrawer";
 import { useStore } from "../lib/store";
@@ -46,23 +46,10 @@ type SettingsSection =
   | "skills"
   | "session-management"
   | "usage";
-type ProjectHealthTone = "clean" | "modified" | "attention" | "neutral";
-
 type SidebarNavItem = {
   id: SettingsSection;
   label: string;
   icon: typeof Settings;
-};
-
-type ProjectView = {
-  workspace: WorkspaceRef;
-  tabs: TerminalTab[];
-  primaryTab: TerminalTab | null;
-  sessionCount: number;
-  hasPlanModeSession: boolean;
-  statusLabel: string;
-  statusCopy: string;
-  healthTone: ProjectHealthTone;
 };
 
 const NAV_ITEMS: SidebarNavItem[] = [
@@ -104,12 +91,6 @@ function cx(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
 
-function badgeToneClass(tone: "default" | "success" | "warn" = "default") {
-  if (tone === "success") return "dcc-badge dcc-badge-success";
-  if (tone === "warn") return "dcc-badge dcc-badge-warn";
-  return "dcc-badge";
-}
-
 function parseDateValue(value: string | null | undefined) {
   if (!value) return 0;
   const timestamp = new Date(value).getTime();
@@ -121,7 +102,7 @@ function projectHealth(workspace: WorkspaceRef, gitPanel: GitPanelData | null) {
     return {
       label: "非 Git 项目",
       copy: "普通目录入口",
-      tone: "neutral" as const,
+      tone: "neutral" as DesktopProjectHealthTone,
     };
   }
 
@@ -129,7 +110,7 @@ function projectHealth(workspace: WorkspaceRef, gitPanel: GitPanelData | null) {
     return {
       label: "需要关注",
       copy: `${workspace.failingChecks} 项检查失败`,
-      tone: "attention" as const,
+      tone: "attention" as DesktopProjectHealthTone,
     };
   }
 
@@ -137,7 +118,7 @@ function projectHealth(workspace: WorkspaceRef, gitPanel: GitPanelData | null) {
     return {
       label: "有代码变更",
       copy: `${workspace.dirtyFiles} 个文件待整理`,
-      tone: "modified" as const,
+      tone: "modified" as DesktopProjectHealthTone,
     };
   }
 
@@ -145,14 +126,14 @@ function projectHealth(workspace: WorkspaceRef, gitPanel: GitPanelData | null) {
     return {
       label: "同步中",
       copy: "准备项目状态",
-      tone: "neutral" as const,
+      tone: "neutral" as DesktopProjectHealthTone,
     };
   }
 
   return {
     label: "状态稳定",
     copy: "可直接进入工作",
-    tone: "clean" as const,
+    tone: "clean" as DesktopProjectHealthTone,
   };
 }
 
@@ -190,7 +171,7 @@ export function DesktopSettingsPage() {
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeVendorTab, setActiveVendorTab] = useState<AgentId>("claude");
-  const [deleteTarget, setDeleteTarget] = useState<ProjectView | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DesktopProjectView | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
 
   const isGeneralSettingsRoute = location.pathname.startsWith("/settings/general");
@@ -215,7 +196,7 @@ export function DesktopSettingsPage() {
     }
   }, []);
 
-  const projectViews = useMemo<ProjectView[]>(() => {
+  const projectViews = useMemo<DesktopProjectView[]>(() => {
     return workspaces
       .map((workspace) => {
         const tabs = terminalTabs.filter((tab) => tab.workspaceId === workspace.id);
@@ -262,15 +243,6 @@ export function DesktopSettingsPage() {
         return left.workspace.name.localeCompare(right.workspace.name);
       });
   }, [activeTerminalTabId, activeWorkspace?.id, gitPanelsByWorkspace, terminalTabs, workspaces]);
-
-  const projectSummary = useMemo(() => {
-    return {
-      mountedProjects: workspaces.length,
-      activeSessions: terminalTabs.length,
-      changedProjects: workspaces.filter((workspace) => workspace.dirtyFiles > 0).length,
-      cleanProjects: workspaces.filter((workspace) => workspace.dirtyFiles === 0 && workspace.failingChecks === 0).length,
-    };
-  }, [terminalTabs.length, workspaces]);
 
   function openSection(section: SettingsSection) {
     if (section === "settings") {
@@ -477,161 +449,16 @@ export function DesktopSettingsPage() {
             ) : null}
 
             {!outlet && activeSection === "projects" ? (
-              <section className="settings-section dcc-projects-section">
-                <div className="dcc-projects-hero">
-                  <div className="dcc-projects-hero-copy">
-                    <div className="settings-section-title">项目列表</div>
-                    <div className="settings-section-subtitle">
-                      这里只保留项目状态和入口动作，方便从设置页快速回到正确的工作区。
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button type="button" className="dcc-action-button secondary" onClick={() => openSection("connections")}>
-                      <Link2 size={14} />
-                      SSH 工作区
-                    </button>
-                    <button type="button" className="dcc-action-button" onClick={() => void openWorkspaceFolder()}>
-                      <Plus size={14} />
-                      添加项目
-                    </button>
-                  </div>
-                </div>
-
-                <div className="dcc-projects-summary-grid">
-                  <div className="dcc-project-summary-card">
-                    <span className="dcc-project-summary-label">已接入项目</span>
-                    <strong className="dcc-project-summary-value">{projectSummary.mountedProjects}</strong>
-                    <span className="dcc-project-summary-meta">工作区总数</span>
-                  </div>
-                  <div className="dcc-project-summary-card">
-                    <span className="dcc-project-summary-label">打开会话</span>
-                    <strong className="dcc-project-summary-value">{projectSummary.activeSessions}</strong>
-                    <span className="dcc-project-summary-meta">终端标签页</span>
-                  </div>
-                  <div className="dcc-project-summary-card">
-                    <span className="dcc-project-summary-label">有变更项目</span>
-                    <strong className="dcc-project-summary-value">{projectSummary.changedProjects}</strong>
-                    <span className="dcc-project-summary-meta">待整理工作区</span>
-                  </div>
-                  <div className="dcc-project-summary-card">
-                    <span className="dcc-project-summary-label">干净项目</span>
-                    <strong className="dcc-project-summary-value">{projectSummary.cleanProjects}</strong>
-                    <span className="dcc-project-summary-meta">可直接开始</span>
-                  </div>
-                </div>
-
-                {projectViews.length === 0 ? (
-                  <div className="dcc-projects-empty dcc-projects-ledger">
-                    <FolderOpen size={26} />
-                    <div className="dcc-card-title">还没有接入任何项目</div>
-                    <div className="dcc-card-description">
-                      添加一个工作区后，这里会展示项目状态、终端入口和 Git 入口。
-                    </div>
-                    <button type="button" className="dcc-action-button" onClick={() => void openWorkspaceFolder()}>
-                      <Plus size={14} />
-                      添加第一个项目
-                    </button>
-                  </div>
-                ) : (
-                  <div className="dcc-projects-ledger">
-                    <div className="dcc-projects-list-head">
-                      <div>
-                        <div className="dcc-card-title">全部项目</div>
-                        <div className="dcc-card-description">
-                          当前项目优先，其次是需要处理的工作区。
-                        </div>
-                      </div>
-                      <div className="dcc-projects-head-note">列表只保留必要信息</div>
-                    </div>
-
-                    <div className="dcc-projects-ledger-list">
-                      {projectViews.map((project) => {
-                        const isCurrent = project.workspace.id === activeWorkspace?.id;
-                        const primaryActionLabel = project.primaryTab ? "打开终端" : "新建会话";
-
-                        return (
-                          <article
-                            key={project.workspace.id}
-                            className={cx(
-                              "dcc-project-row-shell",
-                              isCurrent && "is-current",
-                              `is-${project.healthTone}`,
-                            )}
-                          >
-                            <div className="dcc-project-row-rail" aria-hidden />
-                            <div className="dcc-project-row-main">
-                              <div className="dcc-project-row-title">
-                                <div className="dcc-provider-name-row">
-                                  <span className="dcc-provider-name">{project.workspace.name}</span>
-                                  {isCurrent ? <span className={badgeToneClass("success")}>当前</span> : null}
-                                  {project.hasPlanModeSession ? <span className="dcc-badge">PLAN</span> : null}
-                                  {project.workspace.locationKind === "ssh" ? <span className="dcc-badge">SSH</span> : null}
-                                </div>
-                                <span className={cx("dcc-project-health-pill", `dcc-project-health-pill-${project.healthTone}`)}>
-                                  {project.statusLabel}
-                                </span>
-                              </div>
-
-                              <div className="dcc-provider-url">
-                                {project.workspace.locationKind === "ssh" && project.workspace.locationLabel
-                                  ? `${project.workspace.locationLabel} · ${project.workspace.rootPath}`
-                                  : project.workspace.rootPath}
-                              </div>
-
-                              <div className="dcc-project-row-ledger">
-                                <div className="dcc-project-ledger-item">
-                                  <span>Branch</span>
-                                  <strong>{project.workspace.branch || "未识别"}</strong>
-                                </div>
-                                <div className="dcc-project-ledger-item">
-                                  <span>Changes</span>
-                                  <strong>{project.workspace.dirtyFiles}</strong>
-                                </div>
-                                <div className="dcc-project-ledger-item">
-                                  <span>Checks</span>
-                                  <strong>{project.workspace.failingChecks}</strong>
-                                </div>
-                                <div className="dcc-project-ledger-item">
-                                  <span>Sessions</span>
-                                  <strong>{project.sessionCount}</strong>
-                                </div>
-                                <div className="dcc-project-ledger-note">{project.statusCopy}</div>
-                              </div>
-                            </div>
-
-                            <div className="dcc-project-row-actions">
-                                <button
-                                  type="button"
-                                className="dcc-action-button secondary"
-                                  onClick={() => openWorkspaceTerminal(project.workspace.id)}
-                                >
-                                {primaryActionLabel}
-                                </button>
-                                <button
-                                  type="button"
-                                className="dcc-action-button secondary"
-                                  onClick={() => openWorkspaceGitPanel(project.workspace.id)}
-                                >
-                                  Git
-                                </button>
-                                <button
-                                  type="button"
-                                className="dcc-action-button danger"
-                                  onClick={() => setDeleteTarget(project)}
-                                >
-                                  <Trash2 size={14} />
-                                删除
-                                </button>
-                              </div>
-                          </article>
-                        );
-                      })}
-                    </div>
-                </div>
-                )}
-              </section>
+              <DesktopProjectsSection
+                activeWorkspaceId={activeWorkspace?.id ?? null}
+                projects={projectViews}
+                onAddProject={() => void openWorkspaceFolder()}
+                onOpenConnections={() => openSection("connections")}
+                onOpenWorkspaceTerminal={openWorkspaceTerminal}
+                onOpenWorkspaceGitPanel={openWorkspaceGitPanel}
+                onDeleteProject={setDeleteTarget}
+              />
             ) : null}
-
             {!outlet && activeSection === "connections" ? (
               <DesktopConnectionsSection settings={settings} />
             ) : null}
