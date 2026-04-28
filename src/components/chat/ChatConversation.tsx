@@ -990,7 +990,7 @@ export function ChatConversation() {
           </div>
 
           {showStickyControls ? (
-            <div className="sticky top-2 z-10 flex flex-col items-center gap-2 px-2">
+            <div className="sticky top-1 z-10 flex flex-col items-center gap-2 px-2">
               {showFloatingPlan && planSurfaceToRender ? (
                 <ActivePlanFloatingCard
                   group={planSurfaceToRender.group}
