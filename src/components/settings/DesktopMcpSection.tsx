@@ -21,22 +21,18 @@ function engineLabel(engine: SettingsEngineType) {
   return engine === "codex" ? "Codex" : engine === "claude" ? "Claude Code" : "Gemini CLI";
 }
 
-function sourceLabel(source: GlobalMcpServerEntry["source"]) {
-  return source === "claude_json" ? "claude.json" : "Multi CLI Studio";
-}
-
 function serverEndpointLabel(server: GlobalMcpServerEntry) {
-  if (server.command?.trim()) return "Command";
-  if (server.url?.trim()) return "URL";
-  return "Endpoint";
+  if (server.command?.trim()) return "命令";
+  if (server.url?.trim()) return "地址";
+  return "端点";
 }
 
 function serverEndpointValue(server: GlobalMcpServerEntry) {
-  return server.command?.trim() || server.url?.trim() || "未知";
+  return server.command?.trim() || server.url?.trim() || "无";
 }
 
 function transportDisplay(server: GlobalMcpServerEntry) {
-  return server.transport?.trim() || "未显式配置";
+  return server.transport?.trim() || "无";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -239,7 +235,6 @@ export function DesktopMcpSection({
           padding: 16px 18px;
           background: #ffffff;
           border: 1px solid #e4e4e7;
-          border-left: 4px solid #18181b;
           border-radius: 12px;
           box-shadow: 0 10px 24px rgba(15, 23, 42, 0.035);
         }
@@ -437,28 +432,34 @@ export function DesktopMcpSection({
         .refined-server-list {
           display: flex;
           flex-direction: column;
-          gap: 10px;
+          gap: 0;
+          border: 1px solid #e4e4e7;
+          border-radius: 12px;
+          overflow: hidden;
+          background: #ffffff;
+          box-shadow: 0 6px 18px rgba(15, 23, 42, 0.03);
         }
         .refined-server-row {
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
+          display: grid;
+          grid-template-columns: minmax(180px, 0.9fr) minmax(0, 1.7fr) minmax(110px, 0.6fr) minmax(80px, 0.4fr) auto;
+          gap: 16px;
+          align-items: center;
           padding: 14px 16px;
           background: #ffffff;
-          border: 1px solid #e4e4e7;
-          border-radius: 10px;
-          box-shadow: 0 6px 18px rgba(15, 23, 42, 0.03);
+          border-bottom: 1px solid #eef2f7;
           min-width: 0;
+        }
+        .refined-server-row:last-child {
+          border-bottom: none;
         }
         .refined-server-row:hover {
           background: #fafafa;
-          border-color: #d4d4d8;
         }
         .refined-provider-name-row {
           display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-          gap: 10px;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
         }
         .refined-provider-name {
           font-size: 0.93rem;
@@ -472,48 +473,27 @@ export function DesktopMcpSection({
           overflow-wrap: anywhere;
           word-break: break-word;
         }
+        .refined-server-status {
+          justify-self: end;
+        }
         .refined-provider-meta {
           font-size: 0.75rem;
           color: #52525b;
           min-width: 0;
         }
-        .refined-meta-strip {
-          display: inline-flex;
-          align-items: center;
-          gap: 6px;
-          flex-wrap: wrap;
-        }
-        .refined-meta-pill {
-          display: inline-flex;
-          align-items: center;
-          padding: 3px 7px;
-          border-radius: 999px;
-          border: 1px solid #e5e7eb;
-          background: #f8fafc;
-          font-size: 0.6875rem;
-          color: #475569;
-          font-weight: 600;
-        }
         .refined-server-fields {
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 8px;
+          display: contents;
         }
         .refined-server-field {
           display: flex;
           flex-direction: column;
-          gap: 4px;
+          gap: 3px;
           min-width: 0;
-          padding: 9px 10px;
-          border-radius: 8px;
-          background: #f8fafc;
-          border: 1px solid #e8edf3;
         }
         .refined-server-field-label {
           font-size: 0.6875rem;
-          font-weight: 700;
-          text-transform: uppercase;
-          letter-spacing: 0.12em;
+          font-weight: 600;
+          letter-spacing: 0.01em;
           color: #64748b;
         }
         .refined-server-field-value {
@@ -611,8 +591,19 @@ export function DesktopMcpSection({
           .refined-banner {
             grid-template-columns: 1fr;
           }
+          .refined-server-row {
+            grid-template-columns: 1fr;
+            gap: 10px;
+          }
+          .refined-server-fields {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
+          }
+          .refined-server-status {
+            justify-self: start;
+          }
           .refined-banner-meta,
-          .refined-server-fields,
           .refined-runtime-stats {
             grid-template-columns: 1fr;
           }
@@ -693,7 +684,7 @@ export function DesktopMcpSection({
           <div className="refined-overview-grid">
               <div className="refined-overview-card">
                 <div className="refined-overview-header">
-                  <Settings size={16} color="#71717a" /> 静态配置服务器
+                  静态配置服务器
                 </div>
                 <div className="refined-overview-value">{selectedConfigServers.length}</div>
                 <div className="refined-overview-note">
@@ -703,7 +694,7 @@ export function DesktopMcpSection({
               {selectedEngine === "codex" && (
                 <div className="refined-overview-card">
                   <div className="refined-overview-header">
-                    <TerminalSquare size={16} color="#71717a" /> 运行时服务器
+                    运行时服务器
                   </div>
                   <div className="refined-overview-value">{codexRuntimeServers.length}</div>
                   <div className="refined-overview-note">仅显示当前工作区运行时返回</div>
@@ -711,7 +702,7 @@ export function DesktopMcpSection({
               )}
               <div className="refined-overview-card">
                 <div className="refined-overview-header">
-                  <Wrench size={16} color="#71717a" /> 累计可用工具
+                  累计可用工具
                 </div>
                 <div className="refined-overview-value">{selectedToolCount}</div>
                 <div className="refined-overview-note">Codex 运行时工具总数</div>
@@ -721,7 +712,7 @@ export function DesktopMcpSection({
             {/* 静态服务器列表 */}
             <div>
               <div className="refined-section-title">
-                <Settings size={18} /> 静态服务器配置 (Configured)
+                静态服务器配置
               </div>
               {selectedConfigServers.length > 0 ? (
                 <div className="refined-server-list">
@@ -736,13 +727,6 @@ export function DesktopMcpSection({
                           <Box size={16} color="#52525b" />
                           {server.name}
                         </span>
-                        <span className={server.enabled ? "status-badge status-badge-success" : "status-badge status-badge-neutral"}>
-                          {server.enabled ? "已启用" : "已禁用"}
-                        </span>
-                      </div>
-                      <div className="refined-meta-strip">
-                        <span className="refined-meta-pill">{sourceLabel(server.source)}</span>
-                        <span className="refined-meta-pill">{transport}</span>
                       </div>
                       <div className="refined-server-fields">
                         <div className="refined-server-field">
@@ -752,16 +736,19 @@ export function DesktopMcpSection({
                           </span>
                         </div>
                         <div className="refined-server-field">
-                          <span className="refined-server-field-label">Transport</span>
+                          <span className="refined-server-field-label">传输</span>
                           <span className="refined-server-field-value">{transport}</span>
                         </div>
                         <div className="refined-server-field">
-                          <span className="refined-server-field-label">Args</span>
+                          <span className="refined-server-field-label">参数</span>
                           <span className="refined-server-field-value">
-                            {server.argsCount}
+                            {server.argsCount > 0 ? server.argsCount : "无"}
                           </span>
                         </div>
                       </div>
+                      <span className={`refined-server-status ${server.enabled ? "status-badge status-badge-success" : "status-badge status-badge-neutral"}`}>
+                        {server.enabled ? "已启用" : "已禁用"}
+                      </span>
                           </>
                         );
                       })()}
@@ -777,7 +764,7 @@ export function DesktopMcpSection({
             {selectedEngine === "codex" && (
               <div>
                 <div className="refined-section-title">
-                  <TerminalSquare size={18} /> 运行时服务器 (Runtime Workspace)
+                  运行时服务器
                 </div>
                 {codexRuntimeServers.length > 0 ? (
                   <div className="refined-runtime-grid">

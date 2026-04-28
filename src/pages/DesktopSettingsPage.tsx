@@ -18,6 +18,7 @@ import {
   Server,
   Settings,
   Trash2,
+  Webhook,
 } from "lucide-react";
 import { DesktopConnectionsSection } from "../components/settings/DesktopConnectionsSection";
 import { DesktopMcpSection } from "../components/settings/DesktopMcpSection";
@@ -26,6 +27,7 @@ import { DesktopPromptsSection } from "../components/settings/DesktopPromptsSect
 import { DesktopSkillsSection } from "../components/settings/DesktopSkillsSection";
 import { DesktopUsageSection } from "../components/settings/DesktopUsageSection";
 import { DesktopVendorsSection } from "../components/settings/DesktopVendorsSection";
+import { DesktopHooksSection } from "../components/settings/DesktopHooksSection";
 import { DesktopWindowControls } from "../components/DesktopWindowChrome";
 import { GlobalGitDrawer } from "../components/settings/GlobalGitDrawer";
 import { useStore } from "../lib/store";
@@ -40,6 +42,7 @@ type SettingsSection =
   | "projects"
   | "connections"
   | "mcp"
+  | "hooks"
   | "skills"
   | "session-management"
   | "usage";
@@ -72,6 +75,7 @@ const NAV_ITEMS: SidebarNavItem[] = [
   { id: "session-management", label: "会话", icon: Archive },
   { id: "connections", label: "连接", icon: Link2 },
   { id: "mcp", label: "MCP", icon: Server },
+  { id: "hooks", label: "Hooks", icon: Webhook },
   { id: "skills", label: "Skill", icon: BookOpen },
   { id: "usage", label: "使用统计", icon: BarChart3 },
 ];
@@ -84,6 +88,7 @@ function parseSettingsSection(value: string | null): SettingsSection {
     case "projects":
     case "connections":
     case "mcp":
+    case "hooks":
     case "skills":
     case "session-management":
     case "vendors":
@@ -641,6 +646,10 @@ export function DesktopSettingsPage() {
 
             {!outlet && activeSection === "mcp" ? (
               <DesktopMcpSection activeWorkspace={activeWorkspace} />
+            ) : null}
+
+            {!outlet && activeSection === "hooks" ? (
+              <DesktopHooksSection activeWorkspace={activeWorkspace} workspaces={workspaces} />
             ) : null}
 
             {!outlet && activeSection === "skills" ? (

@@ -324,6 +324,7 @@ export interface RuntimeBridge {
   testSshConnection: (connection: SshConnectionConfig) => Promise<SshConnectionTestResult>;
   getClaudeSettingsPath: () => Promise<string | null>;
   getCodexConfigPath: () => Promise<string | null>;
+  getGeminiSettingsPath: () => Promise<string | null>;
   reloadCodexRuntimeConfig: () => Promise<CodexRuntimeReloadResult>;
   listGlobalMcpServers: () => Promise<GlobalMcpServerEntry[]>;
   listCodexMcpRuntimeServers: (workspaceId?: string | null) => Promise<unknown>;
@@ -986,6 +987,10 @@ const tauriRuntime: RuntimeBridge = {
   async getCodexConfigPath() {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<string | null>("get_codex_config_path");
+  },
+  async getGeminiSettingsPath() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<string | null>("get_gemini_settings_path");
   },
   async reloadCodexRuntimeConfig() {
     const { invoke } = await import("@tauri-apps/api/core");

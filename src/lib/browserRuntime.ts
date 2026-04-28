@@ -3261,6 +3261,10 @@ export const browserRuntime = {
     return null;
   },
 
+  async getGeminiSettingsPath(): Promise<string | null> {
+    return null;
+  },
+
   async reloadCodexRuntimeConfig(): Promise<CodexRuntimeReloadResult> {
     return {
       status: "applied",

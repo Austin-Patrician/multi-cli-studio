@@ -9046,6 +9046,252 @@
   opacity: 1;
 }
 
+.dcc-hooks-section {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.dcc-hooks-surface {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 24px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.98)),
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 36%);
+  box-shadow:
+    0 18px 48px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.dcc-hooks-editor-surface {
+  min-height: 0;
+}
+
+.dcc-hooks-editor-surface-list,
+.dcc-hooks-editor-surface-raw {
+  min-height: 640px;
+}
+
+.dcc-hooks-editor-surface-empty {
+  gap: 14px;
+}
+
+.dcc-hooks-surface-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.dcc-hooks-target-surface::before,
+.dcc-hooks-editor-surface::before {
+  content: none;
+}
+
+.dcc-hooks-summary-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(88px, 1fr));
+  gap: 10px;
+  min-width: min(360px, 100%);
+}
+
+.dcc-hooks-summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.dcc-hooks-summary-item span,
+.dcc-hooks-meta-item span,
+.dcc-hooks-target-grid label span {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: rgba(15, 23, 42, 0.48);
+}
+
+.dcc-hooks-summary-item strong,
+.dcc-hooks-meta-item strong {
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
+  color: #0f172a;
+}
+
+.dcc-hooks-toolbar,
+.dcc-hooks-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dcc-hooks-toolbar {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.dcc-hooks-target-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(180px, 0.8fr) minmax(320px, 1.4fr);
+  gap: 14px;
+  align-items: end;
+}
+
+.dcc-hooks-target-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(15, 23, 42, 0.62);
+}
+
+.dcc-hooks-target-grid .settings-select,
+.dcc-hooks-form-grid .settings-select,
+.dcc-hooks-form-grid .dcc-search-input,
+.dcc-hooks-command-field .settings-prompt-textarea {
+  border-color: rgba(15, 23, 42, 0.08);
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.dcc-hooks-target-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(15, 23, 42, 0.06);
+}
+
+.dcc-hooks-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dcc-hooks-meta-item strong {
+  overflow-wrap: anywhere;
+}
+
+.dcc-hooks-target-help {
+  max-width: 760px;
+}
+
+.dcc-hooks-target-project {
+  grid-column: auto;
+}
+
+.dcc-hooks-icon-button {
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dcc-hooks-icon-button svg {
+  flex-shrink: 0;
+}
+
+.dcc-hooks-toolbar-save {
+  margin-left: auto;
+}
+
+.dcc-hooks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dcc-hooks-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 18px 16px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.dcc-hooks-card:hover {
+  border-color: rgba(59, 130, 246, 0.2);
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+}
+
+.dcc-hooks-form-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr) minmax(160px, 0.8fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+
+.dcc-hooks-form-grid label,
+.dcc-hooks-command-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(15, 23, 42, 0.62);
+}
+
+.dcc-hooks-command-field .settings-prompt-textarea {
+  min-height: 74px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.dcc-hooks-editor-surface-raw > .dcc-hooks-command-field {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.dcc-hooks-editor-surface-raw > .dcc-hooks-command-field .settings-prompt-textarea {
+  flex: 1 1 auto;
+  min-height: 520px;
+}
+
+.dcc-hooks-checkbox {
+  min-height: 36px;
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: flex-start;
+  white-space: nowrap;
+}
+
+.dcc-hooks-checkbox input {
+  margin: 0;
+}
+
+.dcc-hooks-raw-editor {
+  min-height: 420px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.dcc-hooks-empty {
+  min-height: 132px;
+  padding-block: 18px;
+}
+
 @media (max-width: 960px) {
   .settings-project-sessions-header {
     flex-direction: column;
@@ -9063,5 +9309,26 @@
 
   .settings-project-sessions-item-meta {
     text-align: left;
+  }
+
+  .dcc-hooks-surface-head,
+  .dcc-hooks-toolbar,
+  .dcc-hooks-card-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dcc-hooks-summary-strip,
+  .dcc-hooks-target-meta,
+  .dcc-hooks-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dcc-hooks-target-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dcc-hooks-editor-surface {
+    min-height: 0;
   }
 }

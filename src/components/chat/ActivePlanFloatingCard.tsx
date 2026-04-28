@@ -63,6 +63,7 @@ function normalizeActivePlanStatus(status?: string | null): ActivePlanStatus {
   const normalized = status?.trim().toLowerCase().replace(/[\s_]+/g, "-");
   switch (normalized) {
     case "in-progress":
+    case "inprogress":
     case "active":
       return "running";
     case "done":

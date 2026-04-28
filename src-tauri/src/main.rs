@@ -19313,6 +19313,15 @@ fn get_codex_config_path() -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_gemini_settings_path() -> Result<String, String> {
+    Ok(user_home_dir()
+        .join(".gemini")
+        .join("settings.json")
+        .to_string_lossy()
+        .to_string())
+}
+
+#[tauri::command]
 fn reload_codex_runtime_config() -> Result<CodexRuntimeReloadResult, String> {
     Ok(CodexRuntimeReloadResult {
         status: "applied".to_string(),
@@ -28175,6 +28184,7 @@ pub fn run() {
             detect_engines,
             get_claude_settings_path,
             get_codex_config_path,
+            get_gemini_settings_path,
             reload_codex_runtime_config,
             list_global_mcp_servers,
             list_codex_mcp_runtime_servers,
