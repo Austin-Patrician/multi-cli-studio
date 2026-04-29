@@ -61,6 +61,8 @@ import {
   SemanticRecallRequest,
   StudioPromoteRequest,
   StudioPromoteResult,
+  StudioPolicyPromotionResult,
+  StudioWorkflowState,
   ToolApprovalMode,
   WorkspaceSessionBatchMutationResponse,
   WorkspaceSessionCatalogPage,
@@ -147,6 +149,8 @@ export interface RuntimeBridge {
   saveTerminalState: (state: PersistedTerminalState) => Promise<void>;
   switchCliForTask: (request: CliHandoffRequest) => Promise<void>;
   promoteStudioMemory: (request: StudioPromoteRequest) => Promise<StudioPromoteResult>;
+  getStudioWorkflowState: (projectRoot: string, terminalTabId?: string | null) => Promise<StudioWorkflowState>;
+  runStudioPolicyPromotion: (projectRoot: string, taskId: string) => Promise<StudioPolicyPromotionResult>;
   appendChatMessages: (request: ChatMessagesAppendRequest) => Promise<void>;
   updateChatMessageStream: (request: ChatMessageStreamUpdateRequest) => Promise<void>;
   finalizeChatMessage: (request: ChatMessageFinalizeRequest) => Promise<void>;
@@ -526,6 +530,17 @@ const tauriRuntime: RuntimeBridge = {
   async promoteStudioMemory(request) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<StudioPromoteResult>("promote_studio_memory", { request });
+  },
+  async getStudioWorkflowState(projectRoot, terminalTabId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<StudioWorkflowState>("get_studio_workflow_state", {
+      projectRoot,
+      terminalTabId: terminalTabId ?? null,
+    });
+  },
+  async runStudioPolicyPromotion(projectRoot, taskId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<StudioPolicyPromotionResult>("run_studio_policy_promotion", { projectRoot, taskId });
   },
   async appendChatMessages(request) {
     const { invoke } = await import("@tauri-apps/api/core");

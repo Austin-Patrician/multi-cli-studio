@@ -1241,6 +1241,33 @@ export interface StudioPromoteResult {
   kind: StudioPromoteKind;
 }
 
+export interface StudioPolicyPromotionResult {
+  promoted: number;
+  skipped: number;
+  paths: string[];
+  reportPath: string;
+}
+
+export interface StudioWorkflowState {
+  projectRoot: string;
+  taskId: string | null;
+  phase: string;
+  taskPath: string | null;
+  prdPath: string | null;
+  contextReportPath: string | null;
+  implementManifestPath: string | null;
+  checkManifestPath: string | null;
+  checkerReportPath: string | null;
+  policyCheckPath: string | null;
+  promotionReportPath: string | null;
+  researchArtifacts: string[];
+  implementEntries: number;
+  checkEntries: number;
+  policyDecision: string | null;
+  allowAutoPromote: boolean;
+  lastUpdated: string | null;
+}
+
 export interface AutoOrchestrationRequest {
   terminalTabId: string;
   workspaceId: string;

@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  clearScreen: false,
   build: {
     assetsInlineLimit: 0,
     rollupOptions: {
@@ -25,6 +26,17 @@ export default defineConfig({
   },
   server: {
     port: 1420,
-    host: "127.0.0.1"
+    host: "127.0.0.1",
+    watch: {
+      ignored: [
+        "**/.studio/**",
+        "**/.codex/**",
+        "**/.claude/**",
+        "**/.gemini/**",
+        "**/AGENTS.md",
+        "**/CLAUDE.md",
+        "**/GEMINI.md",
+      ],
+    },
   }
 });

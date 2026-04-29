@@ -2360,6 +2360,31 @@ export const browserRuntime = {
       kind: request.kind,
     };
   },
+  async getStudioWorkflowState(projectRoot: string, terminalTabId?: string | null) {
+    return {
+      projectRoot,
+      taskId: terminalTabId ? `tab-${terminalTabId}` : null,
+      phase: "browser_runtime",
+      taskPath: null,
+      prdPath: null,
+      contextReportPath: null,
+      implementManifestPath: null,
+      checkManifestPath: null,
+      checkerReportPath: null,
+      policyCheckPath: null,
+      promotionReportPath: null,
+      researchArtifacts: [],
+      implementEntries: 0,
+      checkEntries: 0,
+      policyDecision: null,
+      allowAutoPromote: false,
+      lastUpdated: null,
+    };
+  },
+  async runStudioPolicyPromotion(projectRoot: string, taskId: string) {
+    console.info("[studio-context] runStudioPolicyPromotion is unavailable in browser runtime", projectRoot, taskId);
+    return { promoted: 0, skipped: 0, paths: [], reportPath: "browser-runtime:promotion-report.md" };
+  },
   async appendChatMessages(_request: ChatMessagesAppendRequest) {
     return;
   },

@@ -1,88 +1,128 @@
-﻿# Studio Context Layer 设计方案
+# Studio Autonomous Workflow Engine
 
-## 背景
+## Background
 
-Multi CLI Studio 旧的跨 CLI 协作依赖运行期 `handoff prompt`、compact summary、cross-tab context 和 SQLite FTS recall。它能把上下文传过去，但本质是“大包注入”：内容越来越长、生成逻辑分散、不同 CLI 看到的是一次性 prompt，而不是同一个可维护的项目知识源。
+Multi CLI Studio should not stop at a lightweight context export layer. Trellis has proven that production AI coding workflows need durable task files, agent-curated context, research artifacts, implementation/check separation, and finish-time knowledge capture. Studio has a stronger position than Trellis in one area: it owns the UI, session state, prompt assembly, and Codex/Claude/Gemini runners. Therefore Studio should borrow Trellis' workflow contract while implementing it as a Studio-native autonomous runtime.
 
-Trellis 更值得借鉴的是知识层设计：把项目知识拆成长期规范、当前任务、工作历史和 session 入口，让不同 AI CLI 通过平台适配器读取同一套文件。Studio 的新方案采用这个方向，彻底替换旧 handoff 注入链路。
+## Product Goal
 
-## 目标
+- Keep Codex, Claude, and Gemini on one task-centric workflow.
+- Make context/spec curation automatic and agent-owned, not manually approved.
+- Persist research, manifests, memory candidates, and policy decisions as files.
+- Treat runtime prompts as projections of durable task state, not as the source of truth.
+- Keep SQLite as runtime index, evidence graph, UI state, and fallback search.
+- Avoid returning to large prompt handoff packages.
 
-- Codex、Claude、Gemini 跨 CLI 时读取同一套项目上下文文件。
-- 长期规则、当前任务、会话历史分层保存，避免混在聊天历史里。
-- 默认只注入小型 Studio prelude，告诉 CLI 应该读哪些文件。
-- SQLite 保留为运行期索引、UI 状态和兜底搜索，不再作为长期记忆主链路。
-- 旧 handoff 只保留为“切换事件记录”，不再生成或注入大上下文包。
-
-## 文件结构
+## File Structure
 
 ```text
 .studio/
-  spec/                 # durable, user/team curated
+  workflow.md                         # managed workflow state machine and agent contract
+  agents/                             # managed built-in Studio agent contracts
+    context-curator.md
+    research.md
+    implement.md
+    check.md
+    memory-distill.md
+    policy-check.md
+  spec/                               # durable project rules and conventions
     index.md
-  workspace/            # durable, user/team curated journals
+  tasks/                              # durable task source of truth
+    <task-id>/
+      task.json
+      prd.md
+      research/
+        <topic>.md
+      implement.jsonl
+      check.jsonl
+      context-selection-report.md
+      memory-candidates.jsonl
+      memory-distill-report.md
+      policy-check.json
+  workspace/                          # durable journals and session traces
     index.md
-  runtime/              # generated, ignored by git
+  runtime/                            # generated, ignored by git
     context.md
-    tasks/
-      <task-id>/
-        task.md
-        implement.jsonl
-        check.jsonl
-    sessions/
-      <context-key>.json
+    tasks/<task-id>/
+      task.md
+      implement.jsonl
+      check.jsonl
+    sessions/<context-key>.json
 ```
 
-## 分层职责
+## Workflow State Machine
 
-- `.studio/spec/`：长期工程规范、跨任务都应遵守的规则；只在用户要求保存知识时创建/修改。
-- `.studio/workspace/`：跨 session 的 durable journal；只在用户要求沉淀历史时创建/修改。
-- `.studio/runtime/context.md`：每个 turn 刷新的轻量入口，不提交。
-- `.studio/runtime/tasks/<task-id>/`：当前任务运行期快照，不提交，可覆盖。
-- `.studio/runtime/tasks/<task-id>/implement.jsonl`：实现前可读取的 spec/research 清单。
-- `.studio/runtime/tasks/<task-id>/check.jsonl`：检查时可读取的 spec/research 清单。
-- `.studio/runtime/sessions/`：CLI session/window 到 active task 的绑定。
+Studio uses a Trellis-class phase model, but Studio owns execution.
 
-## 新注入链路
+1. `planning`: maintain `prd.md`, task metadata, and current goal.
+2. `context_curated`: run `context-curator`; write manifests and selection report.
+3. `implementing`: dispatch the best CLI with `implement.jsonl` and PRD.
+4. `checking`: dispatch checker with `check.jsonl`, acceptance criteria, and changed files.
+5. `memory_distilled`: run memory distill over facts, evidence, failures, diffs, and decisions.
+6. `completed`: runtime projection is stable; task can continue, archive, or become workspace journal.
 
-1. 用户发送消息或切换 CLI。
-2. 后端刷新 `.studio/runtime/context.md`、active task、manifest、session binding。
-3. compact summary、cross-tab summary、working memory 写入 runtime context 文件。
-4. Prompt 只注入 Studio prelude：runtime context、active task、manifest 路径和读取规则。
-5. CLI 根据需要读取 `.studio` 文件，不再接收旧 handoff 大包。
-6. SQLite 中的 handoff event 只作为切换记录和 UI 展示数据。
+## Built-In Agents
 
-## 已替换的旧设计
+- `context-curator`: reads PRD, spec index, research files, runtime hints, and changed-file hints; writes `implement.jsonl`, `check.jsonl`, and `context-selection-report.md`.
+- `research`: writes source-backed findings to `.studio/tasks/<task-id>/research/*.md`; research must not live only in chat.
+- `implement`: consumes `implement.jsonl`, PRD, and runtime context before editing.
+- `check`: consumes `check.jsonl`, PRD, changed files, and command results; records concrete failures.
+- `memory-distill`: converts task facts and evidence into durable knowledge candidates with provenance and confidence.
+- `policy-check`: decides whether automatic durable writes are safe or should remain candidates.
 
-- 前端不再构造 `HandoffDocument`。
-- 前端不再调用 `semanticRecall` 来增强 handoff prompt。
-- 前端不再传 `handoffContext` / `handoffDocument` 给后端。
-- 后端不再序列化、解析或格式化旧 handoff payload。
-- `send_chat_message` 有 Studio Context 时绕过旧 `build_context_assembly` 大包组装。
-- `switch_cli_for_task` 继续记录切换事件，但 `handoff_payload_json` 固定为空。
+## Context Curation Policy
 
-## Token 策略
+- Context/spec curation is fully automatic.
+- `implement.jsonl` and `check.jsonl` are generated projections, not canonical state.
+- Source files to edit are not pre-registered in manifests; agents read source files during implementation/checking.
+- Research files and spec files are valid manifest entries.
+- Heuristic spec selection is fallback only when no stronger curated entries exist.
+- Every selected file gets a reason and score in `context-selection-report.md`.
 
-- Prompt 内只保留项目元数据、response rules、workspace dirty/check 状态、Studio prelude 和用户请求。
-- compacted summaries、cross-tab context、working memory 只写 runtime 文件，不直塞 prompt。
-- 如果 `.studio/runtime` 不可用，才回退旧上下文组装，保证兼容 remote 或不可写 workspace。
+## Memory Policy
 
-## 已实现的 P1.5 硬化
+- Only durable candidate kinds (`decision`, `constraint`, `rule`, `failure`, `checkpoint`, `progress`) are exported as `memory-candidates.jsonl`.
+- Runtime command successes and generic file-update traces are kept as runtime evidence only; they must not auto-promote.
+- `memory-distill-report.md` records the distillation inputs and target contract.
+- `policy-check.json` records whether automatic promotion is safe.
+- Durable `.studio/spec/` writes require provenance, confidence, no direct conflict, and supersedes metadata when replacing guidance.
+- If policy does not pass, knowledge remains a candidate rather than polluting long-term rules.
 
-- `.studio/runtime` 写入使用临时文件 + rename，避免半写入文件。
-- runtime context、active task、optional context section 都有字符上限，避免长对话无限膨胀。
-- runtime task/session binding 会保留最近条目，自动清理旧快照。
-- 每次 Studio Context 生效时在后端 console 输出观测指标：`prelude_chars`、`runtime_context_chars`、`task_chars`、`final_prompt_chars`、`adapter_files`。
+## Runtime Projection
 
-## 已实现的 P2
+Each local turn refreshes:
 
-- 自动生成托管 adapter：`AGENTS.md`、`CLAUDE.md`、`GEMINI.md`。
-- adapter 只在文件不存在，或包含 `STUDIO-CONTEXT:MANAGED` 标记时覆盖，避免误改用户已有规则。
-- 新增后端 promote 接口，把当前结论/片段提升为 `.studio/spec/`、`.studio/workspace/tasks/` 或 `.studio/workspace/journal/` 文件。
-- promote 会维护目标目录的 `index.md`，便于后续 manifest 或 CLI 读取。
+- `.studio/workflow.md` and `.studio/agents/*.md` if missing or managed.
+- `.studio/tasks/<task-id>/task.json` and `prd.md`.
+- `.studio/tasks/<task-id>/implement.jsonl` and `check.jsonl`.
+- `.studio/tasks/<task-id>/context-selection-report.md`.
+- `.studio/tasks/<task-id>/memory-candidates.jsonl`, `memory-distill-report.md`, and `policy-check.json` when evidence exists.
+- `.studio/runtime/context.md`, runtime manifests, and session bindings.
 
-## 后续阶段
+The prompt still injects only workspace metadata, response rules, Studio prelude, and user request. Detailed context is loaded from files.
 
-- 在 UI 上增加 `Promote to Spec / Task / Journal` 操作，调用已有 `promoteStudioMemory` bridge。
-- 把 `kernel_memory_entries` 导出为候选 spec/task/journal 条目。
-- 如需真正语义相似度，再引入 embedding/vector index，但不替代文件化事实源。
+## Current Implementation
+
+- `send_chat_message` exports Studio workflow files before dispatching Codex/Claude/Gemini.
+- Studio now generates real project-local native hook assets instead of simulating hooks inside the send path:
+  - Codex: `.codex/hooks.json`, `.codex/hooks/session-start.py`, `.codex/hooks/inject-workflow-state.py`, and `.codex/agents/studio-{implement,check,research}.toml`.
+  - Claude Code: `.claude/settings.json`, `.claude/hooks/session-start.py`, `.claude/hooks/inject-workflow-state.py`, `.claude/hooks/inject-subagent-context.py`, and `.claude/agents/studio-{implement,check,research}.md`.
+  - Gemini: `.gemini/settings.json`, `.gemini/hooks/session-start.py`, `.gemini/hooks/inject-workflow-state.py`, `.gemini/hooks/inject-subagent-context.py`, and `.gemini/agents/studio-{implement,check,research}.md`.
+- `SessionStart` hooks inject workflow, active task, spec/workspace indexes, research artifacts, and manifest references.
+- `UserPromptSubmit` hooks inject a lightweight workflow breadcrumb and active task file pointers before each turn.
+- `PreToolUse`/sub-agent hooks inject implement/check/research manifest context for named agents, matching the Trellis separation of main session, implementation agent, check agent, and research agent.
+- Context curation is host-validated during Studio file projection: only existing `.studio/spec/**/*.md` and `.studio/tasks/<task-id>/research/*.md` files are accepted.
+- Research artifacts are produced by native `studio-research` agents and stored under `.studio/tasks/<task-id>/research/*.md`.
+- A post-turn background `check` job writes `checker-report.md`; failed checks trigger one focused retry round without delaying the stream completion.
+- `policy-check.json` can trigger background spec/task/journal promotion only for promotable candidates with provenance; runtime traces stay held.
+- The right workspace panel exposes a `Workflow` tab showing task phase, manifests, reports, research artifacts, and promotion status.
+- Studio Context bypasses the old `build_context_assembly` large prompt package when local file projection succeeds.
+- `switch_cli_for_task` still records switch events, but `handoff_payload_json` remains empty.
+- Managed adapters `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` point native CLIs back to Studio files.
+- Managed `.studio/spec/index.md` and `.studio/workspace/index.md` are created when missing or still Studio-managed.
+- Runtime context stores file references and task pointers, not raw working-memory dumps or failed patch bodies.
+- Memory candidates are filtered before export and guarded again at promotion time.
+
+## Next Engineering Steps
+
+- Add deeper UI controls for approving/inspecting individual promoted memory entries.

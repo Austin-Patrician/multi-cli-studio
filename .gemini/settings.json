@@ -1,0 +1,13 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "python3 .gemini/hooks/session-start.py", "timeout": 10 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "python3 .gemini/hooks/inject-workflow-state.py", "timeout": 5 }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Task", "hooks": [{ "type": "command", "command": "python3 .gemini/hooks/inject-subagent-context.py", "timeout": 30 }] }
+    ]
+  }
+}

@@ -52,14 +52,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use storage::{
     default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest,
+    KernelFact, KernelMemoryEntry,
     MessageBlocksUpdateRequest, MessageDeleteRequest, MessageEventsAppendRequest,
     MessageFinalizeRequest, MessageSessionSeed, MessageStreamUpdateRequest, PersistedChatMessage,
     PersistedConversationSession, PersistedTerminalState, SemanticMemoryChunk,
     SemanticRecallRequest, TaskContextBundle, TaskKernel, TaskRecentTurn, TerminalStorage,
 };
 use studio_context::{
-    export_studio_context, promote_studio_context, StudioContextExportInput, StudioPromoteRequest,
-    StudioPromoteResult,
+    apply_checker_agent_output, auto_promote_studio_memory, build_checker_agent_prompt,
+    export_studio_context, load_studio_workflow_state, promote_studio_context,
+    StudioCheckerApplyResult, StudioContextExportInput,
+    StudioPolicyPromotionResult, StudioPromoteRequest, StudioPromoteResult, StudioWorkflowState,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
@@ -96,6 +99,7 @@ const RUNTIME_LOG_TERMINAL_ID: &str = "runtime-console";
 const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
+const STUDIO_CONTEXT_CURATOR_TIMEOUT_MS: u64 = 45_000;
 const SSH_ASKPASS_PASSWORD_ENV: &str = "MULTI_CLI_STUDIO_SSH_PASSWORD";
 
 #[cfg(target_os = "windows")]
@@ -12304,7 +12308,7 @@ fn send_chat_message(
     let _ = terminal_storage.maybe_auto_compact_terminal_tab(&terminal_tab_id);
 
     // Build script with tab-scoped context
-    let (composed_prompt_base, studio_context_metrics) = {
+    let (composed_prompt_base, studio_context_metrics, studio_workflow_input, studio_workflow_task_id) = {
         let mut state = store.state.lock().map_err(|e| e.to_string())?.clone();
         state.workspace.project_root = project_root.clone();
         state.workspace.project_name = project_name.clone();
@@ -12318,52 +12322,65 @@ fn send_chat_message(
             .as_ref()
             .and_then(|s| s.thread_id.as_ref())
             .is_some();
+        let memory_candidates = if remote_workspace {
+            None
+        } else {
+            build_studio_memory_candidates(&terminal_storage, &terminal_tab_id).ok().flatten()
+        };
+        let studio_context_input = StudioContextExportInput {
+            project_root: effective_project_root.clone(),
+            project_name: project_name.clone(),
+            workspace_id: workspace_id.clone(),
+            terminal_tab_id: terminal_tab_id.clone(),
+            cli_id: cli_id.clone(),
+            branch: state.workspace.branch.clone(),
+            dirty_files: state.workspace.dirty_files,
+            failing_checks: state.workspace.failing_checks,
+            write_mode,
+            is_session_resuming: is_resuming,
+            user_prompt: prompt_for_context.clone(),
+            handoff_summary: pending_handoff
+                .as_ref()
+                .and_then(|handoff| handoff.latest_conclusion.clone()),
+            handoff_files: pending_handoff
+                .as_ref()
+                .map(|handoff| handoff.files.clone())
+                .unwrap_or_default(),
+            handoff_next_step: pending_handoff
+                .as_ref()
+                .and_then(|handoff| handoff.next_step.clone()),
+            compacted_context: request
+                .compacted_summaries
+                .as_ref()
+                .map(|summaries| format_compacted_summaries_section(summaries))
+                .filter(|value| !value.trim().is_empty()),
+            cross_tab_context: request
+                .cross_tab_context
+                .as_ref()
+                .map(|entries| format_cross_tab_entries_section(entries, false))
+                .filter(|value| !value.trim().is_empty()),
+            working_memory: request
+                .working_memory
+                .as_ref()
+                .map(|memory| format_working_memory_section(Some(memory)))
+                .filter(|value| !value.trim().is_empty()),
+            memory_candidates,
+        };
         let studio_context = if remote_workspace {
             None
         } else {
-            export_studio_context(&StudioContextExportInput {
-                project_root: effective_project_root.clone(),
-                project_name: project_name.clone(),
-                workspace_id: workspace_id.clone(),
-                terminal_tab_id: terminal_tab_id.clone(),
-                cli_id: cli_id.clone(),
-                branch: state.workspace.branch.clone(),
-                dirty_files: state.workspace.dirty_files,
-                failing_checks: state.workspace.failing_checks,
-                write_mode,
-                is_session_resuming: is_resuming,
-                user_prompt: prompt_for_context.clone(),
-                handoff_summary: pending_handoff
-                    .as_ref()
-                    .and_then(|handoff| handoff.latest_conclusion.clone()),
-                handoff_files: pending_handoff
-                    .as_ref()
-                    .map(|handoff| handoff.files.clone())
-                    .unwrap_or_default(),
-                handoff_next_step: pending_handoff
-                    .as_ref()
-                    .and_then(|handoff| handoff.next_step.clone()),
-                compacted_context: request
-                    .compacted_summaries
-                    .as_ref()
-                    .map(|summaries| format_compacted_summaries_section(summaries))
-                    .filter(|value| !value.trim().is_empty()),
-                cross_tab_context: request
-                    .cross_tab_context
-                    .as_ref()
-                    .map(|entries| format_cross_tab_entries_section(entries, false))
-                    .filter(|value| !value.trim().is_empty()),
-                working_memory: request
-                    .working_memory
-                    .as_ref()
-                    .map(|memory| format_working_memory_section(Some(memory)))
-                    .filter(|value| !value.trim().is_empty()),
-            })
+            export_studio_context(&studio_context_input)
             .ok()
             .flatten()
         };
         let studio_context_prelude = studio_context.as_ref().map(|export| export.prelude.as_str());
         let studio_context_metrics = studio_context.as_ref().map(|export| export.metrics.clone());
+        let studio_workflow_task_id = studio_context.as_ref().map(|export| export.task_id.clone());
+        let studio_workflow_input = if studio_context.is_some() {
+            Some(studio_context_input.clone())
+        } else {
+            None
+        };
         let composed = compose_tab_context_prompt(
             &state,
             &terminal_storage,
@@ -12381,7 +12398,7 @@ fn send_chat_message(
             is_resuming,
             studio_context_prelude,
         );
-        (composed, studio_context_metrics)
+        (composed, studio_context_metrics, studio_workflow_input, studio_workflow_task_id)
     };
     let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
         format!("/{} {}", skill.name, composed_prompt_base)
@@ -12417,6 +12434,8 @@ fn send_chat_message(
     let workspace_id_for_thread = workspace_id.clone();
     let project_name_for_thread = project_name.clone();
     let workspace_target_for_thread = workspace_target.clone();
+    let studio_workflow_input_for_thread = studio_workflow_input.clone();
+    let studio_workflow_task_id_for_thread = studio_workflow_task_id.clone();
     let recent_turns_for_thread: Vec<TaskRecentTurn> = recent_turns
         .iter()
         .map(|turn| TaskRecentTurn {
@@ -12444,6 +12463,8 @@ fn send_chat_message(
         let codex_live_chat_turns = live_chat_turns.clone();
         let codex_image_attachments = image_attachments.clone();
         let codex_workspace_target = workspace_target_for_thread.clone();
+        let codex_studio_workflow_input = studio_workflow_input_for_thread.clone();
+        let codex_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -12558,6 +12579,23 @@ fn send_chat_message(
                 exit_code,
             });
 
+            if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
+                if let (Some(input), Some(task_id)) =
+                    (codex_studio_workflow_input.as_ref(), codex_studio_workflow_task_id.as_ref())
+                {
+                    start_studio_post_turn_job(
+                        codex_project_root.clone(),
+                        "codex".to_string(),
+                        codex_wrapper_path.clone(),
+                        input.clone(),
+                        task_id.clone(),
+                        request_session_for_thread.clone(),
+                        final_content.clone(),
+                        turn_write_mode,
+                    );
+                }
+            }
+
             let _ = app_handle.emit(
                 "stream-chunk",
                 StreamEvent {
@@ -12603,6 +12641,8 @@ fn send_chat_message(
         let gemini_live_turn = live_turn.clone();
         let gemini_live_chat_turns = live_chat_turns.clone();
         let gemini_workspace_target = workspace_target_for_thread.clone();
+        let gemini_studio_workflow_input = studio_workflow_input_for_thread.clone();
+        let gemini_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -12717,6 +12757,23 @@ fn send_chat_message(
                 exit_code,
             });
 
+            if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
+                if let (Some(input), Some(task_id)) =
+                    (gemini_studio_workflow_input.as_ref(), gemini_studio_workflow_task_id.as_ref())
+                {
+                    start_studio_post_turn_job(
+                        gemini_project_root.clone(),
+                        "gemini".to_string(),
+                        gemini_wrapper_path.clone(),
+                        input.clone(),
+                        task_id.clone(),
+                        request_session_for_thread.clone(),
+                        final_content.clone(),
+                        turn_write_mode,
+                    );
+                }
+            }
+
             let _ = app_handle.emit(
                 "stream-chunk",
                 StreamEvent {
@@ -12764,6 +12821,8 @@ fn send_chat_message(
         let claude_live_turn = live_turn.clone();
         let claude_live_chat_turns = live_chat_turns.clone();
         let claude_workspace_target = workspace_target_for_thread.clone();
+        let claude_studio_workflow_input = studio_workflow_input_for_thread.clone();
+        let claude_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -12879,6 +12938,23 @@ fn send_chat_message(
                 exit_code,
             });
 
+            if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
+                if let (Some(input), Some(task_id)) =
+                    (claude_studio_workflow_input.as_ref(), claude_studio_workflow_task_id.as_ref())
+                {
+                    start_studio_post_turn_job(
+                        claude_project_root.clone(),
+                        "claude".to_string(),
+                        claude_wrapper_path.clone(),
+                        input.clone(),
+                        task_id.clone(),
+                        request_session_for_thread.clone(),
+                        final_content.clone(),
+                        turn_write_mode,
+                    );
+                }
+            }
+
             let _ = app_handle.emit(
                 "stream-chunk",
                 StreamEvent {
@@ -12925,6 +13001,8 @@ fn send_chat_message(
     let shell_recent_turns = recent_turns_for_thread.clone();
     let shell_live_turn = live_turn.clone();
     let shell_live_chat_turns = live_chat_turns.clone();
+    let shell_studio_workflow_input = studio_workflow_input_for_thread.clone();
+    let shell_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
 
     thread::spawn(move || {
         let start = Instant::now();
@@ -13134,6 +13212,23 @@ fn send_chat_message(
             exit_code,
         });
 
+        if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
+            if let (Some(input), Some(task_id)) =
+                (shell_studio_workflow_input.as_ref(), shell_studio_workflow_task_id.as_ref())
+            {
+                start_studio_post_turn_job(
+                    project_root.clone(),
+                    agent_id.clone(),
+                    wrapper_path.clone(),
+                    input.clone(),
+                    task_id.clone(),
+                    request_session_for_thread.clone(),
+                    raw_output.clone(),
+                    turn_write_mode,
+                );
+            }
+        }
+
         // Emit done
         let _ = app_handle.emit(
             "stream-chunk",
@@ -13171,6 +13266,22 @@ fn send_chat_message(
 #[tauri::command]
 fn promote_studio_memory(request: StudioPromoteRequest) -> Result<StudioPromoteResult, String> {
     promote_studio_context(&request)
+}
+
+#[tauri::command]
+fn get_studio_workflow_state(
+    project_root: String,
+    terminal_tab_id: Option<String>,
+) -> Result<StudioWorkflowState, String> {
+    load_studio_workflow_state(&project_root, terminal_tab_id.as_deref())
+}
+
+#[tauri::command]
+fn run_studio_policy_promotion(
+    project_root: String,
+    task_id: String,
+) -> Result<StudioPolicyPromotionResult, String> {
+    auto_promote_studio_memory(&project_root, &task_id)
 }
 
 #[tauri::command]
@@ -19622,6 +19733,235 @@ fn format_working_memory_section(wm: Option<&WorkingMemoryPayload>) -> String {
         "\n\n<working-memory>\n{}\n</working-memory>",
         lines.join("\n")
     )
+}
+
+fn build_studio_memory_candidates(
+    storage: &TerminalStorage,
+    terminal_tab_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(kernel) = storage.load_task_kernel_by_terminal_tab(terminal_tab_id)? else {
+        return Ok(None);
+    };
+    let mut lines = Vec::new();
+    for entry in kernel
+        .memory_entries
+        .iter()
+        .filter(|entry| is_promotable_studio_memory_kind(&entry.kind, &entry.content))
+        .take(16)
+    {
+        lines.push(format_studio_memory_entry_candidate(entry)?);
+    }
+    for fact in kernel
+        .facts
+        .iter()
+        .filter(|fact| {
+            (fact.status == "verified" || fact.confidence == "high")
+                && is_promotable_studio_memory_kind(&fact.kind, &fact.statement)
+        })
+        .take(16)
+    {
+        lines.push(format_studio_fact_candidate(fact)?);
+    }
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(lines.join("\n")))
+}
+
+fn is_promotable_studio_memory_kind(kind: &str, content: &str) -> bool {
+    if kind == "runtime" || content.trim_start().starts_with("Command succeeded:") {
+        return false;
+    }
+    matches!(kind, "decision" | "constraint" | "rule" | "failure" | "checkpoint" | "progress")
+}
+
+fn start_studio_post_turn_job(
+    project_root: String,
+    cli_id: String,
+    command_path: String,
+    input: StudioContextExportInput,
+    task_id: String,
+    session: acp::AcpSession,
+    implementation_output: String,
+    write_mode: bool,
+) {
+    thread::spawn(move || {
+        let _ = maybe_run_studio_checker_and_retry(
+            &project_root,
+            &cli_id,
+            &command_path,
+            &input,
+            &task_id,
+            &session,
+            &implementation_output,
+            write_mode,
+        );
+        if write_mode {
+            match auto_promote_studio_memory(&project_root, &task_id) {
+                Ok(result) => println!(
+                    "[studio-context] auto-promotion promoted={} skipped={} report={}",
+                    result.promoted, result.skipped, result.report_path
+                ),
+                Err(error) => println!("[studio-context] auto-promotion skipped: {error}"),
+            }
+        }
+    });
+}
+
+fn maybe_run_studio_checker_and_retry(
+    project_root: &str,
+    cli_id: &str,
+    command_path: &str,
+    input: &StudioContextExportInput,
+    task_id: &str,
+    session: &acp::AcpSession,
+    implementation_output: &str,
+    write_mode: bool,
+) -> Option<StudioCheckerApplyResult> {
+    if !write_mode || implementation_output.trim().is_empty() {
+        return None;
+    }
+    let prompt = build_checker_agent_prompt(input, task_id, implementation_output);
+    let mut checker_session = session.clone();
+    checker_session.plan_mode = true;
+    let outcome = match run_silent_agent_turn_once(
+        project_root,
+        cli_id,
+        command_path,
+        &prompt,
+        false,
+        &checker_session,
+        STUDIO_CONTEXT_CURATOR_TIMEOUT_MS,
+        None,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            println!("[studio-context] checker skipped: {error}");
+            return None;
+        }
+    };
+    let raw_output = if outcome.final_content.trim().is_empty() {
+        outcome.raw_output.as_str()
+    } else {
+        outcome.final_content.as_str()
+    };
+    let result = match apply_checker_agent_output(project_root, task_id, raw_output) {
+        Ok(result) => result,
+        Err(error) => {
+            println!("[studio-context] checker output ignored: {error}");
+            return None;
+        }
+    };
+    println!(
+        "[studio-context] checker status={} issues={} report={}",
+        result.status,
+        result.issues.len(),
+        result.report_path
+    );
+    if result.needs_retry {
+        maybe_run_studio_retry_repair(project_root, cli_id, command_path, input, task_id, session, &result);
+    }
+    Some(result)
+}
+
+fn maybe_run_studio_retry_repair(
+    project_root: &str,
+    cli_id: &str,
+    command_path: &str,
+    input: &StudioContextExportInput,
+    task_id: &str,
+    session: &acp::AcpSession,
+    checker: &StudioCheckerApplyResult,
+) {
+    let prompt = format!(
+        "Studio checker found issues after the implementation. Apply one focused retry fix.\n\n\
+Task: .studio/tasks/{task_id}/prd.md\n\
+Implement manifest: .studio/tasks/{task_id}/implement.jsonl\n\
+Checker report: .studio/tasks/{task_id}/checker-report.md\n\n\
+Original request:\n{}\n\n\
+Checker summary:\n{}\n\n\
+Issues:\n{}\n\n\
+Rules:\n- Keep the fix minimal.\n- Do not ask for human confirmation.\n- Stop after one retry round.\n",
+        if input.user_prompt.trim().is_empty() {
+            "Continue the active task."
+        } else {
+            input.user_prompt.trim()
+        },
+        checker.summary,
+        if checker.issues.is_empty() {
+            "- Checker requested retry without concrete issues.".to_string()
+        } else {
+            checker
+                .issues
+                .iter()
+                .map(|issue| format!("- {issue}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    );
+    let mut retry_session = session.clone();
+    retry_session.plan_mode = false;
+    match run_silent_agent_turn_once(
+        project_root,
+        cli_id,
+        command_path,
+        &prompt,
+        true,
+        &retry_session,
+        STUDIO_CONTEXT_CURATOR_TIMEOUT_MS.saturating_mul(2),
+        None,
+    ) {
+        Ok(outcome) => println!(
+            "[studio-context] checker retry completed chars={}",
+            outcome.raw_output.chars().count()
+        ),
+        Err(error) => println!("[studio-context] checker retry failed: {error}"),
+    }
+}
+
+fn format_studio_memory_entry_candidate(entry: &KernelMemoryEntry) -> Result<String, String> {
+    serde_json::to_string(&json!({
+        "_studioManaged": true,
+        "candidateType": "kernelMemory",
+        "id": entry.id,
+        "kind": entry.kind,
+        "scope": entry.scope,
+        "scopeRef": entry.scope_ref,
+        "priority": entry.priority,
+        "pinState": entry.pin_state,
+        "content": entry.content,
+        "sourceFactId": entry.source_fact_id,
+        "sourceEvidenceIds": entry.source_evidence_ids,
+        "tags": entry.tags,
+        "updatedAt": entry.updated_at,
+        "promotionHint": promotion_hint_for_memory_kind(&entry.kind),
+    }))
+    .map_err(|err| err.to_string())
+}
+
+fn format_studio_fact_candidate(fact: &KernelFact) -> Result<String, String> {
+    serde_json::to_string(&json!({
+        "_studioManaged": true,
+        "candidateType": "kernelFact",
+        "id": fact.id,
+        "kind": fact.kind,
+        "status": fact.status,
+        "confidence": fact.confidence,
+        "ownerCli": fact.owner_cli,
+        "content": fact.statement,
+        "sourceEvidenceIds": fact.source_evidence_ids,
+        "updatedAt": fact.updated_at,
+        "promotionHint": promotion_hint_for_memory_kind(&fact.kind),
+    }))
+    .map_err(|err| err.to_string())
+}
+
+fn promotion_hint_for_memory_kind(kind: &str) -> &'static str {
+    match kind {
+        "decision" | "constraint" | "rule" => "spec",
+        "failure" | "checkpoint" | "progress" => "journal",
+        _ => "task",
+    }
 }
 
 fn format_compacted_summaries_section(summaries: &[CompactedSummary]) -> String {
@@ -28256,6 +28596,8 @@ pub fn run() {
             switch_cli_for_task,
             send_chat_message,
             promote_studio_memory,
+            get_studio_workflow_state,
+            run_studio_policy_promotion,
             interrupt_chat_turn,
             run_auto_orchestration,
             respond_assistant_approval,
