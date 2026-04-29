@@ -408,6 +408,7 @@ export interface AppSettings {
   maxOutputCharsPerTurn: number;
   modelChatContextTurnLimit: number;
   processTimeoutMs: number;
+  externalLinkBrowser: string;
   notifyOnTerminalCompletion: boolean;
   notificationConfig: NotificationConfig;
   updateConfig: UpdateConfig;

@@ -375,6 +375,7 @@ function defaultSettings(): AppSettings {
     maxOutputCharsPerTurn: 100000,
     modelChatContextTurnLimit: 4,
     processTimeoutMs: 300000,
+    externalLinkBrowser: "default",
     notifyOnTerminalCompletion: false,
     notificationConfig: {
       notifyOnCompletion: false,
@@ -584,6 +585,10 @@ function normalizeSettings(value: unknown): AppSettings {
       defaults.modelChatContextTurnLimit
     ),
     processTimeoutMs: parsePositiveNumber(raw.processTimeoutMs, defaults.processTimeoutMs),
+    externalLinkBrowser:
+      typeof raw.externalLinkBrowser === "string" && raw.externalLinkBrowser.trim()
+        ? raw.externalLinkBrowser.trim()
+        : defaults.externalLinkBrowser,
     notifyOnTerminalCompletion: raw.notifyOnTerminalCompletion === true,
     notificationConfig: normalizeNotificationConfig(raw.notificationConfig, defaults.notificationConfig),
     updateConfig: normalizeUpdateConfig(raw.updateConfig, defaults.updateConfig),
@@ -2369,6 +2374,11 @@ export const browserRuntime = {
   },
   async revealPathInFileManager(_path: string) {
     return false;
+  },
+  async openExternalUrl(url: string) {
+    if (!/^https?:\/\//i.test(url)) return false;
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    return opened != null;
   },
   async deleteChatMessage(_request: ChatMessageDeleteRequest) {
     return;

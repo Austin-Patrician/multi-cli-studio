@@ -5,6 +5,7 @@ import {
   detectAssistantContentFormat,
   normalizeAssistantContent,
 } from "../../lib/messageFormatting";
+import { bridge } from "../../lib/bridge";
 
 interface AssistantMessageContentProps {
   content: string;
@@ -19,6 +20,10 @@ function StreamingCursor() {
   return (
     <span className="ml-1 inline-block h-4 w-1.5 rounded-full bg-accent align-[-2px] animate-pulse" />
   );
+}
+
+function isExternalHttpUrl(value: string | undefined) {
+  return /^https?:\/\//i.test(value ?? "");
 }
 
 function createMarkdownComponents(codeBlockRadiusClass: string) {
@@ -39,6 +44,14 @@ function createMarkdownComponents(codeBlockRadiusClass: string) {
         href={href}
         target="_blank"
         rel="noreferrer"
+        onClick={(event) => {
+          if (typeof href !== "string" || !isExternalHttpUrl(href)) return;
+          event.preventDefault();
+          const externalHref = href;
+          void bridge.openExternalUrl(externalHref).catch(() => {
+            window.open(externalHref, "_blank", "noopener,noreferrer");
+          });
+        }}
         className="font-medium text-accent underline decoration-accent/30 underline-offset-4"
       >
         {children}
@@ -56,7 +69,7 @@ function createMarkdownComponents(codeBlockRadiusClass: string) {
     th: ({ children }) => <th className="border-b border-border px-3 py-2 font-semibold">{children}</th>,
     td: ({ children }) => <td className="border-t border-border px-3 py-2 align-top">{children}</td>,
     pre: ({ children }) => (
-      <pre className={`my-4 overflow-x-auto border border-[#172033] bg-[#0f172a] px-4 py-4 text-[12px] leading-6 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] ${codeBlockRadiusClass}`}>
+      <pre className={`my-4 overflow-x-auto border border-[#263244] bg-[#111827] px-4 py-4 text-[12px] leading-6 text-[#e5e7eb] shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_12px_30px_rgba(15,23,42,0.12)] [&_code]:rounded-none [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-[#e5e7eb] ${codeBlockRadiusClass}`}>
         {children}
       </pre>
     ),
@@ -74,7 +87,7 @@ function createMarkdownComponents(codeBlockRadiusClass: string) {
       }
 
       return (
-        <code {...props} className={`${className ?? ""} font-mono text-[12px] leading-6`}>
+        <code {...props} className={`${className ?? ""} font-mono text-[12px] leading-6 text-[#e5e7eb]`}>
           {children}
         </code>
       );

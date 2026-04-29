@@ -149,6 +149,7 @@ export interface RuntimeBridge {
   finalizeChatMessage: (request: ChatMessageFinalizeRequest) => Promise<void>;
   saveGeneratedImageArtifact: (request: SaveGeneratedImageArtifactRequest) => Promise<ChatImageArtifact>;
   revealPathInFileManager: (path: string) => Promise<boolean>;
+  openExternalUrl: (url: string) => Promise<boolean>;
   deleteChatMessage: (request: ChatMessageDeleteRequest) => Promise<void>;
   deleteChatSessionByTab: (terminalTabId: string) => Promise<void>;
   updateChatMessageBlocks: (request: ChatMessageBlocksUpdateRequest) => Promise<void>;
@@ -538,6 +539,11 @@ const tauriRuntime: RuntimeBridge = {
   async revealPathInFileManager(path) {
     const { invoke } = await import("@tauri-apps/api/core");
     const result = await invoke<{ opened: boolean }>("reveal_path_in_file_manager", { path });
+    return result.opened;
+  },
+  async openExternalUrl(url) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const result = await invoke<{ opened: boolean }>("open_external_url", { url });
     return result.opened;
   },
   async deleteChatMessage(request) {

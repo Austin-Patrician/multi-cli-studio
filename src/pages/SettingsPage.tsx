@@ -55,6 +55,14 @@ const DEFAULT_ROUTE_OPTIONS: Array<{ id: TerminalCliId; label: string }> = [
   { id: "auto", label: "Auto" },
 ];
 
+const EXTERNAL_LINK_BROWSER_OPTIONS = [
+  { id: "default", label: "System default" },
+  { id: "chrome", label: "Google Chrome" },
+  { id: "edge", label: "Microsoft Edge" },
+  { id: "firefox", label: "Firefox" },
+  { id: "custom", label: "Custom command" },
+] as const;
+
 const FALLBACK_APP_VERSION =
   (tauriConfig as { version?: string }).version?.trim() || "0.0.0";
 
@@ -112,6 +120,13 @@ function runtimeResources(agent: SettingsAgent): AgentRuntimeResources {
 
 function parseEmailRecipients(value: string) {
   return value.split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function externalLinkBrowserMode(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return EXTERNAL_LINK_BROWSER_OPTIONS.some((option) => option.id === normalized && option.id !== "custom")
+    ? normalized
+    : "custom";
 }
 
 // --- UI Components ---
@@ -282,6 +297,7 @@ export function SettingsPage({
   const [emailTestBusy, setEmailTestBusy] = useState(false);
   const [emailRecipientsInput, setEmailRecipientsInput] = useState("");
   const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION);
+  const linkBrowserMode = local ? externalLinkBrowserMode(local.externalLinkBrowser) : "default";
 
   const activeSection = forcedSection ?? parseSettingsSection(searchParams.get("section"));
 
@@ -289,6 +305,7 @@ export function SettingsPage({
     if (storedSettings) {
       setLocal({
         ...storedSettings,
+        externalLinkBrowser: storedSettings.externalLinkBrowser?.trim() || "default",
         cliPaths: { ...storedSettings.cliPaths },
         notificationConfig: { ...storedSettings.notificationConfig },
         updateConfig: { ...storedSettings.updateConfig },
@@ -377,9 +394,10 @@ export function SettingsPage({
   async function handleSave() {
     if (!local) return;
     const recipients = parseEmailRecipients(emailRecipientsInput);
-    const nextSettings: AppSettings = {
-      ...local,
-      notificationConfig: {
+      const nextSettings: AppSettings = {
+        ...local,
+        externalLinkBrowser: local.externalLinkBrowser.trim() || "default",
+        notificationConfig: {
         ...local.notificationConfig,
         smtpHost: local.notificationConfig.smtpHost.trim(),
         smtpUsername: local.notificationConfig.smtpUsername.trim(),
@@ -571,6 +589,40 @@ export function SettingsPage({
                         value={local.defaultNewWorkspaceCli}
                         onChange={(val) => setLocal({ ...local, defaultNewWorkspaceCli: val as any })}
                       />
+                    }
+                  />
+                  <FormRow
+                    vertical
+                    label="默认链接浏览器"
+                    description="点击 AI 回复里的 Markdown 链接时使用的浏览器。选择自定义命令可填写浏览器可执行文件名或完整路径。"
+                    control={
+                      <div className="grid gap-3 sm:grid-cols-[220px_1fr]">
+                        <select
+                          value={linkBrowserMode}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            setLocal({
+                              ...local,
+                              externalLinkBrowser: value === "custom" ? "" : value,
+                            });
+                          }}
+                          className="w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2.5 text-[14px] text-slate-900 shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)] transition-all focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-500/10"
+                        >
+                          {EXTERNAL_LINK_BROWSER_OPTIONS.map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <Input
+                          value={linkBrowserMode === "custom" ? local.externalLinkBrowser : ""}
+                          onChange={(event: any) =>
+                            setLocal({ ...local, externalLinkBrowser: event.target.value })
+                          }
+                          placeholder="chrome, msedge, firefox, or C:\\Path\\Browser.exe"
+                          className={linkBrowserMode === "custom" ? "" : "opacity-60"}
+                        />
+                      </div>
                     }
                   />
                 </FormGroup>

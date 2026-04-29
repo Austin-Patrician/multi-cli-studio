@@ -15,7 +15,7 @@ use std::{
     process::{Command, Stdio},
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Mutex,
     },
     thread,
@@ -417,6 +417,8 @@ struct AppSettings {
     #[serde(default = "default_model_chat_context_turn_limit")]
     model_chat_context_turn_limit: usize,
     process_timeout_ms: u64,
+    #[serde(default = "default_external_link_browser")]
+    external_link_browser: String,
     #[serde(default)]
     notify_on_terminal_completion: bool,
     #[serde(default)]
@@ -739,8 +741,21 @@ fn default_new_workspace_cli() -> String {
     "codex".to_string()
 }
 
+fn default_external_link_browser() -> String {
+    "default".to_string()
+}
+
 fn default_remote_shell() -> String {
     "bash".to_string()
+}
+
+fn normalize_external_link_browser(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        default_external_link_browser()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn is_likely_email(value: &str) -> bool {
@@ -8690,23 +8705,36 @@ fn run_claude_headless_turn_once(
 
     let completed = Arc::new(AtomicBool::new(false));
     let timed_out = Arc::new(AtomicBool::new(false));
+    let last_activity_ms = Arc::new(AtomicU64::new(runtime_now_ms()));
     let completed_flag = completed.clone();
     let timed_out_flag = timed_out.clone();
+    let watchdog_last_activity_ms = last_activity_ms.clone();
     let child_pid = child.id();
     thread::spawn(move || {
-        thread::sleep(Duration::from_millis(timeout_ms));
-        if completed_flag.load(Ordering::SeqCst) {
-            return;
+        let check_interval = Duration::from_secs(3);
+        loop {
+            thread::sleep(check_interval);
+            if completed_flag.load(Ordering::SeqCst) {
+                return;
+            }
+
+            let idle_ms = runtime_now_ms()
+                .saturating_sub(watchdog_last_activity_ms.load(Ordering::SeqCst));
+            if idle_ms >= timeout_ms {
+                timed_out_flag.store(true, Ordering::SeqCst);
+                terminate_process_tree(child_pid);
+                return;
+            }
         }
-        timed_out_flag.store(true, Ordering::SeqCst);
-        terminate_process_tree(child_pid);
     });
 
     let stderr_buffer = Arc::new(Mutex::new(String::new()));
     let stderr_sink = stderr_buffer.clone();
+    let stderr_activity_ms = last_activity_ms.clone();
     let stderr_handle = thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines().flatten() {
+            stderr_activity_ms.store(runtime_now_ms(), Ordering::SeqCst);
             if let Ok(mut buffer) = stderr_sink.lock() {
                 buffer.push_str(&line);
                 buffer.push('\n');
@@ -8718,6 +8746,7 @@ fn run_claude_headless_turn_once(
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         let line = line.map_err(|err| err.to_string())?;
+        last_activity_ms.store(runtime_now_ms(), Ordering::SeqCst);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -8756,7 +8785,10 @@ fn run_claude_headless_turn_once(
     let _ = stderr_handle.join();
 
     if timed_out.load(Ordering::SeqCst) {
-        return Err(format!("Claude CLI timed out after {}ms", timeout_ms));
+        return Err(format!(
+            "Claude CLI idle timed out after {}ms without output",
+            timeout_ms
+        ));
     }
 
     let stderr_output = stderr_buffer
@@ -9840,6 +9872,7 @@ fn update_settings(
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
     validate_notification_config(&settings.notification_config)?;
+    settings.external_link_browser = normalize_external_link_browser(&settings.external_link_browser);
     normalize_settings_providers(&mut settings);
     {
         let mut s = store.settings.lock().map_err(|err| err.to_string())?;
@@ -17627,6 +17660,198 @@ fn open_workspace_with_default_app(path: &Path) -> Result<std::process::ExitStat
 #[serde(rename_all = "camelCase")]
 struct RevealPathResult {
     opened: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenExternalUrlResult {
+    opened: bool,
+}
+
+#[tauri::command]
+fn browser_command_name(value: &str) -> &str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "chrome" | "google-chrome" => {
+            #[cfg(target_os = "macos")]
+            {
+                "Google Chrome"
+            }
+            #[cfg(target_os = "windows")]
+            {
+                "chrome"
+            }
+            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+            {
+                "google-chrome"
+            }
+        }
+        "edge" | "microsoft-edge" | "msedge" => {
+            #[cfg(target_os = "macos")]
+            {
+                "Microsoft Edge"
+            }
+            #[cfg(target_os = "windows")]
+            {
+                "msedge"
+            }
+            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+            {
+                "microsoft-edge"
+            }
+        }
+        "firefox" => "firefox",
+        _ => value.trim(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn push_browser_install_candidate(
+    candidates: &mut Vec<String>,
+    base_dir: Option<OsString>,
+    relative_path: &str,
+) {
+    let Some(base_dir) = base_dir else {
+        return;
+    };
+    let candidate = PathBuf::from(base_dir).join(relative_path);
+    if candidate.is_file() {
+        candidates.push(candidate.to_string_lossy().to_string());
+    }
+}
+
+fn browser_command_candidates(browser: &str) -> Vec<String> {
+    let command_name = browser_command_name(browser).to_string();
+    let normalized = browser.trim().to_ascii_lowercase();
+    let mut candidates = vec![command_name];
+
+    #[cfg(target_os = "windows")]
+    match normalized.as_str() {
+        "edge" | "microsoft-edge" | "msedge" => {
+            push_browser_install_candidate(
+                &mut candidates,
+                std::env::var_os("PROGRAMFILES"),
+                "Microsoft\\Edge\\Application\\msedge.exe",
+            );
+            push_browser_install_candidate(
+                &mut candidates,
+                std::env::var_os("PROGRAMFILES(X86)"),
+                "Microsoft\\Edge\\Application\\msedge.exe",
+            );
+            push_browser_install_candidate(
+                &mut candidates,
+                std::env::var_os("LOCALAPPDATA"),
+                "Microsoft\\Edge\\Application\\msedge.exe",
+            );
+        }
+        "chrome" | "google-chrome" => {
+            push_browser_install_candidate(
+                &mut candidates,
+                std::env::var_os("PROGRAMFILES"),
+                "Google\\Chrome\\Application\\chrome.exe",
+            );
+            push_browser_install_candidate(
+                &mut candidates,
+                std::env::var_os("PROGRAMFILES(X86)"),
+                "Google\\Chrome\\Application\\chrome.exe",
+            );
+            push_browser_install_candidate(
+                &mut candidates,
+                std::env::var_os("LOCALAPPDATA"),
+                "Google\\Chrome\\Application\\chrome.exe",
+            );
+        }
+        "firefox" => {
+            push_browser_install_candidate(
+                &mut candidates,
+                std::env::var_os("PROGRAMFILES"),
+                "Mozilla Firefox\\firefox.exe",
+            );
+            push_browser_install_candidate(
+                &mut candidates,
+                std::env::var_os("PROGRAMFILES(X86)"),
+                "Mozilla Firefox\\firefox.exe",
+            );
+        }
+        _ => {}
+    }
+
+    candidates
+}
+
+fn open_url_with_default_browser(url: &str) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command.status()
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(url).status()
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        Command::new("xdg-open").arg(url).status()
+    }
+}
+
+fn open_url_with_browser(browser: &str, url: &str) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(target_os = "macos")]
+    {
+        let command_name = browser_command_name(browser);
+        if matches!(browser.trim().to_ascii_lowercase().as_str(), "chrome" | "google-chrome" | "edge" | "microsoft-edge" | "msedge") {
+            return Command::new("open").args(["-a", command_name, url]).status();
+        }
+    }
+
+    let mut last_not_found_error = None;
+    for candidate in browser_command_candidates(browser) {
+        let resolved_command = resolve_command_path(&candidate).unwrap_or(candidate);
+        match batch_aware_command(&resolved_command, &[url]).status() {
+            Ok(status) => return Ok(status),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found_error = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_not_found_error.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "browser command not found")
+    }))
+}
+
+#[tauri::command]
+fn open_external_url(
+    store: State<'_, AppStore>,
+    url: String,
+) -> Result<OpenExternalUrlResult, String> {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err("Only http and https links can be opened externally.".to_string());
+    }
+
+    let browser = {
+        let settings = store.settings.lock().map_err(|err| err.to_string())?;
+        normalize_external_link_browser(&settings.external_link_browser)
+    };
+
+    let status = if browser.eq_ignore_ascii_case("default") {
+        open_url_with_default_browser(trimmed)
+    } else {
+        open_url_with_browser(&browser, trimmed)
+    };
+
+    let status = status.map_err(|err| err.to_string())?;
+    if !status.success() {
+        return Err("Failed to open link in browser.".to_string());
+    }
+
+    Ok(OpenExternalUrlResult { opened: true })
 }
 
 #[tauri::command]
@@ -27556,6 +27781,7 @@ fn seed_settings(project_root: &str) -> AppSettings {
         max_output_chars_per_turn: DEFAULT_MAX_OUTPUT_CHARS,
         model_chat_context_turn_limit: default_model_chat_context_turn_limit(),
         process_timeout_ms: DEFAULT_TIMEOUT_MS,
+        external_link_browser: default_external_link_browser(),
         notify_on_terminal_completion: false,
         notification_config: NotificationConfig {
             notify_on_completion: false,
@@ -28176,6 +28402,7 @@ pub fn run() {
             discard_git_file,
             commit_git_changes,
             open_workspace_in,
+            open_external_url,
             reveal_path_in_file_manager,
             open_workspace_file,
             pick_workspace_folder,
