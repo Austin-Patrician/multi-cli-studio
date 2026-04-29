@@ -59,6 +59,7 @@ import {
   FileMentionCandidate,
   PickedChatAttachment,
   LocalUsageStatistics,
+  StudioPromoteRequest,
   WorkspaceSessionBatchMutationResponse,
   WorkspaceSessionCatalogPage,
   WorkspaceSessionCatalogQuery,
@@ -2351,6 +2352,13 @@ export const browserRuntime = {
   },
   async switchCliForTask(_request: CliHandoffRequest) {
     return;
+  },
+  async promoteStudioMemory(request: StudioPromoteRequest) {
+    console.info("[studio-context] promoteStudioMemory is unavailable in browser runtime", request);
+    return {
+      path: `browser-runtime:${request.kind}/${request.title || "studio-memory"}`,
+      kind: request.kind,
+    };
   },
   async appendChatMessages(_request: ChatMessagesAppendRequest) {
     return;

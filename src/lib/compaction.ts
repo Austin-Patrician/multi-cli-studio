@@ -1,12 +1,12 @@
-/**
- * compaction.ts — Multi-layer conversation compaction for multi-cli-studio.
+﻿/**
+ * compaction.ts 鈥?Multi-layer conversation compaction for multi-cli-studio.
  *
  * Three compression layers (inspired by Claude Code):
- *   1. Micro-compact  — truncate rawContent of old messages in-place
- *   2. Turn-compact   — summarise early turns into a CompactedSummary
- *   3. Full-compact   — emergency: summarise everything, keep only recent turns
+ *   1. Micro-compact  鈥?truncate rawContent of old messages in-place
+ *   2. Turn-compact   鈥?summarise early turns into a CompactedSummary
+ *   3. Full-compact   鈥?emergency: summarise everything, keep only recent turns
  *
- * Plus cross-tab context helpers, working memory, and handoff document generation.
+ * Plus cross-tab context helpers and working memory extraction.
  */
 
 import type {
@@ -14,10 +14,8 @@ import type {
   ChatMessage,
   ChatMessageBlock,
   ChatContextTurn,
-  TerminalCliContextBoundary,
   CompactedSummary,
   ConversationSession,
-  HandoffDocument,
   SharedContextEntry,
   TerminalTab,
   WorkingMemory,
@@ -41,7 +39,7 @@ import {
   CROSS_TAB_MAX_ENTRIES,
 } from "./tokenEstimation";
 
-// ── helpers ──────────────────────────────────────────────────────────────
+// 鈹€鈹€ helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 let _idCounter = 0;
 function compactId(prefix: string) {
@@ -53,7 +51,7 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-/** Group messages into user→assistant turn pairs */
+/** Group messages into user鈫抋ssistant turn pairs */
 function groupIntoTurns(messages: ChatMessage[]): Array<{ user: ChatMessage; assistant: ChatMessage }> {
   const turns: Array<{ user: ChatMessage; assistant: ChatMessage }> = [];
   let pendingUser: ChatMessage | null = null;
@@ -105,7 +103,7 @@ function extractErrors(messages: ChatMessage[]): string {
   return errors.slice(-5).join("\n");
 }
 
-// ── Layer 1: Micro Compaction ────────────────────────────────────────
+// 鈹€鈹€ Layer 1: Micro Compaction 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /**
  * Truncate `rawContent` of older messages to reduce memory & token footprint.
@@ -126,11 +124,11 @@ export function microCompact(messages: ChatMessage[]): ChatMessage[] {
   });
 }
 
-// ── Layer 2: Turn Compaction ─────────────────────────────────────────
+// 鈹€鈹€ Layer 2: Turn Compaction 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /**
  * Build a structured `CompactedSummary` from a slice of messages.
- * This is a **local** summariser — no LLM call.
+ * This is a **local** summariser 鈥?no LLM call.
  * For higher quality, an LLM-based summariser can be plugged in later.
  */
 export function buildCompactedSummary(
@@ -258,7 +256,7 @@ export function turnCompact(session: ConversationSession, cli: AgentId): {
     role: "system",
     cliId: null,
     timestamp: nowIso(),
-    content: `[Context compacted — ${compactCount} turns summarised. See compacted summary for prior context.]`,
+    content: `[Context compacted 鈥?${compactCount} turns summarised. See compacted summary for prior context.]`,
     isStreaming: false,
     durationMs: null,
     exitCode: null,
@@ -286,7 +284,7 @@ export function turnCompact(session: ConversationSession, cli: AgentId): {
 }
 
 /**
- * Full session compaction — emergency mode.
+ * Full session compaction 鈥?emergency mode.
  * Summarises *all* history into one summary, keeps only the most recent turns.
  */
 export function fullCompact(session: ConversationSession, cli: AgentId): {
@@ -315,7 +313,7 @@ export function fullCompact(session: ConversationSession, cli: AgentId): {
   if (session.compactedSummaries.length > 0) {
     const priorIntents = session.compactedSummaries.map((s) => s.intent).filter(Boolean);
     if (priorIntents.length > 0) {
-      fullSummary.intent = [...priorIntents, fullSummary.intent].join(" → ");
+      fullSummary.intent = [...priorIntents, fullSummary.intent].join(" 鈫?");
     }
     // Merge changed files
     const allFiles = new Set<string>();
@@ -342,7 +340,7 @@ export function fullCompact(session: ConversationSession, cli: AgentId): {
     role: "system",
     cliId: null,
     timestamp: nowIso(),
-    content: `[Full context compaction — entire history summarised. ${session.messages.length} messages compressed.]`,
+    content: `[Full context compaction 鈥?entire history summarised. ${session.messages.length} messages compressed.]`,
     isStreaming: false,
     durationMs: null,
     exitCode: null,
@@ -402,7 +400,7 @@ export function autoCompact(session: ConversationSession, cli: AgentId): {
   return null;
 }
 
-// ── Cross-Tab Context ────────────────────────────────────────────────
+// 鈹€鈹€ Cross-Tab Context 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /**
  * Build a SharedContextEntry from a session + its tab.
@@ -476,7 +474,7 @@ export function formatCompactedSummaries(summaries: CompactedSummary[]): string 
   return `<compacted-history>\n${blocks.join("\n\n")}\n</compacted-history>`;
 }
 
-// ── Working Memory ───────────────────────────────────────────────────
+// 鈹€鈹€ Working Memory 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /**
  * Build a live WorkingMemory snapshot from a conversation session.
@@ -562,88 +560,6 @@ type ScoredTurn = {
   recencyRank: number;
 };
 
-export interface WorkingMemoryDelta {
-  modifiedFiles: string[];
-  activeErrors: string[];
-  recentCommands: string[];
-  keyDecisions: string[];
-  buildStatusChanged: boolean;
-  buildStatus: WorkingMemory["buildStatus"];
-  contributingClis: AgentId[];
-  updatedAt: string;
-}
-
-export function diffWorkingMemory(
-  previous: WorkingMemory | null | undefined,
-  current: WorkingMemory
-): WorkingMemoryDelta | null {
-  if (!previous) {
-    return {
-      modifiedFiles: current.modifiedFiles,
-      activeErrors: current.activeErrors,
-      recentCommands: current.recentCommands,
-      keyDecisions: current.keyDecisions,
-      buildStatusChanged: current.buildStatus !== "unknown",
-      buildStatus: current.buildStatus,
-      contributingClis: current.contributingClis,
-      updatedAt: current.updatedAt,
-    };
-  }
-
-  const previousModifiedFiles = new Set(previous.modifiedFiles);
-  const previousErrors = new Set(previous.activeErrors);
-  const previousCommands = new Set(previous.recentCommands);
-  const previousDecisions = new Set(previous.keyDecisions);
-  const previousClis = new Set(previous.contributingClis);
-
-  const delta: WorkingMemoryDelta = {
-    modifiedFiles: current.modifiedFiles.filter((file) => !previousModifiedFiles.has(file)),
-    activeErrors: current.activeErrors.filter((error) => !previousErrors.has(error)),
-    recentCommands: current.recentCommands.filter((command) => !previousCommands.has(command)),
-    keyDecisions: current.keyDecisions.filter((decision) => !previousDecisions.has(decision)),
-    buildStatusChanged: previous.buildStatus !== current.buildStatus,
-    buildStatus: current.buildStatus,
-    contributingClis: current.contributingClis.filter((cli) => !previousClis.has(cli)),
-    updatedAt: current.updatedAt,
-  };
-
-  return delta.modifiedFiles.length > 0 ||
-    delta.activeErrors.length > 0 ||
-    delta.recentCommands.length > 0 ||
-    delta.keyDecisions.length > 0 ||
-    delta.buildStatusChanged ||
-    delta.contributingClis.length > 0
-    ? delta
-    : null;
-}
-
-function formatWorkingMemoryDelta(delta: WorkingMemoryDelta): string {
-  const lines: string[] = [];
-  if (delta.modifiedFiles.length > 0) {
-    lines.push(`Modified files since last session: ${delta.modifiedFiles.join(", ")}`);
-  }
-  if (delta.activeErrors.length > 0) {
-    lines.push(`New active errors:\n${delta.activeErrors.map((entry) => `  - ${entry}`).join("\n")}`);
-  }
-  if (delta.recentCommands.length > 0) {
-    lines.push(`New commands: ${delta.recentCommands.join(", ")}`);
-  }
-  if (delta.keyDecisions.length > 0) {
-    lines.push(`New decisions:\n${delta.keyDecisions.map((entry) => `  - ${entry}`).join("\n")}`);
-  }
-  if (delta.buildStatusChanged) {
-    lines.push(`Build status changed to: ${delta.buildStatus}`);
-  }
-  if (delta.contributingClis.length > 0) {
-    lines.push(`Other contributing CLIs: ${delta.contributingClis.join(", ")}`);
-  }
-  return lines.length > 0
-    ? `<working-memory-delta>\n${lines.join("\n")}\n</working-memory-delta>`
-    : "";
-}
-
-// ── Handoff Document ─────────────────────────────────────────────────
-
 /**
  * Build a token-budget-aware list of recent turns for context injection.
  * Unlike the fixed-limit version, this fits as many turns as the budget allows.
@@ -694,7 +610,7 @@ export function buildDynamicContextTurns(
     );
     const normalizedReply = turn.assistantReply.toLowerCase();
     const hasDecisionCue =
-      /(root cause|decision|resolved|fixed|changed|updated|recommend|next step|结论|原因|修复|建议|下一步)/i
+      /(root cause|decision|resolved|fixed|changed|updated|recommend|next step)/i
         .test(turn.assistantReply);
     const looksLowSignal =
       normalizedReply.length < 120 &&
@@ -749,267 +665,8 @@ export function buildDynamicContextTurns(
     .map((candidate) => candidate.turn);
 }
 
-/**
- * Build a structured handoff document when switching CLIs.
- * This provides deep context to the incoming CLI, far beyond a simple summary.
- */
-export function buildHandoffDocument(
-  session: ConversationSession,
-  fromCli: AgentId,
-  toCli: AgentId,
-  crossTabEntries: SharedContextEntry[]
-): HandoffDocument {
-  const recentTurns = buildDynamicContextTurns(session.messages, fromCli, toCli);
 
-  const workingMemory = buildWorkingMemory(session.messages);
-
-  // Extract high-confidence facts from messages (heuristic: error resolutions, key findings)
-  const kernelFacts: string[] = [];
-  for (const msg of session.messages) {
-    if (msg.role !== "assistant" || !msg.blocks) continue;
-    for (const block of msg.blocks) {
-      if (block.kind === "status" && block.level === "error") {
-        kernelFacts.push(`Error: ${block.text.slice(0, 200)}`);
-      }
-      if (block.kind === "fileChange") {
-        kernelFacts.push(`${block.changeType}: ${block.path}`);
-      }
-    }
-  }
-
-  return {
-    fromCli,
-    toCli,
-    recentTurns,
-    workingMemory,
-    kernelFacts: kernelFacts.slice(-20),
-    compactedSummaries: session.compactedSummaries,
-    crossTabEntries,
-    timestamp: nowIso(),
-  };
-}
-
-function findBoundaryStartIndex(
-  messages: ChatMessage[],
-  boundary: TerminalCliContextBoundary | null | undefined
-): number {
-  if (!boundary) return 0;
-  if (boundary.lastSeenMessageId) {
-    const index = messages.findIndex((message) => message.id === boundary.lastSeenMessageId);
-    if (index >= 0) return index + 1;
-  }
-  if (boundary.lastSeenAt) {
-    const boundaryTime = Date.parse(boundary.lastSeenAt);
-    if (Number.isFinite(boundaryTime)) {
-      const index = messages.findIndex((message) => Date.parse(message.timestamp) > boundaryTime);
-      if (index >= 0) return index;
-    }
-  }
-  return 0;
-}
-
-export function buildDeltaHandoffDocument(
-  session: ConversationSession,
-  targetCli: AgentId,
-  boundary: TerminalCliContextBoundary | null | undefined,
-  crossTabEntries: SharedContextEntry[]
-) {
-  const startIndex = findBoundaryStartIndex(session.messages, boundary);
-  const incrementalMessages = session.messages
-    .slice(startIndex)
-    .filter((message) => message.role !== "system" && message.cliId && message.cliId !== targetCli);
-  const recentTurns = buildDynamicContextTurns(incrementalMessages, targetCli, targetCli);
-  const compactedSummaries = session.compactedSummaries.filter((summary) => {
-    if (summary.sourceCli === targetCli) return false;
-    if (boundary?.lastCompactedSummaryVersion == null) return true;
-    return summary.version > boundary.lastCompactedSummaryVersion;
-  });
-  const crossTabDelta = crossTabEntries.filter((entry) => {
-    if (entry.sourceCli === targetCli) return false;
-    if (!boundary?.lastSeenAt) return true;
-    return Date.parse(entry.updatedAt) > Date.parse(boundary.lastSeenAt);
-  });
-  const hasExternalChanges =
-    recentTurns.length > 0 ||
-    compactedSummaries.length > 0 ||
-    crossTabDelta.length > 0;
-  if (!hasExternalChanges) {
-    return null;
-  }
-  const currentWorkingMemory = buildWorkingMemory(session.messages);
-  const workingMemoryDelta = diffWorkingMemory(boundary?.workingMemorySnapshot, currentWorkingMemory);
-
-  const hasDelta = hasExternalChanges || Boolean(workingMemoryDelta);
-
-  return hasDelta
-    ? {
-        targetCli,
-        summary: buildDeltaSummary(
-          targetCli,
-          recentTurns,
-          compactedSummaries,
-          crossTabDelta,
-          workingMemoryDelta
-        ),
-        recentTurns,
-        compactedSummaries: compactedSummaries.slice(0, 2),
-        crossTabEntries: crossTabDelta.slice(0, CROSS_TAB_MAX_ENTRIES),
-        workingMemoryDelta,
-        timestamp: nowIso(),
-      }
-    : null;
-}
-
-function buildDeltaSummary(
-  targetCli: AgentId,
-  recentTurns: ChatContextTurn[],
-  compactedSummaries: CompactedSummary[],
-  crossTabEntries: SharedContextEntry[],
-  workingMemoryDelta: WorkingMemoryDelta | null
-) {
-  const lines: string[] = [`Updates since ${targetCli} was last active:`];
-  if (workingMemoryDelta?.modifiedFiles.length) {
-    lines.push(`- Files changed: ${workingMemoryDelta.modifiedFiles.slice(0, 6).join(", ")}`);
-  }
-  if (workingMemoryDelta?.activeErrors.length) {
-    lines.push(`- New errors: ${workingMemoryDelta.activeErrors.slice(0, 2).join(" | ")}`);
-  }
-  if (workingMemoryDelta?.buildStatusChanged) {
-    lines.push(`- Build status is now ${workingMemoryDelta.buildStatus}`);
-  }
-  if (workingMemoryDelta?.keyDecisions.length) {
-    lines.push(`- New decisions: ${workingMemoryDelta.keyDecisions.slice(0, 2).join(" | ")}`);
-  }
-  if (recentTurns.length) {
-    const latestForeignTurn = recentTurns[recentTurns.length - 1];
-    if (latestForeignTurn) {
-      lines.push(
-        `- Latest ${latestForeignTurn.cliId} turn: ${truncate(latestForeignTurn.assistantReply, 220)}`
-      );
-    }
-  }
-  if (compactedSummaries.length) {
-    const latestSummary = compactedSummaries[compactedSummaries.length - 1];
-    if (latestSummary?.currentState) {
-      lines.push(`- Summary state: ${truncate(latestSummary.currentState, 220)}`);
-    }
-  }
-  if (crossTabEntries.length) {
-    lines.push(`- Related workspace tabs updated: ${crossTabEntries.slice(0, 2).map((entry) => entry.sourceTabTitle).join(", ")}`);
-  }
-  return lines.slice(0, 6).join("\n");
-}
-
-export function formatDeltaHandoffDocument(
-  doc: ReturnType<typeof buildDeltaHandoffDocument>
-): string {
-  if (!doc) return "";
-
-  const sections: string[] = [`[Context sync for ${doc.targetCli}]`];
-  if (doc.summary) {
-    sections.push(`<delta-summary>\n${doc.summary}\n</delta-summary>`);
-  }
-
-  const workingMemoryText = doc.workingMemoryDelta
-    ? formatWorkingMemoryDelta(doc.workingMemoryDelta)
-    : "";
-  if (workingMemoryText) sections.push(workingMemoryText);
-
-  if (doc.recentTurns.length > 0) {
-    const turnLines = doc.recentTurns.map((turn) => {
-      const ago = formatRelativeTime(turn.timestamp);
-      return `[${turn.cliId}, ${ago}] User: ${truncate(turn.userPrompt, 400)}\nAssistant: ${truncate(turn.assistantReply, 800)}`;
-    });
-    sections.push(
-      `<recent-updates count="${doc.recentTurns.length}">\n${turnLines.join("\n\n")}\n</recent-updates>`
-    );
-  }
-
-  if (doc.compactedSummaries.length > 0) {
-    sections.push(formatCompactedSummaries(doc.compactedSummaries));
-  }
-
-  if (doc.crossTabEntries.length > 0) {
-    sections.push(formatCrossTabContext(doc.crossTabEntries));
-  }
-
-  return `<handoff-delta>\n${sections.join("\n\n")}\n</handoff-delta>`;
-}
-
-/**
- * Format a HandoffDocument as a prompt-injectable block.
- */
-export function formatHandoffDocument(doc: HandoffDocument): string {
-  const sections: string[] = [];
-
-  sections.push(`[CLI Handoff: ${doc.fromCli} → ${doc.toCli}]`);
-
-  // Working memory
-  const wmText = formatWorkingMemory(doc.workingMemory);
-  if (wmText) sections.push(wmText);
-
-  // Kernel facts
-  if (doc.kernelFacts.length > 0) {
-    sections.push(
-      `<kernel-facts>\n${doc.kernelFacts.map((f) => `- ${f}`).join("\n")}\n</kernel-facts>`
-    );
-  }
-
-  // Recent turns with CLI attribution
-  if (doc.recentTurns.length > 0) {
-    const turnLines = doc.recentTurns.map((t) => {
-      const ago = formatRelativeTime(t.timestamp);
-      return `[${t.cliId}, ${ago}] User: ${truncate(t.userPrompt, 600)}\nAssistant: ${truncate(t.assistantReply, 1200)}`;
-    });
-    sections.push(
-      `<recent-conversation count="${doc.recentTurns.length}">\n${turnLines.join("\n\n")}\n</recent-conversation>`
-    );
-  }
-
-  // Compacted summaries
-  if (doc.compactedSummaries.length > 0) {
-    sections.push(formatCompactedSummaries(doc.compactedSummaries));
-  }
-
-  if (doc.crossTabEntries.length > 0) {
-    const crossTabLines = doc.crossTabEntries.map((entry) => {
-      const parts = [
-        `[Tab "${entry.sourceTabTitle}" (${entry.sourceCli}, ${formatRelativeTime(entry.updatedAt)})]`,
-      ];
-      if (entry.summary.intent) parts.push(`Intent: ${truncate(entry.summary.intent, 400)}`);
-      if (entry.summary.technicalContext) {
-        parts.push(`Context: ${truncate(entry.summary.technicalContext, 500)}`);
-      }
-      if (entry.summary.changedFiles.length > 0) {
-        parts.push(`Changed: ${entry.summary.changedFiles.slice(0, 20).join(", ")}`);
-      }
-      if (entry.summary.currentState) {
-        parts.push(`State: ${truncate(entry.summary.currentState, 500)}`);
-      }
-      if (entry.summary.nextSteps) {
-        parts.push(`Next steps: ${truncate(entry.summary.nextSteps, 300)}`);
-      }
-      return parts.join("\n");
-    });
-    sections.push(
-      `<cross-tab-context count="${doc.crossTabEntries.length}">\n${crossTabLines.join("\n\n")}\n</cross-tab-context>`
-    );
-  }
-
-  // Semantic recall context (FTS5-based, Mem0-inspired)
-  if (doc.semanticContext && doc.semanticContext.length > 0) {
-    const semanticLines = doc.semanticContext.map((chunk) => {
-      return `[${chunk.cliId}/${chunk.chunkType}] ${truncate(chunk.content, 400)}`;
-    });
-    sections.push(
-      `<semantic-memory count="${doc.semanticContext.length}">\n${semanticLines.join("\n")}\n</semantic-memory>`
-    );
-  }
-
-  return `<handoff-context>\n${sections.join("\n\n")}\n</handoff-context>`;
-}
-
-// ── Recall Search ────────────────────────────────────────────────────
+// 鈹€鈹€ Recall Search 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 /**
  * Search conversation history for messages matching a query string.
@@ -1069,7 +726,7 @@ export function recallSearch(
   return lines.join("\n");
 }
 
-// ── Utilities ────────────────────────────────────────────────────────
+// 鈹€鈹€ Utilities 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;

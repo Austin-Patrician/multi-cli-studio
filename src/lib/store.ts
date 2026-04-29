@@ -1,4 +1,4 @@
-import { create } from "zustand";
+﻿import { create } from "zustand";
 import { bridge } from "./bridge";
 import {
   AgentId,
@@ -36,15 +36,8 @@ import {
 import {
   autoCompact,
   buildDynamicContextTurns,
-  buildHandoffDocument,
   buildSharedContextEntry,
   buildWorkingMemory,
-  buildDeltaHandoffDocument,
-  formatCrossTabContext,
-  formatCompactedSummaries,
-  formatDeltaHandoffDocument,
-  formatHandoffDocument,
-  diffWorkingMemory,
 } from "./compaction";
 import {
   buildPromptWithAttachments,
@@ -80,7 +73,7 @@ const STREAM_STALE_CHECK_MS = 3000;
 const INTERRUPTED_STREAM_TEXT = "Response interrupted before completion. You can retry this prompt.";
 const PARTIAL_STREAM_TEXT = "Streaming stopped before completion. This response may be partial.";
 const GENERATED_IMAGE_DATA_URL_PATTERN = /data:(image\/(?:png|jpe?g|webp|gif|bmp|svg\+xml));base64,([A-Za-z0-9+/=\r\n]+)(?=[\s)\]}>"']|$)/gi;
-const UNSUPPORTED_IMAGE_ATTACHMENT_MESSAGE = "当前仅 Codex 支持图片附件，请切换到 Codex 后发送。";
+const UNSUPPORTED_IMAGE_ATTACHMENT_MESSAGE = "Only Codex currently supports image attachments. Switch to Codex before sending images.";
 
 type PersistenceScope = "terminalState" | "chatMessages";
 
@@ -456,14 +449,14 @@ function calculateConversationSessionEstimatedTokens(
 }
 
 function nextClonedTabTitle(baseTitle: string, existingTitles: string[]) {
-  const normalizedBase = baseTitle.replace(/\s·\s\d+$/, "");
+  const normalizedBase = baseTitle.replace(/\s路\s\d+$/, "");
   let nextIndex = 2;
 
-  while (existingTitles.includes(`${normalizedBase} · ${nextIndex}`)) {
+  while (existingTitles.includes(`${normalizedBase} 路 ${nextIndex}`)) {
     nextIndex += 1;
   }
 
-  return `${normalizedBase} · ${nextIndex}`;
+  return `${normalizedBase} 路 ${nextIndex}`;
 }
 
 function cloneChatBlocks(blocks: ChatMessageBlock[] | null | undefined) {
@@ -921,18 +914,6 @@ function extractLatestTaskContext(
   }
 
   return { latestUserPrompt, latestAssistantSummary, relevantFiles };
-}
-
-function shouldRequestSemanticRecallForHandoff(
-  prompt: string,
-  hasExistingSession: boolean,
-  initialDeltaContext: string | null
-) {
-  if (!hasExistingSession) return true;
-  if (!initialDeltaContext?.trim()) return true;
-  return /(刚才|之前|上次|继续|那个问题|改到哪|where we left off|earlier|previous|continue|resume)/i.test(
-    prompt
-  );
 }
 
 function updateCliContextBoundary(
@@ -2750,34 +2731,7 @@ export const useStore = create<StoreState>((set, get) => {
     if (!workspace || !session || !targetCli || targetCli === fromCli) return;
 
     const latest = extractLatestTaskContext(session.messages, fromCli);
-    const compactedHistory = session.compactedSummaries.length > 0
-      ? session.compactedSummaries[session.compactedSummaries.length - 1]
-      : null;
-    const crossTabContextEntries = get().getRelatedTabContexts(tabId);
-    const handoffDocument = buildHandoffDocument(
-      session,
-      fromCli,
-      targetCli,
-      crossTabContextEntries
-    );
-
-    // Enrich handoff with semantic recall — fire handoff with results when ready
-    const doHandoff = async () => {
-      try {
-        const semanticQuery = latest.latestUserPrompt || workspace.name;
-        if (semanticQuery) {
-          const chunks = await bridge.semanticRecall({
-            query: semanticQuery,
-            terminalTabId: tabId,
-            limit: 12,
-          });
-          if (chunks.length > 0) {
-            handoffDocument.semanticContext = chunks;
-          }
-        }
-      } catch {
-        // Semantic recall failure is non-critical
-      }
+    const recordSwitch = async () => {
       await bridge.switchCliForTask({
         terminalTabId: tabId,
         workspaceId: workspace.id,
@@ -2789,12 +2743,9 @@ export const useStore = create<StoreState>((set, get) => {
         latestUserPrompt: latest.latestUserPrompt,
         latestAssistantSummary: latest.latestAssistantSummary,
         relevantFiles: latest.relevantFiles,
-        compactedHistory,
-        crossTabContext: crossTabContextEntries.length > 0 ? crossTabContextEntries : null,
-        handoffDocument,
       });
     };
-    void doHandoff();
+    void recordSwitch();
   },
 
   setTabSelectedAgent: (tabId, agent) => {
@@ -3495,54 +3446,7 @@ export const useStore = create<StoreState>((set, get) => {
       const crossTabContextEntries = get().getRelatedTabContexts(tab.id);
       const workingMemory = buildWorkingMemory(session.messages);
       const existingTransportSession = tab.transportSessions[effectiveCli] ?? null;
-      const existingBoundary = tab.contextBoundariesByCli[effectiveCli] ?? null;
       const hasExistingSession = Boolean(existingTransportSession?.threadId);
-
-      const otherCliMessages = session.messages.filter(
-        (m) => m.role !== "system" && m.cliId && m.cliId !== effectiveCli
-      );
-      let fullHandoffContext: string | null = null;
-      if (otherCliMessages.length > 0) {
-        const previousCli = otherCliMessages[otherCliMessages.length - 1].cliId ?? effectiveCli;
-        const handoffDoc = buildHandoffDocument(session, previousCli, effectiveCli, crossTabContextEntries);
-        fullHandoffContext = formatHandoffDocument(handoffDoc);
-      }
-      const deltaHandoffContext =
-        hasExistingSession && existingBoundary
-          ? formatDeltaHandoffDocument(
-              buildDeltaHandoffDocument(
-                session,
-                effectiveCli,
-                existingBoundary,
-                crossTabContextEntries
-              )
-            ) || null
-          : null;
-      const initialHandoffContext =
-        hasExistingSession && existingBoundary ? deltaHandoffContext : fullHandoffContext;
-      if (otherCliMessages.length > 0 && shouldRequestSemanticRecallForHandoff(text, hasExistingSession, initialHandoffContext)) {
-        const previousCli = otherCliMessages[otherCliMessages.length - 1].cliId ?? effectiveCli;
-        const latest = extractLatestTaskContext(session.messages, previousCli);
-        try {
-          const semanticQuery = latest.latestUserPrompt || workspace.name;
-          if (semanticQuery) {
-            const chunks = await bridge.semanticRecall({
-              query: semanticQuery,
-              terminalTabId: tab.id,
-              limit: 3,
-            });
-            if (chunks.length > 0 && !hasExistingSession) {
-              const handoffDoc = buildHandoffDocument(session, previousCli, effectiveCli, crossTabContextEntries);
-              handoffDoc.semanticContext = chunks;
-              fullHandoffContext = formatHandoffDocument(handoffDoc);
-            }
-          }
-        } catch {
-          // Semantic recall is optional for handoff generation.
-        }
-      }
-      const finalInitialHandoffContext =
-        hasExistingSession && existingBoundary ? deltaHandoffContext : fullHandoffContext;
 
       const baseChatRequest = {
         cliId: effectiveCli,
@@ -3572,7 +3476,6 @@ export const useStore = create<StoreState>((set, get) => {
         messageId = await bridge.sendChatMessage({
           ...baseChatRequest,
           transportSession: existingTransportSession,
-          handoffContext: finalInitialHandoffContext,
         });
       } catch (initialError) {
         if (!hasExistingSession || !existingTransportSession?.threadId) {
@@ -3601,7 +3504,6 @@ export const useStore = create<StoreState>((set, get) => {
         messageId = await bridge.sendChatMessage({
           ...baseChatRequest,
           transportSession: null,
-          handoffContext: fullHandoffContext ?? finalInitialHandoffContext,
         });
       }
 
@@ -4816,3 +4718,4 @@ export const useStore = create<StoreState>((set, get) => {
   },
   };
 });
+

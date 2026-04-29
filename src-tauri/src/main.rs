@@ -5,6 +5,7 @@ mod automation;
 mod local_usage;
 mod session_management;
 mod storage;
+mod studio_context;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -50,11 +51,15 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use storage::{
-    default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest, HandoffEvent,
+    default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest,
     MessageBlocksUpdateRequest, MessageDeleteRequest, MessageEventsAppendRequest,
     MessageFinalizeRequest, MessageSessionSeed, MessageStreamUpdateRequest, PersistedChatMessage,
     PersistedConversationSession, PersistedTerminalState, SemanticMemoryChunk,
     SemanticRecallRequest, TaskContextBundle, TaskKernel, TaskRecentTurn, TerminalStorage,
+};
+use studio_context::{
+    export_studio_context, promote_studio_context, StudioContextExportInput, StudioPromoteRequest,
+    StudioPromoteResult,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
@@ -3183,48 +3188,6 @@ struct WorkingMemoryPayload {
     contributing_clis: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct SemanticMemoryChunkPayload {
-    #[serde(default)]
-    terminal_tab_id: String,
-    #[serde(default)]
-    cli_id: String,
-    #[serde(default)]
-    message_id: String,
-    #[serde(default)]
-    chunk_type: String,
-    #[serde(default)]
-    content: String,
-    #[serde(default)]
-    created_at: String,
-    #[serde(default)]
-    rank: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct HandoffDocument {
-    #[serde(default)]
-    from_cli: String,
-    #[serde(default)]
-    to_cli: String,
-    #[serde(default)]
-    recent_turns: Vec<ChatContextTurn>,
-    #[serde(default)]
-    working_memory: WorkingMemoryPayload,
-    #[serde(default)]
-    kernel_facts: Vec<String>,
-    #[serde(default)]
-    compacted_summaries: Vec<CompactedSummary>,
-    #[serde(default)]
-    cross_tab_entries: Vec<SharedContextEntry>,
-    #[serde(default)]
-    semantic_context: Vec<SemanticMemoryChunkPayload>,
-    #[serde(default)]
-    timestamp: String,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatPromptRequest {
@@ -3252,9 +3215,6 @@ struct ChatPromptRequest {
     cross_tab_context: Option<Vec<SharedContextEntry>>,
     #[serde(default)]
     working_memory: Option<WorkingMemoryPayload>,
-    /// Pre-formatted handoff context injected on the first turn after a CLI switch
-    #[serde(default)]
-    handoff_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3306,11 +3266,6 @@ struct CliHandoffRequest {
     latest_assistant_summary: Option<String>,
     #[serde(default)]
     relevant_files: Vec<String>,
-    compacted_history: Option<CompactedSummary>,
-    #[serde(default)]
-    cross_tab_context: Option<Vec<SharedContextEntry>>,
-    #[serde(default)]
-    handoff_document: Option<HandoffDocument>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -11963,30 +11918,6 @@ fn switch_cli_for_task(
     let project_name = request.project_name.clone();
     let latest_user_prompt = request.latest_user_prompt.clone();
     let relevant_files = request.relevant_files.clone();
-    let fallback_handoff_document = if request.handoff_document.is_none()
-        && (request.compacted_history.is_some() || request.cross_tab_context.is_some())
-    {
-        Some(HandoffDocument {
-            from_cli: request.from_cli.clone(),
-            to_cli: request.to_cli.clone(),
-            recent_turns: Vec::new(),
-            working_memory: WorkingMemoryPayload::default(),
-            kernel_facts: Vec::new(),
-            compacted_summaries: request.compacted_history.clone().into_iter().collect(),
-            cross_tab_entries: request.cross_tab_context.clone().unwrap_or_default(),
-            semantic_context: Vec::new(),
-            timestamp: Local::now().to_rfc3339(),
-        })
-    } else {
-        None
-    };
-    let handoff_document = request
-        .handoff_document
-        .as_ref()
-        .or(fallback_handoff_document.as_ref());
-    let handoff_payload_json = handoff_document
-        .map(|doc| serde_json::to_string(doc).map_err(|err| err.to_string()))
-        .transpose()?;
     let bundle = store
         .terminal_storage
         .switch_cli_for_task(&CliHandoffStorageRequest {
@@ -12000,7 +11931,7 @@ fn switch_cli_for_task(
             latest_user_prompt: latest_user_prompt.clone(),
             latest_assistant_summary: request.latest_assistant_summary.clone(),
             relevant_files: relevant_files.clone(),
-            handoff_payload_json,
+            handoff_payload_json: None,
         })?;
 
     if let Ok(mut ctx) = store.context.lock() {
@@ -12373,7 +12304,7 @@ fn send_chat_message(
     let _ = terminal_storage.maybe_auto_compact_terminal_tab(&terminal_tab_id);
 
     // Build script with tab-scoped context
-    let composed_prompt_base = {
+    let (composed_prompt_base, studio_context_metrics) = {
         let mut state = store.state.lock().map_err(|e| e.to_string())?.clone();
         state.workspace.project_root = project_root.clone();
         state.workspace.project_name = project_name.clone();
@@ -12387,17 +12318,53 @@ fn send_chat_message(
             .as_ref()
             .and_then(|s| s.thread_id.as_ref())
             .is_some();
-        let stored_handoff_context = pending_handoff.as_ref().map(|handoff| {
-            handoff
-                .payload_json
-                .as_deref()
-                .and_then(|payload| serde_json::from_str::<HandoffDocument>(payload).ok())
-                .map(|doc| format_handoff_document(&doc))
-                .unwrap_or_else(|| format_handoff_event_fallback(handoff))
-        });
-        let effective_handoff_context =
-            stored_handoff_context.or_else(|| request.handoff_context.clone());
-        compose_tab_context_prompt(
+        let studio_context = if remote_workspace {
+            None
+        } else {
+            export_studio_context(&StudioContextExportInput {
+                project_root: effective_project_root.clone(),
+                project_name: project_name.clone(),
+                workspace_id: workspace_id.clone(),
+                terminal_tab_id: terminal_tab_id.clone(),
+                cli_id: cli_id.clone(),
+                branch: state.workspace.branch.clone(),
+                dirty_files: state.workspace.dirty_files,
+                failing_checks: state.workspace.failing_checks,
+                write_mode,
+                is_session_resuming: is_resuming,
+                user_prompt: prompt_for_context.clone(),
+                handoff_summary: pending_handoff
+                    .as_ref()
+                    .and_then(|handoff| handoff.latest_conclusion.clone()),
+                handoff_files: pending_handoff
+                    .as_ref()
+                    .map(|handoff| handoff.files.clone())
+                    .unwrap_or_default(),
+                handoff_next_step: pending_handoff
+                    .as_ref()
+                    .and_then(|handoff| handoff.next_step.clone()),
+                compacted_context: request
+                    .compacted_summaries
+                    .as_ref()
+                    .map(|summaries| format_compacted_summaries_section(summaries))
+                    .filter(|value| !value.trim().is_empty()),
+                cross_tab_context: request
+                    .cross_tab_context
+                    .as_ref()
+                    .map(|entries| format_cross_tab_entries_section(entries, false))
+                    .filter(|value| !value.trim().is_empty()),
+                working_memory: request
+                    .working_memory
+                    .as_ref()
+                    .map(|memory| format_working_memory_section(Some(memory)))
+                    .filter(|value| !value.trim().is_empty()),
+            })
+            .ok()
+            .flatten()
+        };
+        let studio_context_prelude = studio_context.as_ref().map(|export| export.prelude.as_str());
+        let studio_context_metrics = studio_context.as_ref().map(|export| export.metrics.clone());
+        let composed = compose_tab_context_prompt(
             &state,
             &terminal_storage,
             &cli_id,
@@ -12412,14 +12379,28 @@ fn send_chat_message(
             request.cross_tab_context.as_ref(),
             request.working_memory.as_ref(),
             is_resuming,
-            effective_handoff_context.as_deref(),
-        )
+            studio_context_prelude,
+        );
+        (composed, studio_context_metrics)
     };
     let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
         format!("/{} {}", skill.name, composed_prompt_base)
     } else {
         composed_prompt_base
     };
+    if let Some(mut metrics) = studio_context_metrics {
+        metrics.final_prompt_chars = composed_prompt.chars().count();
+        match serde_json::to_string(&metrics) {
+            Ok(payload) => println!("[studio-context] {payload}"),
+            Err(_) => println!(
+                "[studio-context] prelude_chars={} runtime_context_chars={} task_chars={} final_prompt_chars={}",
+                metrics.prelude_chars,
+                metrics.runtime_context_chars,
+                metrics.task_chars,
+                metrics.final_prompt_chars
+            ),
+        }
+    }
 
     let msg_id = message_id.clone();
     let app_handle = app.clone();
@@ -13185,6 +13166,11 @@ fn send_chat_message(
     });
 
     Ok(message_id)
+}
+
+#[tauri::command]
+fn promote_studio_memory(request: StudioPromoteRequest) -> Result<StudioPromoteResult, String> {
+    promote_studio_context(&request)
 }
 
 #[tauri::command]
@@ -19746,111 +19732,6 @@ fn format_cross_tab_entries_section(entries: &[SharedContextEntry], detailed: bo
     )
 }
 
-fn format_handoff_document(doc: &HandoffDocument) -> String {
-    let mut sections = Vec::new();
-    sections.push(format!("[CLI Handoff: {} -> {}]", doc.from_cli, doc.to_cli));
-
-    let working_memory = format_working_memory_section(Some(&doc.working_memory));
-    if !working_memory.is_empty() {
-        sections.push(working_memory.trim().to_string());
-    }
-
-    if !doc.kernel_facts.is_empty() {
-        sections.push(format!(
-            "<kernel-facts>\n{}\n</kernel-facts>",
-            doc.kernel_facts
-                .iter()
-                .take(20)
-                .map(|fact| format!("- {}", truncate_str(fact, 400)))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-
-    if !doc.recent_turns.is_empty() {
-        sections.push(format!(
-            "<recent-conversation count=\"{}\">\n{}\n</recent-conversation>",
-            doc.recent_turns.len(),
-            doc.recent_turns
-                .iter()
-                .map(|turn| {
-                    format!(
-                        "[{}, {}] User: {}\nAssistant: {}",
-                        turn.cli_id,
-                        turn.timestamp,
-                        truncate_str(&turn.user_prompt, 600),
-                        truncate_str(&turn.assistant_reply, 1200)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        ));
-    }
-
-    let compacted = format_compacted_summaries_section(&doc.compacted_summaries);
-    if !compacted.is_empty() {
-        sections.push(compacted.trim().to_string());
-    }
-
-    let cross_tab = format_cross_tab_entries_section(&doc.cross_tab_entries, true);
-    if !cross_tab.is_empty() {
-        sections.push(cross_tab.trim().to_string());
-    }
-
-    if !doc.semantic_context.is_empty() {
-        sections.push(format!(
-            "<semantic-memory count=\"{}\">\n{}\n</semantic-memory>",
-            doc.semantic_context.len(),
-            doc.semantic_context
-                .iter()
-                .map(|chunk| {
-                    format!(
-                        "[{}/{}] {}",
-                        chunk.cli_id,
-                        chunk.chunk_type,
-                        truncate_str(&chunk.content, 400)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-
-    format!(
-        "<handoff-context>\n{}\n</handoff-context>",
-        sections.join("\n\n")
-    )
-}
-
-fn format_handoff_event_fallback(handoff: &HandoffEvent) -> String {
-    let mut lines = vec![format!(
-        "[CLI Handoff: {} -> {}]",
-        handoff.from_cli, handoff.to_cli
-    )];
-    if let Some(reason) = handoff.reason.as_deref() {
-        if !reason.trim().is_empty() {
-            lines.push(format!("Reason: {}", reason));
-        }
-    }
-    if let Some(conclusion) = handoff.latest_conclusion.as_deref() {
-        if !conclusion.trim().is_empty() {
-            lines.push(format!("Conclusion: {}", truncate_str(conclusion, 600)));
-        }
-    }
-    if !handoff.files.is_empty() {
-        lines.push(format!("Files: {}", handoff.files.join(", ")));
-    }
-    if let Some(next_step) = handoff.next_step.as_deref() {
-        if !next_step.trim().is_empty() {
-            lines.push(format!("Next step: {}", truncate_str(next_step, 400)));
-        }
-    }
-    format!(
-        "<handoff-context>\n{}\n</handoff-context>",
-        lines.join("\n")
-    )
-}
-
 /// Builds a unified context prompt including conversation history from all CLIs
 fn compose_tab_context_prompt(
     state: &AppStateDto,
@@ -19867,7 +19748,7 @@ fn compose_tab_context_prompt(
     cross_tab_context: Option<&Vec<SharedContextEntry>>,
     working_memory: Option<&WorkingMemoryPayload>,
     is_session_resuming: bool,
-    handoff_context: Option<&str>,
+    studio_context_prelude: Option<&str>,
 ) -> String {
     let workspace_preamble = format!(
         "You are operating inside Multi CLI Studio.\n\
@@ -19894,43 +19775,43 @@ fn compose_tab_context_prompt(
          - Answer directly in clean Markdown when it improves readability.\n\
          - Use fenced code blocks only for commands, code, patches, or logs.";
 
-    // Build compacted history section
-    let compacted_section = if is_session_resuming {
-        String::new()
-    } else {
-        compacted_summaries
-            .map(|summaries| format_compacted_summaries_section(summaries))
-            .unwrap_or_default()
-    };
-
-    let cross_tab_section = cross_tab_context
-        .map(|entries| format_cross_tab_entries_section(entries, false))
-        .unwrap_or_default();
-
     let workspace_tail = format!(
         "{}\n\n--- Current workspace ---\n\
          Dirty files: {}\n\
-         Failing checks: {}{}",
+         Failing checks: {}",
         rules,
         state.workspace.dirty_files,
         state.workspace.failing_checks,
-        format_working_memory_section(working_memory),
     );
 
-    // Format the optional handoff context block (injected on first turn after CLI switch)
-    let handoff_section = handoff_context
+    let studio_context_section = studio_context_prelude
         .map(|ctx| format!("\n\n{}", ctx))
         .unwrap_or_default();
 
     // When resuming a native CLI session, skip the heavy context assembly
     // (conversation history is already maintained by the CLI's session).
-    // Only include lightweight per-turn metadata + any handoff context.
+    // Only include lightweight per-turn metadata + the Studio context prelude.
     if is_session_resuming {
         return format!(
-            "{}\n\n{}{}{}\n\n--- User request ---\n{}",
-            workspace_preamble, workspace_tail, cross_tab_section, handoff_section, prompt
+            "{}\n\n{}{}\n\n--- User request ---\n{}",
+            workspace_preamble, workspace_tail, studio_context_section, prompt
         );
     }
+
+    if studio_context_prelude.is_some() {
+        return format!(
+            "{}\n\n{}{}\n\n--- User request ---\n{}",
+            workspace_preamble, workspace_tail, studio_context_section, prompt
+        );
+    }
+
+    let compacted_section = compacted_summaries
+        .map(|summaries| format_compacted_summaries_section(summaries))
+        .unwrap_or_default();
+    let cross_tab_section = cross_tab_context
+        .map(|entries| format_cross_tab_entries_section(entries, false))
+        .unwrap_or_default();
+    let legacy_working_memory_section = format_working_memory_section(working_memory);
 
     let fallback_recent_turns = recent_turns
         .iter()
@@ -19958,9 +19839,9 @@ fn compose_tab_context_prompt(
                 "{}\n\n{}{}{}{}",
                 workspace_preamble,
                 workspace_tail,
+                legacy_working_memory_section,
                 compacted_section,
                 cross_tab_section,
-                handoff_section
             ),
             &fallback_recent_turns,
             write_mode,
@@ -19971,9 +19852,9 @@ fn compose_tab_context_prompt(
                 "{}\n\n{}{}{}{}\n\n--- User request ---\n{}",
                 workspace_preamble,
                 workspace_tail,
+                legacy_working_memory_section,
                 compacted_section,
                 cross_tab_section,
-                handoff_section,
                 prompt
             )
         })
@@ -28374,6 +28255,7 @@ pub fn run() {
             save_text_to_downloads,
             switch_cli_for_task,
             send_chat_message,
+            promote_studio_memory,
             interrupt_chat_turn,
             run_auto_orchestration,
             respond_assistant_approval,

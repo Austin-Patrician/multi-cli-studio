@@ -59,6 +59,8 @@ import {
   PersistedTerminalState,
   SemanticMemoryChunk,
   SemanticRecallRequest,
+  StudioPromoteRequest,
+  StudioPromoteResult,
   ToolApprovalMode,
   WorkspaceSessionBatchMutationResponse,
   WorkspaceSessionCatalogPage,
@@ -144,6 +146,7 @@ export interface RuntimeBridge {
   loadTerminalSession: (terminalTabId: string) => Promise<ConversationSession | null>;
   saveTerminalState: (state: PersistedTerminalState) => Promise<void>;
   switchCliForTask: (request: CliHandoffRequest) => Promise<void>;
+  promoteStudioMemory: (request: StudioPromoteRequest) => Promise<StudioPromoteResult>;
   appendChatMessages: (request: ChatMessagesAppendRequest) => Promise<void>;
   updateChatMessageStream: (request: ChatMessageStreamUpdateRequest) => Promise<void>;
   finalizeChatMessage: (request: ChatMessageFinalizeRequest) => Promise<void>;
@@ -519,6 +522,10 @@ const tauriRuntime: RuntimeBridge = {
   async switchCliForTask(request) {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("switch_cli_for_task", { request });
+  },
+  async promoteStudioMemory(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<StudioPromoteResult>("promote_studio_memory", { request });
   },
   async appendChatMessages(request) {
     const { invoke } = await import("@tauri-apps/api/core");

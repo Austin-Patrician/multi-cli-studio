@@ -976,25 +976,6 @@ export interface WorkingMemory {
   updatedAt: string;
 }
 
-/** Structured handoff document generated on CLI switch for deep context injection */
-export interface HandoffDocument {
-  fromCli: AgentId;
-  toCli: AgentId;
-  /** Full recent turns (token-budget-aware, not fixed count) */
-  recentTurns: ChatContextTurn[];
-  /** Structured working memory snapshot */
-  workingMemory: WorkingMemory;
-  /** High-confidence kernel facts */
-  kernelFacts: string[];
-  /** Compacted history summaries */
-  compactedSummaries: CompactedSummary[];
-  /** Cross-tab context entries */
-  crossTabEntries: SharedContextEntry[];
-  /** Semantic memory recall results for deep context (from FTS5 search) */
-  semanticContext?: SemanticMemoryChunk[];
-  timestamp: string;
-}
-
 /** A chunk returned from semantic FTS5-based recall search */
 export interface SemanticMemoryChunk {
   terminalTabId: string;
@@ -1237,14 +1218,27 @@ export interface ChatPromptRequest {
   permissionOverride?: string | null;
   imageAttachments?: string[] | null;
   transportSession?: AgentTransportSession | null;
-  /** Compacted history from this tab's earlier conversation segments */
+  /** Runtime-file context only; not injected directly when Studio Context is available. */
   compactedSummaries?: CompactedSummary[] | null;
-  /** Summaries from sibling tabs in the same workspace */
+  /** Runtime-file context only; not injected directly when Studio Context is available. */
   crossTabContext?: SharedContextEntry[] | null;
-  /** Structured working memory for context continuity */
+  /** Runtime-file context only; not injected directly when Studio Context is available. */
   workingMemory?: WorkingMemory | null;
-  /** Handoff document injected on the first turn after a CLI switch */
-  handoffContext?: string | null;
+}
+
+export type StudioPromoteKind = "spec" | "task" | "journal";
+
+export interface StudioPromoteRequest {
+  projectRoot: string;
+  kind: StudioPromoteKind;
+  title: string;
+  content: string;
+  source?: string | null;
+}
+
+export interface StudioPromoteResult {
+  path: string;
+  kind: StudioPromoteKind;
 }
 
 export interface AutoOrchestrationRequest {
@@ -1273,12 +1267,6 @@ export interface CliHandoffRequest {
   latestUserPrompt?: string | null;
   latestAssistantSummary?: string | null;
   relevantFiles?: string[];
-  /** Compressed history from the outgoing CLI */
-  compactedHistory?: CompactedSummary | null;
-  /** Summaries from sibling tabs */
-  crossTabContext?: SharedContextEntry[] | null;
-  /** Structured handoff document for deep context injection */
-  handoffDocument?: HandoffDocument | null;
 }
 
 export type AssistantApprovalDecision = "allowOnce" | "allowAlways" | "deny";
