@@ -317,6 +317,41 @@ export function DesktopVendorsSection({
     () => buildCodexLocalView(codexConfigFiles),
     [codexConfigFiles],
   );
+  const activeEmptyStateLabel = useMemo(() => {
+    if (activeAgent?.runtime.installed) {
+      return null;
+    }
+
+    const configuredPath = settings?.cliPaths?.[activeVendorTab]?.trim() || "auto";
+    const manualPath = configuredPath !== "auto" ? configuredPath : "";
+
+    if (activeVendorTab === "claude") {
+      if (claudeConfigFile.settings.exists) {
+        return manualPath
+          ? `已检测到 Claude 本地 settings.json，但仍未找到 Claude CLI 可执行文件。请检查自定义路径 \`${manualPath}\` 是否指向可执行的 \`claude\`。`
+          : "已检测到 Claude 本地 settings.json，但当前 app 运行环境里未找到 Claude CLI 可执行文件。请安装 `claude` 或在“设置”页填写正确的自定义 CLI 路径。";
+      }
+    }
+
+    if (activeVendorTab === "codex") {
+      if (codexConfigFiles.config.exists || codexConfigFiles.auth.exists) {
+        return manualPath
+          ? `已检测到 Codex 本地配置文件，但仍未找到 Codex CLI 可执行文件。请检查自定义路径 \`${manualPath}\` 是否指向可执行的 \`codex\`。`
+          : "已检测到 Codex 本地配置文件，但当前 app 运行环境里未找到 Codex CLI 可执行文件。请安装 `codex` 或在“设置”页填写正确的自定义 CLI 路径。";
+      }
+    }
+
+    return manualPath
+      ? `当前未检测到该 CLI。请检查自定义路径 \`${manualPath}\` 是否正确，或安装后重新刷新运行时。`
+      : "当前未检测到该 CLI。可先在“设置”页填写自定义 CLI 路径，或安装后重新刷新运行时。";
+  }, [
+    activeAgent?.runtime.installed,
+    activeVendorTab,
+    claudeConfigFile.settings.exists,
+    codexConfigFiles.auth.exists,
+    codexConfigFiles.config.exists,
+    settings?.cliPaths,
+  ]);
 
   const refreshRuntimeState = useCallback(
     async (refreshRuntime = true) => {
@@ -461,9 +496,9 @@ export function DesktopVendorsSection({
           </div>
         ) : null}
 
-        {!activeAgent?.runtime.installed ? (
+        {!activeAgent?.runtime.installed && activeEmptyStateLabel ? (
           <div className="dcc-empty-state">
-            当前未检测到该 CLI。可先在“设置”页填写自定义 CLI 路径，或安装后重新刷新运行时。
+            {activeEmptyStateLabel}
           </div>
         ) : null}
       </section>
