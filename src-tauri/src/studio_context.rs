@@ -371,8 +371,8 @@ struct ManifestEntry {
 
 #[derive(Debug, Clone)]
 struct ContextCuration {
-    implement_entries: Vec<ManifestEntry>,
-    check_entries: Vec<ManifestEntry>,
+    implement_entries: Vec<CuratedManifestEntry>,
+    check_entries: Vec<CuratedManifestEntry>,
     report: String,
 }
 
@@ -709,24 +709,11 @@ pub fn export_studio_context(
         &durable_task_dir.join("context-selection-report.md"),
         &trim_to_limit(&curation.report, MAX_REPORT_CHARS),
     )?;
-    write_manifest(
+    write_curated_manifest(
         &task_dir.join("implement.jsonl"),
         &curation.implement_entries,
-        ManifestEntry {
-            file: ".studio/spec/index.md".to_string(),
-            reason: "Optional durable project spec index. If missing, continue with runtime context and keep durable spec writes behind policy-check.".to_string(),
-            score: 0,
-        },
     )?;
-    write_manifest(
-        &task_dir.join("check.jsonl"),
-        &curation.check_entries,
-        ManifestEntry {
-            file: ".studio/spec/index.md".to_string(),
-            reason: "Optional durable project verification spec index. If missing, continue with runtime context and keep durable spec writes behind policy-check.".to_string(),
-            score: 0,
-        },
-    )?;
+    write_curated_manifest(&task_dir.join("check.jsonl"), &curation.check_entries)?;
     sync_manifest_to_durable_task(
         &durable_task_dir.join("implement.jsonl"),
         &task_dir.join("implement.jsonl"),
@@ -734,6 +721,28 @@ pub fn export_studio_context(
     sync_manifest_to_durable_task(
         &durable_task_dir.join("check.jsonl"),
         &task_dir.join("check.jsonl"),
+    )?;
+    let has_fallback = curation
+        .implement_entries
+        .iter()
+        .chain(curation.check_entries.iter())
+        .any(|entry| entry.fallback);
+    update_context_curator_task_state(
+        &durable_task_dir.join("task.json"),
+        &task_id,
+        if has_fallback { "fallback" } else { "curated" },
+        if has_fallback {
+            "heuristic-fallback"
+        } else {
+            "host-curated"
+        },
+        has_fallback,
+        if has_fallback {
+            "Host context-curator could not select a durable spec or research file; using the managed fallback entry."
+        } else {
+            "Host context-curator produced validated manifests from existing spec and research files."
+        },
+        None,
     )?;
 
     let context_path = runtime_dir.join("context.md");
@@ -1550,6 +1559,9 @@ pub fn record_context_curator_fallback(
     }
     let task_dir = project_root.join(".studio").join("tasks").join(task_id);
     fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
+    if task_has_curated_context(&task_dir) {
+        return Ok(());
+    }
     let report_path = task_dir.join("context-selection-report.md");
     let error_summary = error.map(summarize_context_curator_error);
     let fallback_report =
@@ -1623,36 +1635,6 @@ pub fn promote_studio_context(
     })
 }
 
-fn write_manifest(
-    path: &Path,
-    entries: &[ManifestEntry],
-    fallback: ManifestEntry,
-) -> Result<(), String> {
-    if !should_write_managed_jsonl(path)? {
-        return Ok(());
-    }
-    let selected = if entries.is_empty() {
-        vec![fallback]
-    } else {
-        entries.to_vec()
-    };
-    let mut content = String::new();
-    for entry in selected.into_iter().take(MAX_MANIFEST_ENTRIES) {
-        let line = serde_json::json!({
-            "_studioManaged": true,
-            "curatedBy": "heuristic-fallback",
-            "fallback": true,
-            "file": entry.file,
-            "reason": entry.reason,
-            "score": entry.score,
-        })
-        .to_string();
-        content.push_str(&line);
-        content.push('\n');
-    }
-    atomic_write(path, &content)
-}
-
 fn fallback_curated_entry(reason: &str) -> CuratedManifestEntry {
     CuratedManifestEntry {
         file: ".studio/spec/index.md".to_string(),
@@ -1692,6 +1674,40 @@ fn sync_manifest_to_durable_task(target: &Path, source: &Path) -> Result<(), Str
     }
     let content = fs::read_to_string(source).map_err(|err| err.to_string())?;
     atomic_write(target, &content)
+}
+
+fn task_has_curated_context(task_dir: &Path) -> bool {
+    read_json_file(&task_dir.join("task.json"))
+        .ok()
+        .and_then(|task| task.get("contextCurator").cloned())
+        .and_then(|curator| {
+            curator
+                .get("fallback")
+                .and_then(Value::as_bool)
+                .map(|fallback| !fallback)
+        })
+        .unwrap_or(false)
+        || manifest_has_curated_context(&task_dir.join("implement.jsonl"))
+        || manifest_has_curated_context(&task_dir.join("check.jsonl"))
+}
+
+fn manifest_has_curated_context(path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    content.lines().any(|line| {
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            return false;
+        };
+        value.get("curatedBy").and_then(Value::as_str) == Some("context-curator")
+            && value.get("fallback").and_then(Value::as_bool) != Some(true)
+            && value
+                .get("file")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|file| !file.is_empty())
+                .is_some()
+    })
 }
 
 fn ensure_workflow_files(project_root: &Path) -> Result<(), String> {
@@ -2469,12 +2485,58 @@ fn curate_context(
     prioritize_check_entries(&mut check_entries);
     check_entries.truncate(MAX_MANIFEST_ENTRIES);
 
-    let report = render_context_selection_report(input, task_id, &entries, &check_entries);
+    let implement_entries = manifest_entries_to_curated(
+        entries,
+        "Host context-curator did not select an implementation-specific file; using the managed spec index fallback.",
+    );
+    let check_entries = manifest_entries_to_curated(
+        check_entries,
+        "Host context-curator did not select a verification-specific file; using the managed spec index fallback.",
+    );
+    let report = render_curated_context_selection_report(
+        task_id,
+        Some(
+            "Host context-curator selected task-specific durable context from existing `.studio/spec/` and task research files.",
+        ),
+        &implement_entries,
+        &check_entries,
+    );
     Ok(ContextCuration {
-        implement_entries: entries,
+        implement_entries,
         check_entries,
         report,
     })
+}
+
+fn manifest_entries_to_curated(
+    entries: Vec<ManifestEntry>,
+    fallback_reason: &str,
+) -> Vec<CuratedManifestEntry> {
+    if entries.is_empty() {
+        return vec![fallback_curated_entry(fallback_reason)];
+    }
+    entries
+        .into_iter()
+        .map(|entry| CuratedManifestEntry {
+            file: entry.file,
+            reason: format!(
+                "{} Host-selected deterministic context entry (score {}).",
+                entry.reason, entry.score
+            ),
+            confidence: confidence_from_manifest_score(entry.score),
+            fallback: false,
+        })
+        .collect()
+}
+
+fn confidence_from_manifest_score(score: i64) -> f64 {
+    match score {
+        value if value >= 70 => 0.92,
+        value if value >= 50 => 0.85,
+        value if value >= 25 => 0.75,
+        value if value > 0 => 0.65,
+        _ => 0.55,
+    }
 }
 
 fn select_spec_manifest_entries(
@@ -2568,42 +2630,8 @@ fn prioritize_check_entries(entries: &mut [ManifestEntry]) {
     });
 }
 
-fn render_context_selection_report(
-    input: &StudioContextExportInput,
-    task_id: &str,
-    implement_entries: &[ManifestEntry],
-    check_entries: &[ManifestEntry],
-) -> String {
-    let request = clean_studio_text(&input.user_prompt);
-    format!(
-        "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: context-curator gate\nStatus: fallback\nMode: heuristic-fallback\nStrategy: Heuristic projection is active until the context-curator returns host-validated manifests.\n\n## Request\n\n{}\n\n## Implement Manifest\n\n{}\n\n## Check Manifest\n\n{}\n\n## Policy Gates\n\n- Context curation is automatic; no human approval is required.\n- Source files to edit are not pre-registered in manifests.\n- Long-term spec/workspace writes require provenance, confidence, and policy-check output.\n- These entries are explicitly marked as fallback and may be replaced by curated manifests when the gate succeeds.\n",
-        Local::now().to_rfc3339(),
-        non_empty(&request, "Continue the active task."),
-        render_manifest_report_entries(implement_entries),
-        render_manifest_report_entries(check_entries),
-    )
-}
-
-fn render_manifest_report_entries(entries: &[ManifestEntry]) -> String {
-    if entries.is_empty() {
-        return "- No specific entries selected; fallback manifest will be used.".to_string();
-    }
-    entries
-        .iter()
-        .map(|entry| {
-            format!(
-                "- `{}` (fallback, score {}): {}",
-                entry.file, entry.score, entry.reason
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn infer_task_status(input: &StudioContextExportInput) -> &'static str {
-    if input.failing_checks > 0 {
-        "checking"
-    } else if input.write_mode {
+    if input.write_mode {
         "implementing"
     } else {
         "context_curated"
@@ -2972,7 +3000,7 @@ fn render_curated_context_selection_report(
     check_entries: &[CuratedManifestEntry],
 ) -> String {
     format!(
-        "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: Studio silent context-curator\nStrategy: Trellis-class automatic agent-curated projection.\n\n## Curator Summary\n\n{}\n\n## Implement Manifest\n\n{}\n\n## Check Manifest\n\n{}\n\n## Policy Gates\n\n- Context curation ran automatically; no human approval was required.\n- Curator output was host-validated before writing manifests.\n- Only existing `.studio/spec/**/*.md` and task research files were accepted.\n- Source files and absolute/parent paths were rejected.\n",
+        "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: Studio context-curator\nStatus: curated\nMode: host-curated\nStrategy: Trellis-class automatic curated projection.\n\n## Curator Summary\n\n{}\n\n## Implement Manifest\n\n{}\n\n## Check Manifest\n\n{}\n\n## Policy Gates\n\n- Context curation ran automatically; no human approval was required.\n- Curator output was host-validated before writing manifests.\n- Only existing `.studio/spec/**/*.md` and task research files were accepted.\n- Source files and absolute/parent paths were rejected.\n",
         Local::now().to_rfc3339(),
         curator_report
             .map(str::trim)
@@ -2989,7 +3017,7 @@ fn render_context_curator_fallback_report(
     error_summary: Option<&str>,
 ) -> String {
     format!(
-        "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: context-curator gate\nStatus: fallback\nMode: heuristic-fallback\n\n## Fallback Reason\n\n{}\n\n## Curator Error Summary\n\n{}\n\n## Active Manifest Policy\n\n- `implement.jsonl` and `check.jsonl` remain usable, but they are explicitly heuristic fallback projections.\n- Curated manifests are applied only after the context-curator returns host-validated JSON with existing spec/research paths.\n- Full curator transcripts are intentionally not persisted in durable Studio context.\n- The UI must show this gate as fallback until a later curator run succeeds.\n",
+        "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: context-curator gate\nStatus: fallback\nMode: heuristic-fallback\n\n## Fallback Reason\n\n{}\n\n## Curator Error Summary\n\n{}\n\n## Active Manifest Policy\n\n- `implement.jsonl` and `check.jsonl` remain usable, but they are explicitly heuristic fallback projections.\n- Curated manifests are applied only after Studio validates existing spec/research paths from host or agent curation.\n- Full curator transcripts are intentionally not persisted in durable Studio context.\n- The UI must show this gate as fallback until a later curator run succeeds.\n",
         Local::now().to_rfc3339(),
         non_empty(reason.trim(), "Context-curator did not complete."),
         error_summary

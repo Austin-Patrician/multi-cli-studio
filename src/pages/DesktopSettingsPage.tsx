@@ -319,7 +319,6 @@ export function DesktopSettingsPage() {
       <header className="settings-header">
         <div className="settings-header-copy">
           <div className="settings-header-title">Settings</div>
-          <div className="settings-header-subtitle">Multi CLI Studio desktop configuration</div>
         </div>
         <div className="settings-header-drag-region" data-tauri-drag-region="" />
         <DesktopWindowControls className="settings-header-window-controls" />

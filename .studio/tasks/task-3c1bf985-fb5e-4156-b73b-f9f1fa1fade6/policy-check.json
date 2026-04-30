@@ -1,0 +1,21 @@
+{
+  "_studioManaged": true,
+  "agent": "policy-check",
+  "allowAutoPromote": false,
+  "candidateCounts": {
+    "promotable": 1,
+    "rejected": 0
+  },
+  "checkerStatus": "not_run",
+  "decision": "pending_checker",
+  "failingChecks": 1,
+  "reason": "Promotable candidates exist, but automatic promotion waits for the checker gate.",
+  "requires": [
+    "provenance",
+    "confidence",
+    "no_conflict",
+    "supersedes_when_replacing"
+  ],
+  "taskId": "task-3c1bf985-fb5e-4156-b73b-f9f1fa1fade6",
+  "updatedAt": "2026-04-30T15:45:36.031975900+08:00"
+}

@@ -103,6 +103,7 @@ const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 const STUDIO_CONTEXT_CURATOR_TIMEOUT_MS: u64 = 45_000;
 const STUDIO_CONTEXT_ID_ENV: &str = "STUDIO_CONTEXT_ID";
+const STUDIO_CONTEXT_LOG_ENV: &str = "STUDIO_CONTEXT_LOG";
 const SSH_ASKPASS_PASSWORD_ENV: &str = "MULTI_CLI_STUDIO_SSH_PASSWORD";
 
 #[cfg(target_os = "windows")]
@@ -116,6 +117,25 @@ struct CliCommandOutput {
     success: bool,
     stdout: String,
     stderr: String,
+}
+
+macro_rules! studio_context_log {
+    ($($arg:tt)*) => {{
+        if studio_context_logging_enabled() {
+            println!($($arg)*);
+        }
+    }};
+}
+
+fn studio_context_logging_enabled() -> bool {
+    std::env::var(STUDIO_CONTEXT_LOG_ENV)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on" | "debug"
+            )
+        })
+        .unwrap_or(false)
 }
 
 // ── UI state models (unchanged shape for frontend compat) ──────────────
@@ -12520,8 +12540,8 @@ fn send_chat_message(
     if let Some(mut metrics) = studio_context_metrics {
         metrics.final_prompt_chars = composed_prompt.chars().count();
         match serde_json::to_string(&metrics) {
-            Ok(payload) => println!("[studio-context] {payload}"),
-            Err(_) => println!(
+            Ok(payload) => studio_context_log!("[studio-context] {payload}"),
+            Err(_) => studio_context_log!(
                 "[studio-context] prelude_chars={} runtime_context_chars={} task_chars={} final_prompt_chars={}",
                 metrics.prelude_chars,
                 metrics.runtime_context_chars,
@@ -19993,7 +20013,7 @@ fn maybe_run_studio_context_curator(
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
-            println!("[studio-context] context-curator skipped: {error}");
+            studio_context_log!("[studio-context] context-curator skipped: {error}");
             let _ = record_context_curator_fallback(
                 project_root,
                 task_id,
@@ -20011,7 +20031,7 @@ fn maybe_run_studio_context_curator(
     let result = match apply_context_curator_output(project_root, task_id, raw_output) {
         Ok(result) => result,
         Err(error) => {
-            println!("[studio-context] context-curator output ignored: {error}");
+            studio_context_log!("[studio-context] context-curator output ignored: {error}");
             let _ = record_context_curator_fallback(
                 project_root,
                 task_id,
@@ -20021,9 +20041,11 @@ fn maybe_run_studio_context_curator(
             return None;
         }
     };
-    println!(
+    studio_context_log!(
         "[studio-context] context-curator implement={} check={} report={}",
-        result.implement_entries, result.check_entries, result.report_path
+        result.implement_entries,
+        result.check_entries,
+        result.report_path
     );
     Some(result)
 }
@@ -20060,7 +20082,7 @@ fn maybe_distill_and_promote_studio_memory(
     {
         Ok(candidates) => candidates,
         Err(error) => {
-            println!("[studio-context] memory-distill skipped: {error}");
+            studio_context_log!("[studio-context] memory-distill skipped: {error}");
             None
         }
     };
@@ -20073,11 +20095,11 @@ fn maybe_distill_and_promote_studio_memory(
     ) {
         Ok(result) => result,
         Err(error) => {
-            println!("[studio-context] memory-distill failed: {error}");
+            studio_context_log!("[studio-context] memory-distill failed: {error}");
             return;
         }
     };
-    println!(
+    studio_context_log!(
         "[studio-context] memory-distill candidates={} promotable={} rejected={} decision={} report={}",
         distill.candidate_entries,
         distill.promotable_entries,
@@ -20086,15 +20108,19 @@ fn maybe_distill_and_promote_studio_memory(
         distill.report_path
     );
     if !distill.allow_auto_promote {
-        println!("[studio-context] auto-promotion skipped: policy-check held candidates");
+        studio_context_log!(
+            "[studio-context] auto-promotion skipped: policy-check held candidates"
+        );
         return;
     }
     match auto_promote_studio_memory(project_root, task_id) {
-        Ok(result) => println!(
+        Ok(result) => studio_context_log!(
             "[studio-context] auto-promotion promoted={} skipped={} report={}",
-            result.promoted, result.skipped, result.report_path
+            result.promoted,
+            result.skipped,
+            result.report_path
         ),
-        Err(error) => println!("[studio-context] auto-promotion skipped: {error}"),
+        Err(error) => studio_context_log!("[studio-context] auto-promotion skipped: {error}"),
     }
 }
 
@@ -20131,9 +20157,11 @@ fn start_studio_post_turn_job(
                     &input,
                 ),
                 Some("fail") => {
-                    println!("[studio-context] auto-promotion skipped: checker failed")
+                    studio_context_log!("[studio-context] auto-promotion skipped: checker failed")
                 }
-                _ => println!("[studio-context] auto-promotion skipped: checker did not complete"),
+                _ => studio_context_log!(
+                    "[studio-context] auto-promotion skipped: checker did not complete"
+                ),
             }
         }
     });
@@ -20169,7 +20197,7 @@ fn maybe_run_studio_checker_and_retry(
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
-            println!("[studio-context] checker skipped: {error}");
+            studio_context_log!("[studio-context] checker skipped: {error}");
             return None;
         }
     };
@@ -20181,11 +20209,11 @@ fn maybe_run_studio_checker_and_retry(
     let result = match apply_checker_agent_output(project_root, task_id, raw_output) {
         Ok(result) => result,
         Err(error) => {
-            println!("[studio-context] checker output ignored: {error}");
+            studio_context_log!("[studio-context] checker output ignored: {error}");
             return None;
         }
     };
-    println!(
+    studio_context_log!(
         "[studio-context] checker status={} issues={} report={}",
         result.status,
         result.issues.len(),
@@ -20262,16 +20290,19 @@ Rules:\n- Keep the fix minimal.\n- Do not ask for human confirmation.\n- Stop af
                 outcome.final_content.as_str()
             };
             match record_checker_retry_result(project_root, task_id, true, raw_output) {
-                Ok(result) => println!(
+                Ok(result) => studio_context_log!(
                     "[studio-context] checker retry status={} report={}",
-                    result.status, result.report_path
+                    result.status,
+                    result.report_path
                 ),
-                Err(error) => println!("[studio-context] checker retry report failed: {error}"),
+                Err(error) => {
+                    studio_context_log!("[studio-context] checker retry report failed: {error}")
+                }
             }
             true
         }
         Err(error) => {
-            println!("[studio-context] checker retry failed: {error}");
+            studio_context_log!("[studio-context] checker retry failed: {error}");
             let _ = record_checker_retry_result(project_root, task_id, false, &error);
             false
         }
