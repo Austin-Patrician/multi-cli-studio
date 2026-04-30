@@ -382,6 +382,7 @@ pub struct KernelMemoryEntry {
 
 #[derive(Debug, Clone, Default)]
 pub struct EnsureTaskPacketRequest {
+    pub task_id: Option<String>,
     pub terminal_tab_id: String,
     pub workspace_id: String,
     pub project_root: String,
@@ -1432,14 +1433,9 @@ impl TerminalStorage {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|err| err.to_string())?;
-        let task_id = tx
-            .query_row(
-                "SELECT id FROM task_packets WHERE terminal_tab_id = ?1",
-                [terminal_tab_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|err| err.to_string())?;
+        let task_id = self
+            .load_task_packet_by_terminal_tab(&tx, terminal_tab_id)?
+            .map(|task| task.id);
 
         tx.execute(
             "DELETE FROM message_events WHERE terminal_tab_id = ?1",
@@ -1459,26 +1455,40 @@ impl TerminalStorage {
 
         if let Some(task_id) = task_id {
             tx.execute(
-                "DELETE FROM compact_boundaries WHERE task_id = ?1",
-                [&task_id],
+                "DELETE FROM task_tab_bindings WHERE terminal_tab_id = ?1",
+                [terminal_tab_id],
             )
             .map_err(|err| err.to_string())?;
-            tx.execute("DELETE FROM context_packs WHERE task_id = ?1", [&task_id])
+            let remaining_bindings: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM task_tab_bindings WHERE task_id = ?1",
+                    [&task_id],
+                    |row| row.get(0),
+                )
                 .map_err(|err| err.to_string())?;
-            tx.execute(
-                "DELETE FROM context_package_logs WHERE task_id = ?1",
-                [&task_id],
-            )
-            .map_err(|err| err.to_string())?;
-            tx.execute(
-                "DELETE FROM context_snapshots WHERE task_id = ?1",
-                [&task_id],
-            )
-            .map_err(|err| err.to_string())?;
-            tx.execute("DELETE FROM handoff_events WHERE task_id = ?1", [&task_id])
+            if remaining_bindings == 0 {
+                tx.execute(
+                    "DELETE FROM compact_boundaries WHERE task_id = ?1",
+                    [&task_id],
+                )
                 .map_err(|err| err.to_string())?;
-            tx.execute("DELETE FROM task_packets WHERE id = ?1", [&task_id])
+                tx.execute("DELETE FROM context_packs WHERE task_id = ?1", [&task_id])
+                    .map_err(|err| err.to_string())?;
+                tx.execute(
+                    "DELETE FROM context_package_logs WHERE task_id = ?1",
+                    [&task_id],
+                )
                 .map_err(|err| err.to_string())?;
+                tx.execute(
+                    "DELETE FROM context_snapshots WHERE task_id = ?1",
+                    [&task_id],
+                )
+                .map_err(|err| err.to_string())?;
+                tx.execute("DELETE FROM handoff_events WHERE task_id = ?1", [&task_id])
+                    .map_err(|err| err.to_string())?;
+                tx.execute("DELETE FROM task_packets WHERE id = ?1", [&task_id])
+                    .map_err(|err| err.to_string())?;
+            }
         }
 
         tx.commit().map_err(|err| err.to_string())
@@ -1723,6 +1733,18 @@ impl TerminalStorage {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS task_tab_bindings (
+                task_id TEXT NOT NULL,
+                terminal_tab_id TEXT NOT NULL UNIQUE,
+                workspace_id TEXT NOT NULL,
+                project_root TEXT NOT NULL,
+                cli_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (task_id, terminal_tab_id)
+            );
+
             CREATE TABLE IF NOT EXISTS handoff_events (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -1902,6 +1924,8 @@ impl TerminalStorage {
             CREATE INDEX IF NOT EXISTS idx_message_events_message_created
                 ON message_events(message_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_task_packets_workspace ON task_packets(workspace_id);
+            CREATE INDEX IF NOT EXISTS idx_task_tab_bindings_task
+                ON task_tab_bindings(task_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_handoff_events_task_created
                 ON handoff_events(task_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_context_snapshots_task_created
@@ -1970,12 +1994,7 @@ impl TerminalStorage {
         ensure_column_exists(conn, "workspaces", "connection_id", "TEXT")?;
         ensure_column_exists(conn, "workspaces", "remote_path", "TEXT")?;
         ensure_column_exists(conn, "workspaces", "location_label", "TEXT")?;
-        ensure_column_exists(
-            conn,
-            "chat_messages",
-            "selected_agent_json",
-            "TEXT",
-        )?;
+        ensure_column_exists(conn, "chat_messages", "selected_agent_json", "TEXT")?;
         ensure_column_exists(
             conn,
             "chat_messages",
@@ -2359,6 +2378,7 @@ impl TerminalStorage {
         let mut task = self.ensure_task_packet_in_tx(
             &tx,
             &EnsureTaskPacketRequest {
+                task_id: None,
                 terminal_tab_id: request.terminal_tab_id.clone(),
                 workspace_id: request.workspace_id.clone(),
                 project_root: request.project_root.clone(),
@@ -2484,6 +2504,7 @@ impl TerminalStorage {
         let mut task = self.ensure_task_packet_in_tx(
             &tx,
             &EnsureTaskPacketRequest {
+                task_id: None,
                 terminal_tab_id: update.terminal_tab_id.clone(),
                 workspace_id: update.workspace_id.clone(),
                 project_root: update.project_root.clone(),
@@ -3601,9 +3622,22 @@ impl TerminalStorage {
         conn: &Connection,
         request: &EnsureTaskPacketRequest,
     ) -> Result<TaskPacket, String> {
+        if let Some(task_id) = request
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Some(task) = self.load_task_packet_by_id(conn, task_id)? {
+                self.upsert_task_tab_binding_in_tx(conn, &task, request)?;
+                return Ok(task);
+            }
+        }
+
         if let Some(existing) =
             self.load_task_packet_by_terminal_tab(conn, &request.terminal_tab_id)?
         {
+            self.upsert_task_tab_binding_in_tx(conn, &existing, request)?;
             return Ok(existing);
         }
 
@@ -3614,7 +3648,13 @@ impl TerminalStorage {
             request.initial_goal.trim().to_string()
         };
         let task = TaskPacket {
-            id: new_id("task"),
+            id: request
+                .task_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| new_id("task")),
             terminal_tab_id: request.terminal_tab_id.clone(),
             workspace_id: request.workspace_id.clone(),
             project_root: request.project_root.clone(),
@@ -3666,10 +3706,77 @@ impl TerminalStorage {
         )
         .map_err(|err| err.to_string())?;
 
+        self.upsert_task_tab_binding_in_tx(conn, &task, request)?;
         Ok(task)
     }
 
+    fn upsert_task_tab_binding_in_tx(
+        &self,
+        conn: &Connection,
+        task: &TaskPacket,
+        request: &EnsureTaskPacketRequest,
+    ) -> Result<(), String> {
+        let now = now_rfc3339();
+        conn.execute(
+            "INSERT INTO task_tab_bindings (
+                task_id, terminal_tab_id, workspace_id, project_root, cli_id, state, updated_at, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)
+            ON CONFLICT(terminal_tab_id) DO UPDATE SET
+                task_id = excluded.task_id,
+                workspace_id = excluded.workspace_id,
+                project_root = excluded.project_root,
+                cli_id = excluded.cli_id,
+                state = 'active',
+                updated_at = excluded.updated_at",
+            params![
+                task.id,
+                request.terminal_tab_id,
+                request.workspace_id,
+                request.project_root,
+                request.cli_id,
+                now,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
     fn load_task_packet_by_terminal_tab(
+        &self,
+        conn: &Connection,
+        terminal_tab_id: &str,
+    ) -> Result<Option<TaskPacket>, String> {
+        let bound_task_id = conn
+            .query_row(
+                "SELECT task_id FROM task_tab_bindings WHERE terminal_tab_id = ?1 AND state = 'active'",
+                [terminal_tab_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|err| err.to_string())?;
+        if let Some(task_id) = bound_task_id {
+            if let Some(task) = self.load_task_packet_by_id(conn, &task_id)? {
+                return Ok(Some(task));
+            }
+        }
+
+        let legacy_task = self.load_task_packet_by_owner_terminal_tab(conn, terminal_tab_id)?;
+        if let Some(task) = legacy_task.as_ref() {
+            let request = EnsureTaskPacketRequest {
+                task_id: Some(task.id.clone()),
+                terminal_tab_id: terminal_tab_id.to_string(),
+                workspace_id: task.workspace_id.clone(),
+                project_root: task.project_root.clone(),
+                project_name: task.project_name.clone(),
+                cli_id: task.current_owner_cli.clone(),
+                initial_goal: task.goal.clone(),
+            };
+            self.upsert_task_tab_binding_in_tx(conn, task, &request)?;
+        }
+        Ok(legacy_task)
+    }
+
+    fn load_task_packet_by_owner_terminal_tab(
         &self,
         conn: &Connection,
         terminal_tab_id: &str,
@@ -3682,6 +3789,47 @@ impl TerminalStorage {
              FROM task_packets
              WHERE terminal_tab_id = ?1",
             [terminal_tab_id],
+            |row| {
+                Ok(TaskPacket {
+                    id: row.get(0)?,
+                    terminal_tab_id: row.get(1)?,
+                    workspace_id: row.get(2)?,
+                    project_root: row.get(3)?,
+                    project_name: row.get(4)?,
+                    title: row.get(5)?,
+                    goal: row.get(6)?,
+                    status: row.get(7)?,
+                    current_owner_cli: row.get(8)?,
+                    latest_conclusion: row.get(9)?,
+                    open_questions: parse_json_default(row.get::<_, String>(10)?),
+                    risks: parse_json_default(row.get::<_, String>(11)?),
+                    next_step: row.get(12)?,
+                    relevant_files: parse_json_default(row.get::<_, String>(13)?),
+                    relevant_commands: parse_json_default(row.get::<_, String>(14)?),
+                    linked_session_ids: parse_json_default(row.get::<_, String>(15)?),
+                    latest_snapshot_id: row.get(16)?,
+                    updated_at: row.get(17)?,
+                    created_at: row.get(18)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|err| err.to_string())
+    }
+
+    fn load_task_packet_by_id(
+        &self,
+        conn: &Connection,
+        task_id: &str,
+    ) -> Result<Option<TaskPacket>, String> {
+        conn.query_row(
+            "SELECT id, terminal_tab_id, workspace_id, project_root, project_name, title, goal, status,
+                    current_owner_cli, latest_conclusion, open_questions_json, risks_json, next_step,
+                    relevant_files_json, relevant_commands_json, linked_session_ids_json, latest_snapshot_id,
+                    updated_at, created_at
+             FROM task_packets
+             WHERE id = ?1",
+            [task_id],
             |row| {
                 Ok(TaskPacket {
                     id: row.get(0)?,
@@ -4134,6 +4282,21 @@ impl TerminalStorage {
         conn: &Connection,
         task_id: &str,
     ) -> Result<Option<String>, String> {
+        let bound_tab = conn
+            .query_row(
+                "SELECT terminal_tab_id
+                 FROM task_tab_bindings
+                 WHERE task_id = ?1 AND state = 'active'
+                 ORDER BY updated_at DESC
+                 LIMIT 1",
+                [task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|err| err.to_string())?;
+        if bound_tab.is_some() {
+            return Ok(bound_tab);
+        }
         conn.query_row(
             "SELECT terminal_tab_id FROM task_packets WHERE id = ?1",
             [task_id],

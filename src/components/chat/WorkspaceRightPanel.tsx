@@ -391,6 +391,17 @@ function changeStatusMap(changes: GitFileChange[]) {
   return map;
 }
 
+function checkerStatusClass(status: string | null | undefined) {
+  switch ((status ?? "").toLowerCase()) {
+    case "pass":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    case "fail":
+      return "border-red-200 bg-red-50 text-red-700";
+    default:
+      return "border-slate-200 bg-slate-50 text-slate-600";
+  }
+}
+
 function StudioWorkflowPanel({ workspace, terminalTabId }: { workspace: WorkspaceRef; terminalTabId: string | null }) {
   const [workflowState, setWorkflowState] = useState<StudioWorkflowState | null>(null);
   const [loading, setLoading] = useState(false);
@@ -435,10 +446,13 @@ function StudioWorkflowPanel({ workspace, terminalTabId }: { workspace: Workspac
         ["Implement manifest", workflowState.implementManifestPath],
         ["Check manifest", workflowState.checkManifestPath],
         ["Checker report", workflowState.checkerReportPath],
+        ["Checker retry", workflowState.checkerRetryReportPath],
         ["Policy check", workflowState.policyCheckPath],
         ["Promotion report", workflowState.promotionReportPath],
       ].filter((entry): entry is [string, string] => Boolean(entry[1]))
     : [];
+  const checkerStatus = workflowState?.checkerStatus ?? null;
+  const checkerStatusLabel = checkerStatus ? checkerStatus.replace(/_/g, " ") : "pending";
 
   return (
     <section className="session-activity-panel">
@@ -492,6 +506,46 @@ function StudioWorkflowPanel({ workspace, terminalTabId }: { workspace: Workspac
                 </div>
               </div>
             </div>
+            {workflowState.checkerStatus || workflowState.checkerReportPath ? (
+              <div className="rounded-[20px] border border-border bg-white p-4 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.14em] text-secondary">Checker Gate</div>
+                    <div className="mt-1 break-words text-sm font-semibold text-primary">
+                      {workflowState.checkerSummary ?? "No checker summary yet."}
+                    </div>
+                  </div>
+                  <span
+                    className={`shrink-0 rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] ${checkerStatusClass(
+                      checkerStatus,
+                    )}`}
+                  >
+                    {checkerStatusLabel}
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                  <div className="rounded-[14px] bg-slate-50 px-3 py-2">
+                    <div className="text-secondary">Retry</div>
+                    <div className="font-semibold text-primary">
+                      {workflowState.checkerRetryPerformed ? workflowState.checkerRetryStatus ?? "performed" : "not run"}
+                    </div>
+                  </div>
+                  <div className="rounded-[14px] bg-slate-50 px-3 py-2">
+                    <div className="text-secondary">Issues</div>
+                    <div className="font-semibold text-primary">{workflowState.checkerIssues.length}</div>
+                  </div>
+                </div>
+                {workflowState.checkerIssues.length ? (
+                  <div className="mt-3 space-y-1.5">
+                    {workflowState.checkerIssues.slice(0, 4).map((issue, index) => (
+                      <div key={`${index}-${issue}`} className="rounded-[14px] border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-800">
+                        {issue}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {links.length ? (
               <div className="rounded-[20px] border border-border bg-white p-4 shadow-sm">
                 <div className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-secondary">Artifacts</div>

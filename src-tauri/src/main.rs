@@ -51,18 +51,20 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use storage::{
-    default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest,
-    KernelFact, KernelMemoryEntry,
-    MessageBlocksUpdateRequest, MessageDeleteRequest, MessageEventsAppendRequest,
-    MessageFinalizeRequest, MessageSessionSeed, MessageStreamUpdateRequest, PersistedChatMessage,
-    PersistedConversationSession, PersistedTerminalState, SemanticMemoryChunk,
-    SemanticRecallRequest, TaskContextBundle, TaskKernel, TaskRecentTurn, TerminalStorage,
+    default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest, KernelEvidence,
+    KernelFact, KernelMemoryEntry, MessageBlocksUpdateRequest, MessageDeleteRequest,
+    MessageEventsAppendRequest, MessageFinalizeRequest, MessageSessionSeed,
+    MessageStreamUpdateRequest, PersistedChatMessage, PersistedConversationSession,
+    PersistedTerminalState, SemanticMemoryChunk, SemanticRecallRequest, TaskContextBundle,
+    TaskKernel, TaskRecentTurn, TerminalStorage,
 };
 use studio_context::{
-    apply_checker_agent_output, auto_promote_studio_memory, build_checker_agent_prompt,
+    apply_checker_agent_output, apply_context_curator_output, apply_memory_distill_candidates,
+    auto_promote_studio_memory, build_checker_agent_prompt, build_context_curator_prompt,
     export_studio_context, load_studio_workflow_state, promote_studio_context,
-    StudioCheckerApplyResult, StudioContextExportInput,
-    StudioPolicyPromotionResult, StudioPromoteRequest, StudioPromoteResult, StudioWorkflowState,
+    record_checker_retry_result, StudioCheckerApplyResult, StudioContextCurationApplyResult,
+    StudioContextExportInput, StudioPolicyPromotionResult, StudioPromoteRequest,
+    StudioPromoteResult, StudioWorkflowState,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
@@ -100,6 +102,7 @@ const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 const STUDIO_CONTEXT_CURATOR_TIMEOUT_MS: u64 = 45_000;
+const STUDIO_CONTEXT_ID_ENV: &str = "STUDIO_CONTEXT_ID";
 const SSH_ASKPASS_PASSWORD_ENV: &str = "MULTI_CLI_STUDIO_SSH_PASSWORD";
 
 #[cfg(target_os = "windows")]
@@ -1339,7 +1342,11 @@ fn save_generated_image_artifact_to_disk(
 
     let artifact_id = format!("image-{}", Uuid::new_v4());
     let extension = image_extension_for_media_type(&request.media_type);
-    let fallback_name = format!("generated-image-{}.{}", request.index.unwrap_or(1), extension);
+    let fallback_name = format!(
+        "generated-image-{}.{}",
+        request.index.unwrap_or(1),
+        extension
+    );
     let requested_name = request
         .suggested_name
         .as_deref()
@@ -1422,7 +1429,12 @@ fn api_attachment_image_payload(
         .filter(|value| value.starts_with("image/"))
         .or_else(|| guess_api_image_media_type(&attachment.file_name).map(str::to_string))
         .or_else(|| guess_api_image_media_type(source).map(str::to_string))
-        .ok_or_else(|| format!("Could not determine media type for `{}`.", attachment.file_name))?;
+        .ok_or_else(|| {
+            format!(
+                "Could not determine media type for `{}`.",
+                attachment.file_name
+            )
+        })?;
     let base64_data = encode_base64(&bytes);
     let data_url = format!("data:{};base64,{}", media_type, base64_data);
     Ok((media_type, base64_data, data_url))
@@ -2072,7 +2084,11 @@ fn api_usage_from_openai_value(value: &Value) -> ApiUsage {
         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
         context_window_tokens: read_context_window_tokens(
             usage,
-            &["model_context_window", "modelContextWindow", "context_window"],
+            &[
+                "model_context_window",
+                "modelContextWindow",
+                "context_window",
+            ],
         ),
     }
 }
@@ -2117,7 +2133,11 @@ fn api_usage_from_claude_value(value: &Value) -> ApiUsage {
         total_tokens,
         context_window_tokens: read_context_window_tokens(
             usage,
-            &["model_context_window", "modelContextWindow", "context_window"],
+            &[
+                "model_context_window",
+                "modelContextWindow",
+                "context_window",
+            ],
         ),
     }
 }
@@ -2147,7 +2167,11 @@ fn api_usage_from_gemini_value(value: &Value) -> ApiUsage {
         total_tokens,
         context_window_tokens: read_context_window_tokens(
             usage,
-            &["model_context_window", "modelContextWindow", "context_window"],
+            &[
+                "model_context_window",
+                "modelContextWindow",
+                "context_window",
+            ],
         ),
     }
 }
@@ -2207,7 +2231,11 @@ fn capture_codex_usage(target: &mut ApiUsage, value: &Value) {
         if let Some(token_usage) = token_usage {
             if let Some(context_window_tokens) = read_context_window_tokens(
                 token_usage,
-                &["modelContextWindow", "model_context_window", "context_window"],
+                &[
+                    "modelContextWindow",
+                    "model_context_window",
+                    "context_window",
+                ],
             ) {
                 target.context_window_tokens = Some(context_window_tokens);
             }
@@ -2220,10 +2248,18 @@ fn capture_codex_usage(target: &mut ApiUsage, value: &Value) {
     };
 
     let capture_info = |target: &mut ApiUsage, holder: &Value| {
-        if let Some(info) = holder.get("info").or_else(|| holder.get("payload").and_then(|payload| payload.get("info"))) {
+        if let Some(info) = holder.get("info").or_else(|| {
+            holder
+                .get("payload")
+                .and_then(|payload| payload.get("info"))
+        }) {
             if let Some(context_window_tokens) = read_context_window_tokens(
                 info,
-                &["model_context_window", "modelContextWindow", "context_window"],
+                &[
+                    "model_context_window",
+                    "modelContextWindow",
+                    "context_window",
+                ],
             ) {
                 target.context_window_tokens = Some(context_window_tokens);
             }
@@ -3197,6 +3233,8 @@ struct WorkingMemoryPayload {
 struct ChatPromptRequest {
     cli_id: String,
     terminal_tab_id: String,
+    #[serde(default)]
+    task_id: Option<String>,
     workspace_id: String,
     assistant_message_id: String,
     prompt: String,
@@ -5665,7 +5703,8 @@ fn claude_apply_tool_result(
             }
         }
         ChatMessageBlock::Subagent {
-            status: block_status, ..
+            status: block_status,
+            ..
         } => {
             *block_status = status;
         }
@@ -7078,7 +7117,10 @@ fn handle_codex_notification(
                             .clone()
                             .or_else(|| item.get("agentsStates").and_then(json_value_as_text)),
                     });
-                    let inferred_status = match tool_status.as_deref().map(|value| value.to_ascii_lowercase()) {
+                    let inferred_status = match tool_status
+                        .as_deref()
+                        .map(|value| value.to_ascii_lowercase())
+                    {
                         Some(status)
                             if status.contains("fail")
                                 || status.contains("error")
@@ -7102,7 +7144,8 @@ fn handle_codex_notification(
                         _ => "running".to_string(),
                     };
                     let mut emitted_subagent = false;
-                    if let Some(agent_states) = item.get("agentsStates").and_then(Value::as_object) {
+                    if let Some(agent_states) = item.get("agentsStates").and_then(Value::as_object)
+                    {
                         for (agent_id, state_value) in agent_states {
                             let state_record = state_value.as_object();
                             let label = state_record
@@ -7211,7 +7254,8 @@ fn handle_codex_notification(
                         .or_else(|| item.get("revisedPrompt").and_then(Value::as_str))
                         .map(|value| value.to_string());
                     if !result.trim().is_empty() {
-                        let (media_type, base64_data) = if result.trim_start().starts_with("data:") {
+                        let (media_type, base64_data) = if result.trim_start().starts_with("data:")
+                        {
                             decode_api_image_data_url(result)?
                         } else {
                             ("image/png".to_string(), result.trim().to_string())
@@ -7228,14 +7272,19 @@ fn handle_codex_notification(
                                     stream_state
                                         .blocks
                                         .iter()
-                                        .filter(|block| matches!(block, ChatMessageBlock::Image { .. }))
+                                        .filter(|block| {
+                                            matches!(block, ChatMessageBlock::Image { .. })
+                                        })
                                         .count() as u32
                                         + 1,
                                 ),
                             },
                         )?;
-                        stream_state.blocks.push(ChatMessageBlock::Image { artifact });
-                    } else if let Some(saved_path) = item.get("saved_path").and_then(Value::as_str) {
+                        stream_state
+                            .blocks
+                            .push(ChatMessageBlock::Image { artifact });
+                    } else if let Some(saved_path) = item.get("saved_path").and_then(Value::as_str)
+                    {
                         stream_state.blocks.push(ChatMessageBlock::Image {
                             artifact: ChatImageArtifact {
                                 id: format!("image-{}", Uuid::new_v4()),
@@ -7362,6 +7411,7 @@ fn run_codex_app_server_turn(
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     block_prefix: Vec<ChatMessageBlock>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
+    studio_context_key: Option<&str>,
 ) -> Result<CodexTurnOutcome, String> {
     let mut cmd = spawn_workspace_command(
         workspace_target,
@@ -7373,6 +7423,7 @@ fn run_codex_app_server_turn(
         ],
         !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
     )?;
+    apply_studio_context_environment(&mut cmd, studio_context_key);
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -8567,6 +8618,7 @@ fn run_claude_headless_turn_once(
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
+    studio_context_key: Option<&str>,
 ) -> Result<ClaudeTurnOutcome, String> {
     let requested_model = claude_requested_model(session, previous_transport_session.as_ref());
     let requested_effort = claude_reasoning_effort(session);
@@ -8610,6 +8662,7 @@ fn run_claude_headless_turn_once(
         &args,
         !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
     )?;
+    apply_studio_context_environment(&mut cmd, studio_context_key);
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -8677,8 +8730,8 @@ fn run_claude_headless_turn_once(
                 return;
             }
 
-            let idle_ms = runtime_now_ms()
-                .saturating_sub(watchdog_last_activity_ms.load(Ordering::SeqCst));
+            let idle_ms =
+                runtime_now_ms().saturating_sub(watchdog_last_activity_ms.load(Ordering::SeqCst));
             if idle_ms >= timeout_ms {
                 timed_out_flag.store(true, Ordering::SeqCst);
                 terminate_process_tree(child_pid);
@@ -8862,6 +8915,7 @@ fn run_claude_headless_turn(
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
+    studio_context_key: Option<&str>,
 ) -> Result<ClaudeTurnOutcome, String> {
     let resume_session_id = previous_transport_session
         .as_ref()
@@ -8882,6 +8936,7 @@ fn run_claude_headless_turn(
         claude_approval_rules.clone(),
         claude_pending_approvals.clone(),
         live_turn.clone(),
+        studio_context_key,
     ) {
         Ok(outcome) => Ok(outcome),
         Err(error) if resume_session_id.is_some() && claude_should_retry_without_resume(&error) => {
@@ -8904,6 +8959,7 @@ fn run_claude_headless_turn(
                 claude_approval_rules,
                 claude_pending_approvals,
                 live_turn,
+                studio_context_key,
             )
         }
         Err(error) => Err(error),
@@ -8923,6 +8979,7 @@ fn run_gemini_acp_turn(
     timeout_ms: u64,
     block_prefix: Vec<ChatMessageBlock>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
+    studio_context_key: Option<&str>,
 ) -> Result<GeminiTurnOutcome, String> {
     let project_root = workspace_target_project_root(workspace_target);
     let mut cmd = spawn_workspace_command(
@@ -8931,6 +8988,7 @@ fn run_gemini_acp_turn(
         &["--acp".to_string()],
         !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
     )?;
+    apply_studio_context_environment(&mut cmd, studio_context_key);
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -9831,7 +9889,8 @@ fn update_settings(
     mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
     validate_notification_config(&settings.notification_config)?;
-    settings.external_link_browser = normalize_external_link_browser(&settings.external_link_browser);
+    settings.external_link_browser =
+        normalize_external_link_browser(&settings.external_link_browser);
     normalize_settings_providers(&mut settings);
     {
         let mut s = store.settings.lock().map_err(|err| err.to_string())?;
@@ -12240,6 +12299,21 @@ fn send_chat_message(
     let requested_transport_session = request.transport_session.clone();
     let transport_kind = default_transport_kind(&cli_id);
     let terminal_storage = store.terminal_storage.clone();
+    let studio_task_bundle = if remote_workspace {
+        None
+    } else {
+        Some(
+            terminal_storage.ensure_task_bundle(&EnsureTaskPacketRequest {
+                task_id: request.task_id.clone(),
+                terminal_tab_id: terminal_tab_id.clone(),
+                workspace_id: workspace_id.clone(),
+                project_root: effective_project_root.clone(),
+                project_name: project_name.clone(),
+                cli_id: cli_id.clone(),
+                initial_goal: prompt.clone(),
+            })?,
+        )
+    };
     let pending_handoff = terminal_storage
         .load_pending_handoff_for_terminal_tab(&terminal_tab_id, &cli_id)
         .ok()
@@ -12308,7 +12382,13 @@ fn send_chat_message(
     let _ = terminal_storage.maybe_auto_compact_terminal_tab(&terminal_tab_id);
 
     // Build script with tab-scoped context
-    let (composed_prompt_base, studio_context_metrics, studio_workflow_input, studio_workflow_task_id) = {
+    let (
+        composed_prompt_base,
+        studio_context_metrics,
+        studio_workflow_input,
+        studio_workflow_task_id,
+        studio_context_key,
+    ) = {
         let mut state = store.state.lock().map_err(|e| e.to_string())?.clone();
         state.workspace.project_root = project_root.clone();
         state.workspace.project_name = project_name.clone();
@@ -12325,12 +12405,20 @@ fn send_chat_message(
         let memory_candidates = if remote_workspace {
             None
         } else {
-            build_studio_memory_candidates(&terminal_storage, &terminal_tab_id).ok().flatten()
+            build_studio_memory_candidates(&terminal_storage, &terminal_tab_id)
+                .ok()
+                .flatten()
         };
+        let studio_task_packet = studio_task_bundle
+            .as_ref()
+            .map(|bundle| &bundle.task_packet);
         let studio_context_input = StudioContextExportInput {
             project_root: effective_project_root.clone(),
             project_name: project_name.clone(),
             workspace_id: workspace_id.clone(),
+            task_id: studio_task_packet.map(|task| task.id.clone()),
+            task_title: studio_task_packet.map(|task| task.title.clone()),
+            task_goal: studio_task_packet.map(|task| task.goal.clone()),
             terminal_tab_id: terminal_tab_id.clone(),
             cli_id: cli_id.clone(),
             branch: state.workspace.branch.clone(),
@@ -12341,14 +12429,18 @@ fn send_chat_message(
             user_prompt: prompt_for_context.clone(),
             handoff_summary: pending_handoff
                 .as_ref()
-                .and_then(|handoff| handoff.latest_conclusion.clone()),
+                .and_then(|handoff| handoff.latest_conclusion.clone())
+                .or_else(|| studio_task_packet.and_then(|task| task.latest_conclusion.clone())),
             handoff_files: pending_handoff
                 .as_ref()
                 .map(|handoff| handoff.files.clone())
+                .filter(|files| !files.is_empty())
+                .or_else(|| studio_task_packet.map(|task| task.relevant_files.clone()))
                 .unwrap_or_default(),
             handoff_next_step: pending_handoff
                 .as_ref()
-                .and_then(|handoff| handoff.next_step.clone()),
+                .and_then(|handoff| handoff.next_step.clone())
+                .or_else(|| studio_task_packet.and_then(|task| task.next_step.clone())),
             compacted_context: request
                 .compacted_summaries
                 .as_ref()
@@ -12369,13 +12461,27 @@ fn send_chat_message(
         let studio_context = if remote_workspace {
             None
         } else {
-            export_studio_context(&studio_context_input)
-            .ok()
-            .flatten()
+            export_studio_context(&studio_context_input).ok().flatten()
         };
-        let studio_context_prelude = studio_context.as_ref().map(|export| export.prelude.as_str());
+        if let Some(export) = studio_context.as_ref() {
+            let _ = maybe_run_studio_context_curator(
+                &effective_project_root,
+                &cli_id,
+                &wrapper_path,
+                &studio_context_input,
+                &export.task_id,
+                Some(export.context_key.as_str()),
+                &request_session,
+            );
+        }
+        let studio_context_prelude = studio_context
+            .as_ref()
+            .map(|export| export.prelude.as_str());
         let studio_context_metrics = studio_context.as_ref().map(|export| export.metrics.clone());
         let studio_workflow_task_id = studio_context.as_ref().map(|export| export.task_id.clone());
+        let studio_context_key = studio_context
+            .as_ref()
+            .map(|export| export.context_key.clone());
         let studio_workflow_input = if studio_context.is_some() {
             Some(studio_context_input.clone())
         } else {
@@ -12398,7 +12504,13 @@ fn send_chat_message(
             is_resuming,
             studio_context_prelude,
         );
-        (composed, studio_context_metrics, studio_workflow_input, studio_workflow_task_id)
+        (
+            composed,
+            studio_context_metrics,
+            studio_workflow_input,
+            studio_workflow_task_id,
+            studio_context_key,
+        )
     };
     let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
         format!("/{} {}", skill.name, composed_prompt_base)
@@ -12436,6 +12548,7 @@ fn send_chat_message(
     let workspace_target_for_thread = workspace_target.clone();
     let studio_workflow_input_for_thread = studio_workflow_input.clone();
     let studio_workflow_task_id_for_thread = studio_workflow_task_id.clone();
+    let studio_context_key_for_thread = studio_context_key.clone();
     let recent_turns_for_thread: Vec<TaskRecentTurn> = recent_turns
         .iter()
         .map(|turn| TaskRecentTurn {
@@ -12465,6 +12578,7 @@ fn send_chat_message(
         let codex_workspace_target = workspace_target_for_thread.clone();
         let codex_studio_workflow_input = studio_workflow_input_for_thread.clone();
         let codex_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
+        let codex_studio_context_key = studio_context_key_for_thread.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -12484,57 +12598,65 @@ fn send_chat_message(
                 codex_pending_approvals,
                 Vec::new(),
                 Some(codex_live_turn.clone()),
+                codex_studio_context_key.as_deref(),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
             let interrupted_by_user = was_live_chat_turn_interrupted(Some(&codex_live_turn));
-            let (raw_output, exit_code, final_content, content_format, blocks, transport_session, usage) =
-                match outcome {
-                    Ok(outcome) => (
-                        outcome.raw_output,
-                        outcome.exit_code,
-                        outcome.final_content,
-                        outcome.content_format,
-                        outcome.blocks,
-                        outcome.transport_session,
-                        outcome.usage,
-                    ),
-                    Err(error) => {
-                        let permission_mode =
-                            codex_permission_mode(&request_session_for_thread, turn_write_mode);
-                        let transport_session = build_transport_session(
-                            "codex",
-                            codex_requested_transport_session,
-                            None,
-                            None,
-                            request_session_for_thread.model.get("codex").cloned(),
-                            Some(permission_mode),
-                            None,
-                        );
-                        let final_content = if interrupted_by_user {
-                            String::new()
-                        } else {
-                            error.clone()
-                        };
-                        let blocks = if interrupted_by_user {
-                            vec![interrupted_fallback_status_block()]
-                        } else {
-                            vec![ChatMessageBlock::Status {
-                                level: "error".to_string(),
-                                text: error.clone(),
-                            }]
-                        };
-                        (
-                            error,
-                            Some(if interrupted_by_user { 130 } else { 1 }),
-                            final_content,
-                            "log".to_string(),
-                            blocks,
-                            transport_session,
-                            ApiUsage::default(),
-                        )
-                    }
-                };
+            let (
+                raw_output,
+                exit_code,
+                final_content,
+                content_format,
+                blocks,
+                transport_session,
+                usage,
+            ) = match outcome {
+                Ok(outcome) => (
+                    outcome.raw_output,
+                    outcome.exit_code,
+                    outcome.final_content,
+                    outcome.content_format,
+                    outcome.blocks,
+                    outcome.transport_session,
+                    outcome.usage,
+                ),
+                Err(error) => {
+                    let permission_mode =
+                        codex_permission_mode(&request_session_for_thread, turn_write_mode);
+                    let transport_session = build_transport_session(
+                        "codex",
+                        codex_requested_transport_session,
+                        None,
+                        None,
+                        request_session_for_thread.model.get("codex").cloned(),
+                        Some(permission_mode),
+                        None,
+                    );
+                    let final_content = if interrupted_by_user {
+                        String::new()
+                    } else {
+                        error.clone()
+                    };
+                    let blocks = if interrupted_by_user {
+                        vec![interrupted_fallback_status_block()]
+                    } else {
+                        vec![ChatMessageBlock::Status {
+                            level: "error".to_string(),
+                            text: error.clone(),
+                        }]
+                    };
+                    (
+                        error,
+                        Some(if interrupted_by_user { 130 } else { 1 }),
+                        final_content,
+                        "log".to_string(),
+                        blocks,
+                        transport_session,
+                        ApiUsage::default(),
+                    )
+                }
+            };
 
             if let Ok(mut ctx) = ctx_arc.lock() {
                 let turn = ConversationTurn {
@@ -12580,15 +12702,18 @@ fn send_chat_message(
             });
 
             if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
-                if let (Some(input), Some(task_id)) =
-                    (codex_studio_workflow_input.as_ref(), codex_studio_workflow_task_id.as_ref())
-                {
+                if let (Some(input), Some(task_id)) = (
+                    codex_studio_workflow_input.as_ref(),
+                    codex_studio_workflow_task_id.as_ref(),
+                ) {
                     start_studio_post_turn_job(
+                        codex_terminal_storage.clone(),
                         codex_project_root.clone(),
                         "codex".to_string(),
                         codex_wrapper_path.clone(),
                         input.clone(),
                         task_id.clone(),
+                        codex_studio_context_key.clone(),
                         request_session_for_thread.clone(),
                         final_content.clone(),
                         turn_write_mode,
@@ -12643,6 +12768,7 @@ fn send_chat_message(
         let gemini_workspace_target = workspace_target_for_thread.clone();
         let gemini_studio_workflow_input = studio_workflow_input_for_thread.clone();
         let gemini_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
+        let gemini_studio_context_key = studio_context_key_for_thread.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -12659,60 +12785,68 @@ fn send_chat_message(
                 timeout_ms,
                 Vec::new(),
                 Some(gemini_live_turn.clone()),
+                gemini_studio_context_key.as_deref(),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
             let interrupted_by_user = was_live_chat_turn_interrupted(Some(&gemini_live_turn));
-            let (raw_output, exit_code, final_content, content_format, blocks, transport_session, usage) =
-                match outcome {
-                    Ok(outcome) => (
-                        outcome.raw_output,
-                        outcome.exit_code,
-                        outcome.final_content,
-                        outcome.content_format,
-                        outcome.blocks,
-                        outcome.transport_session,
-                        outcome.usage,
-                    ),
-                    Err(error) => {
-                        let permission_mode = gemini_local_permission_mode(
-                            &request_session_for_thread,
-                            turn_write_mode,
-                            gemini_requested_transport_session.as_ref(),
-                        );
-                        let transport_session = build_transport_session(
-                            "gemini",
-                            gemini_requested_transport_session,
-                            None,
-                            None,
-                            request_session_for_thread.model.get("gemini").cloned(),
-                            Some(permission_mode),
-                            None,
-                        );
-                        let final_content = if interrupted_by_user {
-                            String::new()
-                        } else {
-                            error.clone()
-                        };
-                        let blocks = if interrupted_by_user {
-                            vec![interrupted_fallback_status_block()]
-                        } else {
-                            vec![ChatMessageBlock::Status {
-                                level: "error".to_string(),
-                                text: error.clone(),
-                            }]
-                        };
-                        (
-                            error,
-                            Some(if interrupted_by_user { 130 } else { 1 }),
-                            final_content,
-                            "log".to_string(),
-                            blocks,
-                            transport_session,
-                            ApiUsage::default(),
-                        )
-                    }
-                };
+            let (
+                raw_output,
+                exit_code,
+                final_content,
+                content_format,
+                blocks,
+                transport_session,
+                usage,
+            ) = match outcome {
+                Ok(outcome) => (
+                    outcome.raw_output,
+                    outcome.exit_code,
+                    outcome.final_content,
+                    outcome.content_format,
+                    outcome.blocks,
+                    outcome.transport_session,
+                    outcome.usage,
+                ),
+                Err(error) => {
+                    let permission_mode = gemini_local_permission_mode(
+                        &request_session_for_thread,
+                        turn_write_mode,
+                        gemini_requested_transport_session.as_ref(),
+                    );
+                    let transport_session = build_transport_session(
+                        "gemini",
+                        gemini_requested_transport_session,
+                        None,
+                        None,
+                        request_session_for_thread.model.get("gemini").cloned(),
+                        Some(permission_mode),
+                        None,
+                    );
+                    let final_content = if interrupted_by_user {
+                        String::new()
+                    } else {
+                        error.clone()
+                    };
+                    let blocks = if interrupted_by_user {
+                        vec![interrupted_fallback_status_block()]
+                    } else {
+                        vec![ChatMessageBlock::Status {
+                            level: "error".to_string(),
+                            text: error.clone(),
+                        }]
+                    };
+                    (
+                        error,
+                        Some(if interrupted_by_user { 130 } else { 1 }),
+                        final_content,
+                        "log".to_string(),
+                        blocks,
+                        transport_session,
+                        ApiUsage::default(),
+                    )
+                }
+            };
 
             if let Ok(mut ctx) = ctx_arc.lock() {
                 let turn = ConversationTurn {
@@ -12758,15 +12892,18 @@ fn send_chat_message(
             });
 
             if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
-                if let (Some(input), Some(task_id)) =
-                    (gemini_studio_workflow_input.as_ref(), gemini_studio_workflow_task_id.as_ref())
-                {
+                if let (Some(input), Some(task_id)) = (
+                    gemini_studio_workflow_input.as_ref(),
+                    gemini_studio_workflow_task_id.as_ref(),
+                ) {
                     start_studio_post_turn_job(
+                        gemini_terminal_storage.clone(),
                         gemini_project_root.clone(),
                         "gemini".to_string(),
                         gemini_wrapper_path.clone(),
                         input.clone(),
                         task_id.clone(),
+                        gemini_studio_context_key.clone(),
                         request_session_for_thread.clone(),
                         final_content.clone(),
                         turn_write_mode,
@@ -12823,6 +12960,7 @@ fn send_chat_message(
         let claude_workspace_target = workspace_target_for_thread.clone();
         let claude_studio_workflow_input = studio_workflow_input_for_thread.clone();
         let claude_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
+        let claude_studio_context_key = studio_context_key_for_thread.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -12840,60 +12978,68 @@ fn send_chat_message(
                 claude_approval_rules,
                 claude_pending_approvals,
                 Some(claude_live_turn.clone()),
+                claude_studio_context_key.as_deref(),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
             let interrupted_by_user = was_live_chat_turn_interrupted(Some(&claude_live_turn));
-            let (raw_output, exit_code, final_content, content_format, blocks, transport_session, usage) =
-                match outcome {
-                    Ok(outcome) => (
-                        outcome.raw_output,
-                        outcome.exit_code,
-                        outcome.final_content,
-                        outcome.content_format,
-                        outcome.blocks,
-                        outcome.transport_session,
-                        outcome.usage,
-                    ),
-                    Err(error) => {
-                        let permission_mode = claude_permission_mode(
-                            &request_session_for_thread,
-                            turn_write_mode,
-                            claude_requested_transport_session.as_ref(),
-                        );
-                        let transport_session = build_transport_session(
-                            "claude",
-                            claude_requested_transport_session,
-                            None,
-                            None,
-                            request_session_for_thread.model.get("claude").cloned(),
-                            Some(permission_mode),
-                            None,
-                        );
-                        let final_content = if interrupted_by_user {
-                            String::new()
-                        } else {
-                            error.clone()
-                        };
-                        let blocks = if interrupted_by_user {
-                            vec![interrupted_fallback_status_block()]
-                        } else {
-                            vec![ChatMessageBlock::Status {
-                                level: "error".to_string(),
-                                text: error.clone(),
-                            }]
-                        };
-                        (
-                            error,
-                            Some(if interrupted_by_user { 130 } else { 1 }),
-                            final_content,
-                            "log".to_string(),
-                            blocks,
-                            transport_session,
-                            ApiUsage::default(),
-                        )
-                    }
-                };
+            let (
+                raw_output,
+                exit_code,
+                final_content,
+                content_format,
+                blocks,
+                transport_session,
+                usage,
+            ) = match outcome {
+                Ok(outcome) => (
+                    outcome.raw_output,
+                    outcome.exit_code,
+                    outcome.final_content,
+                    outcome.content_format,
+                    outcome.blocks,
+                    outcome.transport_session,
+                    outcome.usage,
+                ),
+                Err(error) => {
+                    let permission_mode = claude_permission_mode(
+                        &request_session_for_thread,
+                        turn_write_mode,
+                        claude_requested_transport_session.as_ref(),
+                    );
+                    let transport_session = build_transport_session(
+                        "claude",
+                        claude_requested_transport_session,
+                        None,
+                        None,
+                        request_session_for_thread.model.get("claude").cloned(),
+                        Some(permission_mode),
+                        None,
+                    );
+                    let final_content = if interrupted_by_user {
+                        String::new()
+                    } else {
+                        error.clone()
+                    };
+                    let blocks = if interrupted_by_user {
+                        vec![interrupted_fallback_status_block()]
+                    } else {
+                        vec![ChatMessageBlock::Status {
+                            level: "error".to_string(),
+                            text: error.clone(),
+                        }]
+                    };
+                    (
+                        error,
+                        Some(if interrupted_by_user { 130 } else { 1 }),
+                        final_content,
+                        "log".to_string(),
+                        blocks,
+                        transport_session,
+                        ApiUsage::default(),
+                    )
+                }
+            };
 
             if let Ok(mut ctx) = ctx_arc.lock() {
                 let turn = ConversationTurn {
@@ -12939,15 +13085,18 @@ fn send_chat_message(
             });
 
             if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
-                if let (Some(input), Some(task_id)) =
-                    (claude_studio_workflow_input.as_ref(), claude_studio_workflow_task_id.as_ref())
-                {
+                if let (Some(input), Some(task_id)) = (
+                    claude_studio_workflow_input.as_ref(),
+                    claude_studio_workflow_task_id.as_ref(),
+                ) {
                     start_studio_post_turn_job(
+                        claude_terminal_storage.clone(),
                         claude_project_root.clone(),
                         "claude".to_string(),
                         claude_wrapper_path.clone(),
                         input.clone(),
                         task_id.clone(),
+                        claude_studio_context_key.clone(),
                         request_session_for_thread.clone(),
                         final_content.clone(),
                         turn_write_mode,
@@ -13003,6 +13152,7 @@ fn send_chat_message(
     let shell_live_chat_turns = live_chat_turns.clone();
     let shell_studio_workflow_input = studio_workflow_input_for_thread.clone();
     let shell_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
+    let shell_studio_context_key = studio_context_key_for_thread.clone();
 
     thread::spawn(move || {
         let start = Instant::now();
@@ -13012,6 +13162,8 @@ fn send_chat_message(
             .current_dir(&project_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        apply_runtime_environment(&mut cmd);
+        apply_studio_context_environment(&mut cmd, shell_studio_context_key.as_deref());
 
         #[cfg(target_os = "windows")]
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -13094,16 +13246,16 @@ fn send_chat_message(
                             exit_code: None,
                             duration_ms: None,
                             final_content: None,
-                        content_format: None,
-                        transport_kind: None,
-                        transport_session: None,
-                        blocks: None,
-                        prompt_tokens: None,
-                        completion_tokens: None,
-                        total_tokens: None,
-                        interrupted_by_user: None,
-                    },
-                );
+                            content_format: None,
+                            transport_kind: None,
+                            transport_session: None,
+                            blocks: None,
+                            prompt_tokens: None,
+                            completion_tokens: None,
+                            total_tokens: None,
+                            interrupted_by_user: None,
+                        },
+                    );
                 }
             }
         });
@@ -13213,15 +13365,18 @@ fn send_chat_message(
         });
 
         if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
-            if let (Some(input), Some(task_id)) =
-                (shell_studio_workflow_input.as_ref(), shell_studio_workflow_task_id.as_ref())
-            {
+            if let (Some(input), Some(task_id)) = (
+                shell_studio_workflow_input.as_ref(),
+                shell_studio_workflow_task_id.as_ref(),
+            ) {
                 start_studio_post_turn_job(
+                    shell_terminal_storage.clone(),
                     project_root.clone(),
                     agent_id.clone(),
                     wrapper_path.clone(),
                     input.clone(),
                     task_id.clone(),
+                    shell_studio_context_key.clone(),
                     request_session_for_thread.clone(),
                     raw_output.clone(),
                     turn_write_mode,
@@ -13441,6 +13596,7 @@ fn run_auto_orchestration(
             &planner_session,
             timeout_ms,
             Some(auto_live_turn.clone()),
+            None,
         );
         if was_live_chat_turn_interrupted(Some(&auto_live_turn)) {
             let blocks = build_auto_orchestration_blocks(
@@ -13638,6 +13794,7 @@ fn run_auto_orchestration(
                     codex_pending_approvals.clone(),
                     block_prefix,
                     Some(auto_live_turn.clone()),
+                    None,
                 ) {
                     Ok(outcome) => {
                         worker_trace_blocks.extend(outcome.blocks.clone());
@@ -13675,6 +13832,7 @@ fn run_auto_orchestration(
                     timeout_ms,
                     block_prefix,
                     Some(auto_live_turn.clone()),
+                    None,
                 ) {
                     Ok(outcome) => {
                         worker_trace_blocks.extend(outcome.blocks.clone());
@@ -13708,6 +13866,7 @@ fn run_auto_orchestration(
                     &worker_session,
                     timeout_ms,
                     Some(auto_live_turn.clone()),
+                    None,
                 ) {
                     Ok(outcome) => {
                         step_states[index].status = "completed".to_string();
@@ -13797,6 +13956,7 @@ fn run_auto_orchestration(
             &synthesis_session,
             timeout_ms,
             Some(auto_live_turn.clone()),
+            None,
         )
         .ok()
         .map(|outcome| {
@@ -17899,8 +18059,13 @@ fn open_url_with_browser(browser: &str, url: &str) -> std::io::Result<std::proce
     #[cfg(target_os = "macos")]
     {
         let command_name = browser_command_name(browser);
-        if matches!(browser.trim().to_ascii_lowercase().as_str(), "chrome" | "google-chrome" | "edge" | "microsoft-edge" | "msedge") {
-            return Command::new("open").args(["-a", command_name, url]).status();
+        if matches!(
+            browser.trim().to_ascii_lowercase().as_str(),
+            "chrome" | "google-chrome" | "edge" | "microsoft-edge" | "msedge"
+        ) {
+            return Command::new("open")
+                .args(["-a", command_name, url])
+                .status();
         }
     }
 
@@ -17968,7 +18133,10 @@ fn reveal_path_in_file_manager(path: String) -> Result<RevealPathResult, String>
     };
 
     #[cfg(target_os = "macos")]
-    let status = Command::new("open").args(["-R"]).arg(&absolute_path).status();
+    let status = Command::new("open")
+        .args(["-R"])
+        .arg(&absolute_path)
+        .status();
 
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     let status = Command::new("xdg-open")
@@ -18333,9 +18501,11 @@ fn search_workspace_files(
             results.sort_by(|left, right| {
                 let left_kind = if left.kind == "directory" { 0 } else { 1 };
                 let right_kind = if right.kind == "directory" { 0 } else { 1 };
-                left_kind
-                    .cmp(&right_kind)
-                    .then_with(|| left.relative_path.to_lowercase().cmp(&right.relative_path.to_lowercase()))
+                left_kind.cmp(&right_kind).then_with(|| {
+                    left.relative_path
+                        .to_lowercase()
+                        .cmp(&right.relative_path.to_lowercase())
+                })
             });
             Ok(results)
         }
@@ -18761,9 +18931,11 @@ fn build_workspace_file_index_local(
     files.sort_by(|left, right| {
         let left_kind = if left.kind == "directory" { 0 } else { 1 };
         let right_kind = if right.kind == "directory" { 0 } else { 1 };
-        left_kind
-            .cmp(&right_kind)
-            .then_with(|| left.relative_path.to_lowercase().cmp(&right.relative_path.to_lowercase()))
+        left_kind.cmp(&right_kind).then_with(|| {
+            left.relative_path
+                .to_lowercase()
+                .cmp(&right.relative_path.to_lowercase())
+        })
     });
     Ok(WorkspaceFileIndexResponse {
         entries_by_parent,
@@ -19762,6 +19934,14 @@ fn build_studio_memory_candidates(
     {
         lines.push(format_studio_fact_candidate(fact)?);
     }
+    for evidence in kernel
+        .evidence
+        .iter()
+        .filter(|evidence| is_promotable_studio_evidence(evidence))
+        .take(8)
+    {
+        lines.push(format_studio_evidence_candidate(evidence)?);
+    }
     if lines.is_empty() {
         return Ok(None);
     }
@@ -19772,37 +19952,154 @@ fn is_promotable_studio_memory_kind(kind: &str, content: &str) -> bool {
     if kind == "runtime" || content.trim_start().starts_with("Command succeeded:") {
         return false;
     }
-    matches!(kind, "decision" | "constraint" | "rule" | "failure" | "checkpoint" | "progress")
+    matches!(
+        kind,
+        "decision" | "constraint" | "rule" | "failure" | "checkpoint" | "progress"
+    )
+}
+
+fn is_promotable_studio_evidence(evidence: &KernelEvidence) -> bool {
+    let summary = evidence.summary.to_ascii_lowercase();
+    matches!(evidence.evidence_type.as_str(), "status" | "command")
+        && (summary.contains("error")
+            || summary.contains("failed")
+            || summary.contains("failure")
+            || summary.contains("exit code"))
+}
+
+fn maybe_run_studio_context_curator(
+    project_root: &str,
+    cli_id: &str,
+    command_path: &str,
+    input: &StudioContextExportInput,
+    task_id: &str,
+    context_key: Option<&str>,
+    session: &acp::AcpSession,
+) -> Option<StudioContextCurationApplyResult> {
+    let prompt = build_context_curator_prompt(input, task_id);
+    let mut curator_session = session.clone();
+    curator_session.plan_mode = true;
+
+    let outcome = match run_silent_agent_turn_once(
+        project_root,
+        cli_id,
+        command_path,
+        &prompt,
+        false,
+        &curator_session,
+        STUDIO_CONTEXT_CURATOR_TIMEOUT_MS,
+        None,
+        context_key,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            println!("[studio-context] context-curator skipped: {error}");
+            return None;
+        }
+    };
+    let raw_output = if outcome.final_content.trim().is_empty() {
+        outcome.raw_output.as_str()
+    } else {
+        outcome.final_content.as_str()
+    };
+    let result = match apply_context_curator_output(project_root, task_id, raw_output) {
+        Ok(result) => result,
+        Err(error) => {
+            println!("[studio-context] context-curator output ignored: {error}");
+            return None;
+        }
+    };
+    println!(
+        "[studio-context] context-curator implement={} check={} report={}",
+        result.implement_entries, result.check_entries, result.report_path
+    );
+    Some(result)
+}
+
+fn maybe_distill_and_promote_studio_memory(
+    terminal_storage: &TerminalStorage,
+    project_root: &str,
+    task_id: &str,
+    input: &StudioContextExportInput,
+) {
+    let candidates = match build_studio_memory_candidates(terminal_storage, &input.terminal_tab_id)
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            println!("[studio-context] memory-distill skipped: {error}");
+            None
+        }
+    };
+    let distill = match apply_memory_distill_candidates(
+        project_root,
+        task_id,
+        input,
+        candidates.as_deref(),
+        true,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            println!("[studio-context] memory-distill failed: {error}");
+            return;
+        }
+    };
+    println!(
+        "[studio-context] memory-distill candidates={} promotable={} rejected={} decision={} report={}",
+        distill.candidate_entries,
+        distill.promotable_entries,
+        distill.rejected_entries,
+        distill.decision,
+        distill.report_path
+    );
+    if !distill.allow_auto_promote {
+        println!("[studio-context] auto-promotion skipped: policy-check held candidates");
+        return;
+    }
+    match auto_promote_studio_memory(project_root, task_id) {
+        Ok(result) => println!(
+            "[studio-context] auto-promotion promoted={} skipped={} report={}",
+            result.promoted, result.skipped, result.report_path
+        ),
+        Err(error) => println!("[studio-context] auto-promotion skipped: {error}"),
+    }
 }
 
 fn start_studio_post_turn_job(
+    terminal_storage: TerminalStorage,
     project_root: String,
     cli_id: String,
     command_path: String,
     input: StudioContextExportInput,
     task_id: String,
+    context_key: Option<String>,
     session: acp::AcpSession,
     implementation_output: String,
     write_mode: bool,
 ) {
     thread::spawn(move || {
-        let _ = maybe_run_studio_checker_and_retry(
+        let checker_result = maybe_run_studio_checker_and_retry(
             &project_root,
             &cli_id,
             &command_path,
             &input,
             &task_id,
+            context_key.as_deref(),
             &session,
             &implementation_output,
             write_mode,
         );
         if write_mode {
-            match auto_promote_studio_memory(&project_root, &task_id) {
-                Ok(result) => println!(
-                    "[studio-context] auto-promotion promoted={} skipped={} report={}",
-                    result.promoted, result.skipped, result.report_path
+            match checker_result.as_ref().map(|result| result.status.as_str()) {
+                Some("pass") => maybe_distill_and_promote_studio_memory(
+                    &terminal_storage,
+                    &project_root,
+                    &task_id,
+                    &input,
                 ),
-                Err(error) => println!("[studio-context] auto-promotion skipped: {error}"),
+                Some("fail") => {
+                    println!("[studio-context] auto-promotion skipped: checker failed")
+                }
+                _ => println!("[studio-context] auto-promotion skipped: checker did not complete"),
             }
         }
     });
@@ -19814,6 +20111,7 @@ fn maybe_run_studio_checker_and_retry(
     command_path: &str,
     input: &StudioContextExportInput,
     task_id: &str,
+    context_key: Option<&str>,
     session: &acp::AcpSession,
     implementation_output: &str,
     write_mode: bool,
@@ -19833,6 +20131,7 @@ fn maybe_run_studio_checker_and_retry(
         &checker_session,
         STUDIO_CONTEXT_CURATOR_TIMEOUT_MS,
         None,
+        context_key,
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -19859,7 +20158,16 @@ fn maybe_run_studio_checker_and_retry(
         result.report_path
     );
     if result.needs_retry {
-        maybe_run_studio_retry_repair(project_root, cli_id, command_path, input, task_id, session, &result);
+        maybe_run_studio_retry_repair(
+            project_root,
+            cli_id,
+            command_path,
+            input,
+            task_id,
+            context_key,
+            session,
+            &result,
+        );
     }
     Some(result)
 }
@@ -19870,9 +20178,10 @@ fn maybe_run_studio_retry_repair(
     command_path: &str,
     input: &StudioContextExportInput,
     task_id: &str,
+    context_key: Option<&str>,
     session: &acp::AcpSession,
     checker: &StudioCheckerApplyResult,
-) {
+) -> bool {
     let prompt = format!(
         "Studio checker found issues after the implementation. Apply one focused retry fix.\n\n\
 Task: .studio/tasks/{task_id}/prd.md\n\
@@ -19910,12 +20219,28 @@ Rules:\n- Keep the fix minimal.\n- Do not ask for human confirmation.\n- Stop af
         &retry_session,
         STUDIO_CONTEXT_CURATOR_TIMEOUT_MS.saturating_mul(2),
         None,
+        context_key,
     ) {
-        Ok(outcome) => println!(
-            "[studio-context] checker retry completed chars={}",
-            outcome.raw_output.chars().count()
-        ),
-        Err(error) => println!("[studio-context] checker retry failed: {error}"),
+        Ok(outcome) => {
+            let raw_output = if outcome.final_content.trim().is_empty() {
+                outcome.raw_output.as_str()
+            } else {
+                outcome.final_content.as_str()
+            };
+            match record_checker_retry_result(project_root, task_id, true, raw_output) {
+                Ok(result) => println!(
+                    "[studio-context] checker retry status={} report={}",
+                    result.status, result.report_path
+                ),
+                Err(error) => println!("[studio-context] checker retry report failed: {error}"),
+            }
+            true
+        }
+        Err(error) => {
+            println!("[studio-context] checker retry failed: {error}");
+            let _ = record_checker_retry_result(project_root, task_id, false, &error);
+            false
+        }
     }
 }
 
@@ -19925,6 +20250,7 @@ fn format_studio_memory_entry_candidate(entry: &KernelMemoryEntry) -> Result<Str
         "candidateType": "kernelMemory",
         "id": entry.id,
         "kind": entry.kind,
+        "confidence": if entry.pin_state == "pinned" || entry.priority == "high" { "high" } else { "medium" },
         "scope": entry.scope,
         "scopeRef": entry.scope_ref,
         "priority": entry.priority,
@@ -19952,6 +20278,23 @@ fn format_studio_fact_candidate(fact: &KernelFact) -> Result<String, String> {
         "sourceEvidenceIds": fact.source_evidence_ids,
         "updatedAt": fact.updated_at,
         "promotionHint": promotion_hint_for_memory_kind(&fact.kind),
+    }))
+    .map_err(|err| err.to_string())
+}
+
+fn format_studio_evidence_candidate(evidence: &KernelEvidence) -> Result<String, String> {
+    serde_json::to_string(&json!({
+        "_studioManaged": true,
+        "candidateType": "kernelEvidence",
+        "id": evidence.id.clone(),
+        "kind": "failure",
+        "confidence": "high",
+        "content": evidence.summary.clone(),
+        "sourceEvidenceIds": [evidence.id.clone()],
+        "cliId": evidence.cli_id.clone(),
+        "evidenceType": evidence.evidence_type.clone(),
+        "updatedAt": evidence.timestamp.clone(),
+        "promotionHint": "journal",
     }))
     .map_err(|err| err.to_string())
 }
@@ -20119,9 +20462,7 @@ fn compose_tab_context_prompt(
         "{}\n\n--- Current workspace ---\n\
          Dirty files: {}\n\
          Failing checks: {}",
-        rules,
-        state.workspace.dirty_files,
-        state.workspace.failing_checks,
+        rules, state.workspace.dirty_files, state.workspace.failing_checks,
     );
 
     let studio_context_section = studio_context_prelude
@@ -20166,6 +20507,7 @@ fn compose_tab_context_prompt(
     storage
         .build_context_assembly(
             &EnsureTaskPacketRequest {
+                task_id: None,
                 terminal_tab_id: terminal_tab_id.to_string(),
                 workspace_id: workspace_id.to_string(),
                 project_root: project_root.to_string(),
@@ -20813,11 +21155,13 @@ fn run_silent_agent_turn_once(
     session: &acp::AcpSession,
     timeout_ms: u64,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
+    studio_context_key: Option<&str>,
 ) -> Result<SilentAgentTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
     let args = build_agent_args(agent_id, prompt, write_mode, session)?;
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let mut cmd = batch_aware_command(&resolved_command, &arg_refs);
+    apply_studio_context_environment(&mut cmd, studio_context_key);
     cmd.stdin(Stdio::null())
         .current_dir(project_root)
         .stdout(Stdio::piped())
@@ -21809,6 +22153,7 @@ fn evaluate_automation_round(
         &validation_session,
         timeout_ms,
         None,
+        None,
     );
 
     match result {
@@ -22154,6 +22499,7 @@ fn execute_auto_mode_goal(
         &planner_session,
         timeout_ms,
         None,
+        None,
     );
 
     let plan = match planner_result {
@@ -22249,6 +22595,7 @@ fn execute_auto_mode_goal(
                 codex_pending_approvals.clone(),
                 Vec::new(),
                 None,
+                None,
             )
             .map(|outcome| {
                 (
@@ -22271,6 +22618,7 @@ fn execute_auto_mode_goal(
                 step.write,
                 timeout_ms,
                 Vec::new(),
+                None,
                 None,
             )
             .map(|outcome| {
@@ -22295,6 +22643,7 @@ fn execute_auto_mode_goal(
                 timeout_ms,
                 claude_approval_rules.clone(),
                 claude_pending_approvals.clone(),
+                None,
                 None,
             )
             .map(|outcome| {
@@ -22341,6 +22690,7 @@ fn execute_auto_mode_goal(
         false,
         &synthesis_session,
         timeout_ms,
+        None,
         None,
     )
     .ok()
@@ -23563,6 +23913,7 @@ fn execute_automation_goal(
             codex_pending_approvals.clone(),
             Vec::new(),
             None,
+            None,
         )
         .map(|outcome| {
             (
@@ -23588,6 +23939,7 @@ fn execute_automation_goal(
             claude_approval_rules.clone(),
             claude_pending_approvals.clone(),
             None,
+            None,
         )
         .map(|outcome| {
             (
@@ -23612,6 +23964,7 @@ fn execute_automation_goal(
             timeout_ms,
             Vec::new(),
             None,
+            None,
         )
         .map(|outcome| {
             (
@@ -23631,6 +23984,7 @@ fn execute_automation_goal(
             true,
             &session,
             timeout_ms,
+            None,
             None,
         )
         .map(|outcome| {
@@ -25632,7 +25986,7 @@ fn interactive_shell_args(shell_path: &str) -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         let _ = shell_path;
-        vec!["-NoLogo".to_string()]
+        vec!["-NoLogo".to_string(), "-NoProfile".to_string()]
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -26827,6 +27181,14 @@ fn apply_runtime_environment(command: &mut Command) {
     if let Some(path_value) = runtime_path_value() {
         command.env("PATH", path_value);
     }
+    command.env("PYTHONIOENCODING", "utf-8");
+    command.env("PYTHONUTF8", "1");
+}
+
+fn apply_studio_context_environment(command: &mut Command, context_key: Option<&str>) {
+    if let Some(context_key) = context_key.map(str::trim).filter(|value| !value.is_empty()) {
+        command.env(STUDIO_CONTEXT_ID_ENV, context_key);
+    }
 }
 
 fn resolve_command_path(command_name: &str) -> Option<String> {
@@ -27163,9 +27525,14 @@ fn collect_workspace_files(
 }
 
 fn picked_chat_attachment_preview_source(path: &str, file_name: &str) -> Option<String> {
-    let media_type = guess_api_image_media_type(file_name).or_else(|| guess_api_image_media_type(path))?;
+    let media_type =
+        guess_api_image_media_type(file_name).or_else(|| guess_api_image_media_type(path))?;
     let bytes = fs::read(path).ok()?;
-    Some(format!("data:{};base64,{}", media_type, encode_base64(&bytes)))
+    Some(format!(
+        "data:{};base64,{}",
+        media_type,
+        encode_base64(&bytes)
+    ))
 }
 
 fn to_picked_chat_attachments(paths: Vec<String>) -> Vec<PickedChatAttachment> {

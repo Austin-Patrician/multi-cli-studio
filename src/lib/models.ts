@@ -1204,6 +1204,7 @@ export interface ChatMessageBlocksUpdateRequest {
 export interface ChatPromptRequest {
   cliId: AgentId;
   terminalTabId: string;
+  taskId?: string | null;
   workspaceId: string;
   assistantMessageId: string;
   prompt: string;
@@ -1263,6 +1264,13 @@ export interface StudioWorkflowState {
   researchArtifacts: string[];
   implementEntries: number;
   checkEntries: number;
+  checkerStatus: string | null;
+  checkerSummary: string | null;
+  checkerIssues: string[];
+  checkerNeedsRetry: boolean;
+  checkerRetryPerformed: boolean;
+  checkerRetryStatus: string | null;
+  checkerRetryReportPath: string | null;
   policyDecision: string | null;
   allowAutoPromote: boolean;
   lastUpdated: string | null;

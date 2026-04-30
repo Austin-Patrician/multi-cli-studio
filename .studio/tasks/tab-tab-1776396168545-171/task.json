@@ -1,0 +1,39 @@
+{
+  "agents": {
+    "check": ".studio/agents/check.md",
+    "contextCurator": ".studio/agents/context-curator.md",
+    "implement": ".studio/agents/implement.md",
+    "memoryDistill": ".studio/agents/memory-distill.md",
+    "policyCheck": ".studio/agents/policy-check.md",
+    "research": ".studio/agents/research.md"
+  },
+  "branch": "main",
+  "checkManifest": ".studio/runtime/tasks/tab-tab-1776396168545-171/check.jsonl",
+  "contextSelectionReport": ".studio/tasks/tab-tab-1776396168545-171/context-selection-report.md",
+  "currentCli": "codex",
+  "id": "tab-tab-1776396168545-171",
+  "implementManifest": ".studio/runtime/tasks/tab-tab-1776396168545-171/implement.jsonl",
+  "latestConclusion": null,
+  "memoryCandidates": ".studio/tasks/tab-tab-1776396168545-171/memory-candidates.jsonl",
+  "memoryDistillReport": ".studio/tasks/tab-tab-1776396168545-171/memory-distill-report.md",
+  "nextStep": "Continue from the latest user request.",
+  "phaseOrder": [
+    "planning",
+    "context_curated",
+    "implementing",
+    "checking",
+    "memory_distilled",
+    "completed"
+  ],
+  "policyCheck": ".studio/tasks/tab-tab-1776396168545-171/policy-check.json",
+  "projectName": "multi-cli-studio",
+  "relevantFiles": [],
+  "runtimeTask": ".studio/runtime/tasks/tab-tab-1776396168545-171/task.md",
+  "status": "checking",
+  "studioManaged": true,
+  "terminalTabId": "tab-1776396168545-171",
+  "title": "## Loading Policy\n\nStart with this file, .studio/workflow.md, and the active runtime task. Load detailed spec/research files from the JSONL manifests only when needed. Avoid injecting unrelated historical chat into the current turn.\n\n无法设置属性。此语言模式仅支持核心类型的属性设置。\n所在位置 行:1 字符: 1\n+ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8;\n+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n    + CategoryInfo          : InvalidOperation: (:) []，RuntimeException\n    + FullyQualifiedErrorId : PropertySetterNotSupportedInConstrainedLanguage",
+  "updatedAt": "2026-04-30T09:41:42.190235500+08:00",
+  "workflow": ".studio/workflow.md",
+  "workspaceId": "workspace-1775725599419-235"
+}

@@ -279,8 +279,18 @@ fn mutate_workspace_sessions(
         let session_key = session_key(&record.entry.engine, &record.entry.session_id);
         let source_path = record.source_path.as_deref().unwrap_or("");
         let outcome = match kind {
-            MutationKind::Archive => archive_record(source_path, &record.entry.engine, &session_key, &mut metadata),
-            MutationKind::Unarchive => unarchive_record(source_path, &record.entry.engine, &session_key, &mut metadata),
+            MutationKind::Archive => archive_record(
+                source_path,
+                &record.entry.engine,
+                &session_key,
+                &mut metadata,
+            ),
+            MutationKind::Unarchive => unarchive_record(
+                source_path,
+                &record.entry.engine,
+                &session_key,
+                &mut metadata,
+            ),
             MutationKind::Delete => delete_record(source_path, &session_key, &mut metadata),
         };
 
@@ -306,7 +316,9 @@ fn mutate_workspace_sessions(
     Ok(WorkspaceSessionBatchMutationResponse { results })
 }
 
-fn load_workspaces(store: &State<'_, crate::AppStore>) -> Result<Vec<PersistedWorkspaceRef>, String> {
+fn load_workspaces(
+    store: &State<'_, crate::AppStore>,
+) -> Result<Vec<PersistedWorkspaceRef>, String> {
     Ok(store
         .terminal_storage
         .load_state()?
@@ -372,14 +384,19 @@ fn build_global_codex_entries(
     let mut entries = Vec::new();
     for summary in scan_codex_session_summaries(None, &codex_history_roots())? {
         let inferred = infer_workspace_for_summary(&summary, workspaces);
-        let (workspace_id, workspace_label, attribution_status, matched_workspace_id, matched_workspace_label) =
-            inferred.unwrap_or((
-                SESSION_CATALOG_UNASSIGNED_WORKSPACE_ID.to_string(),
-                Some("未归属历史".to_string()),
-                Some("unassigned"),
-                None,
-                None,
-            ));
+        let (
+            workspace_id,
+            workspace_label,
+            attribution_status,
+            matched_workspace_id,
+            matched_workspace_label,
+        ) = inferred.unwrap_or((
+            SESSION_CATALOG_UNASSIGNED_WORKSPACE_ID.to_string(),
+            Some("未归属历史".to_string()),
+            Some("unassigned"),
+            None,
+            None,
+        ));
         entries.push(record_from_summary(
             &summary,
             workspace_id,
@@ -442,18 +459,23 @@ fn record_from_summary(
 ) -> SessionRecord {
     let engine = normalize_engine(summary);
     let archived_at = resolve_archived_at(summary, &engine, metadata);
-    let (attribution_status, attribution_reason, attribution_confidence, matched_workspace_id, matched_workspace_label) =
-        attribution
-            .map(|(status, reason, confidence, matched_id, matched_label)| {
-                (
-                    Some(status.to_string()),
-                    reason.map(|value| value.to_string()),
-                    confidence.map(|value| value.to_string()),
-                    matched_id,
-                    matched_label,
-                )
-            })
-            .unwrap_or((None, None, None, None, None));
+    let (
+        attribution_status,
+        attribution_reason,
+        attribution_confidence,
+        matched_workspace_id,
+        matched_workspace_label,
+    ) = attribution
+        .map(|(status, reason, confidence, matched_id, matched_label)| {
+            (
+                Some(status.to_string()),
+                reason.map(|value| value.to_string()),
+                confidence.map(|value| value.to_string()),
+                matched_id,
+                matched_label,
+            )
+        })
+        .unwrap_or((None, None, None, None, None));
     SessionRecord {
         source_path: summary.source_path.clone(),
         entry: WorkspaceSessionCatalogEntry {
@@ -543,7 +565,8 @@ fn build_page(
             .take(limit)
             .map(|record| record.entry)
             .collect(),
-        next_cursor: (next_offset < total).then_some(format!("{}{}", SESSION_CATALOG_CURSOR_PREFIX, next_offset)),
+        next_cursor: (next_offset < total)
+            .then_some(format!("{}{}", SESSION_CATALOG_CURSOR_PREFIX, next_offset)),
         partial_source: None,
     }
 }
@@ -601,7 +624,11 @@ fn resolve_archived_at(
         && summary
             .source_path
             .as_deref()
-            .map(|value| value.replace('\\', "/").contains("/.codex/archived_sessions/"))
+            .map(|value| {
+                value
+                    .replace('\\', "/")
+                    .contains("/.codex/archived_sessions/")
+            })
             .unwrap_or(false)
     {
         return Some(summary.timestamp);

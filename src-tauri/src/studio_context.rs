@@ -42,6 +42,19 @@ PLATFORM = "__STUDIO_PLATFORM__"
 MODE = "__STUDIO_MODE__"
 
 
+def configure_stdio() -> None:
+    if os.name != "nt":
+        return
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def read_stdin_json() -> dict:
     try:
         raw = sys.stdin.read()
@@ -85,7 +98,41 @@ def load_context(root: Path) -> str:
     return read_text(root / ".studio" / "runtime" / "context.md")
 
 
+def discover_bound_task(root: Path) -> tuple[str | None, Path | None, Path | None] | None:
+    context_id = os.environ.get("STUDIO_CONTEXT_ID", "").strip()
+    if not context_id or "/" in context_id or "\\" in context_id or ".." in context_id:
+        return None
+    binding_path = root / ".studio" / "runtime" / "sessions" / f"{context_id}.json"
+    try:
+        data = json.loads(binding_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    task_id_value = data.get("taskId") or data.get("task_id")
+    if isinstance(task_id_value, str) and task_id_value.strip():
+        task_id = Path(task_id_value.strip()).name
+        runtime_task = root / ".studio" / "runtime" / "tasks" / task_id
+        durable_task = root / ".studio" / "tasks" / task_id
+        if runtime_task.is_dir() or durable_task.is_dir():
+            return task_id, runtime_task, durable_task
+    active_task = data.get("activeTask") or data.get("active_task")
+    if not isinstance(active_task, str) or not active_task.strip():
+        return None
+    durable_task = root / active_task.strip().rstrip("/")
+    task_id = durable_task.name
+    if not task_id:
+        return None
+    runtime_task = root / ".studio" / "runtime" / "tasks" / task_id
+    if runtime_task.is_dir() or durable_task.is_dir():
+        return task_id, runtime_task, durable_task
+    return None
+
+
 def discover_active_task(root: Path) -> tuple[str | None, Path | None, Path | None]:
+    bound_task = discover_bound_task(root)
+    if bound_task:
+        return bound_task
     context = load_context(root)
     runtime_task = None
     durable_task = None
@@ -273,6 +320,7 @@ def emit(additional_context: str) -> int:
 
 
 def main() -> int:
+    configure_stdio()
     non_interactive = f"{PLATFORM.upper()}_NON_INTERACTIVE"
     if os.environ.get(non_interactive) == "1":
         return 0
@@ -294,6 +342,9 @@ pub struct StudioContextExportInput {
     pub project_root: String,
     pub project_name: String,
     pub workspace_id: String,
+    pub task_id: Option<String>,
+    pub task_title: Option<String>,
+    pub task_goal: Option<String>,
     pub terminal_tab_id: String,
     pub cli_id: String,
     pub branch: String,
@@ -403,11 +454,30 @@ pub struct StudioCheckerApplyResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StudioCheckerRetryResult {
+    pub status: String,
+    pub report_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StudioPolicyPromotionResult {
     pub promoted: usize,
     pub skipped: usize,
     pub paths: Vec<String>,
     pub report_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudioMemoryDistillApplyResult {
+    pub candidate_entries: usize,
+    pub promotable_entries: usize,
+    pub rejected_entries: usize,
+    pub allow_auto_promote: bool,
+    pub decision: String,
+    pub report_path: String,
+    pub policy_path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -427,6 +497,13 @@ pub struct StudioWorkflowState {
     pub research_artifacts: Vec<String>,
     pub implement_entries: usize,
     pub check_entries: usize,
+    pub checker_status: Option<String>,
+    pub checker_summary: Option<String>,
+    pub checker_issues: Vec<String>,
+    pub checker_needs_retry: bool,
+    pub checker_retry_performed: bool,
+    pub checker_retry_status: Option<String>,
+    pub checker_retry_report_path: Option<String>,
     pub policy_decision: Option<String>,
     pub allow_auto_promote: bool,
     pub last_updated: Option<String>,
@@ -435,6 +512,7 @@ pub struct StudioWorkflowState {
 #[derive(Debug, Clone)]
 pub struct StudioContextExport {
     pub task_id: String,
+    pub context_key: String,
     pub prelude: String,
     pub metrics: StudioContextMetrics,
 }
@@ -471,6 +549,7 @@ pub struct StudioPromoteResult {
 #[serde(rename_all = "camelCase")]
 struct StudioSessionBinding {
     context_key: String,
+    task_id: String,
     active_task: String,
     cli_id: String,
     terminal_tab_id: String,
@@ -494,7 +573,14 @@ pub fn export_studio_context(
     fs::create_dir_all(&sessions_dir).map_err(|err| err.to_string())?;
     ensure_workflow_files(project_root)?;
 
-    let task_id = format!("tab-{}", stable_slug(&input.terminal_tab_id, "default"));
+    let task_id = input
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| stable_slug(value, "task"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("task-{}", stable_slug(&input.terminal_tab_id, "default")));
     let task_dir = tasks_dir.join(&task_id);
     fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
 
@@ -504,9 +590,17 @@ pub fn export_studio_context(
 
     let durable_task_dir = project_root.join(".studio").join("tasks").join(&task_id);
     fs::create_dir_all(&durable_task_dir).map_err(|err| err.to_string())?;
+    let durable_task_json_path = durable_task_dir.join("task.json");
+    let existing_task_json = read_json_file(&durable_task_json_path).ok();
+    let active_tab_ids = load_active_tab_ids(&durable_task_json_path, &input.terminal_tab_id);
     atomic_write(
-        &durable_task_dir.join("task.json"),
-        &render_durable_task_json(input, &task_id)?,
+        &durable_task_json_path,
+        &render_durable_task_json(
+            input,
+            &task_id,
+            &active_tab_ids,
+            existing_task_json.as_ref(),
+        )?,
     )?;
     write_durable_prd_if_missing(&durable_task_dir.join("prd.md"), input, &task_id)?;
 
@@ -516,14 +610,20 @@ pub fn export_studio_context(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let has_promotable_candidates = has_promotable_memory_candidate(memory_candidates);
+        let distill = sanitize_memory_candidates(memory_candidates);
+        let candidates_content = if distill.accepted.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", distill.accepted.join("\n"))
+        };
+        let has_promotable_candidates = distill.promotable_entries > 0;
         atomic_write(
             &durable_task_dir.join("memory-candidates.jsonl"),
-            &trim_to_limit(memory_candidates, MAX_MEMORY_CANDIDATE_CHARS),
+            &trim_to_limit(&candidates_content, MAX_MEMORY_CANDIDATE_CHARS),
         )?;
         atomic_write(
             &durable_task_dir.join("memory-distill-report.md"),
-            &render_memory_distill_report(input, &task_id),
+            &render_memory_distill_report(input, &task_id, &distill, false, "pending_checker"),
         )?;
         atomic_write(
             &durable_task_dir.join("policy-check.json"),
@@ -559,8 +659,14 @@ pub fn export_studio_context(
             score: 0,
         },
     )?;
-    sync_manifest_to_durable_task(&durable_task_dir.join("implement.jsonl"), &task_dir.join("implement.jsonl"))?;
-    sync_manifest_to_durable_task(&durable_task_dir.join("check.jsonl"), &task_dir.join("check.jsonl"))?;
+    sync_manifest_to_durable_task(
+        &durable_task_dir.join("implement.jsonl"),
+        &task_dir.join("implement.jsonl"),
+    )?;
+    sync_manifest_to_durable_task(
+        &durable_task_dir.join("check.jsonl"),
+        &task_dir.join("check.jsonl"),
+    )?;
 
     let context_path = runtime_dir.join("context.md");
     let context_content = trim_to_limit(&render_context(input, &task_id), MAX_CONTEXT_CHARS);
@@ -573,6 +679,7 @@ pub fn export_studio_context(
     );
     let binding = StudioSessionBinding {
         context_key: context_key.clone(),
+        task_id: task_id.clone(),
         active_task: format!(".studio/tasks/{task_id}"),
         cli_id: input.cli_id.clone(),
         terminal_tab_id: input.terminal_tab_id.clone(),
@@ -580,7 +687,10 @@ pub fn export_studio_context(
         updated_at: Local::now().to_rfc3339(),
     };
     let binding_json = serde_json::to_string_pretty(&binding).map_err(|err| err.to_string())?;
-    atomic_write(&sessions_dir.join(format!("{context_key}.json")), &binding_json)?;
+    atomic_write(
+        &sessions_dir.join(format!("{context_key}.json")),
+        &binding_json,
+    )?;
 
     let mut adapter_files = ensure_adapters(project_root)?;
     adapter_files.extend(ensure_native_cli_hooks(project_root)?);
@@ -598,15 +708,18 @@ pub fn export_studio_context(
 
     Ok(Some(StudioContextExport {
         task_id,
+        context_key,
         prelude,
         metrics,
     }))
 }
 
-pub fn build_context_curator_prompt(
-    input: &StudioContextExportInput,
-    task_id: &str,
-) -> String {
+pub fn build_context_curator_prompt(input: &StudioContextExportInput, task_id: &str) -> String {
+    let request = clean_studio_text(&input.user_prompt);
+    let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
+        .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
+    let next_step = clean_studio_option(input.handoff_next_step.as_deref())
+        .unwrap_or_else(|| "Continue from the latest user request.".to_string());
     format!(
         "You are Studio's context-curator subagent. Curate task-specific spec/research context automatically.\n\n\
 Return only a single JSON object with this shape:\n\
@@ -618,6 +731,14 @@ Rules:\n\
 - Keep each list small and task-specific.\n\
 - Use `implement` for implementation rules/research and `check` for verification/quality rules/research.\n\
 - If no specific file is relevant, use `.studio/spec/index.md` only if it exists.\n\n\
+Candidate spec layers:\n\
+- `.studio/spec/index.md` - workflow-wide discovery and policy.\n\
+- `.studio/spec/frontend/index.md` - React UI, chat surfaces, terminal dock, and workflow panel behavior.\n\
+- `.studio/spec/tauri-runtime/index.md` - Rust commands, process orchestration, state, and app runtime rules.\n\
+- `.studio/spec/cli-adapters/index.md` - Codex, Claude, Gemini adapters, hooks, sessions, and permissions.\n\
+- `.studio/spec/storage/index.md` - SQLite task kernel, task bindings, facts, evidence, and migrations.\n\
+- `.studio/spec/automation/index.md` - automation goals, workflow runs, validation, retry, and routing.\n\
+- `.studio/spec/windows-runtime/index.md` - Windows shells, encoding, path handling, and constrained-language safety.\n\n\
 Task ID: {task_id}\n\
 Project: {}\n\
 Root: {}\n\
@@ -635,17 +756,9 @@ Relevant files:\n{}\n",
         input.cli_id,
         input.dirty_files,
         input.failing_checks,
-        non_empty(&input.user_prompt, "Continue the active task."),
-        input
-            .handoff_summary
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("No assistant conclusion captured yet."),
-        input
-            .handoff_next_step
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("Continue from the latest user request."),
+        non_empty(&request, "Continue the active task."),
+        latest_conclusion,
+        next_step,
         if input.handoff_files.is_empty() {
             "- (none captured yet)".to_string()
         } else {
@@ -660,6 +773,9 @@ Relevant files:\n{}\n",
 }
 
 pub fn build_research_agent_prompt(input: &StudioContextExportInput, task_id: &str) -> String {
+    let request = clean_studio_text(&input.user_prompt);
+    let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
+        .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
     format!(
         "You are Studio's research subagent. Create durable task research artifacts only when they help implementation or checking.\n\n\
 Return only JSON: {{\"artifacts\":[{{\"title\":\"short topic\",\"content\":\"markdown finding\",\"sources\":[\"repo/spec/user prompt/source\"]}}]}}\n\n\
@@ -676,12 +792,8 @@ Latest conclusion:\n{}\n\n\
 Relevant files:\n{}\n",
         input.project_name,
         input.project_root,
-        non_empty(&input.user_prompt, "Continue the active task."),
-        input
-            .handoff_summary
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("No assistant conclusion captured yet."),
+        non_empty(&request, "Continue the active task."),
+        latest_conclusion,
         if input.handoff_files.is_empty() {
             "- (none captured yet)".to_string()
         } else {
@@ -705,7 +817,11 @@ pub fn apply_research_agent_output(
         return Err("Project root is missing or not a local directory.".to_string());
     }
     let parsed = parse_research_agent_output(raw_output)?;
-    let research_dir = project_root.join(".studio").join("tasks").join(task_id).join("research");
+    let research_dir = project_root
+        .join(".studio")
+        .join("tasks")
+        .join(task_id)
+        .join("research");
     fs::create_dir_all(&research_dir).map_err(|err| err.to_string())?;
     let mut paths = Vec::new();
     for artifact in parsed.artifacts.into_iter().take(8) {
@@ -715,7 +831,10 @@ pub fn apply_research_agent_output(
             continue;
         }
         let slug = stable_slug(title, "research");
-        let path = research_dir.join(format!("{}-{slug}.md", Local::now().format("%Y%m%d-%H%M%S")));
+        let path = research_dir.join(format!(
+            "{}-{slug}.md",
+            Local::now().format("%Y%m%d-%H%M%S")
+        ));
         let sources = if artifact.sources.is_empty() {
             "- Studio task context".to_string()
         } else {
@@ -746,6 +865,7 @@ pub fn build_checker_agent_prompt(
     task_id: &str,
     implementation_output: &str,
 ) -> String {
+    let request = clean_studio_text(&input.user_prompt);
     format!(
         "You are Studio's checker subagent. Verify the latest implementation against PRD, check manifest, and task state.\n\n\
 Return only JSON: {{\"status\":\"pass|fail\",\"summary\":\"short result\",\"issues\":[\"concrete issue or missing check\"]}}\n\n\
@@ -759,7 +879,7 @@ Check manifest: .studio/tasks/{task_id}/check.jsonl\n\
 Context report: .studio/tasks/{task_id}/context-selection-report.md\n\n\
 Request:\n{}\n\n\
 Implementation output:\n{}\n",
-        non_empty(&input.user_prompt, "Continue the active task."),
+        non_empty(&request, "Continue the active task."),
         trim_to_limit(implementation_output, MAX_OPTIONAL_SECTION_CHARS),
     )
 }
@@ -776,18 +896,147 @@ pub fn apply_checker_agent_output(
     let parsed = parse_checker_agent_output(raw_output)?;
     let status = normalize_checker_status(&parsed.status, &parsed.issues);
     let needs_retry = status == "fail";
-    let summary = non_empty(&parsed.summary, if needs_retry { "Checker found issues." } else { "Checker passed." }).to_string();
+    let checked_at = Local::now().to_rfc3339();
+    let summary = non_empty(
+        &parsed.summary,
+        if needs_retry {
+            "Checker found issues."
+        } else {
+            "Checker passed."
+        },
+    )
+    .to_string();
     let task_dir = project_root.join(".studio").join("tasks").join(task_id);
     fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
     let report_path = task_dir.join("checker-report.md");
-    let report = render_checker_report(task_id, &status, &summary, &parsed.issues);
+    let report = render_checker_report(
+        task_id,
+        &status,
+        &summary,
+        &parsed.issues,
+        needs_retry,
+        &checked_at,
+    );
     atomic_write(&report_path, &report)?;
+    update_checker_task_state(
+        &task_dir.join("task.json"),
+        task_id,
+        &status,
+        &summary,
+        &parsed.issues,
+        needs_retry,
+        &checked_at,
+    )?;
     Ok(StudioCheckerApplyResult {
         status,
         summary,
         issues: parsed.issues,
         report_path: report_path.to_string_lossy().to_string(),
         needs_retry,
+    })
+}
+
+pub fn record_checker_retry_result(
+    project_root: &str,
+    task_id: &str,
+    succeeded: bool,
+    raw_output: &str,
+) -> Result<StudioCheckerRetryResult, String> {
+    let project_root = Path::new(project_root.trim());
+    if project_root.as_os_str().is_empty() || !project_root.is_dir() {
+        return Err("Project root is missing or not a local directory.".to_string());
+    }
+    let task_dir = project_root.join(".studio").join("tasks").join(task_id);
+    fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
+    let completed_at = Local::now().to_rfc3339();
+    let status = if succeeded { "completed" } else { "failed" };
+    let report_path = task_dir.join("checker-retry-report.md");
+    let report = render_checker_retry_report(task_id, status, raw_output, &completed_at);
+    atomic_write(&report_path, &trim_to_limit(&report, MAX_REPORT_CHARS))?;
+    update_checker_retry_task_state(
+        &task_dir.join("task.json"),
+        task_id,
+        status,
+        raw_output,
+        &completed_at,
+    )?;
+    append_checker_retry_to_report(
+        &task_dir.join("checker-report.md"),
+        task_id,
+        status,
+        &completed_at,
+    )?;
+    Ok(StudioCheckerRetryResult {
+        status: status.to_string(),
+        report_path: report_path.to_string_lossy().to_string(),
+    })
+}
+
+pub fn apply_memory_distill_candidates(
+    project_root: &str,
+    task_id: &str,
+    input: &StudioContextExportInput,
+    raw_candidates: Option<&str>,
+    checker_passed: bool,
+) -> Result<StudioMemoryDistillApplyResult, String> {
+    let project_root = Path::new(project_root.trim());
+    if project_root.as_os_str().is_empty() || !project_root.is_dir() {
+        return Err("Project root is missing or not a local directory.".to_string());
+    }
+    let task_dir = project_root.join(".studio").join("tasks").join(task_id);
+    fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
+
+    let distill = sanitize_memory_candidates(raw_candidates.unwrap_or_default());
+    let candidates_path = task_dir.join("memory-candidates.jsonl");
+    let candidates_content = if distill.accepted.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", distill.accepted.join("\n"))
+    };
+    atomic_write(
+        &candidates_path,
+        &trim_to_limit(&candidates_content, MAX_MEMORY_CANDIDATE_CHARS),
+    )?;
+
+    let allow_auto_promote = checker_passed && distill.promotable_entries > 0;
+    let decision = if allow_auto_promote {
+        "candidate_ready"
+    } else if checker_passed {
+        "hold"
+    } else {
+        "pending_checker"
+    }
+    .to_string();
+    let report_path = task_dir.join("memory-distill-report.md");
+    let report = render_memory_distill_report(input, task_id, &distill, checker_passed, &decision);
+    atomic_write(&report_path, &trim_to_limit(&report, MAX_REPORT_CHARS))?;
+
+    let policy_path = task_dir.join("policy-check.json");
+    let policy = render_post_checker_policy_check_json(
+        task_id,
+        checker_passed,
+        &distill,
+        allow_auto_promote,
+        &decision,
+    )?;
+    atomic_write(&policy_path, &policy)?;
+    update_memory_distill_task_state(
+        &task_dir.join("task.json"),
+        task_id,
+        checker_passed,
+        distill.accepted.len(),
+        distill.promotable_entries,
+        &decision,
+    )?;
+
+    Ok(StudioMemoryDistillApplyResult {
+        candidate_entries: distill.accepted.len(),
+        promotable_entries: distill.promotable_entries,
+        rejected_entries: distill.rejected_entries,
+        allow_auto_promote,
+        decision,
+        report_path: report_path.to_string_lossy().to_string(),
+        policy_path: policy_path.to_string_lossy().to_string(),
     })
 }
 
@@ -808,9 +1057,14 @@ pub fn auto_promote_studio_memory(
         .get("allowAutoPromote")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if !allow || !candidates_path.is_file() {
+    let checker_passed = policy
+        .get("checkerStatus")
+        .and_then(Value::as_str)
+        .map(|status| status == "pass")
+        .unwrap_or(false);
+    if !allow || !checker_passed || !candidates_path.is_file() {
         let report = format!(
-            "# Promotion Report\n\nGenerated: {}\nTask: {task_id}\nDecision: hold\nReason: policy-check did not allow promotion or no candidates exist.\n",
+            "# Promotion Report\n\nGenerated: {}\nTask: {task_id}\nDecision: hold\nReason: policy-check did not allow promotion, checker has not passed, or no candidates exist.\n",
             Local::now().to_rfc3339()
         );
         atomic_write(&report_path, &report)?;
@@ -825,7 +1079,12 @@ pub fn auto_promote_studio_memory(
     let mut promoted_paths = Vec::new();
     let mut skipped = 0;
     let content = fs::read_to_string(&candidates_path).map_err(|err| err.to_string())?;
-    for line in content.lines().map(str::trim).filter(|line| !line.is_empty()).take(24) {
+    for line in content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(24)
+    {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             skipped += 1;
             continue;
@@ -835,6 +1094,10 @@ pub fn auto_promote_studio_memory(
             continue;
         }
         if !candidate_has_promotion_evidence(&value) {
+            skipped += 1;
+            continue;
+        }
+        if !candidate_confidence_allows_promotion(&value) {
             skipped += 1;
             continue;
         }
@@ -879,6 +1142,13 @@ pub fn auto_promote_studio_memory(
         }
     );
     atomic_write(&report_path, &report)?;
+    update_promotion_task_state(
+        &task_dir.join("task.json"),
+        task_id,
+        promoted_paths.len(),
+        skipped,
+        &report_path,
+    )?;
     Ok(StudioPolicyPromotionResult {
         promoted: promoted_paths.len(),
         skipped,
@@ -896,12 +1166,26 @@ pub fn load_studio_workflow_state(
         return Err("Project root is missing or not a local directory.".to_string());
     }
     let task_id = terminal_tab_id
-        .map(|tab| format!("tab-{}", stable_slug(tab, "default")))
+        .and_then(|tab| task_id_for_terminal_tab(project_root_path, tab))
+        .or_else(|| {
+            terminal_tab_id
+                .map(|tab| format!("tab-{}", stable_slug(tab, "default")))
+                .filter(|legacy| {
+                    project_root_path
+                        .join(".studio")
+                        .join("tasks")
+                        .join(legacy)
+                        .is_dir()
+                })
+        })
         .or_else(|| latest_task_id(project_root_path));
     let Some(task_id) = task_id else {
         return Ok(StudioWorkflowState::empty(project_root));
     };
-    let task_dir = project_root_path.join(".studio").join("tasks").join(&task_id);
+    let task_dir = project_root_path
+        .join(".studio")
+        .join("tasks")
+        .join(&task_id);
     if !task_dir.is_dir() {
         return Ok(StudioWorkflowState::empty(project_root));
     }
@@ -911,6 +1195,7 @@ pub fn load_studio_workflow_state(
         .and_then(Value::as_str)
         .unwrap_or_else(|| infer_phase_from_files(&task_dir))
         .to_string();
+    let checker = task_json.get("checker").unwrap_or(&Value::Null);
     let policy = read_json_file(&task_dir.join("policy-check.json")).unwrap_or(Value::Null);
     let research_artifacts = list_markdown_files(&task_dir.join("research"))?;
     Ok(StudioWorkflowState {
@@ -919,15 +1204,65 @@ pub fn load_studio_workflow_state(
         phase,
         task_path: Some(format!(".studio/tasks/{task_id}/task.json")),
         prd_path: Some(format!(".studio/tasks/{task_id}/prd.md")),
-        context_report_path: file_ref_if_exists(&task_dir.join("context-selection-report.md"), project_root_path),
-        implement_manifest_path: file_ref_if_exists(&task_dir.join("implement.jsonl"), project_root_path),
+        context_report_path: file_ref_if_exists(
+            &task_dir.join("context-selection-report.md"),
+            project_root_path,
+        ),
+        implement_manifest_path: file_ref_if_exists(
+            &task_dir.join("implement.jsonl"),
+            project_root_path,
+        ),
         check_manifest_path: file_ref_if_exists(&task_dir.join("check.jsonl"), project_root_path),
-        checker_report_path: file_ref_if_exists(&task_dir.join("checker-report.md"), project_root_path),
-        policy_check_path: file_ref_if_exists(&task_dir.join("policy-check.json"), project_root_path),
-        promotion_report_path: file_ref_if_exists(&task_dir.join("promotion-report.md"), project_root_path),
+        checker_report_path: file_ref_if_exists(
+            &task_dir.join("checker-report.md"),
+            project_root_path,
+        ),
+        policy_check_path: file_ref_if_exists(
+            &task_dir.join("policy-check.json"),
+            project_root_path,
+        ),
+        promotion_report_path: file_ref_if_exists(
+            &task_dir.join("promotion-report.md"),
+            project_root_path,
+        ),
         research_artifacts,
         implement_entries: count_jsonl_entries(&task_dir.join("implement.jsonl")),
         check_entries: count_jsonl_entries(&task_dir.join("check.jsonl")),
+        checker_status: checker
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        checker_summary: checker
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        checker_issues: checker
+            .get("issues")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        checker_needs_retry: checker
+            .get("needsRetry")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        checker_retry_performed: checker
+            .get("retryPerformed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        checker_retry_status: checker
+            .get("retryStatus")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        checker_retry_report_path: file_ref_if_exists(
+            &task_dir.join("checker-retry-report.md"),
+            project_root_path,
+        ),
         policy_decision: policy
             .get("decision")
             .and_then(Value::as_str)
@@ -958,6 +1293,20 @@ pub fn apply_context_curator_output(
     if implement_entries.is_empty() && check_entries.is_empty() {
         return Err("Context curator returned no valid spec or research entries.".to_string());
     }
+    let implement_manifest_entries = if implement_entries.is_empty() {
+        vec![fallback_curated_entry(
+            "Curator did not select an implementation-specific file; keeping the managed spec index fallback.",
+        )]
+    } else {
+        implement_entries.clone()
+    };
+    let check_manifest_entries = if check_entries.is_empty() {
+        vec![fallback_curated_entry(
+            "Curator did not select a verification-specific file; keeping the managed spec index fallback.",
+        )]
+    } else {
+        check_entries.clone()
+    };
 
     let durable_task_dir = project_root.join(".studio").join("tasks").join(task_id);
     let runtime_task_dir = project_root
@@ -970,9 +1319,12 @@ pub fn apply_context_curator_output(
 
     write_curated_manifest(
         &durable_task_dir.join("implement.jsonl"),
-        &implement_entries,
+        &implement_manifest_entries,
     )?;
-    write_curated_manifest(&durable_task_dir.join("check.jsonl"), &check_entries)?;
+    write_curated_manifest(
+        &durable_task_dir.join("check.jsonl"),
+        &check_manifest_entries,
+    )?;
     sync_manifest_to_durable_task(
         &runtime_task_dir.join("implement.jsonl"),
         &durable_task_dir.join("implement.jsonl"),
@@ -986,19 +1338,21 @@ pub fn apply_context_curator_output(
     let report = render_curated_context_selection_report(
         task_id,
         parsed.report.as_deref(),
-        &implement_entries,
-        &check_entries,
+        &implement_manifest_entries,
+        &check_manifest_entries,
     );
     atomic_write(&report_path, &trim_to_limit(&report, MAX_REPORT_CHARS))?;
 
     Ok(StudioContextCurationApplyResult {
-        implement_entries: implement_entries.len(),
-        check_entries: check_entries.len(),
+        implement_entries: implement_manifest_entries.len(),
+        check_entries: check_manifest_entries.len(),
         report_path: report_path.to_string_lossy().to_string(),
     })
 }
 
-pub fn promote_studio_context(request: &StudioPromoteRequest) -> Result<StudioPromoteResult, String> {
+pub fn promote_studio_context(
+    request: &StudioPromoteRequest,
+) -> Result<StudioPromoteResult, String> {
     let project_root = Path::new(request.project_root.trim());
     if request.project_root.trim().is_empty() || !project_root.is_dir() {
         return Err("Project root is missing or not a local directory.".to_string());
@@ -1020,7 +1374,11 @@ pub fn promote_studio_context(request: &StudioPromoteRequest) -> Result<StudioPr
         request.content.trim()
     );
     let (kind, dir, file_name) = match request.kind.trim().to_ascii_lowercase().as_str() {
-        "spec" => ("spec", project_root.join(".studio").join("spec"), format!("{slug}.md")),
+        "spec" => (
+            "spec",
+            project_root.join(".studio").join("spec"),
+            format!("{slug}.md"),
+        ),
         "task" => (
             "task",
             project_root.join(".studio").join("workspace").join("tasks"),
@@ -1028,7 +1386,10 @@ pub fn promote_studio_context(request: &StudioPromoteRequest) -> Result<StudioPr
         ),
         "journal" => (
             "journal",
-            project_root.join(".studio").join("workspace").join("journal"),
+            project_root
+                .join(".studio")
+                .join("workspace")
+                .join("journal"),
             format!("{}-{slug}.md", now.format("%Y%m%d-%H%M%S")),
         ),
         other => return Err(format!("Unsupported promote kind: {other}")),
@@ -1051,7 +1412,11 @@ fn write_manifest(
     if !should_write_managed_jsonl(path)? {
         return Ok(());
     }
-    let selected = if entries.is_empty() { vec![fallback] } else { entries.to_vec() };
+    let selected = if entries.is_empty() {
+        vec![fallback]
+    } else {
+        entries.to_vec()
+    };
     let mut content = String::new();
     for entry in selected.into_iter().take(MAX_MANIFEST_ENTRIES) {
         let line = serde_json::json!({
@@ -1065,6 +1430,14 @@ fn write_manifest(
         content.push('\n');
     }
     atomic_write(path, &content)
+}
+
+fn fallback_curated_entry(reason: &str) -> CuratedManifestEntry {
+    CuratedManifestEntry {
+        file: ".studio/spec/index.md".to_string(),
+        reason: reason.to_string(),
+        confidence: 0.4,
+    }
 }
 
 fn write_curated_manifest(path: &Path, entries: &[CuratedManifestEntry]) -> Result<(), String> {
@@ -1115,13 +1488,21 @@ fn ensure_workflow_files(project_root: &Path) -> Result<(), String> {
         ("policy-check.md", render_agent_policy_check()),
     ];
     for (file_name, content) in agents {
-        atomic_write_if_managed(&agents_dir.join(file_name), &content, STUDIO_WORKFLOW_MARKER)?;
+        atomic_write_if_managed(
+            &agents_dir.join(file_name),
+            &content,
+            STUDIO_WORKFLOW_MARKER,
+        )?;
     }
     atomic_write_if_managed(
         &studio_dir.join("spec").join("index.md"),
         &render_spec_index(),
         STUDIO_WORKFLOW_MARKER,
     )?;
+    let spec_dir = studio_dir.join("spec");
+    for (file_name, content) in render_spec_layers() {
+        atomic_write_if_managed(&spec_dir.join(file_name), &content, STUDIO_WORKFLOW_MARKER)?;
+    }
     atomic_write_if_managed(
         &studio_dir.join("workspace").join("index.md"),
         &render_workspace_index(),
@@ -1185,7 +1566,101 @@ fn render_agent_policy_check() -> String {
 
 fn render_spec_index() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# Studio Spec Index\n\nThis directory stores durable project rules used by the Studio Autonomous Workflow.\n\n## Policy\n\n- Spec updates are automatic only after `memory-distill` and `policy-check` accept provenance, confidence, conflict, and supersedes requirements.\n- Context manifests may reference this index as a discovery entry.\n- Keep concrete implementation contracts in topic-specific Markdown files under `.studio/spec/`.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# Studio Spec Index\n\nThis directory stores durable project rules used by the Studio Autonomous Workflow.\n\n## Layers\n\n- `.studio/spec/frontend/index.md` - React UI, chat surfaces, terminal dock, and workflow panel behavior.\n- `.studio/spec/tauri-runtime/index.md` - Rust commands, process orchestration, state, and app runtime rules.\n- `.studio/spec/cli-adapters/index.md` - Codex, Claude, Gemini adapters, hooks, sessions, and permissions.\n- `.studio/spec/storage/index.md` - SQLite task kernel, task bindings, facts, evidence, and migrations.\n- `.studio/spec/automation/index.md` - automation goals, workflow runs, validation, retry, and routing.\n- `.studio/spec/windows-runtime/index.md` - Windows shells, encoding, path handling, and constrained-language safety.\n\n## Policy\n\n- Spec updates are automatic only after `memory-distill` and `policy-check` accept provenance, confidence, conflict, and supersedes requirements.\n- Context manifests may reference this index as a discovery entry.\n- Context-curator should select the narrowest relevant layer index instead of injecting every spec file.\n- Keep concrete implementation contracts in topic-specific Markdown files under `.studio/spec/`.\n"
+    )
+}
+
+fn render_spec_layers() -> [(&'static str, String); 6] {
+    [
+        (
+            "frontend/index.md",
+            render_spec_layer_index(
+                "Frontend Spec",
+                "React, TypeScript, chat UX, terminal dock, workflow visibility, and design-system integration.",
+                &[
+                    "Prefer existing component and state patterns before adding new UI abstractions.",
+                    "Workflow state should be inspectable without inlining raw history into the prompt.",
+                    "Do not let dynamic labels, counters, or streamed content resize fixed control surfaces unexpectedly.",
+                    "Surface task, manifest, checker, and policy state as operational UI, not as marketing copy.",
+                ],
+            ),
+        ),
+        (
+            "tauri-runtime/index.md",
+            render_spec_layer_index(
+                "Tauri Runtime Spec",
+                "Rust commands, subprocess lifecycle, app state, environment propagation, and local execution safety.",
+                &[
+                    "Keep Tauri commands responsive; long work should run in bounded background jobs or child processes.",
+                    "Propagate Studio context through explicit environment variables instead of relying on global process state.",
+                    "Child processes must have bounded timeouts and clear error logging.",
+                    "Generated runtime files are projections and may be overwritten; durable state belongs under `.studio/tasks/` or SQLite.",
+                ],
+            ),
+        ),
+        (
+            "cli-adapters/index.md",
+            render_spec_layer_index(
+                "CLI Adapters Spec",
+                "Codex, Claude, Gemini command adapters, hooks, permissions, transport sessions, and prompt prelude rules.",
+                &[
+                    "All CLIs must consume the same `.studio` task, manifest, and workflow contract.",
+                    "Adapter-specific prompts may differ, but task identity and manifest paths must stay shared.",
+                    "Use `STUDIO_CONTEXT_ID` to resolve session-scoped runtime context in native hooks.",
+                    "Silent workflow agents must run with planning/read-only permissions unless they are an explicit retry repair.",
+                ],
+            ),
+        ),
+        (
+            "storage/index.md",
+            render_spec_layer_index(
+                "Storage Spec",
+                "SQLite task kernel, terminal state, task-tab bindings, facts, evidence, migrations, and semantic recall.",
+                &[
+                    "Task identity is independent from terminal tab identity.",
+                    "Terminal tabs are interaction surfaces bound to tasks through explicit binding records.",
+                    "Schema migrations must preserve existing local user state.",
+                    "Durable memory promotion requires evidence, confidence, and policy approval.",
+                ],
+            ),
+        ),
+        (
+            "automation/index.md",
+            render_spec_layer_index(
+                "Automation Spec",
+                "Automation goals, workflow runs, validation gates, owner routing, retry behavior, and event logs.",
+                &[
+                    "Automation should route by capability and record why a CLI was selected.",
+                    "Checker and validator failures should produce actionable evidence, not silent loops.",
+                    "Retries are bounded and focused; repeated failures remain visible in workflow state.",
+                    "Automation outputs should feed the same task, manifest, and memory pipeline as manual turns.",
+                ],
+            ),
+        ),
+        (
+            "windows-runtime/index.md",
+            render_spec_layer_index(
+                "Windows Runtime Spec",
+                "PowerShell, cmd.exe, UTF-8 output, path quoting, hidden process windows, and constrained-language compatibility.",
+                &[
+                    "Do not unconditionally set .NET static properties such as `[Console]::OutputEncoding` in PowerShell wrappers.",
+                    "Prefer environment-level UTF-8 controls for Python and CLI subprocesses.",
+                    "Windows child processes launched by Studio should avoid visible console windows unless the user asks for one.",
+                    "Normalize shell bootstrap errors before they become task titles, PRDs, context reports, or memory candidates.",
+                ],
+            ),
+        ),
+    ]
+}
+
+fn render_spec_layer_index(title: &str, scope: &str, rules: &[&str]) -> String {
+    let rule_lines = rules
+        .iter()
+        .map(|rule| format!("- {rule}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{STUDIO_WORKFLOW_MARKER}\n# {title}\n\nScope: {scope}\n\n## Context Selection\n\nContext-curator should select this file when the current task touches this scope. Do not select it for unrelated turns.\n\n## Rules\n\n{rule_lines}\n"
     )
 }
 
@@ -1193,6 +1668,80 @@ fn render_workspace_index() -> String {
     format!(
         "{STUDIO_WORKFLOW_MARKER}\n# Studio Workspace Index\n\nThis directory stores durable journals, session traces, and task-level memory that should survive chat compaction.\n\n## Policy\n\n- Workspace memory is written by the Studio workflow, not pasted from ad hoc chat history.\n- Prefer task directories for active work and promote only durable lessons here.\n"
     )
+}
+
+fn clean_studio_text(value: &str) -> String {
+    let stripped = strip_ansi_sequences(value);
+    let mut lines = Vec::new();
+    let mut blank_count = 0usize;
+    for line in stripped.lines() {
+        if is_powershell_encoding_bootstrap_noise(line) {
+            continue;
+        }
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 1 {
+                lines.push(String::new());
+            }
+            continue;
+        }
+        blank_count = 0;
+        lines.push(line.to_string());
+    }
+    lines.join("\n").trim().to_string()
+}
+
+fn clean_studio_option(value: Option<&str>) -> Option<String> {
+    value
+        .map(clean_studio_text)
+        .map(|cleaned| cleaned.trim().to_string())
+        .filter(|cleaned| !cleaned.is_empty())
+}
+
+fn studio_task_title(input: &StudioContextExportInput) -> String {
+    clean_studio_option(input.task_title.as_deref())
+        .or_else(|| clean_studio_option(input.task_goal.as_deref()))
+        .unwrap_or_else(|| clean_studio_text(&input.user_prompt))
+}
+
+fn studio_task_goal(input: &StudioContextExportInput) -> String {
+    clean_studio_option(input.task_goal.as_deref())
+        .unwrap_or_else(|| clean_studio_text(&input.user_prompt))
+}
+
+fn strip_ansi_sequences(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn is_powershell_encoding_bootstrap_noise(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    trimmed.contains("[Console]::OutputEncoding")
+        || trimmed.contains("无法设置属性")
+        || trimmed.contains("此语言模式仅支持核心类型")
+        || trimmed.starts_with("所在位置")
+        || trimmed.starts_with("+ ~")
+        || lower.contains("propertysetternotsupportedinconstrainedlanguage")
+        || lower.contains("cannot set property")
+        || lower.contains("categoryinfo")
+        || lower.contains("fullyqualifiederrorid")
 }
 
 fn render_prelude(input: &StudioContextExportInput, task_id: &str) -> String {
@@ -1236,6 +1785,12 @@ Access: {}\n\
 }
 
 fn render_context(input: &StudioContextExportInput, task_id: &str) -> String {
+    let next_action =
+        clean_studio_option(input.handoff_next_step.as_deref()).unwrap_or_else(|| {
+            "Continue the current user request with the active task context.".to_string()
+        });
+    let compacted_context = clean_studio_option(input.compacted_context.as_deref());
+    let cross_tab_context = clean_studio_option(input.cross_tab_context.as_deref());
     format!(
         "# Studio Context\n\n\
 Updated: {}\n\n\
@@ -1270,19 +1825,24 @@ Start with this file, .studio/workflow.md, and the active runtime task. Load det
         input.failing_checks,
         input.cli_id,
         input.terminal_tab_id,
-        input
-            .handoff_next_step
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("Continue the current user request with the active task context."),
+        next_action,
         render_runtime_working_memory_reference(input, task_id),
-        optional_section("Compacted Context", input.compacted_context.as_deref()),
-        optional_section("Cross Tab Context", input.cross_tab_context.as_deref())
+        optional_section("Compacted Context", compacted_context.as_deref()),
+        optional_section("Cross Tab Context", cross_tab_context.as_deref())
     )
 }
 
-fn render_runtime_working_memory_reference(input: &StudioContextExportInput, task_id: &str) -> String {
-    if input.working_memory.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+fn render_runtime_working_memory_reference(
+    input: &StudioContextExportInput,
+    task_id: &str,
+) -> String {
+    if input
+        .working_memory
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
         return String::new();
     }
     format!(
@@ -1291,6 +1851,12 @@ fn render_runtime_working_memory_reference(input: &StudioContextExportInput, tas
 }
 
 fn render_task(input: &StudioContextExportInput, task_id: &str) -> String {
+    let goal = studio_task_goal(input);
+    let current_request = clean_studio_text(&input.user_prompt);
+    let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
+        .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
+    let next_step = clean_studio_option(input.handoff_next_step.as_deref())
+        .unwrap_or_else(|| "Continue from the latest user request.".to_string());
     let files = if input.handoff_files.is_empty() {
         "- (none captured yet)".to_string()
     } else {
@@ -1306,8 +1872,11 @@ fn render_task(input: &StudioContextExportInput, task_id: &str) -> String {
 Updated: {}\n\n\
 ## Goal\n\n\
 {}\n\n\
+## Current Request\n\n\
+{}\n\n\
 ## Runtime Identity\n\n\
 - Workspace ID: {}\n\
+- Task ID: {task_id}\n\
 - Terminal tab: {}\n\
 - Current CLI: {}\n\
 - Branch: {}\n\n\
@@ -1326,29 +1895,32 @@ Updated: {}\n\n\
 - Move session/process notes to .studio/workspace/ only when they should become durable memory.\n\
 ",
         Local::now().to_rfc3339(),
-        non_empty(&input.user_prompt, "Continue the active task."),
+        non_empty(&goal, "Continue the active task."),
+        non_empty(&current_request, "Continue the active task."),
         input.workspace_id,
         input.terminal_tab_id,
         input.cli_id,
         input.branch,
-        input
-            .handoff_summary
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("No assistant conclusion captured yet."),
+        latest_conclusion,
         files,
-        input
-            .handoff_next_step
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("Continue from the latest user request."),
+        next_step,
     )
 }
 
-fn render_durable_task_json(input: &StudioContextExportInput, task_id: &str) -> Result<String, String> {
-    let value = serde_json::json!({
+fn render_durable_task_json(
+    input: &StudioContextExportInput,
+    task_id: &str,
+    active_tab_ids: &[String],
+    existing_task: Option<&Value>,
+) -> Result<String, String> {
+    let title = studio_task_title(input);
+    let goal = studio_task_goal(input);
+    let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref());
+    let next_step = clean_studio_option(input.handoff_next_step.as_deref())
+        .unwrap_or_else(|| "Continue from the latest user request.".to_string());
+    let mut value = serde_json::json!({
         "id": task_id,
-        "title": non_empty(&input.user_prompt, "Studio Task"),
+        "title": non_empty(&title, "Studio Task"),
         "status": infer_task_status(input),
         "workflow": ".studio/workflow.md",
         "phaseOrder": ["planning", "context_curated", "implementing", "checking", "memory_distilled", "completed"],
@@ -1362,22 +1934,33 @@ fn render_durable_task_json(input: &StudioContextExportInput, task_id: &str) -> 
         },
         "projectName": input.project_name.as_str(),
         "workspaceId": input.workspace_id.as_str(),
+        "goal": non_empty(&goal, "Continue the active task."),
         "terminalTabId": input.terminal_tab_id.as_str(),
+        "activeTabIds": active_tab_ids,
         "currentCli": input.cli_id.as_str(),
         "branch": input.branch.as_str(),
-        "latestConclusion": input.handoff_summary.as_deref(),
-        "nextStep": input.handoff_next_step.as_deref().unwrap_or("Continue from the latest user request."),
+        "latestConclusion": latest_conclusion.as_deref(),
+        "nextStep": next_step,
         "relevantFiles": input.handoff_files.as_slice(),
         "runtimeTask": format!(".studio/runtime/tasks/{task_id}/task.md"),
         "contextSelectionReport": format!(".studio/tasks/{task_id}/context-selection-report.md"),
         "implementManifest": format!(".studio/runtime/tasks/{task_id}/implement.jsonl"),
         "checkManifest": format!(".studio/runtime/tasks/{task_id}/check.jsonl"),
+        "checkerReport": format!(".studio/tasks/{task_id}/checker-report.md"),
+        "checkerRetryReport": format!(".studio/tasks/{task_id}/checker-retry-report.md"),
         "memoryCandidates": format!(".studio/tasks/{task_id}/memory-candidates.jsonl"),
         "memoryDistillReport": format!(".studio/tasks/{task_id}/memory-distill-report.md"),
         "policyCheck": format!(".studio/tasks/{task_id}/policy-check.json"),
         "updatedAt": Local::now().to_rfc3339(),
         "studioManaged": true,
     });
+    if let Some(object) = value.as_object_mut() {
+        for key in ["checker", "memoryDistill", "promotion"] {
+            if let Some(existing_value) = existing_task.and_then(|task| task.get(key)).cloned() {
+                object.insert(key.to_string(), existing_value);
+            }
+        }
+    }
     serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
 }
 
@@ -1387,32 +1970,58 @@ fn write_durable_prd_if_missing(
     task_id: &str,
 ) -> Result<(), String> {
     if path.is_file() {
-        let existing = fs::read_to_string(path).map_err(|err| err.to_string())?;
-        if !existing.contains("Created by Studio Autonomous Workflow") {
-            return Ok(());
-        }
+        return Ok(());
     }
+    let goal = studio_task_goal(input);
     let content = format!(
         "# {task_id}\n\n## Goal\n\n{}\n\n## Acceptance Criteria\n\n- Use `.studio/workflow.md` as the autonomous workflow contract.\n- Curate context automatically through `.studio/tasks/{task_id}/context-selection-report.md`.\n- Follow relevant specs/research from `implement.jsonl` and `check.jsonl`.\n- Distill durable lessons with provenance, confidence, and policy-check output.\n\n## Notes\n\nCreated by Studio Autonomous Workflow for cross-CLI continuity.\n",
-        non_empty(&input.user_prompt, "Continue the active task."),
+        non_empty(&goal, "Continue the active task."),
     );
     atomic_write(path, &content)
 }
 
-fn render_memory_distill_report(input: &StudioContextExportInput, task_id: &str) -> String {
+fn load_active_tab_ids(task_json_path: &Path, current_tab_id: &str) -> Vec<String> {
+    let mut tabs = read_json_file(task_json_path)
+        .ok()
+        .and_then(|value| value.get("activeTabIds").cloned())
+        .and_then(|value| value.as_array().cloned())
+        .map(|values| {
+            values
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !current_tab_id.trim().is_empty() && !tabs.iter().any(|tab| tab == current_tab_id) {
+        tabs.push(current_tab_id.to_string());
+    }
+    tabs.sort();
+    tabs.dedup();
+    tabs
+}
+
+fn render_memory_distill_report(
+    input: &StudioContextExportInput,
+    task_id: &str,
+    distill: &MemoryDistillSanitization,
+    checker_passed: bool,
+    decision: &str,
+) -> String {
+    let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
+        .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
     format!(
-        "# Memory Distill Report\n\nGenerated: {}\nTask: {task_id}\nAgent: memory-distill\n\n## Inputs\n\n- Kernel memory entries and high-confidence facts from the Studio task kernel.\n- Latest conclusion: {}\n- Relevant files: {}\n\n## Output\n\nCandidates are written to `memory-candidates.jsonl`. Each candidate must keep provenance and a promotion hint. Automatic durable writes are gated by `policy-check.json`.\n",
+        "# Memory Distill Report\n\nGenerated: {}\nTask: {task_id}\nAgent: memory-distill\nDecision: {decision}\nChecker Passed: {}\n\n## Inputs\n\n- Kernel memory entries and high-confidence facts from the Studio task kernel.\n- Latest conclusion: {}\n- Relevant files: {}\n\n## Candidate Summary\n\n- Accepted candidates: {}\n- Promotable candidates: {}\n- Rejected candidates: {}\n\n## Policy\n\nCandidates are written to `memory-candidates.jsonl`. Each accepted candidate must keep provenance and a promotion hint. Automatic durable writes are gated by `policy-check.json` and require checker pass.\n",
         Local::now().to_rfc3339(),
-        input
-            .handoff_summary
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("No assistant conclusion captured yet."),
+        if checker_passed { "yes" } else { "no" },
+        latest_conclusion,
         if input.handoff_files.is_empty() {
             "none".to_string()
         } else {
             input.handoff_files.join(", ")
-        }
+        },
+        distill.accepted.len(),
+        distill.promotable_entries,
+        distill.rejected_entries,
     )
 }
 
@@ -1421,19 +2030,54 @@ fn render_policy_check_json(
     task_id: &str,
     has_promotable_candidates: bool,
 ) -> Result<String, String> {
-    let allow_auto_promote = has_promotable_candidates && input.failing_checks == 0;
+    let value = serde_json::json!({
+        "_studioManaged": true,
+        "taskId": task_id,
+        "agent": "policy-check",
+        "allowAutoPromote": false,
+        "decision": if has_promotable_candidates { "pending_checker" } else { "hold" },
+        "checkerStatus": "not_run",
+        "reason": if has_promotable_candidates {
+            "Promotable candidates exist, but automatic promotion waits for the checker gate."
+        } else {
+            "No promotable durable memory candidates are available for this turn. Runtime traces and file-update noise are held."
+        },
+        "candidateCounts": {
+            "promotable": if has_promotable_candidates { 1 } else { 0 },
+            "rejected": 0
+        },
+        "failingChecks": input.failing_checks,
+        "requires": ["provenance", "confidence", "no_conflict", "supersedes_when_replacing"],
+        "updatedAt": Local::now().to_rfc3339(),
+    });
+    serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
+}
+
+fn render_post_checker_policy_check_json(
+    task_id: &str,
+    checker_passed: bool,
+    distill: &MemoryDistillSanitization,
+    allow_auto_promote: bool,
+    decision: &str,
+) -> Result<String, String> {
     let value = serde_json::json!({
         "_studioManaged": true,
         "taskId": task_id,
         "agent": "policy-check",
         "allowAutoPromote": allow_auto_promote,
-        "decision": if allow_auto_promote { "candidate_ready" } else { "hold" },
+        "decision": decision,
+        "checkerStatus": if checker_passed { "pass" } else { "not_passed" },
         "reason": if allow_auto_promote {
-            "Candidates exist and no failing checks are reported. Durable writes still require provenance and conflict checks per workflow."
-        } else if has_promotable_candidates {
-            "Promotable candidates exist but failing checks are reported; keep them as candidates."
+            "Checker passed and at least one candidate satisfied provenance, confidence, conflict, and target gates."
+        } else if !checker_passed {
+            "Checker has not passed; durable memory promotion is held."
         } else {
-            "No promotable durable memory candidates are available for this turn. Runtime traces and file-update noise are held."
+            "Checker passed, but no candidate satisfied the promotion gates."
+        },
+        "candidateCounts": {
+            "accepted": distill.accepted.len(),
+            "promotable": distill.promotable_entries,
+            "rejected": distill.rejected_entries,
         },
         "requires": ["provenance", "confidence", "no_conflict", "supersedes_when_replacing"],
         "updatedAt": Local::now().to_rfc3339(),
@@ -1441,14 +2085,52 @@ fn render_policy_check_json(
     serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
 }
 
-fn has_promotable_memory_candidate(candidates: &str) -> bool {
-    candidates.lines().any(|line| {
-        serde_json::from_str::<Value>(line)
-            .ok()
-            .as_ref()
-            .map(candidate_is_auto_promotable)
-            .unwrap_or(false)
-    })
+#[derive(Debug, Clone, Default)]
+struct MemoryDistillSanitization {
+    accepted: Vec<String>,
+    promotable_entries: usize,
+    rejected_entries: usize,
+}
+
+fn sanitize_memory_candidates(raw_candidates: &str) -> MemoryDistillSanitization {
+    let mut distill = MemoryDistillSanitization::default();
+    let mut seen = HashSet::new();
+    for line in raw_candidates
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(64)
+    {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            distill.rejected_entries += 1;
+            continue;
+        };
+        if !candidate_has_promotion_content(&value)
+            || candidate_is_runtime_noise(&value)
+            || !candidate_has_promotion_evidence(&value)
+        {
+            distill.rejected_entries += 1;
+            continue;
+        }
+        let content_key = value
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if content_key.is_empty() || !seen.insert(content_key) {
+            distill.rejected_entries += 1;
+            continue;
+        }
+        if candidate_is_auto_promotable(&value) && candidate_confidence_allows_promotion(&value) {
+            distill.promotable_entries += 1;
+        }
+        match serde_json::to_string(&value) {
+            Ok(line) => distill.accepted.push(line),
+            Err(_) => distill.rejected_entries += 1,
+        }
+    }
+    distill
 }
 
 fn curate_context(
@@ -1495,7 +2177,13 @@ fn select_spec_manifest_entries(
         .map(|file| file.to_ascii_lowercase())
         .collect::<Vec<_>>();
     let mut entries = Vec::new();
-    collect_spec_entries(project_root, &spec_dir, &query, &relevant_files, &mut entries)?;
+    collect_spec_entries(
+        project_root,
+        &spec_dir,
+        &query,
+        &relevant_files,
+        &mut entries,
+    )?;
     entries.sort_by(|left, right| {
         right
             .score
@@ -1570,10 +2258,11 @@ fn render_context_selection_report(
     implement_entries: &[ManifestEntry],
     check_entries: &[ManifestEntry],
 ) -> String {
+    let request = clean_studio_text(&input.user_prompt);
     format!(
         "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: Studio automatic context-curator\nStrategy: Trellis-class agent-curated projection with heuristic fallback.\n\n## Request\n\n{}\n\n## Implement Manifest\n\n{}\n\n## Check Manifest\n\n{}\n\n## Policy Gates\n\n- Context curation is automatic; no human approval is required.\n- Source files to edit are not pre-registered in manifests.\n- Long-term spec/workspace writes require provenance, confidence, and policy-check output.\n- If no curated spec/research exists, fallback entries point to `.studio/spec/index.md` when available.\n",
         Local::now().to_rfc3339(),
-        non_empty(&input.user_prompt, "Continue the active task."),
+        non_empty(&request, "Continue the active task."),
         render_manifest_report_entries(implement_entries),
         render_manifest_report_entries(check_entries),
     )
@@ -1585,7 +2274,12 @@ fn render_manifest_report_entries(entries: &[ManifestEntry]) -> String {
     }
     entries
         .iter()
-        .map(|entry| format!("- `{}` (score {}): {}", entry.file, entry.score, entry.reason))
+        .map(|entry| {
+            format!(
+                "- `{}` (score {}): {}",
+                entry.file, entry.score, entry.reason
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1620,7 +2314,10 @@ fn collect_spec_entries(
         if entries.len() >= MAX_SPEC_SCAN_FILES {
             break;
         }
-        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
         if name.starts_with('.') {
             continue;
         }
@@ -1644,7 +2341,11 @@ fn collect_spec_entries(
             } else {
                 "Spec index for discovering durable project rules.".to_string()
             };
-            entries.push(ManifestEntry { file: relative, reason, score });
+            entries.push(ManifestEntry {
+                file: relative,
+                reason,
+                score,
+            });
         }
     }
     Ok(())
@@ -1652,12 +2353,13 @@ fn collect_spec_entries(
 
 fn build_query_terms(input: &StudioContextExportInput) -> HashSet<String> {
     let mut terms = HashSet::new();
-    for value in [
-        input.user_prompt.as_str(),
-        input.handoff_summary.as_deref().unwrap_or_default(),
-        input.handoff_next_step.as_deref().unwrap_or_default(),
-    ] {
-        for token in tokenize(value) {
+    let values = [
+        clean_studio_text(&input.user_prompt),
+        clean_studio_option(input.handoff_summary.as_deref()).unwrap_or_default(),
+        clean_studio_option(input.handoff_next_step.as_deref()).unwrap_or_default(),
+    ];
+    for value in values {
+        for token in tokenize(&value) {
             terms.insert(token);
         }
     }
@@ -1684,8 +2386,12 @@ fn score_spec_candidate(
     query: &HashSet<String>,
     relevant_files: &[String],
 ) -> i64 {
-    let haystack = format!("{}\n{}", relative, content.chars().take(4_000).collect::<String>())
-        .to_ascii_lowercase();
+    let haystack = format!(
+        "{}\n{}",
+        relative,
+        content.chars().take(4_000).collect::<String>()
+    )
+    .to_ascii_lowercase();
     let mut score = if relative.ends_with("/index.md") || relative == ".studio/spec/index.md" {
         2
     } else {
@@ -1715,7 +2421,11 @@ fn should_write_managed_jsonl(path: &Path) -> Result<bool, String> {
     if content.trim().is_empty() {
         return Ok(true);
     }
-    for line in content.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             return Ok(false);
         };
@@ -1739,9 +2449,8 @@ fn parse_context_curator_output(raw_output: &str) -> Result<ContextCuratorOutput
         return Ok(parsed);
     }
     if let Some(json_slice) = extract_json_object(trimmed) {
-        return serde_json::from_str::<ContextCuratorOutput>(json_slice).map_err(|err| {
-            format!("Context curator output was not valid JSON: {err}")
-        });
+        return serde_json::from_str::<ContextCuratorOutput>(json_slice)
+            .map_err(|err| format!("Context curator output was not valid JSON: {err}"));
     }
     Err("Context curator output did not contain a JSON object.".to_string())
 }
@@ -1836,10 +2545,12 @@ fn normalize_curator_file(file: &str) -> Result<String, String> {
         return Err("Context curator returned an invalid path.".to_string());
     }
     let path = Path::new(&normalized);
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
-    {
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
         return Err("Context curator returned an unsafe path.".to_string());
     }
     Ok(normalized.trim_start_matches("./").to_string())
@@ -1898,7 +2609,14 @@ fn normalize_checker_status(status: &str, issues: &[String]) -> String {
     }
 }
 
-fn render_checker_report(task_id: &str, status: &str, summary: &str, issues: &[String]) -> String {
+fn render_checker_report(
+    task_id: &str,
+    status: &str,
+    summary: &str,
+    issues: &[String],
+    needs_retry: bool,
+    checked_at: &str,
+) -> String {
     let issue_lines = if issues.is_empty() {
         "- No concrete issues reported.".to_string()
     } else {
@@ -1909,11 +2627,250 @@ fn render_checker_report(task_id: &str, status: &str, summary: &str, issues: &[S
             .join("\n")
     };
     format!(
-        "# Checker Report\n\nGenerated: {}\nTask: {task_id}\nStatus: {status}\n\n## Summary\n\n{}\n\n## Issues\n\n{}\n",
-        Local::now().to_rfc3339(),
+        "# Checker Report\n\nGenerated: {checked_at}\nTask: {task_id}\nStatus: {status}\nNeeds Retry: {}\nRetry Performed: no\n\n## Summary\n\n{}\n\n## Issues\n\n{}\n",
+        if needs_retry { "yes" } else { "no" },
         summary,
         issue_lines,
     )
+}
+
+fn render_checker_retry_report(
+    task_id: &str,
+    status: &str,
+    raw_output: &str,
+    completed_at: &str,
+) -> String {
+    format!(
+        "# Checker Retry Report\n\nGenerated: {completed_at}\nTask: {task_id}\nStatus: {status}\n\n## Output\n\n{}\n",
+        non_empty(
+            &trim_to_limit(raw_output, MAX_OPTIONAL_SECTION_CHARS),
+            "Retry produced no output."
+        ),
+    )
+}
+
+fn update_checker_task_state(
+    task_json_path: &Path,
+    task_id: &str,
+    status: &str,
+    summary: &str,
+    issues: &[String],
+    needs_retry: bool,
+    checked_at: &str,
+) -> Result<(), String> {
+    let mut task_json = read_json_file(task_json_path).unwrap_or_else(|_| {
+        serde_json::json!({
+            "id": task_id,
+            "studioManaged": true,
+        })
+    });
+    let object = ensure_json_object(&mut task_json);
+    object
+        .entry("id".to_string())
+        .or_insert_with(|| Value::String(task_id.to_string()));
+    object.insert(
+        "status".to_string(),
+        Value::String(if needs_retry { "checking" } else { "completed" }.to_string()),
+    );
+    object.insert(
+        "checkerReport".to_string(),
+        Value::String(format!(".studio/tasks/{task_id}/checker-report.md")),
+    );
+    object.insert(
+        "checkerRetryReport".to_string(),
+        Value::String(format!(".studio/tasks/{task_id}/checker-retry-report.md")),
+    );
+    object.insert(
+        "checker".to_string(),
+        serde_json::json!({
+            "status": status,
+            "summary": summary,
+            "issues": issues,
+            "needsRetry": needs_retry,
+            "retryPerformed": false,
+            "retryStatus": null,
+            "retryReport": null,
+            "checkedAt": checked_at,
+            "report": format!(".studio/tasks/{task_id}/checker-report.md"),
+        }),
+    );
+    object.insert(
+        "updatedAt".to_string(),
+        Value::String(checked_at.to_string()),
+    );
+    let content = serde_json::to_string_pretty(&task_json).map_err(|err| err.to_string())?;
+    atomic_write(task_json_path, &content)
+}
+
+fn update_checker_retry_task_state(
+    task_json_path: &Path,
+    task_id: &str,
+    status: &str,
+    raw_output: &str,
+    completed_at: &str,
+) -> Result<(), String> {
+    let mut task_json = read_json_file(task_json_path).unwrap_or_else(|_| {
+        serde_json::json!({
+            "id": task_id,
+            "studioManaged": true,
+        })
+    });
+    let object = ensure_json_object(&mut task_json);
+    object
+        .entry("id".to_string())
+        .or_insert_with(|| Value::String(task_id.to_string()));
+    object.insert("status".to_string(), Value::String("checking".to_string()));
+    object.insert(
+        "nextStep".to_string(),
+        Value::String(if status == "completed" {
+            "Review the retry output and rerun verification if needed.".to_string()
+        } else {
+            "Resolve the checker retry failure before continuing.".to_string()
+        }),
+    );
+    object.insert(
+        "updatedAt".to_string(),
+        Value::String(completed_at.to_string()),
+    );
+
+    let checker = object
+        .entry("checker".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let checker_object = ensure_json_object(checker);
+    checker_object.insert("retryPerformed".to_string(), Value::Bool(true));
+    checker_object.insert("retryStatus".to_string(), Value::String(status.to_string()));
+    checker_object.insert(
+        "retryReport".to_string(),
+        Value::String(format!(".studio/tasks/{task_id}/checker-retry-report.md")),
+    );
+    checker_object.insert(
+        "retryCompletedAt".to_string(),
+        Value::String(completed_at.to_string()),
+    );
+    checker_object.insert(
+        "retrySummary".to_string(),
+        Value::String(trim_to_limit(raw_output, 1_000)),
+    );
+
+    let content = serde_json::to_string_pretty(&task_json).map_err(|err| err.to_string())?;
+    atomic_write(task_json_path, &content)
+}
+
+fn update_memory_distill_task_state(
+    task_json_path: &Path,
+    task_id: &str,
+    checker_passed: bool,
+    candidate_entries: usize,
+    promotable_entries: usize,
+    decision: &str,
+) -> Result<(), String> {
+    let updated_at = Local::now().to_rfc3339();
+    let mut task_json = read_json_file(task_json_path).unwrap_or_else(|_| {
+        serde_json::json!({
+            "id": task_id,
+            "studioManaged": true,
+        })
+    });
+    let object = ensure_json_object(&mut task_json);
+    object
+        .entry("id".to_string())
+        .or_insert_with(|| Value::String(task_id.to_string()));
+    if checker_passed {
+        object.insert(
+            "status".to_string(),
+            Value::String("memory_distilled".to_string()),
+        );
+    }
+    object.insert(
+        "memoryCandidates".to_string(),
+        Value::String(format!(".studio/tasks/{task_id}/memory-candidates.jsonl")),
+    );
+    object.insert(
+        "memoryDistillReport".to_string(),
+        Value::String(format!(".studio/tasks/{task_id}/memory-distill-report.md")),
+    );
+    object.insert(
+        "policyCheck".to_string(),
+        Value::String(format!(".studio/tasks/{task_id}/policy-check.json")),
+    );
+    object.insert(
+        "memoryDistill".to_string(),
+        serde_json::json!({
+            "candidateEntries": candidate_entries,
+            "promotableEntries": promotable_entries,
+            "decision": decision,
+            "checkerPassed": checker_passed,
+            "report": format!(".studio/tasks/{task_id}/memory-distill-report.md"),
+            "policyCheck": format!(".studio/tasks/{task_id}/policy-check.json"),
+            "updatedAt": updated_at,
+        }),
+    );
+    object.insert("updatedAt".to_string(), Value::String(updated_at));
+    let content = serde_json::to_string_pretty(&task_json).map_err(|err| err.to_string())?;
+    atomic_write(task_json_path, &content)
+}
+
+fn update_promotion_task_state(
+    task_json_path: &Path,
+    task_id: &str,
+    promoted: usize,
+    skipped: usize,
+    report_path: &Path,
+) -> Result<(), String> {
+    let updated_at = Local::now().to_rfc3339();
+    let mut task_json = read_json_file(task_json_path).unwrap_or_else(|_| {
+        serde_json::json!({
+            "id": task_id,
+            "studioManaged": true,
+        })
+    });
+    let object = ensure_json_object(&mut task_json);
+    object
+        .entry("id".to_string())
+        .or_insert_with(|| Value::String(task_id.to_string()));
+    object.insert("status".to_string(), Value::String("completed".to_string()));
+    object.insert(
+        "promotionReport".to_string(),
+        Value::String(format!(".studio/tasks/{task_id}/promotion-report.md")),
+    );
+    object.insert(
+        "promotion".to_string(),
+        serde_json::json!({
+            "promoted": promoted,
+            "skipped": skipped,
+            "report": report_path.to_string_lossy(),
+            "updatedAt": updated_at,
+        }),
+    );
+    object.insert("updatedAt".to_string(), Value::String(updated_at));
+    let content = serde_json::to_string_pretty(&task_json).map_err(|err| err.to_string())?;
+    atomic_write(task_json_path, &content)
+}
+
+fn append_checker_retry_to_report(
+    checker_report_path: &Path,
+    task_id: &str,
+    status: &str,
+    completed_at: &str,
+) -> Result<(), String> {
+    if !checker_report_path.exists() {
+        return Ok(());
+    }
+    let mut content = fs::read_to_string(checker_report_path).map_err(|err| err.to_string())?;
+    if content.contains("\n## Retry\n") {
+        return Ok(());
+    }
+    content.push_str(&format!(
+        "\n## Retry\n\nStatus: {status}\nPerformed: yes\nCompleted: {completed_at}\nReport: .studio/tasks/{task_id}/checker-retry-report.md\n"
+    ));
+    atomic_write(checker_report_path, &content)
+}
+
+fn ensure_json_object(value: &mut Value) -> &mut serde_json::Map<String, Value> {
+    if !value.is_object() {
+        *value = Value::Object(serde_json::Map::new());
+    }
+    value.as_object_mut().expect("value was forced to object")
 }
 
 fn read_json_file(path: &Path) -> Result<Value, String> {
@@ -1922,18 +2879,52 @@ fn read_json_file(path: &Path) -> Result<Value, String> {
 }
 
 fn candidate_has_promotion_evidence(value: &Value) -> bool {
-    let has_content = value
-        .get("content")
-        .and_then(Value::as_str)
-        .map(|content| !content.trim().is_empty())
-        .unwrap_or(false);
     let has_evidence = value
         .get("sourceEvidenceIds")
         .and_then(Value::as_array)
         .map(|items| !items.is_empty())
         .unwrap_or(false)
         || value.get("sourceFactId").and_then(Value::as_str).is_some();
-    has_content && has_evidence
+    candidate_has_promotion_content(value) && has_evidence
+}
+
+fn candidate_has_promotion_content(value: &Value) -> bool {
+    value
+        .get("content")
+        .and_then(Value::as_str)
+        .map(|content| !content.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn candidate_is_runtime_noise(value: &Value) -> bool {
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let content = value
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    kind == "runtime"
+        || content.starts_with("command succeeded:")
+        || content.starts_with("command ok")
+        || content.contains("generic file update")
+        || content.contains("no assistant conclusion captured yet")
+}
+
+fn candidate_confidence_allows_promotion(value: &Value) -> bool {
+    match value.get("confidence").and_then(Value::as_str) {
+        Some("high") => true,
+        Some("medium") | Some("low") => false,
+        Some(_) => false,
+        None => value
+            .get("candidateType")
+            .and_then(Value::as_str)
+            .map(|candidate_type| candidate_type == "kernelMemory")
+            .unwrap_or(false),
+    }
 }
 
 fn candidate_is_auto_promotable(value: &Value) -> bool {
@@ -1945,19 +2936,20 @@ fn candidate_is_auto_promotable(value: &Value) -> bool {
         .get("promotionHint")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let content = value
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if promotion_hint == "hold" || kind == "runtime" || content.starts_with("Command succeeded:") {
+    if promotion_hint == "hold" || candidate_is_runtime_noise(value) {
         return false;
     }
-    matches!(kind, "decision" | "constraint" | "rule" | "failure" | "checkpoint" | "progress")
-        || matches!(promotion_hint, "spec" | "journal")
+    matches!(
+        kind,
+        "decision" | "constraint" | "rule" | "failure" | "checkpoint" | "progress"
+    ) || matches!(promotion_hint, "spec" | "journal")
 }
 
 fn candidate_title(value: &Value) -> String {
-    let kind = value.get("kind").and_then(Value::as_str).unwrap_or("memory");
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("memory");
     let content = value
         .get("content")
         .and_then(Value::as_str)
@@ -1968,7 +2960,10 @@ fn candidate_title(value: &Value) -> String {
 }
 
 fn render_promoted_candidate(task_id: &str, value: &Value) -> String {
-    let content = value.get("content").and_then(Value::as_str).unwrap_or_default();
+    let content = value
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let candidate_type = value
         .get("candidateType")
         .and_then(Value::as_str)
@@ -1998,6 +2993,13 @@ impl StudioWorkflowState {
             research_artifacts: Vec::new(),
             implement_entries: 0,
             check_entries: 0,
+            checker_status: None,
+            checker_summary: None,
+            checker_issues: Vec::new(),
+            checker_needs_retry: false,
+            checker_retry_performed: false,
+            checker_retry_status: None,
+            checker_retry_report_path: None,
             policy_decision: None,
             allow_auto_promote: false,
             last_updated: None,
@@ -2018,6 +3020,53 @@ fn latest_task_id(project_root: &Path) -> Option<String> {
         .collect::<Vec<_>>();
     entries.sort_by_key(|(_, modified)| *modified);
     entries.pop().map(|(name, _)| name)
+}
+
+fn task_id_for_terminal_tab(project_root: &Path, terminal_tab_id: &str) -> Option<String> {
+    let sessions_dir = project_root
+        .join(".studio")
+        .join("runtime")
+        .join("sessions");
+    let mut matches = fs::read_dir(sessions_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            let value = read_json_file(&path).ok()?;
+            let binding_tab = value
+                .get("terminalTabId")
+                .or_else(|| value.get("terminal_tab_id"))
+                .and_then(Value::as_str)?;
+            if binding_tab != terminal_tab_id {
+                return None;
+            }
+            let task_id = value
+                .get("taskId")
+                .or_else(|| value.get("task_id"))
+                .and_then(Value::as_str)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    value
+                        .get("activeTask")
+                        .or_else(|| value.get("active_task"))
+                        .and_then(Value::as_str)
+                        .and_then(|active_task| {
+                            Path::new(active_task)
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .map(str::to_string)
+                        })
+                })?;
+            Some((task_id, modified))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(_, modified)| *modified);
+    matches.pop().map(|(task_id, _)| task_id)
 }
 
 fn infer_phase_from_files(task_dir: &Path) -> &'static str {
@@ -2072,7 +3121,12 @@ fn list_markdown_files(dir: &Path) -> Result<Vec<String>, String> {
 fn count_jsonl_entries(path: &Path) -> usize {
     fs::read_to_string(path)
         .ok()
-        .map(|content| content.lines().filter(|line| !line.trim().is_empty()).count())
+        .map(|content| {
+            content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+        })
         .unwrap_or(0)
 }
 
@@ -2088,7 +3142,10 @@ fn optional_section(title: &str, value: Option<&str>) -> String {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return String::new();
     };
-    format!("## {title}\n\n{}\n\n", trim_to_limit(value, MAX_OPTIONAL_SECTION_CHARS))
+    format!(
+        "## {title}\n\n{}\n\n",
+        trim_to_limit(value, MAX_OPTIONAL_SECTION_CHARS)
+    )
 }
 
 fn stable_slug(value: &str, fallback: &str) -> String {
@@ -2136,7 +3193,10 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("studio-context");
-    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}", Local::now().timestamp_nanos_opt().unwrap_or_default()));
+    let temp_path = path.with_file_name(format!(
+        ".{file_name}.tmp-{}",
+        Local::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
     fs::write(&temp_path, content).map_err(|err| err.to_string())?;
     fs::rename(&temp_path, path).map_err(|err| {
         let _ = fs::remove_file(&temp_path);
