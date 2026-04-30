@@ -433,6 +433,31 @@ function getRuntimeBridge() {
   return isTauriRuntime() ? tauriRuntime : browserRuntime;
 }
 
+function withoutSessionMessages(session: ConversationSession): ConversationSession {
+  return {
+    ...session,
+    messages: [],
+  };
+}
+
+function withoutPersistedChatMessages(state: PersistedTerminalState): PersistedTerminalState {
+  return {
+    ...state,
+    chatSessions: {},
+  };
+}
+
+function withoutAppendRequestSessionMessages(
+  request: ChatMessagesAppendRequest
+): ChatMessagesAppendRequest {
+  return {
+    seeds: request.seeds.map((seed) => ({
+      ...seed,
+      session: withoutSessionMessages(seed.session),
+    })),
+  };
+}
+
 const tauriRuntime: RuntimeBridge = {
   async loadAppState(projectRoot, refreshRuntime) {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -521,7 +546,7 @@ const tauriRuntime: RuntimeBridge = {
   },
   async saveTerminalState(state) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("save_terminal_state", { state });
+    await invoke("save_terminal_state", { state: withoutPersistedChatMessages(state) });
   },
   async switchCliForTask(request) {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -544,7 +569,7 @@ const tauriRuntime: RuntimeBridge = {
   },
   async appendChatMessages(request) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("append_chat_messages", { request });
+    await invoke("append_chat_messages", { request: withoutAppendRequestSessionMessages(request) });
   },
   async updateChatMessageStream(request) {
     const { invoke } = await import("@tauri-apps/api/core");

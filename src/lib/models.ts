@@ -1249,6 +1249,46 @@ export interface StudioPolicyPromotionResult {
   reportPath: string;
 }
 
+export interface StudioWorkflowArtifact {
+  label: string;
+  path: string;
+  status: "ready" | "missing" | string;
+  updatedAt: string | null;
+  sizeBytes: number | null;
+}
+
+export interface StudioWorkflowManifestEntry {
+  manifest: "implement" | "check" | string;
+  file: string;
+  reason: string;
+  confidence: number | null;
+  score: number | null;
+  status: "ready" | "missing" | string;
+  fallback: boolean;
+}
+
+export interface StudioWorkflowTimelineEvent {
+  kind: string;
+  title: string;
+  summary: string;
+  timestamp: string | null;
+  status: string;
+  path: string | null;
+}
+
+export interface StudioWorkflowMemoryCandidate {
+  id: string | null;
+  candidateType: string;
+  kind: string;
+  content: string;
+  confidence: string;
+  promotionHint: string;
+  target: string;
+  status: "promotable" | "held" | "rejected" | string;
+  evidenceCount: number;
+  updatedAt: string | null;
+}
+
 export interface StudioWorkflowState {
   projectRoot: string;
   taskId: string | null;
@@ -1261,9 +1301,21 @@ export interface StudioWorkflowState {
   checkerReportPath: string | null;
   policyCheckPath: string | null;
   promotionReportPath: string | null;
+  artifacts: StudioWorkflowArtifact[];
+  manifestEntries: StudioWorkflowManifestEntry[];
+  timeline: StudioWorkflowTimelineEvent[];
   researchArtifacts: string[];
   implementEntries: number;
   checkEntries: number;
+  contextCuratorStatus: string | null;
+  contextCuratorMode: string | null;
+  contextCuratorFallback: boolean;
+  contextCuratorReason: string | null;
+  contextCuratorError: string | null;
+  contextCuratorUpdatedAt: string | null;
+  memoryCandidateEntries: number;
+  memoryPromotableEntries: number;
+  memoryRejectedEntries: number;
   checkerStatus: string | null;
   checkerSummary: string | null;
   checkerIssues: string[];
@@ -1271,8 +1323,15 @@ export interface StudioWorkflowState {
   checkerRetryPerformed: boolean;
   checkerRetryStatus: string | null;
   checkerRetryReportPath: string | null;
+  checkerReportPreview: string | null;
+  checkerRetryReportPreview: string | null;
   policyDecision: string | null;
+  memoryPolicyReason: string | null;
   allowAutoPromote: boolean;
+  memoryCandidates: StudioWorkflowMemoryCandidate[];
+  promotionPromoted: number;
+  promotionSkipped: number;
+  promotionDecision: string | null;
   lastUpdated: string | null;
 }
 

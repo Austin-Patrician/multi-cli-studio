@@ -3629,6 +3629,7 @@ impl TerminalStorage {
             .filter(|value| !value.is_empty())
         {
             if let Some(task) = self.load_task_packet_by_id(conn, task_id)? {
+                let task = self.repair_task_intent_if_polluted_in_tx(conn, task, request)?;
                 self.upsert_task_tab_binding_in_tx(conn, &task, request)?;
                 return Ok(task);
             }
@@ -3637,15 +3638,17 @@ impl TerminalStorage {
         if let Some(existing) =
             self.load_task_packet_by_terminal_tab(conn, &request.terminal_tab_id)?
         {
+            let existing = self.repair_task_intent_if_polluted_in_tx(conn, existing, request)?;
             self.upsert_task_tab_binding_in_tx(conn, &existing, request)?;
             return Ok(existing);
         }
 
         let now = now_rfc3339();
-        let goal = if request.initial_goal.trim().is_empty() {
+        let cleaned_initial_goal = clean_task_intent_text(&request.initial_goal);
+        let goal = if cleaned_initial_goal.trim().is_empty() {
             format!("Continue work in {}", request.project_name)
         } else {
-            request.initial_goal.trim().to_string()
+            cleaned_initial_goal
         };
         let task = TaskPacket {
             id: request
@@ -3707,6 +3710,58 @@ impl TerminalStorage {
         .map_err(|err| err.to_string())?;
 
         self.upsert_task_tab_binding_in_tx(conn, &task, request)?;
+        Ok(task)
+    }
+
+    fn repair_task_intent_if_polluted_in_tx(
+        &self,
+        conn: &Connection,
+        mut task: TaskPacket,
+        request: &EnsureTaskPacketRequest,
+    ) -> Result<TaskPacket, String> {
+        let cleaned_goal = clean_task_intent_text(&task.goal);
+        let cleaned_title = clean_task_intent_text(&task.title);
+        let replacement_goal = clean_task_intent_text(&request.initial_goal);
+        let goal_polluted = cleaned_goal.is_empty() || is_legacy_task_pollution(&task.goal);
+        let title_polluted = cleaned_title.is_empty() || is_legacy_task_pollution(&task.title);
+
+        if replacement_goal.is_empty() && !goal_polluted && !title_polluted {
+            return Ok(task);
+        }
+
+        let next_goal = if goal_polluted {
+            if replacement_goal.is_empty() {
+                format!("Continue work in {}", request.project_name)
+            } else {
+                replacement_goal
+            }
+        } else {
+            cleaned_goal
+        };
+        let next_title = if title_polluted {
+            title_from_goal(&next_goal, &request.project_name)
+        } else {
+            cleaned_title
+        };
+
+        if next_goal == task.goal && next_title == task.title {
+            return Ok(task);
+        }
+
+        let now = now_rfc3339();
+        conn.execute(
+            "UPDATE task_packets
+             SET title = ?1,
+                 goal = ?2,
+                 updated_at = ?3
+             WHERE id = ?4",
+            params![&next_title, &next_goal, &now, &task.id],
+        )
+        .map_err(|err| err.to_string())?;
+
+        task.title = next_title;
+        task.goal = next_goal;
+        task.updated_at = now;
         Ok(task)
     }
 
@@ -4458,6 +4513,77 @@ fn title_from_goal(goal: &str, fallback: &str) -> String {
         return fallback.to_string();
     }
     truncate_text(&trimmed.replace('\n', " "), 72)
+}
+
+fn clean_task_intent_text(value: &str) -> String {
+    strip_managed_loading_policy(value).trim().to_string()
+}
+
+fn strip_managed_loading_policy(value: &str) -> String {
+    let lines = value.lines().collect::<Vec<_>>();
+    let mut output = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if trimmed.eq_ignore_ascii_case("## Loading Policy")
+            || trimmed.eq_ignore_ascii_case("Loading Policy")
+        {
+            index += 1;
+            while index < lines.len() {
+                let current = lines[index].trim();
+                if current.starts_with("## ") {
+                    break;
+                }
+                if current.is_empty() || is_loading_policy_line(current) {
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
+            continue;
+        }
+        if is_loading_policy_line(trimmed) || is_powershell_bootstrap_noise(trimmed) {
+            index += 1;
+            continue;
+        }
+        output.push(lines[index]);
+        index += 1;
+    }
+    output.join("\n").trim().to_string()
+}
+
+fn is_loading_policy_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    (lower.contains("start with this file") && lower.contains(".studio/workflow.md"))
+        || lower.contains("avoid injecting unrelated historical chat")
+        || lower.contains("load detailed spec/research files from the jsonl manifests")
+        || lower.contains("active runtime task")
+}
+
+fn is_powershell_bootstrap_noise(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    line.contains("[Console]::OutputEncoding")
+        || line.contains("无法设置属性")
+        || line.contains("此语言模式仅支持核心类型")
+        || lower.contains("propertysetternotsupportedinconstrainedlanguage")
+        || lower.contains("cannot set property")
+        || lower.contains("categoryinfo")
+        || lower.contains("fullyqualifiederrorid")
+}
+
+fn is_legacy_task_pollution(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let has_loading_policy_block = lower.contains("## loading policy")
+        || lower
+            .lines()
+            .any(|line| line.trim().eq_ignore_ascii_case("loading policy"));
+    (has_loading_policy_block && lower.contains(".studio/workflow.md"))
+        || lower.contains("start with this file")
+        || lower.contains(".studio/workflow.md")
+        || lower.contains("active runtime task")
+        || lower.contains("avoid injecting unrelated historical chat")
+        || is_powershell_bootstrap_noise(value)
+        || (value.contains("这是啥问题") && value.contains("控制台输出"))
 }
 
 fn merge_string_lists(current: &[String], incoming: &[String]) -> Vec<String> {

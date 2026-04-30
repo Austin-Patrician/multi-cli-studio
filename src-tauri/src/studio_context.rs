@@ -5,7 +5,7 @@ use std::{
     time::SystemTime,
 };
 
-use chrono::Local;
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -381,6 +381,7 @@ struct CuratedManifestEntry {
     file: String,
     reason: String,
     confidence: f64,
+    fallback: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -482,6 +483,54 @@ pub struct StudioMemoryDistillApplyResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StudioWorkflowArtifact {
+    pub label: String,
+    pub path: String,
+    pub status: String,
+    pub updated_at: Option<String>,
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudioWorkflowManifestEntry {
+    pub manifest: String,
+    pub file: String,
+    pub reason: String,
+    pub confidence: Option<f64>,
+    pub score: Option<i64>,
+    pub status: String,
+    pub fallback: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudioWorkflowTimelineEvent {
+    pub kind: String,
+    pub title: String,
+    pub summary: String,
+    pub timestamp: Option<String>,
+    pub status: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudioWorkflowMemoryCandidate {
+    pub id: Option<String>,
+    pub candidate_type: String,
+    pub kind: String,
+    pub content: String,
+    pub confidence: String,
+    pub promotion_hint: String,
+    pub target: String,
+    pub status: String,
+    pub evidence_count: usize,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StudioWorkflowState {
     pub project_root: String,
     pub task_id: Option<String>,
@@ -494,9 +543,21 @@ pub struct StudioWorkflowState {
     pub checker_report_path: Option<String>,
     pub policy_check_path: Option<String>,
     pub promotion_report_path: Option<String>,
+    pub artifacts: Vec<StudioWorkflowArtifact>,
+    pub manifest_entries: Vec<StudioWorkflowManifestEntry>,
+    pub timeline: Vec<StudioWorkflowTimelineEvent>,
     pub research_artifacts: Vec<String>,
     pub implement_entries: usize,
     pub check_entries: usize,
+    pub context_curator_status: Option<String>,
+    pub context_curator_mode: Option<String>,
+    pub context_curator_fallback: bool,
+    pub context_curator_reason: Option<String>,
+    pub context_curator_error: Option<String>,
+    pub context_curator_updated_at: Option<String>,
+    pub memory_candidate_entries: usize,
+    pub memory_promotable_entries: usize,
+    pub memory_rejected_entries: usize,
     pub checker_status: Option<String>,
     pub checker_summary: Option<String>,
     pub checker_issues: Vec<String>,
@@ -504,8 +565,15 @@ pub struct StudioWorkflowState {
     pub checker_retry_performed: bool,
     pub checker_retry_status: Option<String>,
     pub checker_retry_report_path: Option<String>,
+    pub checker_report_preview: Option<String>,
+    pub checker_retry_report_preview: Option<String>,
     pub policy_decision: Option<String>,
+    pub memory_policy_reason: Option<String>,
     pub allow_auto_promote: bool,
+    pub memory_candidates: Vec<StudioWorkflowMemoryCandidate>,
+    pub promotion_promoted: usize,
+    pub promotion_skipped: usize,
+    pub promotion_decision: Option<String>,
     pub last_updated: Option<String>,
 }
 
@@ -602,7 +670,7 @@ pub fn export_studio_context(
             existing_task_json.as_ref(),
         )?,
     )?;
-    write_durable_prd_if_missing(&durable_task_dir.join("prd.md"), input, &task_id)?;
+    write_durable_prd_if_missing_or_polluted(&durable_task_dir.join("prd.md"), input, &task_id)?;
 
     if let Some(memory_candidates) = input
         .memory_candidates
@@ -1186,6 +1254,11 @@ pub fn load_studio_workflow_state(
         .join(".studio")
         .join("tasks")
         .join(&task_id);
+    let runtime_task_dir = project_root_path
+        .join(".studio")
+        .join("runtime")
+        .join("tasks")
+        .join(&task_id);
     if !task_dir.is_dir() {
         return Ok(StudioWorkflowState::empty(project_root));
     }
@@ -1196,8 +1269,76 @@ pub fn load_studio_workflow_state(
         .unwrap_or_else(|| infer_phase_from_files(&task_dir))
         .to_string();
     let checker = task_json.get("checker").unwrap_or(&Value::Null);
+    let context_curator = task_json.get("contextCurator").unwrap_or(&Value::Null);
+    let memory_distill = task_json.get("memoryDistill").unwrap_or(&Value::Null);
+    let promotion = task_json.get("promotion").unwrap_or(&Value::Null);
     let policy = read_json_file(&task_dir.join("policy-check.json")).unwrap_or(Value::Null);
+    let implement_manifest_path = task_dir.join("implement.jsonl");
+    let check_manifest_path = task_dir.join("check.jsonl");
+    let checker_report_path = task_dir.join("checker-report.md");
+    let checker_retry_report_path = task_dir.join("checker-retry-report.md");
+    let memory_candidates_path = task_dir.join("memory-candidates.jsonl");
+    let policy_candidate_counts = policy.get("candidateCounts").unwrap_or(&Value::Null);
+    let memory_candidate_entries = json_usize(memory_distill, "candidateEntries")
+        .unwrap_or_else(|| count_jsonl_entries(&memory_candidates_path));
+    let memory_promotable_entries = json_usize(memory_distill, "promotableEntries")
+        .or_else(|| json_usize(policy_candidate_counts, "promotable"))
+        .unwrap_or(0);
+    let memory_rejected_entries = json_usize(memory_distill, "rejectedEntries")
+        .or_else(|| json_usize(policy_candidate_counts, "rejected"))
+        .unwrap_or(0);
+    let promotion_promoted = json_usize(promotion, "promoted").unwrap_or(0);
+    let promotion_skipped = json_usize(promotion, "skipped").unwrap_or(0);
+    let promotion_decision = promotion
+        .get("decision")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            if promotion.is_object() {
+                Some(
+                    if promotion_promoted > 0 {
+                        "promoted"
+                    } else if promotion_skipped > 0 {
+                        "skipped"
+                    } else {
+                        "completed"
+                    }
+                    .to_string(),
+                )
+            } else if task_dir.join("promotion-report.md").is_file() {
+                Some("reported".to_string())
+            } else {
+                None
+            }
+        });
     let research_artifacts = list_markdown_files(&task_dir.join("research"))?;
+    let artifacts = workflow_artifacts(project_root_path, &task_id, &task_dir, &runtime_task_dir);
+    let mut manifest_entries =
+        read_workflow_manifest_entries(&implement_manifest_path, "implement", project_root_path);
+    manifest_entries.extend(read_workflow_manifest_entries(
+        &check_manifest_path,
+        "check",
+        project_root_path,
+    ));
+    let timeline = workflow_timeline(
+        project_root_path,
+        &task_id,
+        &task_json,
+        &policy,
+        &task_dir,
+        &runtime_task_dir,
+        &phase,
+        memory_candidate_entries,
+        memory_promotable_entries,
+        memory_rejected_entries,
+        promotion_promoted,
+        promotion_skipped,
+    );
+    let memory_candidates = read_memory_candidate_preview(&memory_candidates_path);
+    let context_curator_fallback = context_curator
+        .get("fallback")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| manifest_entries.iter().any(|entry| entry.fallback));
     Ok(StudioWorkflowState {
         project_root: project_root.to_string(),
         task_id: Some(task_id.clone()),
@@ -1225,9 +1366,21 @@ pub fn load_studio_workflow_state(
             &task_dir.join("promotion-report.md"),
             project_root_path,
         ),
+        artifacts,
+        manifest_entries,
+        timeline,
         research_artifacts,
-        implement_entries: count_jsonl_entries(&task_dir.join("implement.jsonl")),
-        check_entries: count_jsonl_entries(&task_dir.join("check.jsonl")),
+        implement_entries: count_jsonl_entries(&implement_manifest_path),
+        check_entries: count_jsonl_entries(&check_manifest_path),
+        context_curator_status: json_string(context_curator, "status"),
+        context_curator_mode: json_string(context_curator, "mode"),
+        context_curator_fallback,
+        context_curator_reason: json_string(context_curator, "reason"),
+        context_curator_error: json_string(context_curator, "error"),
+        context_curator_updated_at: json_string(context_curator, "updatedAt"),
+        memory_candidate_entries,
+        memory_promotable_entries,
+        memory_rejected_entries,
         checker_status: checker
             .get("status")
             .and_then(Value::as_str)
@@ -1260,17 +1413,27 @@ pub fn load_studio_workflow_state(
             .and_then(Value::as_str)
             .map(str::to_string),
         checker_retry_report_path: file_ref_if_exists(
-            &task_dir.join("checker-retry-report.md"),
+            &checker_retry_report_path,
             project_root_path,
         ),
+        checker_report_preview: read_report_preview(&checker_report_path),
+        checker_retry_report_preview: read_report_preview(&checker_retry_report_path),
         policy_decision: policy
             .get("decision")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        memory_policy_reason: policy
+            .get("reason")
             .and_then(Value::as_str)
             .map(str::to_string),
         allow_auto_promote: policy
             .get("allowAutoPromote")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        memory_candidates,
+        promotion_promoted,
+        promotion_skipped,
+        promotion_decision,
         last_updated: task_json
             .get("updatedAt")
             .and_then(Value::as_str)
@@ -1342,12 +1505,68 @@ pub fn apply_context_curator_output(
         &check_manifest_entries,
     );
     atomic_write(&report_path, &trim_to_limit(&report, MAX_REPORT_CHARS))?;
+    let has_fallback = implement_manifest_entries
+        .iter()
+        .chain(check_manifest_entries.iter())
+        .any(|entry| entry.fallback);
+    update_context_curator_task_state(
+        &durable_task_dir.join("task.json"),
+        task_id,
+        if has_fallback {
+            "curated_with_fallback"
+        } else {
+            "curated"
+        },
+        if has_fallback {
+            "curated-with-fallback"
+        } else {
+            "curated"
+        },
+        has_fallback,
+        if has_fallback {
+            "Context-curator produced a valid manifest, with explicit fallback entries for unselected lanes."
+        } else {
+            "Context-curator produced host-validated manifests."
+        },
+        None,
+    )?;
 
     Ok(StudioContextCurationApplyResult {
         implement_entries: implement_manifest_entries.len(),
         check_entries: check_manifest_entries.len(),
         report_path: report_path.to_string_lossy().to_string(),
     })
+}
+
+pub fn record_context_curator_fallback(
+    project_root: &str,
+    task_id: &str,
+    reason: &str,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let project_root = Path::new(project_root.trim());
+    if project_root.as_os_str().is_empty() || !project_root.is_dir() {
+        return Err("Project root is missing or not a local directory.".to_string());
+    }
+    let task_dir = project_root.join(".studio").join("tasks").join(task_id);
+    fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
+    let report_path = task_dir.join("context-selection-report.md");
+    let error_summary = error.map(summarize_context_curator_error);
+    let fallback_report =
+        render_context_curator_fallback_report(task_id, reason, error_summary.as_deref());
+    atomic_write(
+        &report_path,
+        &trim_to_limit(&fallback_report, MAX_REPORT_CHARS),
+    )?;
+    update_context_curator_task_state(
+        &task_dir.join("task.json"),
+        task_id,
+        "fallback",
+        "heuristic-fallback",
+        true,
+        reason,
+        error_summary.as_deref(),
+    )
 }
 
 pub fn promote_studio_context(
@@ -1421,6 +1640,8 @@ fn write_manifest(
     for entry in selected.into_iter().take(MAX_MANIFEST_ENTRIES) {
         let line = serde_json::json!({
             "_studioManaged": true,
+            "curatedBy": "heuristic-fallback",
+            "fallback": true,
             "file": entry.file,
             "reason": entry.reason,
             "score": entry.score,
@@ -1437,6 +1658,7 @@ fn fallback_curated_entry(reason: &str) -> CuratedManifestEntry {
         file: ".studio/spec/index.md".to_string(),
         reason: reason.to_string(),
         confidence: 0.4,
+        fallback: true,
     }
 }
 
@@ -1452,6 +1674,7 @@ fn write_curated_manifest(path: &Path, entries: &[CuratedManifestEntry]) -> Resu
         let line = serde_json::json!({
             "_studioManaged": true,
             "curatedBy": "context-curator",
+            "fallback": entry.fallback,
             "file": entry.file,
             "reason": entry.reason,
             "confidence": entry.confidence,
@@ -1698,15 +1921,92 @@ fn clean_studio_option(value: Option<&str>) -> Option<String> {
         .filter(|cleaned| !cleaned.is_empty())
 }
 
+fn clean_studio_intent_text(value: &str) -> String {
+    let cleaned = clean_studio_text(value);
+    strip_managed_loading_policy(&cleaned)
+}
+
+fn clean_studio_intent_option(value: Option<&str>) -> Option<String> {
+    value
+        .map(clean_studio_intent_text)
+        .map(|cleaned| cleaned.trim().to_string())
+        .filter(|cleaned| !cleaned.is_empty())
+        .filter(|cleaned| !is_legacy_task_pollution(cleaned))
+}
+
 fn studio_task_title(input: &StudioContextExportInput) -> String {
-    clean_studio_option(input.task_title.as_deref())
-        .or_else(|| clean_studio_option(input.task_goal.as_deref()))
-        .unwrap_or_else(|| clean_studio_text(&input.user_prompt))
+    clean_studio_intent_option(input.task_title.as_deref())
+        .or_else(|| clean_studio_intent_option(input.task_goal.as_deref()))
+        .unwrap_or_else(|| clean_studio_intent_text(&input.user_prompt))
 }
 
 fn studio_task_goal(input: &StudioContextExportInput) -> String {
-    clean_studio_option(input.task_goal.as_deref())
-        .unwrap_or_else(|| clean_studio_text(&input.user_prompt))
+    clean_studio_intent_option(input.task_goal.as_deref())
+        .unwrap_or_else(|| clean_studio_intent_text(&input.user_prompt))
+}
+
+fn studio_current_request(input: &StudioContextExportInput) -> String {
+    let current_request = clean_studio_intent_text(&input.user_prompt);
+    non_empty(&current_request, "Continue the active task.").to_string()
+}
+
+fn strip_managed_loading_policy(value: &str) -> String {
+    let lines = value.lines().collect::<Vec<_>>();
+    let mut output = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if trimmed.eq_ignore_ascii_case("## Loading Policy")
+            || trimmed.eq_ignore_ascii_case("Loading Policy")
+        {
+            index += 1;
+            while index < lines.len() {
+                let current = lines[index].trim();
+                if current.starts_with("## ") {
+                    break;
+                }
+                if is_loading_policy_line(current) || current.is_empty() {
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
+            continue;
+        }
+        if is_loading_policy_line(trimmed) {
+            index += 1;
+            continue;
+        }
+        output.push(lines[index]);
+        index += 1;
+    }
+    output.join("\n").trim().to_string()
+}
+
+fn is_loading_policy_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    (lower.contains("start with this file") && lower.contains(".studio/workflow.md"))
+        || lower.contains("avoid injecting unrelated historical chat")
+        || lower.contains("load detailed spec/research files from the jsonl manifests")
+        || lower.contains("active runtime task")
+}
+
+fn is_legacy_task_pollution(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let has_loading_policy_block = lower.contains("## loading policy")
+        || lower
+            .lines()
+            .any(|line| line.trim().eq_ignore_ascii_case("loading policy"));
+    (has_loading_policy_block && lower.contains(".studio/workflow.md"))
+        || lower.contains("start with this file")
+        || lower.contains(".studio/workflow.md")
+        || lower.contains("active runtime task")
+        || lower.contains("avoid injecting unrelated historical chat")
+        || lower.contains("cannot set property")
+        || lower.contains("propertysetternotsupportedinconstrainedlanguage")
+        || value.contains("无法设置属性")
+        || value.contains("此语言模式仅支持核心类型")
+        || value.contains("这是啥问题") && value.contains("控制台输出")
 }
 
 fn strip_ansi_sequences(value: &str) -> String {
@@ -1852,7 +2152,7 @@ fn render_runtime_working_memory_reference(
 
 fn render_task(input: &StudioContextExportInput, task_id: &str) -> String {
     let goal = studio_task_goal(input);
-    let current_request = clean_studio_text(&input.user_prompt);
+    let current_request = studio_current_request(input);
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
         .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
     let next_step = clean_studio_option(input.handoff_next_step.as_deref())
@@ -1896,7 +2196,7 @@ Updated: {}\n\n\
 ",
         Local::now().to_rfc3339(),
         non_empty(&goal, "Continue the active task."),
-        non_empty(&current_request, "Continue the active task."),
+        current_request,
         input.workspace_id,
         input.terminal_tab_id,
         input.cli_id,
@@ -1915,6 +2215,7 @@ fn render_durable_task_json(
 ) -> Result<String, String> {
     let title = studio_task_title(input);
     let goal = studio_task_goal(input);
+    let current_request = studio_current_request(input);
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref());
     let next_step = clean_studio_option(input.handoff_next_step.as_deref())
         .unwrap_or_else(|| "Continue from the latest user request.".to_string());
@@ -1935,6 +2236,16 @@ fn render_durable_task_json(
         "projectName": input.project_name.as_str(),
         "workspaceId": input.workspace_id.as_str(),
         "goal": non_empty(&goal, "Continue the active task."),
+        "currentRequest": current_request,
+        "contextCurator": {
+            "status": "fallback",
+            "mode": "heuristic-fallback",
+            "fallback": true,
+            "reason": "Using heuristic fallback manifests until the context-curator gate completes.",
+            "error": null,
+            "report": format!(".studio/tasks/{task_id}/context-selection-report.md"),
+            "updatedAt": Local::now().to_rfc3339(),
+        },
         "terminalTabId": input.terminal_tab_id.as_str(),
         "activeTabIds": active_tab_ids,
         "currentCli": input.cli_id.as_str(),
@@ -1964,18 +2275,23 @@ fn render_durable_task_json(
     serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
 }
 
-fn write_durable_prd_if_missing(
+fn write_durable_prd_if_missing_or_polluted(
     path: &Path,
     input: &StudioContextExportInput,
     task_id: &str,
 ) -> Result<(), String> {
     if path.is_file() {
-        return Ok(());
+        let current = fs::read_to_string(path).unwrap_or_default();
+        if !is_legacy_task_pollution(&current) {
+            return Ok(());
+        }
     }
     let goal = studio_task_goal(input);
+    let current_request = studio_current_request(input);
     let content = format!(
-        "# {task_id}\n\n## Goal\n\n{}\n\n## Acceptance Criteria\n\n- Use `.studio/workflow.md` as the autonomous workflow contract.\n- Curate context automatically through `.studio/tasks/{task_id}/context-selection-report.md`.\n- Follow relevant specs/research from `implement.jsonl` and `check.jsonl`.\n- Distill durable lessons with provenance, confidence, and policy-check output.\n\n## Notes\n\nCreated by Studio Autonomous Workflow for cross-CLI continuity.\n",
+        "# {task_id}\n\n## Goal\n\n{}\n\n## Current Request\n\n{}\n\n## Acceptance Criteria\n\n- Use `.studio/workflow.md` as the autonomous workflow contract.\n- Curate context automatically through `.studio/tasks/{task_id}/context-selection-report.md`.\n- Follow relevant specs/research from `implement.jsonl` and `check.jsonl`.\n- Distill durable lessons with provenance, confidence, and policy-check output.\n\n## Notes\n\nCreated by Studio Autonomous Workflow for cross-CLI continuity.\n",
         non_empty(&goal, "Continue the active task."),
+        current_request,
     );
     atomic_write(path, &content)
 }
@@ -2260,7 +2576,7 @@ fn render_context_selection_report(
 ) -> String {
     let request = clean_studio_text(&input.user_prompt);
     format!(
-        "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: Studio automatic context-curator\nStrategy: Trellis-class agent-curated projection with heuristic fallback.\n\n## Request\n\n{}\n\n## Implement Manifest\n\n{}\n\n## Check Manifest\n\n{}\n\n## Policy Gates\n\n- Context curation is automatic; no human approval is required.\n- Source files to edit are not pre-registered in manifests.\n- Long-term spec/workspace writes require provenance, confidence, and policy-check output.\n- If no curated spec/research exists, fallback entries point to `.studio/spec/index.md` when available.\n",
+        "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: context-curator gate\nStatus: fallback\nMode: heuristic-fallback\nStrategy: Heuristic projection is active until the context-curator returns host-validated manifests.\n\n## Request\n\n{}\n\n## Implement Manifest\n\n{}\n\n## Check Manifest\n\n{}\n\n## Policy Gates\n\n- Context curation is automatic; no human approval is required.\n- Source files to edit are not pre-registered in manifests.\n- Long-term spec/workspace writes require provenance, confidence, and policy-check output.\n- These entries are explicitly marked as fallback and may be replaced by curated manifests when the gate succeeds.\n",
         Local::now().to_rfc3339(),
         non_empty(&request, "Continue the active task."),
         render_manifest_report_entries(implement_entries),
@@ -2276,7 +2592,7 @@ fn render_manifest_report_entries(entries: &[ManifestEntry]) -> String {
         .iter()
         .map(|entry| {
             format!(
-                "- `{}` (score {}): {}",
+                "- `{}` (fallback, score {}): {}",
                 entry.file, entry.score, entry.reason
             )
         })
@@ -2446,13 +2762,31 @@ fn parse_context_curator_output(raw_output: &str) -> Result<ContextCuratorOutput
         return Err("Context curator returned empty output.".to_string());
     }
     if let Ok(parsed) = serde_json::from_str::<ContextCuratorOutput>(trimmed) {
-        return Ok(parsed);
+        if is_real_context_curator_output(&parsed) {
+            return Ok(parsed);
+        }
+        return Err(
+            "Context curator JSON did not contain real implement/check entries.".to_string(),
+        );
     }
-    if let Some(json_slice) = extract_json_object(trimmed) {
-        return serde_json::from_str::<ContextCuratorOutput>(json_slice)
-            .map_err(|err| format!("Context curator output was not valid JSON: {err}"));
+
+    let mut last_error = None;
+    for json_slice in extract_json_objects(trimmed).into_iter().rev() {
+        match serde_json::from_str::<ContextCuratorOutput>(json_slice) {
+            Ok(parsed) if is_real_context_curator_output(&parsed) => return Ok(parsed),
+            Ok(_) => {
+                last_error =
+                    Some("candidate JSON did not contain real implement/check entries".to_string())
+            }
+            Err(err) => last_error = Some(err.to_string()),
+        }
     }
-    Err("Context curator output did not contain a JSON object.".to_string())
+    Err(format!(
+        "Context curator output did not contain a valid curated JSON object{}.",
+        last_error
+            .map(|err| format!("; last parse error: {err}"))
+            .unwrap_or_default()
+    ))
 }
 
 fn parse_research_agent_output(raw_output: &str) -> Result<ResearchAgentOutput, String> {
@@ -2502,6 +2836,74 @@ fn extract_json_object(value: &str) -> Option<&str> {
     Some(&value[start..=end])
 }
 
+fn extract_json_objects(value: &str) -> Vec<&str> {
+    let mut objects = Vec::new();
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in value.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' if depth > 0 => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = Some(index);
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(start_index) = start.take() {
+                        objects.push(&value[start_index..index + ch.len_utf8()]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    objects
+}
+
+fn is_real_context_curator_output(output: &ContextCuratorOutput) -> bool {
+    if output.implement.is_empty() && output.check.is_empty() {
+        return false;
+    }
+    let placeholder_report = output
+        .report
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .contains("short markdown summary");
+    if placeholder_report {
+        return false;
+    }
+    output
+        .implement
+        .iter()
+        .chain(output.check.iter())
+        .any(|entry| {
+            let file = entry.file.trim();
+            let reason = entry.reason.to_ascii_lowercase();
+            !file.is_empty()
+                && !reason.contains("why implementation needs it")
+                && !reason.contains("why verification needs it")
+        })
+}
+
 fn sanitize_curator_entries(
     project_root: &Path,
     task_id: &str,
@@ -2530,6 +2932,7 @@ fn sanitize_curator_entries(
             file,
             reason: non_empty(&entry.reason, "Selected by automatic context-curator.").to_string(),
             confidence: entry.confidence.unwrap_or(0.7).clamp(0.0, 1.0),
+            fallback: false,
         });
     }
     Ok(selected)
@@ -2580,6 +2983,82 @@ fn render_curated_context_selection_report(
     )
 }
 
+fn render_context_curator_fallback_report(
+    task_id: &str,
+    reason: &str,
+    error_summary: Option<&str>,
+) -> String {
+    format!(
+        "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: context-curator gate\nStatus: fallback\nMode: heuristic-fallback\n\n## Fallback Reason\n\n{}\n\n## Curator Error Summary\n\n{}\n\n## Active Manifest Policy\n\n- `implement.jsonl` and `check.jsonl` remain usable, but they are explicitly heuristic fallback projections.\n- Curated manifests are applied only after the context-curator returns host-validated JSON with existing spec/research paths.\n- Full curator transcripts are intentionally not persisted in durable Studio context.\n- The UI must show this gate as fallback until a later curator run succeeds.\n",
+        Local::now().to_rfc3339(),
+        non_empty(reason.trim(), "Context-curator did not complete."),
+        error_summary
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("No additional error captured.")
+    )
+}
+
+fn summarize_context_curator_error(error: &str) -> String {
+    let normalized = strip_ansi_escape_codes(error).replace("\r\n", "\n");
+    let mut lines = Vec::new();
+    for line in normalized.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if is_context_curator_transcript_noise(line) {
+            continue;
+        }
+        lines.push(line.to_string());
+        if lines.len() >= 6 {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        lines.push("Context-curator did not return host-validated JSON.".to_string());
+    }
+    trim_to_limit(&lines.join("\n"), 900)
+}
+
+fn is_context_curator_transcript_noise(line: &str) -> bool {
+    line.starts_with("OpenAI Codex")
+        || line == "Reading additional input from stdin..."
+        || line == "--------"
+        || line == "user"
+        || line == "codex"
+        || line == "exec"
+        || line.starts_with("workdir:")
+        || line.starts_with("model:")
+        || line.starts_with("provider:")
+        || line.starts_with("approval:")
+        || line.starts_with("sandbox:")
+        || line.starts_with("reasoning ")
+        || line.starts_with("session id:")
+        || line.contains(" succeeded in ")
+        || line.contains(" declined in ")
+        || line.contains(" rejected: blocked by policy")
+}
+
+fn strip_ansi_escape_codes(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            output.push(ch);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+    }
+    output
+}
+
 fn render_curated_report_entries(entries: &[CuratedManifestEntry]) -> String {
     if entries.is_empty() {
         return "- No valid curator entries selected.".to_string();
@@ -2587,8 +3066,13 @@ fn render_curated_report_entries(entries: &[CuratedManifestEntry]) -> String {
     entries
         .iter()
         .map(|entry| {
+            let mode = if entry.fallback {
+                "fallback"
+            } else {
+                "curated"
+            };
             format!(
-                "- `{}` (confidence {:.2}): {}",
+                "- `{}` ({mode}, confidence {:.2}): {}",
                 entry.file, entry.confidence, entry.reason
             )
         })
@@ -2698,6 +3182,53 @@ fn update_checker_task_state(
         "updatedAt".to_string(),
         Value::String(checked_at.to_string()),
     );
+    let content = serde_json::to_string_pretty(&task_json).map_err(|err| err.to_string())?;
+    atomic_write(task_json_path, &content)
+}
+
+fn update_context_curator_task_state(
+    task_json_path: &Path,
+    task_id: &str,
+    status: &str,
+    mode: &str,
+    fallback: bool,
+    reason: &str,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let updated_at = Local::now().to_rfc3339();
+    let mut task_json = read_json_file(task_json_path).unwrap_or_else(|_| {
+        serde_json::json!({
+            "id": task_id,
+            "studioManaged": true,
+        })
+    });
+    let object = ensure_json_object(&mut task_json);
+    object
+        .entry("id".to_string())
+        .or_insert_with(|| Value::String(task_id.to_string()));
+    object.insert(
+        "status".to_string(),
+        Value::String("context_curated".to_string()),
+    );
+    object.insert(
+        "contextSelectionReport".to_string(),
+        Value::String(format!(
+            ".studio/tasks/{task_id}/context-selection-report.md"
+        )),
+    );
+    object.insert(
+        "contextCurator".to_string(),
+        serde_json::json!({
+            "status": status,
+            "mode": mode,
+            "fallback": fallback,
+            "reason": reason,
+            "error": error,
+            "report": format!(".studio/tasks/{task_id}/context-selection-report.md"),
+            "updatedAt": updated_at,
+        }),
+    );
+    object.insert("updatedAt".to_string(), Value::String(updated_at));
     let content = serde_json::to_string_pretty(&task_json).map_err(|err| err.to_string())?;
     atomic_write(task_json_path, &content)
 }
@@ -2838,6 +3369,7 @@ fn update_promotion_task_state(
         serde_json::json!({
             "promoted": promoted,
             "skipped": skipped,
+            "decision": if promoted > 0 { "promoted" } else { "skipped" },
             "report": report_path.to_string_lossy(),
             "updatedAt": updated_at,
         }),
@@ -2990,9 +3522,21 @@ impl StudioWorkflowState {
             checker_report_path: None,
             policy_check_path: None,
             promotion_report_path: None,
+            artifacts: Vec::new(),
+            manifest_entries: Vec::new(),
+            timeline: Vec::new(),
             research_artifacts: Vec::new(),
             implement_entries: 0,
             check_entries: 0,
+            context_curator_status: None,
+            context_curator_mode: None,
+            context_curator_fallback: false,
+            context_curator_reason: None,
+            context_curator_error: None,
+            context_curator_updated_at: None,
+            memory_candidate_entries: 0,
+            memory_promotable_entries: 0,
+            memory_rejected_entries: 0,
             checker_status: None,
             checker_summary: None,
             checker_issues: Vec::new(),
@@ -3000,8 +3544,15 @@ impl StudioWorkflowState {
             checker_retry_performed: false,
             checker_retry_status: None,
             checker_retry_report_path: None,
+            checker_report_preview: None,
+            checker_retry_report_preview: None,
             policy_decision: None,
+            memory_policy_reason: None,
             allow_auto_promote: false,
+            memory_candidates: Vec::new(),
+            promotion_promoted: 0,
+            promotion_skipped: 0,
+            promotion_decision: None,
             last_updated: None,
         }
     }
@@ -3067,6 +3618,438 @@ fn task_id_for_terminal_tab(project_root: &Path, terminal_tab_id: &str) -> Optio
         .collect::<Vec<_>>();
     matches.sort_by_key(|(_, modified)| *modified);
     matches.pop().map(|(task_id, _)| task_id)
+}
+
+fn read_workflow_manifest_entries(
+    path: &Path,
+    manifest: &str,
+    project_root: &Path,
+) -> Vec<StudioWorkflowManifestEntry> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let value = serde_json::from_str::<Value>(trimmed).ok()?;
+            let file = value
+                .get("file")
+                .or_else(|| value.get("path"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if file.is_empty() {
+                return None;
+            }
+            let reason = value
+                .get("reason")
+                .or_else(|| value.get("why"))
+                .and_then(Value::as_str)
+                .unwrap_or("Selected by Studio context curation.")
+                .trim()
+                .to_string();
+            let confidence = value.get("confidence").and_then(Value::as_f64);
+            let score = value.get("score").and_then(Value::as_i64);
+            let reason_lower = reason.to_ascii_lowercase();
+            let fallback = value
+                .get("fallback")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| {
+                    reason_lower.contains("fallback")
+                        || reason_lower.contains("did not select")
+                        || value
+                            .get("curatedBy")
+                            .and_then(Value::as_str)
+                            .map(|value| value == "heuristic-fallback")
+                            .unwrap_or(false)
+                        || (file == ".studio/spec/index.md"
+                            && confidence.map(|value| value <= 0.4).unwrap_or(false))
+                });
+            Some(StudioWorkflowManifestEntry {
+                manifest: manifest.to_string(),
+                status: workflow_file_status(project_root, &file),
+                file,
+                reason,
+                confidence,
+                score,
+                fallback,
+            })
+        })
+        .take(MAX_MANIFEST_ENTRIES * 2)
+        .collect()
+}
+
+fn workflow_file_status(project_root: &Path, relative_path: &str) -> String {
+    if project_root.join(relative_path).is_file() {
+        "ready".to_string()
+    } else {
+        "missing".to_string()
+    }
+}
+
+fn workflow_timeline(
+    project_root: &Path,
+    task_id: &str,
+    task_json: &Value,
+    policy: &Value,
+    task_dir: &Path,
+    runtime_task_dir: &Path,
+    phase: &str,
+    memory_candidate_entries: usize,
+    memory_promotable_entries: usize,
+    memory_rejected_entries: usize,
+    promotion_promoted: usize,
+    promotion_skipped: usize,
+) -> Vec<StudioWorkflowTimelineEvent> {
+    let checker = task_json.get("checker").unwrap_or(&Value::Null);
+    let context_curator = task_json.get("contextCurator").unwrap_or(&Value::Null);
+    let memory_distill = task_json.get("memoryDistill").unwrap_or(&Value::Null);
+    let promotion = task_json.get("promotion").unwrap_or(&Value::Null);
+    let mut events = Vec::new();
+    events.push(StudioWorkflowTimelineEvent {
+        kind: "task".to_string(),
+        title: "Task State".to_string(),
+        summary: format!("Task {task_id} is currently in `{phase}`."),
+        timestamp: json_string(task_json, "updatedAt")
+            .or_else(|| file_modified_at(&task_dir.join("task.json"))),
+        status: phase.to_string(),
+        path: Some(format!(".studio/tasks/{task_id}/task.json")),
+    });
+    if runtime_task_dir.join("task.md").is_file() {
+        events.push(StudioWorkflowTimelineEvent {
+            kind: "runtime".to_string(),
+            title: "Runtime Projection".to_string(),
+            summary: "Generated active task context for the current CLI session.".to_string(),
+            timestamp: file_modified_at(&runtime_task_dir.join("task.md")),
+            status: "ready".to_string(),
+            path: Some(format!(".studio/runtime/tasks/{task_id}/task.md")),
+        });
+    }
+    if task_dir.join("context-selection-report.md").is_file() {
+        let context_status =
+            json_string(context_curator, "status").unwrap_or_else(|| "fallback".to_string());
+        let context_summary = json_string(context_curator, "reason").unwrap_or_else(|| {
+            format!(
+                "Projection contains {} implement and {} check entries.",
+                count_jsonl_entries(&task_dir.join("implement.jsonl")),
+                count_jsonl_entries(&task_dir.join("check.jsonl"))
+            )
+        });
+        events.push(StudioWorkflowTimelineEvent {
+            kind: "context".to_string(),
+            title: if context_status == "fallback" {
+                "Context Fallback".to_string()
+            } else {
+                "Context Curated".to_string()
+            },
+            summary: context_summary,
+            timestamp: json_string(context_curator, "updatedAt")
+                .or_else(|| file_modified_at(&task_dir.join("context-selection-report.md"))),
+            status: context_status,
+            path: Some(format!(
+                ".studio/tasks/{task_id}/context-selection-report.md"
+            )),
+        });
+    }
+    if checker.is_object() || task_dir.join("checker-report.md").is_file() {
+        let checker_status =
+            json_string(checker, "status").unwrap_or_else(|| "reported".to_string());
+        events.push(StudioWorkflowTimelineEvent {
+            kind: "checker".to_string(),
+            title: "Checker Gate".to_string(),
+            summary: json_string(checker, "summary")
+                .unwrap_or_else(|| "Checker report is available.".to_string()),
+            timestamp: json_string(checker, "checkedAt")
+                .or_else(|| file_modified_at(&task_dir.join("checker-report.md"))),
+            status: checker_status,
+            path: Some(format!(".studio/tasks/{task_id}/checker-report.md")),
+        });
+    }
+    if checker
+        .get("retryPerformed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || task_dir.join("checker-retry-report.md").is_file()
+    {
+        events.push(StudioWorkflowTimelineEvent {
+            kind: "checker_retry".to_string(),
+            title: "Checker Retry".to_string(),
+            summary: json_string(checker, "retrySummary")
+                .unwrap_or_else(|| "Retry report recorded for checker feedback.".to_string()),
+            timestamp: json_string(checker, "retryCompletedAt")
+                .or_else(|| file_modified_at(&task_dir.join("checker-retry-report.md"))),
+            status: json_string(checker, "retryStatus").unwrap_or_else(|| "reported".to_string()),
+            path: Some(format!(".studio/tasks/{task_id}/checker-retry-report.md")),
+        });
+    }
+    if memory_distill.is_object() || task_dir.join("memory-candidates.jsonl").is_file() {
+        events.push(StudioWorkflowTimelineEvent {
+            kind: "memory".to_string(),
+            title: "Memory Distilled".to_string(),
+            summary: format!(
+                "{} accepted, {} promotable, {} rejected.",
+                memory_candidate_entries, memory_promotable_entries, memory_rejected_entries
+            ),
+            timestamp: json_string(memory_distill, "updatedAt")
+                .or_else(|| file_modified_at(&task_dir.join("memory-distill-report.md"))),
+            status: json_string(memory_distill, "decision")
+                .unwrap_or_else(|| "candidate".to_string()),
+            path: Some(format!(".studio/tasks/{task_id}/memory-distill-report.md")),
+        });
+    }
+    if policy.is_object() || task_dir.join("policy-check.json").is_file() {
+        events.push(StudioWorkflowTimelineEvent {
+            kind: "policy".to_string(),
+            title: "Policy Check".to_string(),
+            summary: json_string(policy, "reason")
+                .unwrap_or_else(|| "Policy check file is available.".to_string()),
+            timestamp: json_string(policy, "updatedAt")
+                .or_else(|| file_modified_at(&task_dir.join("policy-check.json"))),
+            status: json_string(policy, "decision").unwrap_or_else(|| "pending".to_string()),
+            path: Some(format!(".studio/tasks/{task_id}/policy-check.json")),
+        });
+    }
+    if promotion.is_object() || task_dir.join("promotion-report.md").is_file() {
+        events.push(StudioWorkflowTimelineEvent {
+            kind: "promotion".to_string(),
+            title: "Promotion".to_string(),
+            summary: format!(
+                "{} promoted, {} skipped.",
+                promotion_promoted, promotion_skipped
+            ),
+            timestamp: json_string(promotion, "updatedAt")
+                .or_else(|| file_modified_at(&task_dir.join("promotion-report.md"))),
+            status: json_string(promotion, "decision").unwrap_or_else(|| "reported".to_string()),
+            path: Some(format!(".studio/tasks/{task_id}/promotion-report.md")),
+        });
+    }
+    let runtime_context_path = project_root
+        .join(".studio")
+        .join("runtime")
+        .join("context.md");
+    if runtime_context_path.is_file() {
+        events.push(StudioWorkflowTimelineEvent {
+            kind: "runtime_context".to_string(),
+            title: "Runtime Context".to_string(),
+            summary: "Studio runtime context snapshot is available for CLI startup.".to_string(),
+            timestamp: file_modified_at(&runtime_context_path),
+            status: "ready".to_string(),
+            path: Some(".studio/runtime/context.md".to_string()),
+        });
+    }
+    events
+}
+
+fn read_memory_candidate_preview(path: &Path) -> Vec<StudioWorkflowMemoryCandidate> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+                return Some(StudioWorkflowMemoryCandidate {
+                    id: None,
+                    candidate_type: "invalid".to_string(),
+                    kind: "invalid".to_string(),
+                    content: trim_to_limit(trimmed, 320),
+                    confidence: "unknown".to_string(),
+                    promotion_hint: "hold".to_string(),
+                    target: "hold".to_string(),
+                    status: "rejected".to_string(),
+                    evidence_count: 0,
+                    updated_at: None,
+                });
+            };
+            let promotion_hint =
+                json_string(&value, "promotionHint").unwrap_or_else(|| "hold".to_string());
+            let status = if candidate_has_promotion_content(&value)
+                && candidate_has_promotion_evidence(&value)
+                && !candidate_is_runtime_noise(&value)
+                && candidate_is_auto_promotable(&value)
+                && candidate_confidence_allows_promotion(&value)
+            {
+                "promotable"
+            } else if candidate_is_runtime_noise(&value) || !candidate_has_promotion_content(&value)
+            {
+                "rejected"
+            } else {
+                "held"
+            };
+            Some(StudioWorkflowMemoryCandidate {
+                id: json_string(&value, "id"),
+                candidate_type: json_string(&value, "candidateType")
+                    .unwrap_or_else(|| "memory".to_string()),
+                kind: json_string(&value, "kind").unwrap_or_else(|| "memory".to_string()),
+                content: trim_to_limit(
+                    &json_string(&value, "content").unwrap_or_else(|| "No content.".to_string()),
+                    320,
+                ),
+                confidence: json_string(&value, "confidence")
+                    .unwrap_or_else(|| "unknown".to_string()),
+                target: promotion_hint.clone(),
+                promotion_hint,
+                status: status.to_string(),
+                evidence_count: value
+                    .get("sourceEvidenceIds")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0),
+                updated_at: json_string(&value, "updatedAt"),
+            })
+        })
+        .take(12)
+        .collect()
+}
+
+fn read_report_preview(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|content| trim_to_limit(content.trim(), 2_400))
+        .filter(|content| !content.trim().is_empty())
+}
+
+fn workflow_artifacts(
+    project_root: &Path,
+    task_id: &str,
+    task_dir: &Path,
+    runtime_task_dir: &Path,
+) -> Vec<StudioWorkflowArtifact> {
+    let items: Vec<(&str, PathBuf, String)> = vec![
+        (
+            "Task JSON",
+            task_dir.join("task.json"),
+            format!(".studio/tasks/{task_id}/task.json"),
+        ),
+        (
+            "Runtime Task",
+            runtime_task_dir.join("task.md"),
+            format!(".studio/runtime/tasks/{task_id}/task.md"),
+        ),
+        (
+            "PRD",
+            task_dir.join("prd.md"),
+            format!(".studio/tasks/{task_id}/prd.md"),
+        ),
+        (
+            "Context Report",
+            task_dir.join("context-selection-report.md"),
+            format!(".studio/tasks/{task_id}/context-selection-report.md"),
+        ),
+        (
+            "Implement Manifest",
+            task_dir.join("implement.jsonl"),
+            format!(".studio/tasks/{task_id}/implement.jsonl"),
+        ),
+        (
+            "Check Manifest",
+            task_dir.join("check.jsonl"),
+            format!(".studio/tasks/{task_id}/check.jsonl"),
+        ),
+        (
+            "Checker Report",
+            task_dir.join("checker-report.md"),
+            format!(".studio/tasks/{task_id}/checker-report.md"),
+        ),
+        (
+            "Checker Retry",
+            task_dir.join("checker-retry-report.md"),
+            format!(".studio/tasks/{task_id}/checker-retry-report.md"),
+        ),
+        (
+            "Memory Distill",
+            task_dir.join("memory-distill-report.md"),
+            format!(".studio/tasks/{task_id}/memory-distill-report.md"),
+        ),
+        (
+            "Memory Candidates",
+            task_dir.join("memory-candidates.jsonl"),
+            format!(".studio/tasks/{task_id}/memory-candidates.jsonl"),
+        ),
+        (
+            "Policy Check",
+            task_dir.join("policy-check.json"),
+            format!(".studio/tasks/{task_id}/policy-check.json"),
+        ),
+        (
+            "Promotion Report",
+            task_dir.join("promotion-report.md"),
+            format!(".studio/tasks/{task_id}/promotion-report.md"),
+        ),
+        (
+            "Runtime Context",
+            project_root
+                .join(".studio")
+                .join("runtime")
+                .join("context.md"),
+            ".studio/runtime/context.md".to_string(),
+        ),
+    ];
+    items
+        .into_iter()
+        .map(|(label, absolute_path, relative_path)| {
+            workflow_artifact(label, relative_path, &absolute_path)
+        })
+        .collect()
+}
+
+fn workflow_artifact(label: &str, path: String, absolute_path: &Path) -> StudioWorkflowArtifact {
+    let metadata = fs::metadata(absolute_path)
+        .ok()
+        .filter(|metadata| metadata.is_file());
+    let updated_at = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.modified().ok())
+        .map(format_system_time);
+    let size_bytes = metadata.as_ref().map(|metadata| metadata.len());
+    StudioWorkflowArtifact {
+        label: label.to_string(),
+        path,
+        status: if metadata.is_some() {
+            "ready".to_string()
+        } else {
+            "missing".to_string()
+        },
+        updated_at,
+        size_bytes,
+    }
+}
+
+fn format_system_time(value: SystemTime) -> String {
+    let datetime: DateTime<Local> = value.into();
+    datetime.to_rfc3339()
+}
+
+fn file_modified_at(path: &Path) -> Option<String> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .map(format_system_time)
+}
+
+fn json_usize(value: &Value, key: &str) -> Option<usize> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|number| usize::try_from(number).ok())
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn infer_phase_from_files(task_dir: &Path) -> &'static str {

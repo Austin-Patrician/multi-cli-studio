@@ -892,11 +892,17 @@ Status: completed for backend/runtime memory gates.
 
 ### Phase 6: Operational Visibility
 
-- add workflow panel
-- manifest viewer
-- handoff timeline
-- checker surface
-- memory promotion surface
+Status: completed for the first production UI pass.
+
+- [x] Expose a backend workflow snapshot with artifact health, manifest counts, checker state, memory distill counts, policy reason, and promotion counts.
+- [x] Upgrade the workspace right panel into a phase/gate inspector for context, checker, memory, and promotion state.
+- [x] Show workflow artifacts with ready/missing status, size, and last modified time.
+- [x] Keep policy promotion executable from the workflow panel and refresh state after completion.
+- [x] Add inline manifest entry preview with selected spec/research paths and fallback reasons.
+- [x] Add handoff timeline from durable task, runtime projection, context, checker, memory, policy, and promotion events.
+- [x] Add a focused checker report viewer with report previews and retry provenance.
+- [x] Add memory candidate review with accepted/promotable/rejected rows and promotion target paths.
+- [ ] Add deeper SQLite handoff-event integration when the workflow panel needs historical cross-CLI handoffs beyond task artifacts.
 
 ## 27. Acceptance Criteria
 

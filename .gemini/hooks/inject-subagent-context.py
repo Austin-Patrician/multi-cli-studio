@@ -19,6 +19,19 @@ PLATFORM = "gemini"
 MODE = "subagent"
 
 
+def configure_stdio() -> None:
+    if os.name != "nt":
+        return
+    for name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def read_stdin_json() -> dict:
     try:
         raw = sys.stdin.read()
@@ -62,7 +75,41 @@ def load_context(root: Path) -> str:
     return read_text(root / ".studio" / "runtime" / "context.md")
 
 
+def discover_bound_task(root: Path) -> tuple[str | None, Path | None, Path | None] | None:
+    context_id = os.environ.get("STUDIO_CONTEXT_ID", "").strip()
+    if not context_id or "/" in context_id or "\\" in context_id or ".." in context_id:
+        return None
+    binding_path = root / ".studio" / "runtime" / "sessions" / f"{context_id}.json"
+    try:
+        data = json.loads(binding_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    task_id_value = data.get("taskId") or data.get("task_id")
+    if isinstance(task_id_value, str) and task_id_value.strip():
+        task_id = Path(task_id_value.strip()).name
+        runtime_task = root / ".studio" / "runtime" / "tasks" / task_id
+        durable_task = root / ".studio" / "tasks" / task_id
+        if runtime_task.is_dir() or durable_task.is_dir():
+            return task_id, runtime_task, durable_task
+    active_task = data.get("activeTask") or data.get("active_task")
+    if not isinstance(active_task, str) or not active_task.strip():
+        return None
+    durable_task = root / active_task.strip().rstrip("/")
+    task_id = durable_task.name
+    if not task_id:
+        return None
+    runtime_task = root / ".studio" / "runtime" / "tasks" / task_id
+    if runtime_task.is_dir() or durable_task.is_dir():
+        return task_id, runtime_task, durable_task
+    return None
+
+
 def discover_active_task(root: Path) -> tuple[str | None, Path | None, Path | None]:
+    bound_task = discover_bound_task(root)
+    if bound_task:
+        return bound_task
     context = load_context(root)
     runtime_task = None
     durable_task = None
@@ -250,6 +297,7 @@ def emit(additional_context: str) -> int:
 
 
 def main() -> int:
+    configure_stdio()
     non_interactive = f"{PLATFORM.upper()}_NON_INTERACTIVE"
     if os.environ.get(non_interactive) == "1":
         return 0

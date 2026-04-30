@@ -62,9 +62,9 @@ use studio_context::{
     apply_checker_agent_output, apply_context_curator_output, apply_memory_distill_candidates,
     auto_promote_studio_memory, build_checker_agent_prompt, build_context_curator_prompt,
     export_studio_context, load_studio_workflow_state, promote_studio_context,
-    record_checker_retry_result, StudioCheckerApplyResult, StudioContextCurationApplyResult,
-    StudioContextExportInput, StudioPolicyPromotionResult, StudioPromoteRequest,
-    StudioPromoteResult, StudioWorkflowState,
+    record_checker_retry_result, record_context_curator_fallback, StudioCheckerApplyResult,
+    StudioContextCurationApplyResult, StudioContextExportInput, StudioPolicyPromotionResult,
+    StudioPromoteRequest, StudioPromoteResult, StudioWorkflowState,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
@@ -12464,14 +12464,14 @@ fn send_chat_message(
             export_studio_context(&studio_context_input).ok().flatten()
         };
         if let Some(export) = studio_context.as_ref() {
-            let _ = maybe_run_studio_context_curator(
-                &effective_project_root,
-                &cli_id,
-                &wrapper_path,
-                &studio_context_input,
-                &export.task_id,
-                Some(export.context_key.as_str()),
-                &request_session,
+            start_studio_context_curator_job(
+                effective_project_root.clone(),
+                cli_id.clone(),
+                wrapper_path.clone(),
+                studio_context_input.clone(),
+                export.task_id.clone(),
+                Some(export.context_key.clone()),
+                request_session.clone(),
             );
         }
         let studio_context_prelude = studio_context
@@ -19994,6 +19994,12 @@ fn maybe_run_studio_context_curator(
         Ok(outcome) => outcome,
         Err(error) => {
             println!("[studio-context] context-curator skipped: {error}");
+            let _ = record_context_curator_fallback(
+                project_root,
+                task_id,
+                "Context-curator execution failed; using explicit heuristic fallback manifests.",
+                Some(&error),
+            );
             return None;
         }
     };
@@ -20006,6 +20012,12 @@ fn maybe_run_studio_context_curator(
         Ok(result) => result,
         Err(error) => {
             println!("[studio-context] context-curator output ignored: {error}");
+            let _ = record_context_curator_fallback(
+                project_root,
+                task_id,
+                "Context-curator output was invalid or empty; using explicit heuristic fallback manifests.",
+                Some(&error),
+            );
             return None;
         }
     };
@@ -20014,6 +20026,28 @@ fn maybe_run_studio_context_curator(
         result.implement_entries, result.check_entries, result.report_path
     );
     Some(result)
+}
+
+fn start_studio_context_curator_job(
+    project_root: String,
+    cli_id: String,
+    command_path: String,
+    input: StudioContextExportInput,
+    task_id: String,
+    context_key: Option<String>,
+    session: acp::AcpSession,
+) {
+    thread::spawn(move || {
+        let _ = maybe_run_studio_context_curator(
+            &project_root,
+            &cli_id,
+            &command_path,
+            &input,
+            &task_id,
+            context_key.as_deref(),
+            &session,
+        );
+    });
 }
 
 fn maybe_distill_and_promote_studio_memory(
@@ -20656,6 +20690,7 @@ fn build_agent_args(
     prompt: &str,
     write_mode: bool,
     session: &acp::AcpSession,
+    output_last_message_path: Option<&Path>,
 ) -> Result<Vec<String>, String> {
     let args = match agent_id {
         "codex" => {
@@ -20681,6 +20716,10 @@ fn build_agent_args(
             if let Some(model) = session.model.get("codex") {
                 args.push("--model".to_string());
                 args.push(model.clone());
+            }
+            if let Some(path) = output_last_message_path {
+                args.push("--output-last-message".to_string());
+                args.push(path.to_string_lossy().to_string());
             }
             args.push(prompt.to_string());
             args
@@ -21158,7 +21197,24 @@ fn run_silent_agent_turn_once(
     studio_context_key: Option<&str>,
 ) -> Result<SilentAgentTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
-    let args = build_agent_args(agent_id, prompt, write_mode, session)?;
+    let output_last_message_path = if agent_id == "codex" {
+        let output_dir = Path::new(project_root)
+            .join(".studio")
+            .join("runtime")
+            .join("silent-agent");
+        fs::create_dir_all(&output_dir)
+            .map_err(|err| format!("Failed to prepare silent agent output: {err}"))?;
+        Some(output_dir.join(format!("{}-{}.txt", agent_id, Uuid::new_v4())))
+    } else {
+        None
+    };
+    let args = build_agent_args(
+        agent_id,
+        prompt,
+        write_mode,
+        session,
+        output_last_message_path.as_deref(),
+    )?;
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let mut cmd = batch_aware_command(&resolved_command, &arg_refs);
     apply_studio_context_environment(&mut cmd, studio_context_key);
@@ -21190,6 +21246,14 @@ fn run_silent_agent_turn_once(
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let output_last_message = output_last_message_path
+        .as_ref()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(path) = output_last_message_path.as_ref() {
+        let _ = fs::remove_file(path);
+    }
     let combined = if stderr.trim().is_empty() {
         stdout.clone()
     } else if stdout.trim().is_empty() {
@@ -21200,7 +21264,7 @@ fn run_silent_agent_turn_once(
 
     if output.status.success() {
         Ok(SilentAgentTurnOutcome {
-            final_content: stdout.trim().to_string(),
+            final_content: output_last_message.unwrap_or_else(|| stdout.trim().to_string()),
             raw_output: combined.trim().to_string(),
         })
     } else {

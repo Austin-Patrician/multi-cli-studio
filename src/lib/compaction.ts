@@ -39,6 +39,9 @@ import {
   CROSS_TAB_MAX_ENTRIES,
 } from "./tokenEstimation";
 
+const WORKING_MEMORY_SCAN_MESSAGE_LIMIT = 120;
+const CONTEXT_TURN_SCAN_MESSAGE_LIMIT = 96;
+
 // 鈹€鈹€ helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 let _idCounter = 0;
@@ -490,8 +493,12 @@ export function buildWorkingMemory(
   const keyDecisions = new Set<string>(existingMemory?.keyDecisions ?? []);
   const contributingClis = new Set<AgentId>(existingMemory?.contributingClis ?? []);
   let buildStatus: WorkingMemory["buildStatus"] = existingMemory?.buildStatus ?? "unknown";
+  const scanMessages =
+    messages.length > WORKING_MEMORY_SCAN_MESSAGE_LIMIT
+      ? messages.slice(-WORKING_MEMORY_SCAN_MESSAGE_LIMIT)
+      : messages;
 
-  for (const msg of messages) {
+  for (const msg of scanMessages) {
     if (msg.cliId) contributingClis.add(msg.cliId);
     if (!msg.blocks) continue;
 
@@ -573,8 +580,12 @@ export function buildDynamicContextTurns(
   let pendingUser: ChatMessage | null = null;
   const budget = CONTEXT_TURNS_BUDGET_BY_CLI[targetCli ?? fallbackCli] ?? CONTEXT_TURNS_MAX_BUDGET;
   let assistantRecencyCounter = 0;
+  const scanMessages =
+    messages.length > CONTEXT_TURN_SCAN_MESSAGE_LIMIT
+      ? messages.slice(-CONTEXT_TURN_SCAN_MESSAGE_LIMIT)
+      : messages;
 
-  for (const message of messages) {
+  for (const message of scanMessages) {
     if (message.role === "user") {
       pendingUser = message;
       continue;

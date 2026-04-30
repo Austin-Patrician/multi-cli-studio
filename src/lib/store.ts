@@ -49,7 +49,7 @@ import {
   normalizeSelectedCustomAgent,
   resolveSelectedCustomAgent,
 } from "./customAgents";
-import { estimateSessionTokens } from "./tokenEstimation";
+import { estimateMessageTokens, estimateSessionTokens } from "./tokenEstimation";
 import {
   ACP_COMMANDS,
   AcpCliCapabilities,
@@ -448,6 +448,13 @@ function calculateConversationSessionEstimatedTokens(
   );
 }
 
+function appendEstimatedTokens(
+  session: Pick<ConversationSession, "estimatedTokens">,
+  messages: ChatMessage[]
+) {
+  return session.estimatedTokens + messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+}
+
 function nextClonedTabTitle(baseTitle: string, existingTitles: string[]) {
   const normalizedBase = baseTitle.replace(/\s路\s\d+$/, "");
   let nextIndex = 2;
@@ -484,8 +491,10 @@ type PersistableTerminalState = Pick<
 let draftPromptPersistTimer: number | null = null;
 let streamingRecoveryInterval: number | null = null;
 let terminalStatePersistInFlight = false;
+let terminalStatePersistTimer: number | null = null;
 let queuedTerminalState: PersistedTerminalState | null = null;
 let messagePersistenceInFlight = false;
+let messagePersistenceTimer: number | null = null;
 const queuedMessagePersistence: Array<() => Promise<void>> = [];
 const persistenceIssues = new Map<PersistenceScope, string>();
 let persistenceIssueReporter: ((message: string | null) => void) | null = null;
@@ -525,6 +534,9 @@ async function flushTerminalStatePersistence() {
     }
   }
   terminalStatePersistInFlight = false;
+  if (queuedTerminalState) {
+    scheduleTerminalStatePersistence();
+  }
 }
 
 async function flushMessagePersistenceQueue() {
@@ -539,13 +551,46 @@ async function flushMessagePersistenceQueue() {
     }
   }
   messagePersistenceInFlight = false;
+  if (queuedMessagePersistence.length > 0) {
+    scheduleMessagePersistence();
+  }
+}
+
+function scheduleTerminalStatePersistence() {
+  if (terminalStatePersistInFlight) return;
+  if (typeof window === "undefined") {
+    terminalStatePersistInFlight = true;
+    void flushTerminalStatePersistence();
+    return;
+  }
+  if (terminalStatePersistTimer !== null) return;
+  terminalStatePersistTimer = window.setTimeout(() => {
+    terminalStatePersistTimer = null;
+    if (terminalStatePersistInFlight || !queuedTerminalState) return;
+    terminalStatePersistInFlight = true;
+    void flushTerminalStatePersistence();
+  }, 40);
+}
+
+function scheduleMessagePersistence() {
+  if (messagePersistenceInFlight) return;
+  if (typeof window === "undefined") {
+    messagePersistenceInFlight = true;
+    void flushMessagePersistenceQueue();
+    return;
+  }
+  if (messagePersistenceTimer !== null) return;
+  messagePersistenceTimer = window.setTimeout(() => {
+    messagePersistenceTimer = null;
+    if (messagePersistenceInFlight || queuedMessagePersistence.length === 0) return;
+    messagePersistenceInFlight = true;
+    void flushMessagePersistenceQueue();
+  }, 40);
 }
 
 function enqueueMessagePersistence(operation: () => Promise<void>) {
   queuedMessagePersistence.push(operation);
-  if (messagePersistenceInFlight) return;
-  messagePersistenceInFlight = true;
-  void flushMessagePersistenceQueue();
+  scheduleMessagePersistence();
 }
 
 function persistTerminalState(
@@ -560,9 +605,7 @@ function persistTerminalState(
     activeTerminalTabId,
     chatSessions,
   };
-  if (terminalStatePersistInFlight) return;
-  terminalStatePersistInFlight = true;
-  void flushTerminalStatePersistence();
+  scheduleTerminalStatePersistence();
 }
 
 function scheduleDraftPromptPersistence(getState: () => PersistableTerminalState) {
@@ -3003,10 +3046,10 @@ export const useStore = create<StoreState>((set, get) => {
               ...state.chatSessions[targetTabId],
               messages: [...state.chatSessions[targetTabId].messages, systemMessage!],
               updatedAt: nowIso(),
-              estimatedTokens: calculateConversationSessionEstimatedTokens({
-                ...state.chatSessions[targetTabId],
-                messages: [...state.chatSessions[targetTabId].messages, systemMessage!],
-              }),
+              estimatedTokens: appendEstimatedTokens(
+                state.chatSessions[targetTabId],
+                [systemMessage!]
+              ),
             },
           }
         : state.chatSessions;
@@ -3196,16 +3239,16 @@ export const useStore = create<StoreState>((set, get) => {
         ];
         const chatSessions = {
           ...current.chatSessions,
-          [tabId]: {
-            ...current.chatSessions[tabId],
-            messages: nextMessages,
-            updatedAt: nowIso(),
-            estimatedTokens: calculateConversationSessionEstimatedTokens({
+            [tabId]: {
               ...current.chatSessions[tabId],
               messages: nextMessages,
-            }),
-          },
-        };
+              updatedAt: nowIso(),
+              estimatedTokens: appendEstimatedTokens(current.chatSessions[tabId], [
+                userMessage,
+                pendingMessage,
+              ]),
+            },
+          };
         persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
         return { busyAction: "chat", terminalTabs, chatSessions };
       });
@@ -3394,16 +3437,16 @@ export const useStore = create<StoreState>((set, get) => {
       );
       const chatSessions = {
         ...current.chatSessions,
-        [tabId]: {
-          ...current.chatSessions[tabId],
-          messages: [...current.chatSessions[tabId].messages, userMessage, pendingMessage],
-          updatedAt: nowIso(),
-          estimatedTokens: calculateConversationSessionEstimatedTokens({
+          [tabId]: {
             ...current.chatSessions[tabId],
             messages: [...current.chatSessions[tabId].messages, userMessage, pendingMessage],
-          }),
-        },
-      };
+            updatedAt: nowIso(),
+            estimatedTokens: appendEstimatedTokens(current.chatSessions[tabId], [
+              userMessage,
+              pendingMessage,
+            ]),
+          },
+        };
       const livePlanByTab = { ...current.livePlanByTab };
       delete livePlanByTab[tabId];
       const tabSubagentsByTab = rebuildTabSubagentMap(chatSessions);
@@ -3511,20 +3554,15 @@ export const useStore = create<StoreState>((set, get) => {
         set((current) => {
           const chatSessions = {
             ...current.chatSessions,
-            [tabId]: {
-              ...current.chatSessions[tabId],
-              messages: current.chatSessions[tabId].messages.map((message) =>
-                message.id === pendingMessage.id ? { ...message, id: messageId } : message
-              ),
-              updatedAt: nowIso(),
-              estimatedTokens: calculateConversationSessionEstimatedTokens({
+              [tabId]: {
                 ...current.chatSessions[tabId],
                 messages: current.chatSessions[tabId].messages.map((message) =>
                   message.id === pendingMessage.id ? { ...message, id: messageId } : message
                 ),
-              }),
-            },
-          };
+                updatedAt: nowIso(),
+                estimatedTokens: current.chatSessions[tabId].estimatedTokens,
+              },
+            };
           persistTerminalState(current.workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
           return {
             chatSessions,
@@ -3539,10 +3577,10 @@ export const useStore = create<StoreState>((set, get) => {
         );
         const chatSessions = {
           ...current.chatSessions,
-          [tabId]: {
-            ...current.chatSessions[tabId],
-            messages: current.chatSessions[tabId].messages.map<ChatMessage>((message) =>
-              message.id === pendingMessage.id
+            [tabId]: {
+              ...current.chatSessions[tabId],
+              messages: current.chatSessions[tabId].messages.map<ChatMessage>((message) =>
+                message.id === pendingMessage.id
                 ? {
                     ...message,
                     content: "Error: failed to send message",
@@ -3558,33 +3596,12 @@ export const useStore = create<StoreState>((set, get) => {
                     isStreaming: false,
                     exitCode: 1,
                   }
-                : message
-            ),
-            updatedAt: nowIso(),
-            estimatedTokens: calculateConversationSessionEstimatedTokens({
-              ...current.chatSessions[tabId],
-              messages: current.chatSessions[tabId].messages.map<ChatMessage>((message) =>
-                message.id === pendingMessage.id
-                  ? {
-                      ...message,
-                      content: "Error: failed to send message",
-                      rawContent: "Error: failed to send message",
-                      contentFormat: "log",
-                      blocks: [
-                        {
-                          kind: "status",
-                          level: "error",
-                          text: "Error: failed to send message",
-                        },
-                      ] satisfies ChatMessageBlock[],
-                      isStreaming: false,
-                      exitCode: 1,
-                    }
                   : message
               ),
-            }),
-          },
-        };
+              updatedAt: nowIso(),
+              estimatedTokens: current.chatSessions[tabId].estimatedTokens,
+            },
+          };
         persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, chatSessions);
         return {
           busyAction: null,
@@ -3645,9 +3662,9 @@ export const useStore = create<StoreState>((set, get) => {
       if (!targetMessageId) return {};
       const chatSessions = {
         ...state.chatSessions,
-        [tabId]: {
-          ...session,
-          messages: session.messages.map<ChatMessage>((message) =>
+          [tabId]: {
+            ...session,
+            messages: session.messages.map<ChatMessage>((message) =>
             message.id === targetMessageId
               ? {
                   ...message,
@@ -3661,22 +3678,7 @@ export const useStore = create<StoreState>((set, get) => {
               : message
           ),
           updatedAt: nowIso(),
-          estimatedTokens: calculateConversationSessionEstimatedTokens({
-            ...session,
-            messages: session.messages.map<ChatMessage>((message) =>
-              message.id === targetMessageId
-                ? {
-                    ...message,
-                    rawContent: (message.rawContent ?? message.content) + chunk,
-                    content: normalizeAssistantContent(
-                      (message.rawContent ?? message.content) + chunk
-                    ),
-                    contentFormat: "plain",
-                    blocks: blocks ?? message.blocks ?? null,
-                  }
-                : message
-            ),
-          }),
+          estimatedTokens: session.estimatedTokens,
         },
       };
       if (!blocks) {

@@ -1,6 +1,12 @@
 import type { ChatMessage, ConversationSession } from "./models";
 
 const CJK_RANGE = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g;
+const TOKEN_ESTIMATION_SAMPLE_CHARS = 12_000;
+
+function countCjkChars(text: string): number {
+  const matches = text.match(CJK_RANGE);
+  return matches ? matches.length : 0;
+}
 
 /**
  * Rough token estimate.
@@ -8,8 +14,18 @@ const CJK_RANGE = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g;
  */
 export function estimateTokens(text: string): number {
   if (!text) return 0;
-  const cjkMatches = text.match(CJK_RANGE);
-  const cjkCount = cjkMatches ? cjkMatches.length : 0;
+  const cjkCount =
+    text.length <= TOKEN_ESTIMATION_SAMPLE_CHARS
+      ? countCjkChars(text)
+      : Math.round(
+          (countCjkChars(
+            `${text.slice(0, TOKEN_ESTIMATION_SAMPLE_CHARS / 2)}${text.slice(
+              -TOKEN_ESTIMATION_SAMPLE_CHARS / 2
+            )}`
+          ) /
+            TOKEN_ESTIMATION_SAMPLE_CHARS) *
+            text.length
+        );
   const otherCount = text.length - cjkCount;
   return Math.ceil(cjkCount / 2 + otherCount / 4);
 }
