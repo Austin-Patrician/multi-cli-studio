@@ -1,4 +1,4 @@
-import type { ChatAttachment, PickedChatAttachment } from "./models";
+import type { ChatAttachment, PickedChatAttachment, TerminalCliId } from "./models";
 
 const IMAGE_EXTENSIONS = new Set([
   "apng",
@@ -75,6 +75,10 @@ export function isImageAttachment(attachment: Pick<ChatAttachment, "fileName" | 
   if (isImageMediaType(attachment.mediaType)) return true;
   if (attachment.source.startsWith("data:image/")) return true;
   return IMAGE_EXTENSIONS.has(attachmentExtension(attachment.fileName || attachment.source));
+}
+
+export function cliSupportsImageAttachments(cliId: TerminalCliId | null | undefined) {
+  return cliId === "codex" || cliId === "claude" || cliId === "gemini";
 }
 
 export function relativeAttachmentDisplayPath(

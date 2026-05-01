@@ -1,4 +1,5 @@
 import {
+  ClipboardEvent,
   KeyboardEvent,
   useEffect,
   useMemo,
@@ -65,9 +66,13 @@ import {
   TerminalTab,
   TerminalCliId,
   ToolApprovalMode,
+  PickedChatAttachment,
 } from "../../lib/models";
 import { bridge } from "../../lib/bridge";
-import { createChatAttachment } from "../../lib/chatAttachments";
+import {
+  cliSupportsImageAttachments,
+  createChatAttachment,
+} from "../../lib/chatAttachments";
 import { AgentIcon } from "../AgentIcon";
 import { resolveSelectedCustomAgent } from "../../lib/customAgents";
 import { useStore } from "../../lib/store";
@@ -187,9 +192,9 @@ function findMentionToken(value: string, caret: number) {
 
 function findSkillToken(value: string, caret: number) {
   const prefix = value.slice(0, caret);
-  const match = prefix.match(/^\s*\$([A-Za-z0-9._-]*)$/);
+  const match = prefix.match(/(?:^|\s)\$([A-Za-z0-9._-]*)$/);
   if (!match || match.index == null) return null;
-  const start = prefix.lastIndexOf("$");
+  const start = match.index + match[0].lastIndexOf("$");
   if (start < 0) return null;
   return {
     start,
@@ -200,12 +205,10 @@ function findSkillToken(value: string, caret: number) {
 
 function findAgentToken(value: string, caret: number) {
   const prefix = value.slice(0, caret);
-  const lineStart = prefix.lastIndexOf("\n") + 1;
-  const linePrefix = prefix.slice(lineStart);
-  const match = linePrefix.match(/^#([^\s#]*)$/);
-  if (!match) return null;
+  const match = prefix.match(/(?:^|\s)#([^\s#]*)$/);
+  if (!match || match.index == null) return null;
   return {
-    start: lineStart,
+    start: match.index + match[0].lastIndexOf("#"),
     end: caret,
     query: match[1] ?? "",
   };
@@ -213,12 +216,10 @@ function findAgentToken(value: string, caret: number) {
 
 function findPromptTemplateToken(value: string, caret: number) {
   const prefix = value.slice(0, caret);
-  const lineStart = prefix.lastIndexOf("\n") + 1;
-  const linePrefix = prefix.slice(lineStart);
-  const match = linePrefix.match(/^!([^\s!]*)$/);
-  if (!match) return null;
+  const match = prefix.match(/(?:^|\s)!([^\s!]*)$/);
+  if (!match || match.index == null) return null;
   return {
-    start: lineStart,
+    start: match.index + match[0].lastIndexOf("!"),
     end: caret,
     query: match[1] ?? "",
   };
@@ -236,6 +237,9 @@ function titleCaseCli(cliId: TerminalCliId) {
 }
 
 const CODEX_CONTEXT_COMPACTION_TEXT = "Codex compacted the thread context.";
+const IMAGE_ATTACHMENT_SUPPORT_MESSAGE = "当前仅 Codex、Claude Code 和 Gemini 支持图片附件";
+const MAX_PASTED_IMAGE_ATTACHMENTS = 5;
+const MAX_PASTED_IMAGE_BYTES = 10 * 1024 * 1024;
 
 function formatCompactCount(value: number) {
   if (!Number.isFinite(value)) return "0";
@@ -284,6 +288,55 @@ function attachmentPreviewSrc(attachment: ChatAttachment) {
   } catch {
     return "";
   }
+}
+
+function readFileAsDataUrl(file: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read clipboard image"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function pastedImageExtension(mediaType: string | null | undefined) {
+  switch ((mediaType ?? "").toLowerCase()) {
+    case "image/jpeg":
+      return "jpg";
+    case "image/png":
+      return "png";
+    case "image/gif":
+      return "gif";
+    case "image/webp":
+      return "webp";
+    case "image/bmp":
+      return "bmp";
+    case "image/svg+xml":
+      return "svg";
+    case "image/tiff":
+      return "tiff";
+    case "image/heic":
+      return "heic";
+    case "image/heif":
+      return "heif";
+    case "image/avif":
+      return "avif";
+    default:
+      return "png";
+  }
+}
+
+async function pastedImageToAttachment(file: File, index: number): Promise<PickedChatAttachment> {
+  const mediaType = file.type || "image/png";
+  const source = await readFileAsDataUrl(file);
+  const fileName =
+    file.name?.trim() || `pasted-image-${Date.now()}-${index + 1}.${pastedImageExtension(mediaType)}`;
+  return {
+    fileName,
+    mediaType,
+    source,
+    previewSource: source,
+  };
 }
 
 const CREATE_AGENT_ENTRY_ID = "__create-agent__";
@@ -1815,6 +1868,36 @@ export function ChatPromptBar({
     });
   }
 
+  function addPickedAttachmentsToDraft(picked: PickedChatAttachment[]) {
+    if (!activeTab || !workspace) {
+      return {
+        added: 0,
+        imageCount: 0,
+        imageRejectedForCli: false,
+      };
+    }
+
+    const prepared = picked
+      .map((item) => createChatAttachment(item, workspace.rootPath))
+      .filter((item): item is ChatAttachment => Boolean(item));
+    const imageCount = prepared.filter((attachment) => attachment.kind === "image").length;
+    const allowImages = cliSupportsImageAttachments(activeTab.selectedCli);
+    const allowedPicked = allowImages
+      ? picked
+      : picked.filter((item) => {
+          const attachment = createChatAttachment(item, workspace.rootPath);
+          return attachment?.kind !== "image";
+        });
+    const result = addDraftChatAttachments(activeTab.id, workspace.rootPath, allowedPicked);
+    focusPromptAtEnd();
+
+    return {
+      added: result.added,
+      imageCount,
+      imageRejectedForCli: !allowImages && imageCount > 0,
+    };
+  }
+
   async function handlePickAttachments() {
     if (!activeTab || !workspace || isStreaming) return;
     closeFooterMenus();
@@ -1823,27 +1906,14 @@ export function ChatPromptBar({
       const picked = await bridge.pickChatAttachments();
       if (picked.length === 0) return;
 
-      const prepared = picked
-        .map((item) => createChatAttachment(item, workspace.rootPath))
-        .filter((item): item is ChatAttachment => Boolean(item));
-      const imageCount = prepared.filter((attachment) => attachment.kind === "image").length;
-      const allowImages = activeTab.selectedCli === "codex";
-      const allowedPicked = allowImages
-        ? picked
-        : picked.filter((item) => {
-            const attachment = createChatAttachment(item, workspace.rootPath);
-            return attachment?.kind !== "image";
-          });
-
-      const result = addDraftChatAttachments(activeTab.id, workspace.rootPath, allowedPicked);
-      if (!allowImages && imageCount > 0) {
-        setQueueFeedback("当前仅 Codex 支持图片附件，图片已忽略。");
+      const result = addPickedAttachmentsToDraft(picked);
+      if (result.imageRejectedForCli) {
+        setQueueFeedback(`${IMAGE_ATTACHMENT_SUPPORT_MESSAGE}，图片已忽略。`);
       } else if (result.added === 0) {
         setQueueFeedback("没有可添加的新附件。");
       } else {
         setQueueFeedback(null);
       }
-      focusPromptAtEnd();
     } catch (error) {
       const detail =
         error instanceof Error
@@ -1851,6 +1921,81 @@ export function ChatPromptBar({
           : typeof error === "string"
             ? error
             : "Attachment picker failed.";
+      setQueueFeedback(detail);
+    }
+  }
+
+  async function handlePromptPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const imageFiles = Array.from(event.clipboardData?.items ?? [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((item): item is File => Boolean(item));
+
+    if (imageFiles.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (!activeTab || !workspace) {
+      return;
+    }
+    if (isStreaming) {
+      setQueueFeedback("当前正在生成回复，暂时不能粘贴图片附件。");
+      return;
+    }
+
+    const filesWithinCountLimit = imageFiles.slice(0, MAX_PASTED_IMAGE_ATTACHMENTS);
+    const oversizedCount = filesWithinCountLimit.filter(
+      (file) => file.size > MAX_PASTED_IMAGE_BYTES
+    ).length;
+    const acceptedFiles = filesWithinCountLimit.filter(
+      (file) => file.size <= MAX_PASTED_IMAGE_BYTES
+    );
+    const ignoredCount = imageFiles.length - filesWithinCountLimit.length;
+
+    if (acceptedFiles.length === 0) {
+      if (oversizedCount > 0) {
+        setQueueFeedback(`单张粘贴图片不能超过 ${MAX_PASTED_IMAGE_BYTES / (1024 * 1024)} MB。`);
+      } else {
+        setQueueFeedback("没有可添加的剪贴板图片。");
+      }
+      focusPromptAtEnd();
+      return;
+    }
+
+    try {
+      const picked = await Promise.all(
+        acceptedFiles.map((file, index) => pastedImageToAttachment(file, index))
+      );
+      const result = addPickedAttachmentsToDraft(picked);
+      if (result.imageRejectedForCli) {
+        setQueueFeedback(`${IMAGE_ATTACHMENT_SUPPORT_MESSAGE}，图片已忽略。`);
+        return;
+      }
+      if (result.added === 0) {
+        setQueueFeedback("没有可添加的新附件。");
+        return;
+      }
+      if (oversizedCount > 0 || ignoredCount > 0) {
+        const reasons: string[] = [];
+        if (oversizedCount > 0) {
+          reasons.push(`${oversizedCount} 张超过 ${MAX_PASTED_IMAGE_BYTES / (1024 * 1024)} MB`);
+        }
+        if (ignoredCount > 0) {
+          reasons.push(`最多只保留前 ${MAX_PASTED_IMAGE_ATTACHMENTS} 张`);
+        }
+        setQueueFeedback(`已添加 ${result.added} 张图片，${reasons.join("，")}。`);
+        return;
+      }
+      setQueueFeedback(null);
+    } catch (error) {
+      const detail =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "读取剪贴板图片失败。";
       setQueueFeedback(detail);
     }
   }
@@ -1924,8 +2069,11 @@ export function ChatPromptBar({
       });
       return;
     }
-    if (draftAttachments.some((attachment) => attachment.kind === "image") && activeTab.selectedCli !== "codex") {
-      setQueueFeedback("当前仅 Codex 支持图片附件，请切换到 Codex 后发送。");
+    if (
+      draftAttachments.some((attachment) => attachment.kind === "image") &&
+      !cliSupportsImageAttachments(activeTab.selectedCli)
+    ) {
+      setQueueFeedback(`${IMAGE_ATTACHMENT_SUPPORT_MESSAGE}，请切换后发送。`);
       return;
     }
 
@@ -1952,7 +2100,7 @@ export function ChatPromptBar({
         if (result === "full") {
           setQueueFeedback("Only one queued message is allowed. Press Ctrl+B to edit it.");
         } else if (result === "unsupportedAttachments") {
-          setQueueFeedback("当前仅 Codex 支持图片附件，请切换到 Codex 后再排队。");
+          setQueueFeedback(`${IMAGE_ATTACHMENT_SUPPORT_MESSAGE}，请切换后再排队。`);
         } else if (result === "queued") {
           setQueueFeedback(null);
           requestConversationScrollToBottom(activeTab.id);
@@ -2016,7 +2164,7 @@ export function ChatPromptBar({
       if (result === "full") {
         setQueueFeedback("Only one queued message is allowed. Press Ctrl+B to edit it.");
       } else if (result === "unsupportedAttachments") {
-        setQueueFeedback("当前仅 Codex 支持图片附件，请切换到 Codex 后再排队。");
+        setQueueFeedback(`${IMAGE_ATTACHMENT_SUPPORT_MESSAGE}，请切换后再排队。`);
       } else if (result === "queued") {
         setQueueFeedback(null);
         requestConversationScrollToBottom(activeTab.id);
@@ -3105,6 +3253,7 @@ export function ChatPromptBar({
                   rows={1}
                   value={prompt}
                   onChange={(event) => handlePromptChange(event.target.value)}
+                  onPaste={handlePromptPaste}
                   onKeyDown={handleKeyDown}
                   placeholder={promptPlaceholder}
                   className="terminal-chat-textarea"

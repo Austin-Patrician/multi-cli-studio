@@ -136,6 +136,23 @@ function basename(path: string) {
   return parts[parts.length - 1] ?? path;
 }
 
+function formatMessageDuration(durationMs: number) {
+  const totalSeconds = Math.max(0, durationMs / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds.toFixed(1)}s`;
+  }
+
+  const totalMinutes = totalSeconds / 60;
+  if (totalMinutes < 60) {
+    const minutesText = totalMinutes >= 10 ? totalMinutes.toFixed(0) : totalMinutes.toFixed(1);
+    return `${minutesText}min`;
+  }
+
+  const totalHours = totalMinutes / 60;
+  const hoursText = totalHours >= 10 ? totalHours.toFixed(0) : totalHours.toFixed(1);
+  return `${hoursText}h`;
+}
+
 function samePath(left: string, right: string) {
   return (
     left.replace(/\//g, "\\").replace(/[\\]+$/, "").toLowerCase() ===
@@ -453,9 +470,11 @@ type PromoteDraft = {
 
 const PROMOTE_LABELS: Record<StudioPromoteKind, string> = {
   spec: "保存为 Spec",
-  task: "保存为 Task",
+  memory: "保存为项目记忆",
   journal: "保存为 Journal",
 };
+
+const PROMOTE_KINDS: StudioPromoteKind[] = ["spec", "memory", "journal"];
 
 function stripMarkdownNoise(value: string) {
   return value
@@ -491,7 +510,7 @@ function createPromoteDraft(kind: StudioPromoteKind, rawText: string): PromoteDr
   const heading = `# ${title}`;
   const contentByKind: Record<StudioPromoteKind, string> = {
     spec: `${heading}\n\n${body}\n\n## Rule\n\nKeep this as durable project guidance until explicitly changed.`,
-    task: `${heading}\n\n## Goal\n\n${body}\n\n## Next Step\n\nContinue from this task memory when it is relevant.`,
+    memory: `${heading}\n\n## Context\n\n${body}\n\n## Reuse\n\nKeep this as durable project memory when it is relevant to future CLI turns.`,
     journal: `${heading}\n\nRecorded: ${new Date().toISOString()}\n\n${body}`,
   };
   return { kind, title, content: contentByKind[kind] };
@@ -550,7 +569,7 @@ function PromoteMemoryDialog({
             />
           </label>
           <div className="grid gap-3 sm:grid-cols-3">
-            {(["spec", "task", "journal"] as StudioPromoteKind[]).map((kind) => (
+            {PROMOTE_KINDS.map((kind) => (
               <button
                 key={kind}
                 type="button"
@@ -2257,7 +2276,7 @@ export function CliBubble({
           <div className="mt-1.5 flex min-h-7 items-center gap-3 pl-1">
             {showDurationFooter && (
               <span className="text-[11px] font-medium text-muted">
-                {(message.durationMs! / 1000).toFixed(1)}s
+                {formatMessageDuration(message.durationMs!)}
               </span>
             )}
             {showBottomActions && (
@@ -2280,7 +2299,7 @@ export function CliBubble({
                     />
                     {promoteMenuOpen && (
                       <div className="absolute bottom-9 left-0 z-20 w-44 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-[0_18px_45px_rgba(15,23,42,0.16)]">
-                        {(["spec", "task", "journal"] as StudioPromoteKind[]).map((kind) => (
+                        {PROMOTE_KINDS.map((kind) => (
                           <button
                             key={kind}
                             type="button"

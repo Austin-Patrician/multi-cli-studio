@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import type { ComponentType, ReactNode } from "react";
+import type { ReactNode } from "react";
 import {
   Activity as ActivityIcon,
   Bot,
@@ -37,11 +37,6 @@ import type {
   WorkspaceRef,
   WorkspaceTextSearchFileResult,
   WorkspaceTextSearchResponse,
-  StudioWorkflowArtifact,
-  StudioWorkflowManifestEntry,
-  StudioWorkflowMemoryCandidate,
-  StudioWorkflowState,
-  StudioWorkflowTimelineEvent,
   WorkspaceTreeEntry,
 } from "../../lib/models";
 import { bridge } from "../../lib/bridge";
@@ -395,453 +390,244 @@ function changeStatusMap(changes: GitFileChange[]) {
   return map;
 }
 
-const WORKFLOW_PHASES = [
-  { id: "planning", label: "Plan" },
-  { id: "context_curated", label: "Context" },
-  { id: "implementing", label: "Build" },
-  { id: "checking", label: "Check" },
-  { id: "memory_distilled", label: "Memory" },
-  { id: "completed", label: "Done" },
-] as const;
-
-type WorkflowGateTone = "pass" | "warn" | "fail" | "idle";
-type WorkflowPhaseTone = "done" | "active" | "pending";
-type WorkflowDetailView = "events" | "manifest" | "reports" | "memory" | "resources";
-
-function normalizeWorkflowLabel(value: string | null | undefined, fallback = "pending") {
-  const normalized = value?.trim();
-  return normalized ? normalized.replace(/_/g, " ") : fallback;
+function joinWorkspaceRelativePath(root: string, relativePath: string) {
+  const normalizedRoot = root.replace(/[\\/]+$/, "");
+  const normalizedRelative = relativePath.replace(/^[\\/]+/, "");
+  return `${normalizedRoot}/${normalizedRelative}`;
 }
 
-function workflowPhaseIndex(phase: string | null | undefined) {
-  const normalized = phase ?? "";
-  if (normalized === "memory_distilled") return 4;
-  if (normalized === "completed" || normalized === "browser_runtime") return 5;
-  return WORKFLOW_PHASES.findIndex((item) => item.id === normalized);
+async function readWorkspaceTextFile(root: string, relativePath: string) {
+  const absolutePath = joinWorkspaceRelativePath(root, relativePath);
+  const result = await bridge.readExternalAbsoluteFile(absolutePath);
+  return result.exists ? result.content.trim() : "";
 }
 
-function workflowPhaseTone(currentPhase: string, phaseId: (typeof WORKFLOW_PHASES)[number]["id"]): WorkflowPhaseTone {
-  const currentIndex = workflowPhaseIndex(currentPhase);
-  const phaseIndex = workflowPhaseIndex(phaseId);
-  if (currentIndex < 0 || phaseIndex < 0) return "pending";
-  if (phaseIndex < currentIndex) return "done";
-  if (phaseIndex === currentIndex) return "active";
-  return "pending";
+type StudioInjectedLayerTexts = {
+  spec: string;
+  memory: string;
+  activeContext: string;
+};
+
+const EMPTY_STUDIO_INJECTED_LAYERS: StudioInjectedLayerTexts = {
+  spec: "",
+  memory: "",
+  activeContext: "",
+};
+
+const STUDIO_MANAGED_MARKER_RE = /<!-- STUDIO-(?:WORKFLOW|CONTEXT):MANAGED -->\n?/g;
+
+function normalizeStudioInjectedText(content: string) {
+  return content.replace(/\r\n/g, "\n").replace(STUDIO_MANAGED_MARKER_RE, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function workflowPhaseClass(tone: WorkflowPhaseTone) {
-  switch (tone) {
-    case "done":
-      return "border-emerald-200 bg-emerald-50 text-emerald-700";
-    case "active":
-      return "border-blue-200 bg-blue-50 text-blue-700";
-    default:
-      return "border-slate-200 bg-slate-50 text-slate-500";
+function extractMarkdownSection(content: string, heading: string) {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const headingKey = `## ${heading}`.toLowerCase();
+  const output: string[] = [];
+  let capturing = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim().toLowerCase();
+    if (trimmed === headingKey) {
+      capturing = true;
+      continue;
+    }
+    if (capturing && trimmed.startsWith("## ")) {
+      break;
+    }
+    if (capturing) {
+      output.push(line);
+    }
   }
+
+  return normalizeStudioInjectedText(output.join("\n"));
 }
 
-function workflowGateClass(tone: WorkflowGateTone) {
-  switch (tone) {
-    case "pass":
-      return "border-emerald-200 bg-emerald-50/70";
-    case "warn":
-      return "border-amber-200 bg-amber-50/80";
-    case "fail":
-      return "border-red-200 bg-red-50/80";
-    default:
-      return "border-border bg-white";
+function formatInjectedSection(title: string, content: string) {
+  const normalized = normalizeStudioInjectedText(content);
+  if (!normalized) return "";
+  return `${title}\n${normalized}`;
+}
+
+function parseJsonlManifestPaths(content: string) {
+  const paths: string[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const value = JSON.parse(trimmed) as { file?: string; path?: string };
+      const path = typeof value.file === "string" ? value.file : typeof value.path === "string" ? value.path : "";
+      if (path.trim()) {
+        paths.push(path.trim());
+      }
+    } catch {
+      continue;
+    }
   }
+  return paths;
 }
 
-function workflowStatusClass(tone: WorkflowGateTone) {
-  switch (tone) {
-    case "pass":
-      return "border-emerald-200 bg-white text-emerald-700";
-    case "warn":
-      return "border-amber-200 bg-white text-amber-700";
-    case "fail":
-      return "border-red-200 bg-white text-red-700";
-    default:
-      return "border-slate-200 bg-slate-50 text-slate-600";
+function parseMarkdownIndexPaths(content: string, baseDir: string) {
+  const paths: string[] = [];
+  for (const match of content.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+    const rawPath = match[1]?.trim();
+    if (!rawPath) continue;
+    const normalized = rawPath.replace(/^[./]+/, "");
+    if (!normalized) continue;
+    paths.push(`${baseDir}/${normalized}`);
   }
+  return paths;
 }
 
-function artifactStatusClass(status: string) {
-  return status === "ready"
-    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-    : "border-slate-200 bg-slate-50 text-slate-500";
-}
-
-function workflowSmallStatusClass(status: string | null | undefined) {
-  const normalized = (status ?? "").toLowerCase();
-  if (["ready", "pass", "promotable", "promoted", "curated", "completed"].includes(normalized)) {
-    return "border-emerald-200 bg-emerald-50 text-emerald-700";
-  }
-  if (["fail", "failed", "rejected", "missing"].includes(normalized)) {
-    return "border-red-200 bg-red-50 text-red-700";
-  }
-  if (["held", "hold", "pending_checker", "skipped", "warn", "fallback", "curated_with_fallback"].includes(normalized)) {
-    return "border-amber-200 bg-amber-50 text-amber-700";
-  }
-  return "border-slate-200 bg-slate-50 text-slate-600";
-}
-
-function formatManifestScore(entry: StudioWorkflowManifestEntry) {
-  if (typeof entry.confidence === "number") return `${Math.round(entry.confidence * 100)}%`;
-  if (typeof entry.score === "number") return `score ${entry.score}`;
-  return "scored";
-}
-
-function timelineTone(status: string): WorkflowGateTone {
-  const normalized = status.toLowerCase();
-  if (["pass", "ready", "promoted", "completed", "curated"].includes(normalized)) return "pass";
-  if (["fail", "failed", "missing", "rejected"].includes(normalized)) return "fail";
-  if (["held", "hold", "pending_checker", "skipped", "checking", "fallback", "curated_with_fallback"].includes(normalized)) return "warn";
-  return "idle";
-}
-
-function candidateStatusClass(candidate: StudioWorkflowMemoryCandidate) {
-  return workflowSmallStatusClass(candidate.status);
-}
-
-function formatArtifactSize(sizeBytes: number | null | undefined) {
-  if (!sizeBytes) return null;
-  if (sizeBytes < 1024) return `${sizeBytes} B`;
-  if (sizeBytes < 1024 * 1024) return `${Math.round(sizeBytes / 102.4) / 10} KB`;
-  return `${Math.round(sizeBytes / 1024 / 102.4) / 10} MB`;
-}
-
-function formatWorkflowTimestamp(value: string | null | undefined) {
-  if (!value) return null;
-  const timestamp = new Date(value);
-  if (Number.isNaN(timestamp.getTime())) return null;
-  return timestamp.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
+function uniquePaths(paths: string[]) {
+  const seen = new Set<string>();
+  return paths.filter((path) => {
+    const normalized = path.replace(/\\/g, "/").trim();
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
   });
 }
 
-function formatArtifactMeta(artifact: StudioWorkflowArtifact) {
-  return [formatArtifactSize(artifact.sizeBytes), formatWorkflowTimestamp(artifact.updatedAt)].filter(Boolean).join(" · ");
+async function listMarkdownFiles(root: string, relativeDir: string) {
+  const entries = await bridge.listExternalAbsoluteDirectoryChildren(joinWorkspaceRelativePath(root, relativeDir));
+  return entries
+    .filter((entry) => entry.kind === "file" && entry.name.endsWith(".md") && entry.name.toLowerCase() !== "index.md")
+    .map((entry) => `${relativeDir}/${entry.name}`)
+    .sort((left, right) => left.localeCompare(right));
 }
 
-function WorkflowGateTile({
-  icon: Icon,
-  title,
-  status,
-  tone,
-  metric,
-  detail,
-}: {
-  icon: ComponentType<{ className?: string }>;
-  title: string;
-  status: string;
-  tone: WorkflowGateTone;
-  metric: string;
-  detail: string;
-}) {
-  return (
-    <div className={`min-w-0 rounded-[16px] border px-3 py-3 ${workflowGateClass(tone)}`}>
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <Icon className="h-3.5 w-3.5 shrink-0 text-secondary" />
-          <div className="min-w-0">
-            <div className="truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-secondary">{title}</div>
-          </div>
-        </div>
-        <span
-          className={`shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.1em] ${workflowStatusClass(
-            tone,
-          )}`}
-        >
-          {status}
-        </span>
-      </div>
-      <div className="mt-2 truncate text-sm font-semibold text-primary">{metric}</div>
-      <div className="mt-0.5 truncate text-[11px] text-secondary">{detail}</div>
-    </div>
+async function readWorkspaceTextFiles(root: string, relativePaths: string[]) {
+  const normalizedPaths = uniquePaths(relativePaths);
+  if (normalizedPaths.length === 0) return "";
+  const contents = await Promise.all(
+    normalizedPaths.map(async (path) => normalizeStudioInjectedText(await readWorkspaceTextFile(root, path)))
   );
+  return contents.filter(Boolean).join("\n\n");
 }
 
-function WorkflowEmptyState({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-[14px] border border-dashed border-border bg-slate-50 px-3 py-4 text-center text-xs text-secondary">
-      {children}
-    </div>
+async function buildStudioInjectedLayers(root: string): Promise<StudioInjectedLayerTexts> {
+  const [
+    currentContext,
+    prd,
+    implementManifest,
+    checkManifest,
+    memoryIndex,
+    journalIndex,
+  ] = await Promise.all([
+    readWorkspaceTextFile(root, ".studio/runtime/active-context/current.md"),
+    readWorkspaceTextFile(root, ".studio/runtime/active-context/prd.md"),
+    readWorkspaceTextFile(root, ".studio/runtime/active-context/manifest.jsonl"),
+    readWorkspaceTextFile(root, ".studio/runtime/active-context/check.jsonl"),
+    readWorkspaceTextFile(root, ".studio/workspace/memory/index.md"),
+    readWorkspaceTextFile(root, ".studio/workspace/journal/index.md"),
+  ]);
+
+  const manifestPaths = uniquePaths([
+    ...parseJsonlManifestPaths(implementManifest),
+    ...parseJsonlManifestPaths(checkManifest),
+  ]);
+  const specPaths = manifestPaths.filter((path) => path.startsWith(".studio/spec/"));
+  const researchPaths = manifestPaths.filter((path) => path.startsWith(".studio/runtime/active-context/research/"));
+
+  const indexedMemoryPaths = uniquePaths([
+    ...parseMarkdownIndexPaths(memoryIndex, ".studio/workspace/memory").reverse().slice(0, 4),
+    ...parseMarkdownIndexPaths(journalIndex, ".studio/workspace/journal").reverse().slice(0, 4),
+  ]);
+
+  const fallbackMemoryPaths =
+    indexedMemoryPaths.length > 0
+      ? []
+      : uniquePaths([
+          ...(await listMarkdownFiles(root, ".studio/workspace/memory")).reverse().slice(0, 4),
+          ...(await listMarkdownFiles(root, ".studio/workspace/journal")).reverse().slice(0, 4),
+        ]);
+
+  const [specText, durableMemoryText, researchText] = await Promise.all([
+    readWorkspaceTextFiles(root, specPaths),
+    readWorkspaceTextFiles(root, indexedMemoryPaths.length > 0 ? indexedMemoryPaths : fallbackMemoryPaths),
+    readWorkspaceTextFiles(root, researchPaths),
+  ]);
+  const memoryText = normalizeStudioInjectedText(
+    [memoryIndex, journalIndex, durableMemoryText].filter(Boolean).join("\n\n")
   );
+
+  const activeContextText = normalizeStudioInjectedText(
+    [
+      formatInjectedSection("Goal", extractMarkdownSection(currentContext, "Goal")),
+      formatInjectedSection("Current Request", extractMarkdownSection(currentContext, "Current Request")),
+      formatInjectedSection("Workflow Goal", extractMarkdownSection(prd, "Goal")),
+      formatInjectedSection(
+        "Acceptance Criteria",
+        extractMarkdownSection(prd, "Acceptance Criteria")
+      ),
+      formatInjectedSection(
+        "Latest Conclusion",
+        extractMarkdownSection(currentContext, "Latest Conclusion")
+      ),
+      formatInjectedSection("Next Step", extractMarkdownSection(currentContext, "Next Step")),
+      researchText ? formatInjectedSection("Research", researchText) : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+  );
+
+  return {
+    spec: specText,
+    memory: memoryText,
+    activeContext: activeContextText,
+  };
 }
 
-function WorkflowManifestRow({
-  entry,
+function StudioWorkflowPanel({
   workspace,
+  terminalTabId,
+  refreshToken,
 }: {
-  entry: StudioWorkflowManifestEntry;
   workspace: WorkspaceRef;
+  terminalTabId: string | null;
+  refreshToken: string;
 }) {
-  const ready = entry.status === "ready";
-  return (
-    <button
-      type="button"
-      className="w-full rounded-[14px] border border-border bg-slate-50 px-3 py-2 text-left text-xs hover:bg-slate-100 disabled:cursor-default disabled:opacity-60"
-      disabled={!ready}
-      onClick={() => {
-        if (ready) void bridge.openWorkspaceFile(workspace.rootPath, entry.file, workspace.id);
-      }}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-secondary">
-              {entry.manifest}
-            </span>
-            <span className="truncate font-semibold text-primary">{entry.file}</span>
-          </div>
-          <div className="mt-1 line-clamp-2 break-words text-secondary">{entry.reason}</div>
-        </div>
-        <div className="shrink-0 text-right">
-          <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${workflowSmallStatusClass(entry.status)}`}>
-            {entry.fallback ? "fallback" : entry.status}
-          </span>
-          <div className="mt-1 text-[10px] text-secondary">{formatManifestScore(entry)}</div>
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function WorkflowTimelineRow({
-  event,
-  workspace,
-}: {
-  event: StudioWorkflowTimelineEvent;
-  workspace: WorkspaceRef;
-}) {
-  const tone = timelineTone(event.status);
-  const timestamp = formatWorkflowTimestamp(event.timestamp);
-  return (
-    <button
-      type="button"
-      className="grid w-full grid-cols-[16px_1fr] gap-3 rounded-[14px] px-2 py-2 text-left text-xs hover:bg-slate-50 disabled:cursor-default"
-      disabled={!event.path}
-      onClick={() => {
-        if (event.path) void bridge.openWorkspaceFile(workspace.rootPath, event.path, workspace.id);
-      }}
-    >
-      <span className={`mt-1 h-3 w-3 rounded-full border ${workflowStatusClass(tone)}`} />
-      <span className="min-w-0">
-        <span className="flex items-start justify-between gap-3">
-          <span className="min-w-0">
-            <span className="block truncate font-semibold text-primary">{event.title}</span>
-            <span className="mt-0.5 block line-clamp-2 break-words text-secondary">{event.summary}</span>
-          </span>
-          <span className="shrink-0 text-right">
-            <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${workflowSmallStatusClass(event.status)}`}>
-              {normalizeWorkflowLabel(event.status)}
-            </span>
-            <span className="mt-1 block max-w-[88px] truncate text-[10px] text-secondary">{timestamp ?? "no time"}</span>
-          </span>
-        </span>
-      </span>
-    </button>
-  );
-}
-
-function WorkflowMemoryCandidateRow({ candidate }: { candidate: StudioWorkflowMemoryCandidate }) {
-  return (
-    <div className="rounded-[14px] border border-border bg-slate-50 px-3 py-2 text-xs">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-secondary">
-              {candidate.kind}
-            </span>
-            <span className="truncate text-secondary">{candidate.candidateType}</span>
-          </div>
-          <div className="mt-1 line-clamp-3 break-words font-medium text-primary">{candidate.content}</div>
-        </div>
-        <div className="shrink-0 text-right">
-          <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${candidateStatusClass(candidate)}`}>
-            {candidate.status}
-          </span>
-          <div className="mt-1 text-[10px] text-secondary">{candidate.target}</div>
-        </div>
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-secondary">
-        <span>confidence {candidate.confidence}</span>
-        <span>evidence {candidate.evidenceCount}</span>
-        {candidate.updatedAt ? <span>{formatWorkflowTimestamp(candidate.updatedAt)}</span> : null}
-      </div>
-    </div>
-  );
-}
-
-function StudioWorkflowPanel({ workspace, terminalTabId }: { workspace: WorkspaceRef; terminalTabId: string | null }) {
-  const [workflowState, setWorkflowState] = useState<StudioWorkflowState | null>(null);
+  const [layers, setLayers] = useState<StudioInjectedLayerTexts>(EMPTY_STUDIO_INJECTED_LAYERS);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [promoting, setPromoting] = useState(false);
-  const [detailView, setDetailView] = useState<WorkflowDetailView>("events");
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const state = await bridge.getStudioWorkflowState(workspace.rootPath, terminalTabId);
-      setWorkflowState(state);
+      setLayers(await buildStudioInjectedLayers(workspace.rootPath));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, [terminalTabId, workspace.rootPath]);
+  }, [workspace.rootPath]);
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+  }, [refresh, terminalTabId, refreshToken]);
 
-  const runPromotion = useCallback(async () => {
-    if (!workflowState?.taskId) return;
-    setPromoting(true);
-    setError(null);
-    try {
-      await bridge.runStudioPolicyPromotion(workspace.rootPath, workflowState.taskId);
-      await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setPromoting(false);
-    }
-  }, [refresh, workflowState?.taskId, workspace.rootPath]);
-
-  const fallbackArtifacts: StudioWorkflowArtifact[] = workflowState
-    ? [
-        ["PRD", workflowState.prdPath],
-        ["Context Report", workflowState.contextReportPath],
-        ["Implement Manifest", workflowState.implementManifestPath],
-        ["Check Manifest", workflowState.checkManifestPath],
-        ["Checker Report", workflowState.checkerReportPath],
-        ["Checker Retry", workflowState.checkerRetryReportPath],
-        ["Policy Check", workflowState.policyCheckPath],
-        ["Promotion Report", workflowState.promotionReportPath],
-      ]
-        .filter((entry): entry is [string, string] => Boolean(entry[1]))
-        .map(([label, path]) => ({ label, path, status: "ready", updatedAt: null, sizeBytes: null }))
-    : [];
-  const artifactRows = workflowState?.artifacts?.length ? workflowState.artifacts : fallbackArtifacts;
-  const checkerStatus = workflowState?.checkerStatus ?? null;
-  const checkerTone: WorkflowGateTone =
-    checkerStatus === "pass" ? "pass" : checkerStatus === "fail" ? "fail" : workflowState?.checkerNeedsRetry ? "warn" : "idle";
-  const checkerStatusLabel = normalizeWorkflowLabel(checkerStatus);
-  const contextCuratorStatus = workflowState?.contextCuratorStatus ?? null;
-  const contextCuratorMode = workflowState?.contextCuratorMode ?? null;
-  const contextTone: WorkflowGateTone =
-    workflowState?.contextCuratorError
-      ? "fail"
-      : workflowState?.contextCuratorFallback || contextCuratorStatus === "fallback" || contextCuratorStatus === "curated_with_fallback"
-        ? "warn"
-        : workflowState?.contextReportPath && (workflowState.implementEntries > 0 || workflowState.checkEntries > 0)
-          ? "pass"
-          : "warn";
-  const memoryTone: WorkflowGateTone = workflowState?.allowAutoPromote
-    ? "pass"
-    : workflowState?.memoryPromotableEntries
-      ? "warn"
-      : workflowState?.memoryCandidateEntries
-        ? "idle"
-        : "idle";
-  const promotionTone: WorkflowGateTone = workflowState?.promotionPromoted
-    ? "pass"
-    : workflowState?.promotionSkipped || workflowState?.promotionDecision
-      ? "warn"
-      : "idle";
-  const contextStatus = normalizeWorkflowLabel(
-    contextCuratorStatus,
-    contextTone === "pass" ? "curated" : workflowState?.contextCuratorFallback ? "fallback" : "pending",
+  const displayedLayers = useMemo(
+    () => [
+      {
+        id: "spec",
+        title: "Spec",
+        text: layers.spec || (loading ? "正在加载..." : "当前没有可注入的 Spec 文本。"),
+      },
+      {
+        id: "memory",
+        title: "Memory",
+        text: layers.memory || (loading ? "正在加载..." : "当前没有可注入的 Memory 文本。"),
+      },
+      {
+        id: "active-context",
+        title: "Active Context",
+        text: layers.activeContext || (loading ? "正在加载..." : "当前没有可注入的 Active Context 文本。"),
+      },
+    ],
+    [layers.activeContext, layers.memory, layers.spec, loading]
   );
-  const memoryStatus = workflowState?.allowAutoPromote
-    ? "ready"
-    : workflowState?.memoryPromotableEntries
-      ? "held"
-      : workflowState?.memoryCandidateEntries
-        ? "candidate"
-        : "pending";
-  const promotionStatus = normalizeWorkflowLabel(workflowState?.promotionDecision, "pending");
-  const manifestRows = workflowState?.manifestEntries ?? [];
-  const timelineRows = workflowState?.timeline ?? [];
-  const checkerPreviews = workflowState
-    ? [
-        { label: "Checker Report", path: workflowState.checkerReportPath, content: workflowState.checkerReportPreview },
-        { label: "Checker Retry", path: workflowState.checkerRetryReportPath, content: workflowState.checkerRetryReportPreview },
-      ].filter((entry): entry is { label: string; path: string | null; content: string } => Boolean(entry.content))
-    : [];
-  const memoryCandidates = workflowState?.memoryCandidates ?? [];
-  const gateSummaries = workflowState
-    ? [
-        {
-          key: "context",
-          icon: FileLookupIcon,
-          title: "Context",
-          status: contextStatus,
-          tone: contextTone,
-          metric: `${workflowState.implementEntries}/${workflowState.checkEntries}`,
-          detail: contextCuratorMode
-            ? normalizeWorkflowLabel(contextCuratorMode)
-            : `${workflowState.researchArtifacts.length} research`,
-          summary:
-            workflowState.contextCuratorError ??
-            workflowState.contextCuratorReason ??
-            "Context projection and manifests are ready for the active task.",
-        },
-        {
-          key: "checker",
-          icon: ShieldCheck,
-          title: "Checker",
-          status: checkerStatusLabel,
-          tone: checkerTone,
-          metric: `${workflowState.checkerIssues.length} issues`,
-          detail: workflowState.checkerRetryPerformed ? workflowState.checkerRetryStatus ?? "retry done" : "retry not run",
-          summary: workflowState.checkerSummary ?? "Checker has not produced a summary yet.",
-        },
-        {
-          key: "memory",
-          icon: Braces,
-          title: "Memory",
-          status: memoryStatus,
-          tone: memoryTone,
-          metric: `${workflowState.memoryPromotableEntries} promotable`,
-          detail: `${workflowState.memoryRejectedEntries} rejected`,
-          summary: workflowState.memoryPolicyReason ?? `Policy is ${workflowState.policyDecision ?? "pending"}.`,
-        },
-        {
-          key: "promotion",
-          icon: CheckCircle2,
-          title: "Promotion",
-          status: promotionStatus,
-          tone: promotionTone,
-          metric: `${workflowState.promotionPromoted} promoted`,
-          detail: `${workflowState.promotionSkipped} skipped`,
-          summary: workflowState.allowAutoPromote
-            ? "Promotion is allowed by policy."
-            : "Promotion waits for policy, checker, or candidate gates.",
-        },
-      ]
-    : [];
-  const activeGate =
-    gateSummaries.find((gate) => gate.tone === "fail") ??
-    gateSummaries.find((gate) => gate.tone === "warn") ??
-    gateSummaries.find((gate) => gate.tone === "idle") ??
-    gateSummaries[gateSummaries.length - 1] ??
-    null;
-  const ActiveGateIcon = activeGate?.icon ?? WorkflowIcon;
-  const detailTabs: Array<{ id: WorkflowDetailView; label: string; count: number; icon: ComponentType<{ className?: string }> }> = [
-    { id: "events", label: "Events", count: timelineRows.length, icon: ClockIcon },
-    { id: "manifest", label: "Manifest", count: manifestRows.length, icon: FileCode2 },
-    { id: "reports", label: "Reports", count: checkerPreviews.length, icon: FileLookupIcon },
-    { id: "memory", label: "Memory", count: memoryCandidates.length, icon: Braces },
-    { id: "resources", label: "Resources", count: artifactRows.length + (workflowState?.researchArtifacts.length ?? 0), icon: FilesPanelIcon },
-  ];
 
   return (
     <section className="session-activity-panel">
@@ -849,283 +635,23 @@ function StudioWorkflowPanel({ workspace, terminalTabId }: { workspace: Workspac
         <div className="session-activity-title-group">
           <div className="session-activity-title-row flex items-center gap-2">
             <WorkflowIcon className="h-4 w-4" />
-            Studio Workflow
+            上下文
           </div>
-          <div className="text-xs text-secondary">Automatic context, research, checking, and memory promotion.</div>
         </div>
-        <button type="button" className="workspace-file-action" onClick={() => void refresh()} disabled={loading}>
+        <button type="button" className="workspace-file-action" onClick={() => void refresh()} disabled={loading} title="刷新上下文" aria-label="刷新上下文">
           {loading ? <SpinnerIcon className="h-3.5 w-3.5 animate-spin" /> : <RefreshIcon className="h-3.5 w-3.5" />}
-          Refresh
         </button>
       </div>
       <div className="workspace-panel-scroll space-y-3">
         {error ? <div className="rounded-[16px] border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div> : null}
-        {!workflowState ? (
-          <div className="rounded-[18px] border border-dashed border-border bg-white px-4 py-4 text-sm text-secondary">
-            {loading ? "Loading Studio workflow state..." : "No Studio workflow state loaded yet."}
-          </div>
-        ) : (
-          <>
-            <div className={`rounded-[20px] border p-4 shadow-sm ${activeGate ? workflowGateClass(activeGate.tone) : "border-border bg-white"}`}>
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-xs uppercase tracking-[0.16em] text-secondary">Current Gate</div>
-                  <div className="mt-1 flex min-w-0 items-center gap-2">
-                    <ActiveGateIcon className="h-4 w-4 shrink-0 text-secondary" />
-                    <div className="truncate text-sm font-semibold text-primary">{activeGate?.title ?? "Workflow"}</div>
-                  </div>
-                </div>
-                <span
-                  className={`shrink-0 rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] ${
-                    activeGate ? workflowStatusClass(activeGate.tone) : "border-blue-200 bg-blue-50 text-blue-700"
-                  }`}
-                >
-                  {activeGate?.status ?? normalizeWorkflowLabel(workflowState.phase)}
-                </span>
-              </div>
-              <div className="mt-3 break-words text-sm font-semibold leading-5 text-primary">
-                {activeGate?.summary ?? "No workflow state is available yet."}
-              </div>
-              <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
-                <div className="rounded-[12px] bg-white/70 px-3 py-2">
-                  <div className="text-secondary">Task</div>
-                  <div className="truncate font-semibold text-primary">{workflowState.taskId ?? "No active task"}</div>
-                </div>
-                <div className="rounded-[12px] bg-white/70 px-3 py-2">
-                  <div className="text-secondary">Updated</div>
-                  <div className="truncate font-semibold text-primary">{formatWorkflowTimestamp(workflowState.lastUpdated) ?? "pending"}</div>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-[20px] border border-border bg-white p-4 shadow-sm">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-xs font-semibold uppercase tracking-[0.14em] text-secondary">Phase Rail</div>
-                  <div className="mt-1 text-sm font-semibold text-primary">{normalizeWorkflowLabel(workflowState.phase)}</div>
-                </div>
-                <button
-                  type="button"
-                  className="inline-flex shrink-0 items-center justify-center gap-2 rounded-[12px] border border-border bg-white px-3 py-2 text-xs font-semibold text-primary hover:bg-slate-50 disabled:opacity-60"
-                  disabled={!workflowState.taskId || promoting}
-                  onClick={() => void runPromotion()}
-                >
-                  {promoting ? <SpinnerIcon className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-                  Promote
-                </button>
-              </div>
-              <div className="relative mt-4 px-1">
-                <div className="absolute left-5 right-5 top-[7px] h-px bg-slate-200" />
-                <div className="relative grid grid-cols-6 gap-1">
-                  {WORKFLOW_PHASES.map((phase) => {
-                    const tone = workflowPhaseTone(workflowState.phase, phase.id);
-                    return (
-                      <div key={phase.id} className="min-w-0 text-center">
-                        <div className={`mx-auto h-3.5 w-3.5 rounded-full ${workflowPhaseClass(tone)}`} />
-                        <div
-                          className={`mt-2 truncate text-[9px] font-semibold uppercase tracking-[0.08em] ${
-                            tone === "active" ? "text-blue-700" : tone === "done" ? "text-emerald-700" : "text-secondary"
-                          }`}
-                        >
-                          {phase.label}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
-                <div className="rounded-[12px] bg-slate-50 px-3 py-2">
-                  <div className="text-secondary">Implement</div>
-                  <div className="font-semibold text-primary">{workflowState.implementEntries} entries</div>
-                </div>
-                <div className="rounded-[12px] bg-slate-50 px-3 py-2">
-                  <div className="text-secondary">Check</div>
-                  <div className="font-semibold text-primary">{workflowState.checkEntries} entries</div>
-                </div>
-                <div className="rounded-[12px] bg-slate-50 px-3 py-2">
-                  <div className="text-secondary">Memory</div>
-                  <div className="font-semibold text-primary">{workflowState.memoryCandidateEntries} candidates</div>
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              {gateSummaries.map((gate) => (
-                <WorkflowGateTile
-                  key={gate.key}
-                  icon={gate.icon}
-                  title={gate.title}
-                  status={gate.status}
-                  tone={gate.tone}
-                  metric={gate.metric}
-                  detail={gate.detail}
-                />
-              ))}
-            </div>
-
-            <div className="rounded-[20px] border border-border bg-white p-3 shadow-sm">
-              <div className="flex gap-1 overflow-x-auto rounded-[14px] border border-border bg-slate-50 p-1">
-                {detailTabs.map((tab) => {
-                  const TabIcon = tab.icon;
-                  const active = detailView === tab.id;
-                  return (
-                    <button
-                      type="button"
-                      key={tab.id}
-                      className={`inline-flex shrink-0 items-center justify-center gap-1.5 rounded-[10px] px-2.5 py-1.5 text-[11px] font-semibold transition-colors ${
-                        active ? "bg-white text-primary shadow-sm" : "text-secondary hover:bg-white/70 hover:text-primary"
-                      }`}
-                      onClick={() => setDetailView(tab.id)}
-                    >
-                      <TabIcon className="h-3.5 w-3.5" />
-                      {tab.label}
-                      <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] text-secondary">{tab.count}</span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="mt-3">
-                {detailView === "events" ? (
-                  timelineRows.length ? (
-                    <div className="space-y-1">
-                      {timelineRows.map((event) => (
-                        <WorkflowTimelineRow key={`${event.kind}-${event.timestamp ?? event.title}`} event={event} workspace={workspace} />
-                      ))}
-                    </div>
-                  ) : (
-                    <WorkflowEmptyState>No workflow events recorded yet.</WorkflowEmptyState>
-                  )
-                ) : null}
-
-                {detailView === "manifest" ? (
-                  manifestRows.length ? (
-                    <div className="space-y-2">
-                      {workflowState.contextCuratorFallback || workflowState.contextCuratorError ? (
-                        <div className="rounded-[14px] border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                          <div className="font-semibold">Context-curator fallback is active.</div>
-                          <div className="mt-1 break-words">
-                            {workflowState.contextCuratorError ??
-                              workflowState.contextCuratorReason ??
-                              "The current manifests are explicit heuristic fallback projections."}
-                          </div>
-                        </div>
-                      ) : null}
-                      {manifestRows.slice(0, 8).map((entry) => (
-                        <WorkflowManifestRow key={`${entry.manifest}-${entry.file}-${entry.reason}`} entry={entry} workspace={workspace} />
-                      ))}
-                    </div>
-                  ) : (
-                    <WorkflowEmptyState>No manifest entries are available.</WorkflowEmptyState>
-                  )
-                ) : null}
-
-                {detailView === "reports" ? (
-                  checkerPreviews.length ? (
-                    <div className="space-y-3">
-                      {checkerPreviews.map((report) => (
-                        <div key={report.label} className="rounded-[14px] border border-border bg-slate-50 p-3">
-                          <div className="mb-2 flex items-center justify-between gap-2">
-                            <div className="truncate text-xs font-semibold text-primary">{report.label}</div>
-                            {report.path ? (
-                              <button
-                                type="button"
-                                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-white px-2 py-1 text-[10px] font-semibold text-primary hover:bg-slate-100"
-                                onClick={() => void bridge.openWorkspaceFile(workspace.rootPath, report.path!, workspace.id)}
-                              >
-                                <FileLookupIcon className="h-3 w-3" />
-                                Open
-                              </button>
-                            ) : null}
-                          </div>
-                          <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-[10px] bg-white px-3 py-2 text-[11px] leading-5 text-slate-700">
-                            {report.content}
-                          </pre>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <WorkflowEmptyState>No checker reports are available.</WorkflowEmptyState>
-                  )
-                ) : null}
-
-                {detailView === "memory" ? (
-                  memoryCandidates.length ? (
-                    <div className="space-y-2">
-                      {memoryCandidates.map((candidate, index) => (
-                        <WorkflowMemoryCandidateRow key={candidate.id ?? `${candidate.kind}-${index}`} candidate={candidate} />
-                      ))}
-                    </div>
-                  ) : (
-                    <WorkflowEmptyState>No memory candidates are available.</WorkflowEmptyState>
-                  )
-                ) : null}
-
-                {detailView === "resources" ? (
-                  artifactRows.length || workflowState.researchArtifacts.length ? (
-                    <div className="space-y-3">
-                      {artifactRows.length ? (
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between gap-2 text-xs">
-                            <div className="font-semibold uppercase tracking-[0.14em] text-secondary">Artifacts</div>
-                            <div className="text-[11px] text-secondary">{artifactRows.filter((artifact) => artifact.status === "ready").length} ready</div>
-                          </div>
-                          {artifactRows.map((artifact) => {
-                            const ready = artifact.status === "ready";
-                            return (
-                              <button
-                                type="button"
-                                key={`${artifact.label}-${artifact.path}`}
-                                className="flex w-full items-center justify-between gap-3 rounded-[14px] border border-border bg-slate-50 px-3 py-2 text-left text-xs hover:bg-slate-100 disabled:cursor-default disabled:opacity-60"
-                                disabled={!ready}
-                                onClick={() => {
-                                  if (ready) void bridge.openWorkspaceFile(workspace.rootPath, artifact.path, workspace.id);
-                                }}
-                              >
-                                <span className="min-w-0">
-                                  <span className="block truncate font-medium text-primary">{artifact.label}</span>
-                                  <span className="block truncate text-secondary">{artifact.path}</span>
-                                </span>
-                                <span className="shrink-0 text-right">
-                                  <span
-                                    className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] ${artifactStatusClass(
-                                      artifact.status,
-                                    )}`}
-                                  >
-                                    {artifact.status}
-                                  </span>
-                                  <span className="mt-1 block max-w-[96px] truncate text-[10px] text-secondary">{formatArtifactMeta(artifact)}</span>
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      ) : null}
-                      {workflowState.researchArtifacts.length ? (
-                        <div className="space-y-2">
-                          <div className="text-xs font-semibold uppercase tracking-[0.14em] text-secondary">Research</div>
-                          {workflowState.researchArtifacts.map((path) => (
-                            <button
-                              type="button"
-                              key={path}
-                              className="block w-full truncate rounded-[14px] border border-border bg-slate-50 px-3 py-2 text-left text-xs text-primary hover:bg-slate-100"
-                              onClick={() => void bridge.openWorkspaceFile(workspace.rootPath, path, workspace.id)}
-                            >
-                              {path}
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <WorkflowEmptyState>No workflow resources are available.</WorkflowEmptyState>
-                  )
-                ) : null}
-              </div>
-            </div>
-          </>
-        )}
+        {displayedLayers.map((layer) => (
+          <section key={layer.id} className="rounded-[20px] border border-border bg-white p-4 shadow-sm">
+            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-secondary">{layer.title}</div>
+            <pre className="mt-3 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-[18px] border border-border bg-slate-950 px-4 py-4 font-mono text-[11px] leading-5 text-slate-100 shadow-sm">
+              {layer.text}
+            </pre>
+          </section>
+        ))}
       </div>
     </section>
   );
@@ -2369,6 +1895,11 @@ export function WorkspaceRightPanel({
     () => (activeTabId ? chatSessions[activeTabId] ?? null : null),
     [activeTabId, chatSessions]
   );
+  const workflowRefreshToken = useMemo(() => {
+    if (!activeSession) return "";
+    const lastMessage = activeSession.messages[activeSession.messages.length - 1];
+    return [activeSession.updatedAt, activeSession.messages.length, lastMessage?.id ?? ""].join(":");
+  }, [activeSession]);
   const taskNodes = useMemo(() => buildTaskNodes(activeSession), [activeSession]);
   const tabSubagentsByTab = useStore((state) => state.tabSubagentsByTab);
   const activeSubagents = useMemo(
@@ -2422,7 +1953,7 @@ export function WorkspaceRightPanel({
                 onSelectTab={setActiveTerminalTab}
               />
             ) : mode === "workflow" ? (
-              <StudioWorkflowPanel workspace={workspace} terminalTabId={activeTabId} />
+              <StudioWorkflowPanel workspace={workspace} terminalTabId={activeTabId} refreshToken={workflowRefreshToken} />
             ) : mode === "files" ? (
               <WorkspaceFilesPanel workspace={workspace} changes={fileModeChanges} />
             ) : mode === "search" ? (

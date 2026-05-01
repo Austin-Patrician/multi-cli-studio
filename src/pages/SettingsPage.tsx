@@ -627,6 +627,73 @@ export function SettingsPage({
                   />
                 </FormGroup>
 
+                <FormGroup title="CLI 可执行路径">
+                  <FormRow
+                    vertical
+                    label="桌面端 CLI 路径覆盖"
+                    description="留空或填写 `auto` 时按当前运行环境的 PATH 自动探测。填写完整路径后，点击右上角保存，应用会自动重新检测运行时。"
+                    control={
+                      <div className="grid gap-4">
+                        {CLI_ORDER.map((cli) => {
+                          const agent = agents.find((item) => item.id === cli) ?? fallbackAgent(cli);
+                          const configuredValue = local.cliPaths[cli] ?? "";
+                          const runtimePath = agent.runtime.commandPath?.trim() || "";
+                          const runtimeStatus = agent.runtime.installed
+                            ? runtimePath || "已检测到可执行文件"
+                            : agent.runtime.lastError?.trim() || "当前未检测到可执行文件";
+
+                          return (
+                            <div
+                              key={cli}
+                              className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]"
+                            >
+                              <div className="mb-2 flex items-center justify-between gap-3">
+                                <div className="text-[13px] font-semibold text-slate-900">
+                                  {CLI_META[cli].label}
+                                </div>
+                                <span
+                                  className={cx(
+                                    "rounded-full px-2 py-0.5 text-[11px] font-semibold",
+                                    agent.runtime.installed
+                                      ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
+                                      : "border border-amber-200 bg-amber-50 text-amber-700",
+                                  )}
+                                >
+                                  {agent.runtime.installed ? "已检测" : "未检测到"}
+                                </span>
+                              </div>
+                              <Input
+                                value={configuredValue}
+                                onChange={(event: any) =>
+                                  setLocal({
+                                    ...local,
+                                    cliPaths: {
+                                      ...local.cliPaths,
+                                      [cli]: event.target.value,
+                                    },
+                                  })
+                                }
+                                placeholder={`auto 或 /opt/homebrew/bin/${cli}`}
+                              />
+                              <div className="mt-2 text-[12px] leading-5 text-slate-500">
+                                当前运行时：
+                                <span
+                                  className={cx(
+                                    "ml-1 font-mono",
+                                    agent.runtime.installed ? "text-slate-700" : "text-amber-700",
+                                  )}
+                                >
+                                  {runtimeStatus}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    }
+                  />
+                </FormGroup>
+
                 <FormGroup title="系统通知与更新">
                   <FormRow
                     label="当前版本"

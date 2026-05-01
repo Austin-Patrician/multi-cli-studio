@@ -13,14 +13,19 @@ const STUDIO_MANAGED_MARKER: &str = "<!-- STUDIO-CONTEXT:MANAGED -->";
 const STUDIO_WORKFLOW_MARKER: &str = "<!-- STUDIO-WORKFLOW:MANAGED -->";
 const MAX_OPTIONAL_SECTION_CHARS: usize = 16_000;
 const MAX_CONTEXT_CHARS: usize = 64_000;
-const MAX_TASK_CHARS: usize = 24_000;
+const MAX_CURRENT_CONTEXT_CHARS: usize = 24_000;
 const MAX_ADAPTER_CHARS: usize = 8_000;
 const MAX_REPORT_CHARS: usize = 24_000;
 const MAX_MANIFEST_ENTRIES: usize = 12;
+const MAX_CURATED_SPEC_ENTRIES: usize = 3;
+const MAX_CURATED_RESEARCH_ENTRIES: usize = 2;
+const MAX_CURATED_IMPLEMENT_ENTRIES: usize = 4;
+const MAX_CURATED_CHECK_ENTRIES: usize = 4;
 const MAX_SPEC_SCAN_FILES: usize = 256;
+const MIN_SPEC_MATCH_SCORE: i64 = 8;
 const MAX_MEMORY_CANDIDATE_CHARS: usize = 12_000;
-const KEEP_RUNTIME_TASKS: usize = 24;
 const KEEP_SESSION_BINDINGS: usize = 64;
+pub const ACTIVE_CONTEXT_ID: &str = "active-context";
 const PYTHON_NATIVE_HOOK: &str = r#"#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -98,62 +103,83 @@ def load_context(root: Path) -> str:
     return read_text(root / ".studio" / "runtime" / "context.md")
 
 
-def discover_bound_task(root: Path) -> tuple[str | None, Path | None, Path | None] | None:
-    context_id = os.environ.get("STUDIO_CONTEXT_ID", "").strip()
-    if not context_id or "/" in context_id or "\\" in context_id or ".." in context_id:
-        return None
-    binding_path = root / ".studio" / "runtime" / "sessions" / f"{context_id}.json"
-    try:
-        data = json.loads(binding_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    task_id_value = data.get("taskId") or data.get("task_id")
-    if isinstance(task_id_value, str) and task_id_value.strip():
-        task_id = Path(task_id_value.strip()).name
-        runtime_task = root / ".studio" / "runtime" / "tasks" / task_id
-        durable_task = root / ".studio" / "tasks" / task_id
-        if runtime_task.is_dir() or durable_task.is_dir():
-            return task_id, runtime_task, durable_task
-    active_task = data.get("activeTask") or data.get("active_task")
-    if not isinstance(active_task, str) or not active_task.strip():
-        return None
-    durable_task = root / active_task.strip().rstrip("/")
-    task_id = durable_task.name
-    if not task_id:
-        return None
-    runtime_task = root / ".studio" / "runtime" / "tasks" / task_id
-    if runtime_task.is_dir() or durable_task.is_dir():
-        return task_id, runtime_task, durable_task
+def discover_active_context(root: Path) -> Path | None:
+    context_dir = root / ".studio" / "runtime" / "active-context"
+    if context_dir.is_dir():
+        return context_dir
     return None
 
 
-def discover_active_task(root: Path) -> tuple[str | None, Path | None, Path | None]:
-    bound_task = discover_bound_task(root)
-    if bound_task:
-        return bound_task
-    context = load_context(root)
-    runtime_task = None
-    durable_task = None
-    for line in context.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("- Path: .studio/runtime/tasks/"):
-            runtime_task = root / stripped.split(": ", 1)[1].rstrip("/")
-        elif stripped.startswith("- Durable task: .studio/tasks/"):
-            durable_file = root / stripped.split(": ", 1)[1]
-            durable_task = durable_file.parent
-    if runtime_task and runtime_task.is_dir():
-        return runtime_task.name, runtime_task, durable_task
-    candidates = sorted(
-        (root / ".studio" / "runtime" / "tasks").glob("*/task.md"),
-        key=lambda path: path.stat().st_mtime if path.exists() else 0,
-        reverse=True,
-    )
-    if candidates:
-        task_dir = candidates[0].parent
-        return task_dir.name, task_dir, root / ".studio" / "tasks" / task_dir.name
-    return None, None, None
+def read_json(path: Path) -> dict:
+    try:
+        payload = json.loads(read_text(path, "{}"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_json(path: Path, payload: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def resolve_context_key(root: Path, input_data: dict) -> str:
+    for value in (
+        os.environ.get("STUDIO_CONTEXT_KEY"),
+        os.environ.get("STUDIO_CONTEXT_ID"),
+        input_data.get("studioContextKey"),
+        input_data.get("contextKey"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    sessions_dir = root / ".studio" / "runtime" / "sessions"
+    if not sessions_dir.is_dir():
+        return ""
+    candidates = sorted(sessions_dir.glob(f"*-{PLATFORM}.json"))
+    if not candidates:
+        return ""
+    return candidates[-1].stem
+
+
+def load_session_binding(root: Path, input_data: dict) -> dict:
+    context_key = resolve_context_key(root, input_data)
+    if not context_key:
+        return {}
+    binding = read_json(root / ".studio" / "runtime" / "sessions" / f"{context_key}.json")
+    if "contextKey" not in binding:
+        binding["contextKey"] = context_key
+    return binding
+
+
+def hook_state_path(root: Path, context_key: str) -> Path:
+    return root / ".studio" / "runtime" / "hook-state" / f"{context_key}.json"
+
+
+def load_hook_state(root: Path, context_key: str) -> dict:
+    if not context_key:
+        return {}
+    return read_json(hook_state_path(root, context_key))
+
+
+def store_hook_state(root: Path, context_key: str, version: str, mode: str) -> None:
+    if not context_key:
+        return
+    state = load_hook_state(root, context_key)
+    state["contextKey"] = context_key
+    if version:
+        state["lastPromptVersion"] = version
+    if mode == "full" and version:
+        state["lastFullVersion"] = version
+    state["lastInjectionMode"] = mode
+    write_json(hook_state_path(root, context_key), state)
+
+
+def shared_context(binding: dict) -> dict:
+    value = binding.get("sharedContext")
+    return value if isinstance(value, dict) else {}
 
 
 def read_jsonl_manifest(root: Path, manifest: Path | None, limit: int = 12) -> list[str]:
@@ -180,41 +206,40 @@ def read_jsonl_manifest(root: Path, manifest: Path | None, limit: int = 12) -> l
     return refs
 
 
-def build_session_context(root: Path) -> str:
-    task_id, runtime_task, durable_task = discover_active_task(root)
+def build_session_context(root: Path, binding: dict) -> str:
+    active_context = discover_active_context(root)
+    shared = shared_context(binding)
     parts = [
         "<studio-context-native-hook>",
         f"Platform: {PLATFORM}",
-        "Studio Context Native Hook 已注入：workflow、active task、spec/workspace 索引和 manifest 文件引用已加载。",
+        "Studio Context Native Hook 已注入：active context、spec/workspace 索引和 manifest 文件引用已加载。",
+        f"Shared context version: {shared.get('version') or 'unknown'}",
         "Rules:",
         "- Read `.studio/runtime/context.md` first; it is the active runtime snapshot.",
-        "- Treat `.studio/workflow.md` as the task state machine and agent contract.",
+        "- Treat `.studio/workflow.md` as the context injection contract.",
         "- Treat `.studio/spec/` as durable project rules and `.studio/workspace/` as durable memory.",
         "- Use manifest file references before broad history recall; keep prompt context small.",
     ]
-    if task_id:
-        parts.append(f"Active task: `{task_id}`")
     for ref in (
         ".studio/runtime/context.md",
         ".studio/workflow.md",
-        f".studio/runtime/tasks/{task_id}/task.md" if task_id else None,
-        f".studio/tasks/{task_id}/prd.md" if task_id else None,
-        f".studio/tasks/{task_id}/context-selection-report.md" if task_id else None,
-        f".studio/runtime/tasks/{task_id}/implement.jsonl" if task_id else None,
-        f".studio/runtime/tasks/{task_id}/check.jsonl" if task_id else None,
+        ".studio/runtime/active-context/current.md",
+        ".studio/runtime/active-context/prd.md",
+        ".studio/runtime/active-context/context-selection-report.md",
+        ".studio/runtime/active-context/manifest.jsonl",
+        ".studio/runtime/active-context/check.jsonl",
         ".studio/spec/index.md",
         ".studio/workspace/index.md",
     ):
         if ref:
             parts.append(f"- `{ref}`")
-    if durable_task and durable_task.is_dir():
-        research = sorted((durable_task / "research").glob("*.md"))[:8]
+    if active_context and active_context.is_dir():
+        research = sorted((active_context / "research").glob("*.md"))[:8]
         if research:
             parts.append("Research artifacts:")
             parts.extend(f"- `{path.relative_to(root)}`" for path in research)
-    if runtime_task and runtime_task.is_dir():
-        implement_refs = read_jsonl_manifest(root, runtime_task / "implement.jsonl")
-        check_refs = read_jsonl_manifest(root, runtime_task / "check.jsonl")
+        implement_refs = read_jsonl_manifest(root, active_context / "manifest.jsonl")
+        check_refs = read_jsonl_manifest(root, active_context / "check.jsonl")
         if implement_refs:
             parts.append("Implement manifest:")
             parts.extend(implement_refs)
@@ -225,27 +250,50 @@ def build_session_context(root: Path) -> str:
     return "\n".join(parts)
 
 
-def build_prompt_context(root: Path) -> str:
-    task_id, runtime_task, durable_task = discover_active_task(root)
+def build_delta_context(binding: dict) -> str:
+    shared = shared_context(binding)
+    version = shared.get("version") or "unknown"
+    changed_layers = shared.get("changedLayers")
+    if not isinstance(changed_layers, list):
+        changed_layers = []
+    layer_text = ", ".join(
+        item for item in changed_layers if isinstance(item, str) and item.strip()
+    )
     parts = [
-        "<studio-workflow-state>",
+        "<studio-context-delta>",
         f"Platform: {PLATFORM}",
-        f"Task: {task_id or 'none'}",
-        "Before responding, load the active Studio files and follow `.studio/workflow.md`.",
+        f"Shared context version: {version}",
     ]
-    if task_id:
-        parts.extend([
-            f"Runtime task: `.studio/runtime/tasks/{task_id}/task.md`",
-            f"PRD: `.studio/tasks/{task_id}/prd.md`",
-            f"Context report: `.studio/tasks/{task_id}/context-selection-report.md`",
-            f"Implement manifest: `.studio/runtime/tasks/{task_id}/implement.jsonl`",
-            f"Check manifest: `.studio/runtime/tasks/{task_id}/check.jsonl`",
-        ])
-    policy = durable_task / "policy-check.json" if durable_task else None
-    if policy and policy.is_file():
-        parts.append(f"Policy check: `{policy.relative_to(root)}`")
-    parts.append("</studio-workflow-state>")
+    if layer_text:
+        parts.append(f"Changed layers: {layer_text}")
+    hint = shared.get("versionHint")
+    if isinstance(hint, str) and hint.strip():
+        parts.append(hint.strip())
+    else:
+        parts.append(
+            "Reload `.studio/runtime/context.md` and the latest active-context manifests before continuing."
+        )
+    parts.append("</studio-context-delta>")
     return "\n".join(parts)
+
+
+def build_prompt_context(root: Path, input_data: dict) -> tuple[str, str]:
+    binding = load_session_binding(root, input_data)
+    context_key = binding.get("contextKey")
+    if not isinstance(context_key, str):
+        context_key = ""
+    version = shared_context(binding).get("version")
+    if not isinstance(version, str):
+        version = ""
+    if not context_key or not version:
+        return build_session_context(root, binding), "full"
+    state = load_hook_state(root, context_key)
+    last_prompt_version = state.get("lastPromptVersion") or state.get("lastFullVersion")
+    if not isinstance(last_prompt_version, str) or not last_prompt_version.strip():
+        return build_session_context(root, binding), "full"
+    if last_prompt_version == version:
+        return "", "none"
+    return build_delta_context(binding), "delta"
 
 
 def detect_agent_name(input_data: dict) -> str:
@@ -271,33 +319,33 @@ def detect_agent_name(input_data: dict) -> str:
 
 def build_subagent_context(root: Path, input_data: dict) -> str:
     agent = detect_agent_name(input_data)
-    task_id, runtime_task, durable_task = discover_active_task(root)
+    active_context = discover_active_context(root)
     manifest = None
-    if runtime_task:
+    if active_context:
         if "check" in agent:
-            manifest = runtime_task / "check.jsonl"
+            manifest = active_context / "check.jsonl"
         elif "research" in agent:
             manifest = None
         else:
-            manifest = runtime_task / "implement.jsonl"
+            manifest = active_context / "manifest.jsonl"
     parts = [
         "<studio-subagent-context>",
         f"Platform: {PLATFORM}",
         f"Agent: {agent or 'unknown'}",
-        f"Task: {task_id or 'none'}",
+        "Context: active-context",
         "Required files:",
     ]
-    if task_id:
-        parts.append(f"- `.studio/tasks/{task_id}/prd.md`")
-        parts.append(f"- `.studio/tasks/{task_id}/context-selection-report.md`")
+    if active_context:
+        parts.append("- `.studio/runtime/active-context/prd.md`")
+        parts.append("- `.studio/runtime/active-context/context-selection-report.md`")
     if manifest:
         parts.append(f"- `{manifest.relative_to(root)}`")
         refs = read_jsonl_manifest(root, manifest)
         if refs:
             parts.append("Selected context:")
             parts.extend(refs)
-    if durable_task and "research" in agent:
-        parts.append(f"Research output directory: `{(durable_task / 'research').relative_to(root)}`")
+    if active_context and "research" in agent:
+        parts.append(f"Research output directory: `{(active_context / 'research').relative_to(root)}`")
     parts.append("Keep output file-referenced; do not paste large unrelated history.")
     parts.append("</studio-subagent-context>")
     return "\n".join(parts)
@@ -327,10 +375,23 @@ def main() -> int:
     input_data = read_stdin_json()
     root = project_root(input_data)
     if MODE == "session":
-        return emit(build_session_context(root))
+        binding = load_session_binding(root, input_data)
+        context_key = binding.get("contextKey")
+        shared = shared_context(binding)
+        version = shared.get("version")
+        if isinstance(context_key, str) and isinstance(version, str):
+            store_hook_state(root, context_key, version, "full")
+        return emit(build_session_context(root, binding))
     if MODE == "subagent":
         return emit(build_subagent_context(root, input_data))
-    return emit(build_prompt_context(root))
+    additional_context, mode = build_prompt_context(root, input_data)
+    binding = load_session_binding(root, input_data)
+    context_key = binding.get("contextKey")
+    shared = shared_context(binding)
+    version = shared.get("version")
+    if isinstance(context_key, str) and isinstance(version, str):
+        store_hook_state(root, context_key, version, mode)
+    return emit(additional_context)
 
 
 if __name__ == "__main__":
@@ -342,9 +403,8 @@ pub struct StudioContextExportInput {
     pub project_root: String,
     pub project_name: String,
     pub workspace_id: String,
-    pub task_id: Option<String>,
-    pub task_title: Option<String>,
-    pub task_goal: Option<String>,
+    pub context_title: Option<String>,
+    pub context_goal: Option<String>,
     pub terminal_tab_id: String,
     pub cli_id: String,
     pub branch: String,
@@ -533,9 +593,9 @@ pub struct StudioWorkflowMemoryCandidate {
 #[serde(rename_all = "camelCase")]
 pub struct StudioWorkflowState {
     pub project_root: String,
-    pub task_id: Option<String>,
+    pub context_id: Option<String>,
     pub phase: String,
-    pub task_path: Option<String>,
+    pub context_path: Option<String>,
     pub prd_path: Option<String>,
     pub context_report_path: Option<String>,
     pub implement_manifest_path: Option<String>,
@@ -579,7 +639,7 @@ pub struct StudioWorkflowState {
 
 #[derive(Debug, Clone)]
 pub struct StudioContextExport {
-    pub task_id: String,
+    pub context_id: String,
     pub context_key: String,
     pub prelude: String,
     pub metrics: StudioContextMetrics,
@@ -590,9 +650,21 @@ pub struct StudioContextExport {
 pub struct StudioContextMetrics {
     pub prelude_chars: usize,
     pub runtime_context_chars: usize,
-    pub task_chars: usize,
+    pub current_context_chars: usize,
     pub final_prompt_chars: usize,
     pub adapter_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StudioSharedContextVersion {
+    version: String,
+    spec_version: String,
+    workspace_version: String,
+    manifest_version: String,
+    research_version: String,
+    changed_layers: Vec<String>,
+    version_hint: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -613,16 +685,28 @@ pub struct StudioPromoteResult {
     pub kind: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StudioSessionBinding {
     context_key: String,
-    task_id: String,
-    active_task: String,
+    context_id: String,
+    active_context: String,
     cli_id: String,
     terminal_tab_id: String,
     workspace_id: String,
+    shared_context: StudioSharedContextVersion,
     updated_at: String,
+}
+
+fn active_context_dir(project_root: &Path) -> PathBuf {
+    project_root
+        .join(".studio")
+        .join("runtime")
+        .join(ACTIVE_CONTEXT_ID)
+}
+
+fn active_context_ref(file_name: &str) -> String {
+    format!(".studio/runtime/active-context/{file_name}")
 }
 
 pub fn export_studio_context(
@@ -634,43 +718,39 @@ pub fn export_studio_context(
     }
 
     let runtime_dir = project_root.join(".studio").join("runtime");
-    let tasks_dir = runtime_dir.join("tasks");
+    let active_context_dir = active_context_dir(project_root);
     let sessions_dir = runtime_dir.join("sessions");
 
-    fs::create_dir_all(&tasks_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(&active_context_dir).map_err(|err| err.to_string())?;
     fs::create_dir_all(&sessions_dir).map_err(|err| err.to_string())?;
     ensure_workflow_files(project_root)?;
 
-    let task_id = input
-        .task_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| stable_slug(value, "task"))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("task-{}", stable_slug(&input.terminal_tab_id, "default")));
-    let task_dir = tasks_dir.join(&task_id);
-    fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
+    let context_id = ACTIVE_CONTEXT_ID.to_string();
 
-    let task_path = task_dir.join("task.md");
-    let task_content = trim_to_limit(&render_task(input, &task_id), MAX_TASK_CHARS);
-    atomic_write(&task_path, &task_content)?;
+    let current_path = active_context_dir.join("current.md");
+    let current_content = trim_to_limit(
+        &render_current_context(input, &context_id),
+        MAX_CURRENT_CONTEXT_CHARS,
+    );
+    atomic_write(&current_path, &current_content)?;
 
-    let durable_task_dir = project_root.join(".studio").join("tasks").join(&task_id);
-    fs::create_dir_all(&durable_task_dir).map_err(|err| err.to_string())?;
-    let durable_task_json_path = durable_task_dir.join("task.json");
-    let existing_task_json = read_json_file(&durable_task_json_path).ok();
-    let active_tab_ids = load_active_tab_ids(&durable_task_json_path, &input.terminal_tab_id);
+    let context_json_path = active_context_dir.join("context.json");
+    let existing_context_json = read_json_file(&context_json_path).ok();
+    let active_tab_ids = load_active_tab_ids(&context_json_path, &input.terminal_tab_id);
     atomic_write(
-        &durable_task_json_path,
-        &render_durable_task_json(
+        &context_json_path,
+        &render_active_context_json(
             input,
-            &task_id,
+            &context_id,
             &active_tab_ids,
-            existing_task_json.as_ref(),
+            existing_context_json.as_ref(),
         )?,
     )?;
-    write_durable_prd_if_missing_or_polluted(&durable_task_dir.join("prd.md"), input, &task_id)?;
+    write_durable_prd_if_missing_or_polluted(
+        &active_context_dir.join("prd.md"),
+        input,
+        &context_id,
+    )?;
 
     if let Some(memory_candidates) = input
         .memory_candidates
@@ -686,41 +766,36 @@ pub fn export_studio_context(
         };
         let has_promotable_candidates = distill.promotable_entries > 0;
         atomic_write(
-            &durable_task_dir.join("memory-candidates.jsonl"),
+            &active_context_dir.join("memory-candidates.jsonl"),
             &trim_to_limit(&candidates_content, MAX_MEMORY_CANDIDATE_CHARS),
         )?;
         atomic_write(
-            &durable_task_dir.join("memory-distill-report.md"),
-            &render_memory_distill_report(input, &task_id, &distill, false, "pending_checker"),
+            &active_context_dir.join("memory-distill-report.md"),
+            &render_memory_distill_report(input, &context_id, &distill, false, "pending_checker"),
         )?;
         atomic_write(
-            &durable_task_dir.join("policy-check.json"),
-            &render_policy_check_json(input, &task_id, has_promotable_candidates)?,
+            &active_context_dir.join("policy-check.json"),
+            &render_policy_check_json(input, &context_id, has_promotable_candidates)?,
         )?;
     } else {
         atomic_write(
-            &durable_task_dir.join("policy-check.json"),
-            &render_policy_check_json(input, &task_id, false)?,
+            &active_context_dir.join("policy-check.json"),
+            &render_policy_check_json(input, &context_id, false)?,
         )?;
     }
 
-    let curation = curate_context(project_root, input, &task_id)?;
+    let curation = curate_context(project_root, input, &context_id)?;
     atomic_write(
-        &durable_task_dir.join("context-selection-report.md"),
+        &active_context_dir.join("context-selection-report.md"),
         &trim_to_limit(&curation.report, MAX_REPORT_CHARS),
     )?;
     write_curated_manifest(
-        &task_dir.join("implement.jsonl"),
+        &active_context_dir.join("manifest.jsonl"),
         &curation.implement_entries,
     )?;
-    write_curated_manifest(&task_dir.join("check.jsonl"), &curation.check_entries)?;
-    sync_manifest_to_durable_task(
-        &durable_task_dir.join("implement.jsonl"),
-        &task_dir.join("implement.jsonl"),
-    )?;
-    sync_manifest_to_durable_task(
-        &durable_task_dir.join("check.jsonl"),
-        &task_dir.join("check.jsonl"),
+    write_curated_manifest(
+        &active_context_dir.join("check.jsonl"),
+        &curation.check_entries,
     )?;
     let has_fallback = curation
         .implement_entries
@@ -728,8 +803,8 @@ pub fn export_studio_context(
         .chain(curation.check_entries.iter())
         .any(|entry| entry.fallback);
     update_context_curator_task_state(
-        &durable_task_dir.join("task.json"),
-        &task_id,
+        &active_context_dir.join("context.json"),
+        &context_id,
         if has_fallback { "fallback" } else { "curated" },
         if has_fallback {
             "heuristic-fallback"
@@ -745,67 +820,69 @@ pub fn export_studio_context(
         None,
     )?;
 
-    let context_path = runtime_dir.join("context.md");
-    let context_content = trim_to_limit(&render_context(input, &task_id), MAX_CONTEXT_CHARS);
-    atomic_write(&context_path, &context_content)?;
-
     let context_key = format!(
         "{}-{}",
         stable_slug(&input.terminal_tab_id, "terminal"),
         stable_slug(&input.cli_id, "cli")
     );
+    let session_binding_path = sessions_dir.join(format!("{context_key}.json"));
+    let existing_binding = read_json_file(&session_binding_path).ok();
+    let shared_context = compute_shared_context_version(project_root, existing_binding.as_ref())?;
+
+    let context_path = runtime_dir.join("context.md");
+    let context_content = trim_to_limit(&render_context(input, &context_id), MAX_CONTEXT_CHARS);
+    atomic_write(&context_path, &context_content)?;
+
     let binding = StudioSessionBinding {
         context_key: context_key.clone(),
-        task_id: task_id.clone(),
-        active_task: format!(".studio/tasks/{task_id}"),
+        context_id: context_id.clone(),
+        active_context: ".studio/runtime/active-context".to_string(),
         cli_id: input.cli_id.clone(),
         terminal_tab_id: input.terminal_tab_id.clone(),
         workspace_id: input.workspace_id.clone(),
+        shared_context,
         updated_at: Local::now().to_rfc3339(),
     };
     let binding_json = serde_json::to_string_pretty(&binding).map_err(|err| err.to_string())?;
-    atomic_write(
-        &sessions_dir.join(format!("{context_key}.json")),
-        &binding_json,
-    )?;
+    atomic_write(&session_binding_path, &binding_json)?;
 
     let mut adapter_files = ensure_adapters(project_root)?;
     adapter_files.extend(ensure_native_cli_hooks(project_root)?);
-    cleanup_old_entries(&tasks_dir, KEEP_RUNTIME_TASKS)?;
     cleanup_old_entries(&sessions_dir, KEEP_SESSION_BINDINGS)?;
 
-    let prelude = render_prelude(input, &task_id);
+    let prelude = render_prelude(input, &context_id);
     let metrics = StudioContextMetrics {
         prelude_chars: prelude.chars().count(),
         runtime_context_chars: context_content.chars().count(),
-        task_chars: task_content.chars().count(),
+        current_context_chars: current_content.chars().count(),
         final_prompt_chars: 0,
         adapter_files,
     };
 
     Ok(Some(StudioContextExport {
-        task_id,
+        context_id,
         context_key,
         prelude,
         metrics,
     }))
 }
 
-pub fn build_context_curator_prompt(input: &StudioContextExportInput, task_id: &str) -> String {
+pub fn build_context_curator_prompt(input: &StudioContextExportInput, context_id: &str) -> String {
     let request = clean_studio_text(&input.user_prompt);
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
         .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
     let next_step = clean_studio_option(input.handoff_next_step.as_deref())
         .unwrap_or_else(|| "Continue from the latest user request.".to_string());
+    let handoff_files = sanitized_handoff_files(input);
     format!(
-        "You are Studio's context-curator subagent. Curate task-specific spec/research context automatically.\n\n\
+        "You are Studio's context-curator subagent. Curate request-specific spec/research context automatically for the single active context.\n\n\
 Return only a single JSON object with this shape:\n\
 {{\"implement\":[{{\"file\":\".studio/spec/index.md\",\"reason\":\"why implementation needs it\",\"confidence\":0.8}}],\"check\":[{{\"file\":\".studio/spec/index.md\",\"reason\":\"why verification needs it\",\"confidence\":0.8}}],\"report\":\"short markdown summary\"}}\n\n\
 Rules:\n\
 - Do not ask for human confirmation.\n\
-- Select only existing `.studio/spec/**/*.md` or `.studio/tasks/{task_id}/research/*.md` files.\n\
+- Select only existing `.studio/spec/**/*.md` or `.studio/runtime/active-context/research/*.md` files.\n\
 - Never include source files, files to edit, package files, build artifacts, or absolute paths.\n\
-- Keep each list small and task-specific.\n\
+- Keep each list small and specific to the current request.\n\
 - Use `implement` for implementation rules/research and `check` for verification/quality rules/research.\n\
 - If no specific file is relevant, use `.studio/spec/index.md` only if it exists.\n\n\
 Candidate spec layers:\n\
@@ -813,10 +890,10 @@ Candidate spec layers:\n\
 - `.studio/spec/frontend/index.md` - React UI, chat surfaces, terminal dock, and workflow panel behavior.\n\
 - `.studio/spec/tauri-runtime/index.md` - Rust commands, process orchestration, state, and app runtime rules.\n\
 - `.studio/spec/cli-adapters/index.md` - Codex, Claude, Gemini adapters, hooks, sessions, and permissions.\n\
-- `.studio/spec/storage/index.md` - SQLite task kernel, task bindings, facts, evidence, and migrations.\n\
+- `.studio/spec/storage/index.md` - SQLite context kernel, terminal bindings, facts, evidence, and migrations.\n\
 - `.studio/spec/automation/index.md` - automation goals, workflow runs, validation, retry, and routing.\n\
 - `.studio/spec/windows-runtime/index.md` - Windows shells, encoding, path handling, and constrained-language safety.\n\n\
-Task ID: {task_id}\n\
+Context ID: {context_id}\n\
 Project: {}\n\
 Root: {}\n\
 Branch: {}\n\
@@ -833,14 +910,13 @@ Relevant files:\n{}\n",
         input.cli_id,
         input.dirty_files,
         input.failing_checks,
-        non_empty(&request, "Continue the active task."),
+        non_empty(&request, "Continue the active context."),
         latest_conclusion,
         next_step,
-        if input.handoff_files.is_empty() {
+        if handoff_files.is_empty() {
             "- (none captured yet)".to_string()
         } else {
-            input
-                .handoff_files
+            handoff_files
                 .iter()
                 .map(|file| format!("- {file}"))
                 .collect::<Vec<_>>()
@@ -853,15 +929,16 @@ pub fn build_research_agent_prompt(input: &StudioContextExportInput, task_id: &s
     let request = clean_studio_text(&input.user_prompt);
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
         .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
+    let handoff_files = sanitized_handoff_files(input);
     format!(
-        "You are Studio's research subagent. Create durable task research artifacts only when they help implementation or checking.\n\n\
+        "You are Studio's research subagent. Create durable active-context research artifacts only when they help implementation or checking.\n\n\
 Return only JSON: {{\"artifacts\":[{{\"title\":\"short topic\",\"content\":\"markdown finding\",\"sources\":[\"repo/spec/user prompt/source\"]}}]}}\n\n\
 Rules:\n\
 - Do not ask for human confirmation.\n\
 - Keep artifacts source-backed and concise.\n\
 - Do not invent external facts; if no research is needed, return an empty artifacts array.\n\
-- Focus on constraints, APIs, design decisions, or verification evidence relevant to this task.\n\n\
-Task ID: {task_id}\n\
+- Focus on constraints, APIs, design decisions, or verification evidence relevant to the active context.\n\n\
+Context ID: {task_id}\n\
 Project: {}\n\
 Root: {}\n\
 Request:\n{}\n\n\
@@ -869,13 +946,12 @@ Latest conclusion:\n{}\n\n\
 Relevant files:\n{}\n",
         input.project_name,
         input.project_root,
-        non_empty(&request, "Continue the active task."),
+        non_empty(&request, "Continue the active context."),
         latest_conclusion,
-        if input.handoff_files.is_empty() {
+        if handoff_files.is_empty() {
             "- (none captured yet)".to_string()
         } else {
-            input
-                .handoff_files
+            handoff_files
                 .iter()
                 .map(|file| format!("- {file}"))
                 .collect::<Vec<_>>()
@@ -894,11 +970,7 @@ pub fn apply_research_agent_output(
         return Err("Project root is missing or not a local directory.".to_string());
     }
     let parsed = parse_research_agent_output(raw_output)?;
-    let research_dir = project_root
-        .join(".studio")
-        .join("tasks")
-        .join(task_id)
-        .join("research");
+    let research_dir = active_context_dir(project_root).join("research");
     fs::create_dir_all(&research_dir).map_err(|err| err.to_string())?;
     let mut paths = Vec::new();
     for artifact in parsed.artifacts.into_iter().take(8) {
@@ -913,7 +985,7 @@ pub fn apply_research_agent_output(
             Local::now().format("%Y%m%d-%H%M%S")
         ));
         let sources = if artifact.sources.is_empty() {
-            "- Studio task context".to_string()
+            "- Studio active context".to_string()
         } else {
             artifact
                 .sources
@@ -923,7 +995,7 @@ pub fn apply_research_agent_output(
                 .join("\n")
         };
         let content = format!(
-            "# {title}\n\nGenerated: {}\nAgent: research\nTask: {task_id}\n\n## Sources\n\n{}\n\n## Findings\n\n{}\n",
+            "# {title}\n\nGenerated: {}\nAgent: research\nContext: {task_id}\n\n## Sources\n\n{}\n\n## Findings\n\n{}\n",
             Local::now().to_rfc3339(),
             sources,
             body,
@@ -944,19 +1016,19 @@ pub fn build_checker_agent_prompt(
 ) -> String {
     let request = clean_studio_text(&input.user_prompt);
     format!(
-        "You are Studio's checker subagent. Verify the latest implementation against PRD, check manifest, and task state.\n\n\
+        "You are Studio's checker subagent. Verify the latest implementation against active context, check manifest, and project rules.\n\n\
 Return only JSON: {{\"status\":\"pass|fail\",\"summary\":\"short result\",\"issues\":[\"concrete issue or missing check\"]}}\n\n\
 Rules:\n\
 - Do not ask for human confirmation.\n\
 - Prefer concrete failures over speculative warnings.\n\
 - If retry is needed, issues must be actionable for the same CLI.\n\n\
-Task ID: {task_id}\n\
-PRD: .studio/tasks/{task_id}/prd.md\n\
-Check manifest: .studio/tasks/{task_id}/check.jsonl\n\
-Context report: .studio/tasks/{task_id}/context-selection-report.md\n\n\
+Context ID: {task_id}\n\
+PRD: .studio/runtime/active-context/prd.md\n\
+Check manifest: .studio/runtime/active-context/check.jsonl\n\
+Context report: .studio/runtime/active-context/context-selection-report.md\n\n\
 Request:\n{}\n\n\
 Implementation output:\n{}\n",
-        non_empty(&request, "Continue the active task."),
+        non_empty(&request, "Continue the active context."),
         trim_to_limit(implementation_output, MAX_OPTIONAL_SECTION_CHARS),
     )
 }
@@ -983,7 +1055,7 @@ pub fn apply_checker_agent_output(
         },
     )
     .to_string();
-    let task_dir = project_root.join(".studio").join("tasks").join(task_id);
+    let task_dir = active_context_dir(project_root);
     fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
     let report_path = task_dir.join("checker-report.md");
     let report = render_checker_report(
@@ -996,7 +1068,7 @@ pub fn apply_checker_agent_output(
     );
     atomic_write(&report_path, &report)?;
     update_checker_task_state(
-        &task_dir.join("task.json"),
+        &task_dir.join("context.json"),
         task_id,
         &status,
         &summary,
@@ -1023,7 +1095,7 @@ pub fn record_checker_retry_result(
     if project_root.as_os_str().is_empty() || !project_root.is_dir() {
         return Err("Project root is missing or not a local directory.".to_string());
     }
-    let task_dir = project_root.join(".studio").join("tasks").join(task_id);
+    let task_dir = active_context_dir(project_root);
     fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
     let completed_at = Local::now().to_rfc3339();
     let status = if succeeded { "completed" } else { "failed" };
@@ -1031,7 +1103,7 @@ pub fn record_checker_retry_result(
     let report = render_checker_retry_report(task_id, status, raw_output, &completed_at);
     atomic_write(&report_path, &trim_to_limit(&report, MAX_REPORT_CHARS))?;
     update_checker_retry_task_state(
-        &task_dir.join("task.json"),
+        &task_dir.join("context.json"),
         task_id,
         status,
         raw_output,
@@ -1060,7 +1132,7 @@ pub fn apply_memory_distill_candidates(
     if project_root.as_os_str().is_empty() || !project_root.is_dir() {
         return Err("Project root is missing or not a local directory.".to_string());
     }
-    let task_dir = project_root.join(".studio").join("tasks").join(task_id);
+    let task_dir = active_context_dir(project_root);
     fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
 
     let distill = sanitize_memory_candidates(raw_candidates.unwrap_or_default());
@@ -1098,7 +1170,7 @@ pub fn apply_memory_distill_candidates(
     )?;
     atomic_write(&policy_path, &policy)?;
     update_memory_distill_task_state(
-        &task_dir.join("task.json"),
+        &task_dir.join("context.json"),
         task_id,
         checker_passed,
         distill.accepted.len(),
@@ -1125,7 +1197,7 @@ pub fn auto_promote_studio_memory(
     if project_root.as_os_str().is_empty() || !project_root.is_dir() {
         return Err("Project root is missing or not a local directory.".to_string());
     }
-    let task_dir = project_root.join(".studio").join("tasks").join(task_id);
+    let task_dir = active_context_dir(project_root);
     let policy_path = task_dir.join("policy-check.json");
     let candidates_path = task_dir.join("memory-candidates.jsonl");
     let report_path = task_dir.join("promotion-report.md");
@@ -1141,7 +1213,7 @@ pub fn auto_promote_studio_memory(
         .unwrap_or(false);
     if !allow || !checker_passed || !candidates_path.is_file() {
         let report = format!(
-            "# Promotion Report\n\nGenerated: {}\nTask: {task_id}\nDecision: hold\nReason: policy-check did not allow promotion, checker has not passed, or no candidates exist.\n",
+            "# Promotion Report\n\nGenerated: {}\nContext: {task_id}\nDecision: hold\nReason: policy-check did not allow promotion, checker has not passed, or no candidates exist.\n",
             Local::now().to_rfc3339()
         );
         atomic_write(&report_path, &report)?;
@@ -1181,11 +1253,11 @@ pub fn auto_promote_studio_memory(
         let promotion_hint = value
             .get("promotionHint")
             .and_then(Value::as_str)
-            .unwrap_or("task");
+            .unwrap_or("memory");
         let target_kind = match promotion_hint {
             "spec" => "spec",
             "journal" => "journal",
-            _ => "task",
+            _ => "memory",
         };
         let title = candidate_title(&value);
         let body = render_promoted_candidate(task_id, &value);
@@ -1194,7 +1266,7 @@ pub fn auto_promote_studio_memory(
             kind: target_kind.to_string(),
             title,
             content: body,
-            source: Some(format!(".studio/tasks/{task_id}/memory-candidates.jsonl")),
+            source: Some(active_context_ref("memory-candidates.jsonl")),
         };
         match promote_studio_context(&request) {
             Ok(result) if promoted_paths.contains(&result.path) => skipped += 1,
@@ -1203,7 +1275,7 @@ pub fn auto_promote_studio_memory(
         }
     }
     let report = format!(
-        "# Promotion Report\n\nGenerated: {}\nTask: {task_id}\nDecision: {}\nPromoted: {}\nSkipped: {}\n\n{}\n",
+        "# Promotion Report\n\nGenerated: {}\nContext: {task_id}\nDecision: {}\nPromoted: {}\nSkipped: {}\n\n{}\n",
         Local::now().to_rfc3339(),
         if promoted_paths.is_empty() { "hold" } else { "promoted" },
         promoted_paths.len(),
@@ -1220,7 +1292,7 @@ pub fn auto_promote_studio_memory(
     );
     atomic_write(&report_path, &report)?;
     update_promotion_task_state(
-        &task_dir.join("task.json"),
+        &task_dir.join("context.json"),
         task_id,
         promoted_paths.len(),
         skipped,
@@ -1236,42 +1308,22 @@ pub fn auto_promote_studio_memory(
 
 pub fn load_studio_workflow_state(
     project_root: &str,
-    terminal_tab_id: Option<&str>,
+    _terminal_tab_id: Option<&str>,
 ) -> Result<StudioWorkflowState, String> {
     let project_root_path = Path::new(project_root.trim());
     if project_root_path.as_os_str().is_empty() || !project_root_path.is_dir() {
         return Err("Project root is missing or not a local directory.".to_string());
     }
-    let task_id = terminal_tab_id
-        .and_then(|tab| task_id_for_terminal_tab(project_root_path, tab))
-        .or_else(|| {
-            terminal_tab_id
-                .map(|tab| format!("tab-{}", stable_slug(tab, "default")))
-                .filter(|legacy| {
-                    project_root_path
-                        .join(".studio")
-                        .join("tasks")
-                        .join(legacy)
-                        .is_dir()
-                })
-        })
-        .or_else(|| latest_task_id(project_root_path));
-    let Some(task_id) = task_id else {
-        return Ok(StudioWorkflowState::empty(project_root));
-    };
+    let context_id = ACTIVE_CONTEXT_ID.to_string();
     let task_dir = project_root_path
         .join(".studio")
-        .join("tasks")
-        .join(&task_id);
-    let runtime_task_dir = project_root_path
-        .join(".studio")
         .join("runtime")
-        .join("tasks")
-        .join(&task_id);
+        .join(ACTIVE_CONTEXT_ID);
+    let runtime_task_dir = task_dir.clone();
     if !task_dir.is_dir() {
         return Ok(StudioWorkflowState::empty(project_root));
     }
-    let task_json = read_json_file(&task_dir.join("task.json")).unwrap_or(Value::Null);
+    let task_json = read_json_file(&task_dir.join("context.json")).unwrap_or(Value::Null);
     let phase = task_json
         .get("status")
         .and_then(Value::as_str)
@@ -1282,7 +1334,7 @@ pub fn load_studio_workflow_state(
     let memory_distill = task_json.get("memoryDistill").unwrap_or(&Value::Null);
     let promotion = task_json.get("promotion").unwrap_or(&Value::Null);
     let policy = read_json_file(&task_dir.join("policy-check.json")).unwrap_or(Value::Null);
-    let implement_manifest_path = task_dir.join("implement.jsonl");
+    let implement_manifest_path = task_dir.join("manifest.jsonl");
     let check_manifest_path = task_dir.join("check.jsonl");
     let checker_report_path = task_dir.join("checker-report.md");
     let checker_retry_report_path = task_dir.join("checker-retry-report.md");
@@ -1321,7 +1373,8 @@ pub fn load_studio_workflow_state(
             }
         });
     let research_artifacts = list_markdown_files(&task_dir.join("research"))?;
-    let artifacts = workflow_artifacts(project_root_path, &task_id, &task_dir, &runtime_task_dir);
+    let artifacts =
+        workflow_artifacts(project_root_path, &context_id, &task_dir, &runtime_task_dir);
     let mut manifest_entries =
         read_workflow_manifest_entries(&implement_manifest_path, "implement", project_root_path);
     manifest_entries.extend(read_workflow_manifest_entries(
@@ -1331,7 +1384,7 @@ pub fn load_studio_workflow_state(
     ));
     let timeline = workflow_timeline(
         project_root_path,
-        &task_id,
+        &context_id,
         &task_json,
         &policy,
         &task_dir,
@@ -1350,16 +1403,16 @@ pub fn load_studio_workflow_state(
         .unwrap_or_else(|| manifest_entries.iter().any(|entry| entry.fallback));
     Ok(StudioWorkflowState {
         project_root: project_root.to_string(),
-        task_id: Some(task_id.clone()),
+        context_id: Some(context_id.clone()),
         phase,
-        task_path: Some(format!(".studio/tasks/{task_id}/task.json")),
-        prd_path: Some(format!(".studio/tasks/{task_id}/prd.md")),
+        context_path: Some(".studio/runtime/active-context/context.json".to_string()),
+        prd_path: Some(".studio/runtime/active-context/prd.md".to_string()),
         context_report_path: file_ref_if_exists(
             &task_dir.join("context-selection-report.md"),
             project_root_path,
         ),
         implement_manifest_path: file_ref_if_exists(
-            &task_dir.join("implement.jsonl"),
+            &task_dir.join("manifest.jsonl"),
             project_root_path,
         ),
         check_manifest_path: file_ref_if_exists(&task_dir.join("check.jsonl"), project_root_path),
@@ -1480,33 +1533,16 @@ pub fn apply_context_curator_output(
         check_entries.clone()
     };
 
-    let durable_task_dir = project_root.join(".studio").join("tasks").join(task_id);
-    let runtime_task_dir = project_root
-        .join(".studio")
-        .join("runtime")
-        .join("tasks")
-        .join(task_id);
-    fs::create_dir_all(&durable_task_dir).map_err(|err| err.to_string())?;
-    fs::create_dir_all(&runtime_task_dir).map_err(|err| err.to_string())?;
+    let context_dir = active_context_dir(project_root);
+    fs::create_dir_all(&context_dir).map_err(|err| err.to_string())?;
 
     write_curated_manifest(
-        &durable_task_dir.join("implement.jsonl"),
+        &context_dir.join("manifest.jsonl"),
         &implement_manifest_entries,
     )?;
-    write_curated_manifest(
-        &durable_task_dir.join("check.jsonl"),
-        &check_manifest_entries,
-    )?;
-    sync_manifest_to_durable_task(
-        &runtime_task_dir.join("implement.jsonl"),
-        &durable_task_dir.join("implement.jsonl"),
-    )?;
-    sync_manifest_to_durable_task(
-        &runtime_task_dir.join("check.jsonl"),
-        &durable_task_dir.join("check.jsonl"),
-    )?;
+    write_curated_manifest(&context_dir.join("check.jsonl"), &check_manifest_entries)?;
 
-    let report_path = durable_task_dir.join("context-selection-report.md");
+    let report_path = context_dir.join("context-selection-report.md");
     let report = render_curated_context_selection_report(
         task_id,
         parsed.report.as_deref(),
@@ -1519,7 +1555,7 @@ pub fn apply_context_curator_output(
         .chain(check_manifest_entries.iter())
         .any(|entry| entry.fallback);
     update_context_curator_task_state(
-        &durable_task_dir.join("task.json"),
+        &context_dir.join("context.json"),
         task_id,
         if has_fallback {
             "curated_with_fallback"
@@ -1557,7 +1593,7 @@ pub fn record_context_curator_fallback(
     if project_root.as_os_str().is_empty() || !project_root.is_dir() {
         return Err("Project root is missing or not a local directory.".to_string());
     }
-    let task_dir = project_root.join(".studio").join("tasks").join(task_id);
+    let task_dir = active_context_dir(project_root);
     fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
     if task_has_curated_context(&task_dir) {
         return Ok(());
@@ -1571,7 +1607,7 @@ pub fn record_context_curator_fallback(
         &trim_to_limit(&fallback_report, MAX_REPORT_CHARS),
     )?;
     update_context_curator_task_state(
-        &task_dir.join("task.json"),
+        &task_dir.join("context.json"),
         task_id,
         "fallback",
         "heuristic-fallback",
@@ -1610,9 +1646,12 @@ pub fn promote_studio_context(
             project_root.join(".studio").join("spec"),
             format!("{slug}.md"),
         ),
-        "task" => (
-            "task",
-            project_root.join(".studio").join("workspace").join("tasks"),
+        "memory" => (
+            "memory",
+            project_root
+                .join(".studio")
+                .join("workspace")
+                .join("memory"),
             format!("{slug}.md"),
         ),
         "journal" => (
@@ -1668,16 +1707,8 @@ fn write_curated_manifest(path: &Path, entries: &[CuratedManifestEntry]) -> Resu
     atomic_write(path, &content)
 }
 
-fn sync_manifest_to_durable_task(target: &Path, source: &Path) -> Result<(), String> {
-    if !should_write_managed_jsonl(target)? {
-        return Ok(());
-    }
-    let content = fs::read_to_string(source).map_err(|err| err.to_string())?;
-    atomic_write(target, &content)
-}
-
 fn task_has_curated_context(task_dir: &Path) -> bool {
-    read_json_file(&task_dir.join("task.json"))
+    read_json_file(&task_dir.join("context.json"))
         .ok()
         .and_then(|task| task.get("contextCurator").cloned())
         .and_then(|curator| {
@@ -1687,7 +1718,7 @@ fn task_has_curated_context(task_dir: &Path) -> bool {
                 .map(|fallback| !fallback)
         })
         .unwrap_or(false)
-        || manifest_has_curated_context(&task_dir.join("implement.jsonl"))
+        || manifest_has_curated_context(&task_dir.join("manifest.jsonl"))
         || manifest_has_curated_context(&task_dir.join("check.jsonl"))
 }
 
@@ -1747,6 +1778,19 @@ fn ensure_workflow_files(project_root: &Path) -> Result<(), String> {
         &render_workspace_index(),
         STUDIO_WORKFLOW_MARKER,
     )?;
+    atomic_write_if_managed(
+        &studio_dir.join("workspace").join("memory").join("index.md"),
+        &render_workspace_memory_index(),
+        STUDIO_WORKFLOW_MARKER,
+    )?;
+    atomic_write_if_managed(
+        &studio_dir
+            .join("workspace")
+            .join("journal")
+            .join("index.md"),
+        &render_workspace_journal_index(),
+        STUDIO_WORKFLOW_MARKER,
+    )?;
     Ok(())
 }
 
@@ -1763,37 +1807,37 @@ fn atomic_write_if_managed(path: &Path, content: &str, marker: &str) -> Result<(
 
 fn render_studio_workflow() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# Studio Autonomous Workflow\n\nThis project uses a Studio-native, Trellis-class workflow. Studio owns task state, context curation, runtime projection, and CLI routing across Codex, Claude, and Gemini.\n\n## Phases\n\n1. `planning` - maintain `.studio/tasks/<task-id>/prd.md` and task intent.\n2. `context_curated` - run `context-curator`; write `implement.jsonl`, `check.jsonl`, and `context-selection-report.md`.\n3. `implementing` - dispatch the best CLI with the implement manifest.\n4. `checking` - dispatch checker with the check manifest and acceptance criteria.\n5. `memory_distilled` - run memory distill over facts, evidence, diffs, failures, and decisions.\n6. `completed` - runtime projection is stable; archive or continue from the durable task.\n\n## Automatic Context Contract\n\n- Context/spec curation is automatic and agent-owned; no manual approval is required.\n- The main Studio turn does not inline research, raw working memory, or long history. Research belongs in `.studio/tasks/<task-id>/research/`.\n- `implement.jsonl` and `check.jsonl` are projections, not the source of truth. The durable task, evidence graph, research files, and spec files are canonical.\n- Heuristic spec selection is fallback only when no curated entries exist.\n\n## Machine Gates\n\n- `context_curated`: manifests contain managed entries or an explicit fallback reason.\n- `checking`: checker consumes `check.jsonl` and records failures before retry.\n- `memory_distilled`: long-term updates include provenance, confidence, supersedes, and a policy decision.\n- Runtime traces, command successes, and generic file-update facts must not auto-promote into durable workspace memory.\n- Durable `.studio/spec/` updates are automatic only when policy-check permits them; otherwise they remain candidates.\n\n## CLI Policy\n\n- Codex, Claude, and Gemini follow the same task state machine.\n- CLI-specific prompts may differ, but they must read the same durable task and generated manifests.\n- Prefer file references over prompt stuffing.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# Studio Context Workflow\n\nThis project uses a Studio-native shared-context workflow. Each user turn runs exactly one selected CLI, while Codex, Claude, and Gemini read and write the same project-local context contract.\n\n## Three Layers\n\n1. `spec` - durable project rules under `.studio/spec/`.\n2. `memory` - durable project memory and journals under `.studio/workspace/`.\n3. `active_context` - generated runtime state under `.studio/runtime/active-context/`.\n\n## Active Context Files\n\n- `.studio/runtime/context.md` is the startup pointer for every CLI.\n- `.studio/runtime/active-context/current.md` is the current request snapshot.\n- `.studio/runtime/active-context/context.json` is the machine-readable active state.\n- `.studio/runtime/active-context/prd.md` captures the current request, goal, and acceptance criteria.\n- `.studio/runtime/active-context/manifest.jsonl` and `check.jsonl` list curated spec/research references.\n- `.studio/runtime/active-context/research/` stores request-specific research notes.\n\n## Machine Gates\n\n- `context_curated`: manifests contain managed entries or an explicit fallback reason.\n- `checking`: checker consumes `check.jsonl` and records concrete failures before retry.\n- `memory_distilled`: long-term updates include provenance, confidence, supersedes, and a policy decision.\n- Runtime traces, command successes, and generic file-update facts must not auto-promote into durable workspace memory.\n- Durable `.studio/spec/` and `.studio/workspace/` updates are automatic only when policy-check permits them; otherwise they remain candidates.\n\n## CLI Policy\n\n- Only the user-selected CLI handles the current request.\n- Switching CLI keeps the same active context instead of creating or archiving work units.\n- CLI-specific prompts may differ, but they must read the same active-context files and generated manifests.\n- Prefer file references over prompt stuffing.\n"
     )
 }
 
 fn render_agent_context_curator() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# context-curator\n\nRole: select the minimal task-specific context for implementation and checking.\n\nInputs:\n- `.studio/tasks/<task-id>/prd.md`\n- `.studio/spec/**/index.md` and relevant spec files\n- `.studio/tasks/<task-id>/research/*.md`\n- current runtime context and changed-file hints\n\nOutputs:\n- `.studio/tasks/<task-id>/implement.jsonl`\n- `.studio/tasks/<task-id>/check.jsonl`\n- `.studio/tasks/<task-id>/context-selection-report.md`\n\nRules:\n- Run automatically; do not ask for human confirmation.\n- Add only spec or research files, never source files to edit.\n- Explain every selected file with a reason and confidence.\n- Prefer stable curated entries over per-turn heuristic matches.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# context-curator\n\nRole: select the minimal request-specific context for implementation and checking.\n\nInputs:\n- `.studio/runtime/active-context/prd.md`\n- `.studio/spec/**/index.md` and relevant spec files\n- `.studio/runtime/active-context/research/*.md`\n- current runtime context and changed-file hints\n\nOutputs:\n- `.studio/runtime/active-context/manifest.jsonl`\n- `.studio/runtime/active-context/check.jsonl`\n- `.studio/runtime/active-context/context-selection-report.md`\n\nRules:\n- Run automatically; do not ask for human confirmation.\n- Add only spec or active-context research files, never source files to edit.\n- Explain every selected file with a reason and confidence.\n- Prefer stable curated entries over per-turn heuristic matches.\n"
     )
 }
 
 fn render_agent_research() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# research\n\nRole: gather project and external evidence for the task.\n\nOutputs go under `.studio/tasks/<task-id>/research/`. Do not leave research only in chat. Each file should include source, finding, evidence, and relevance to implementation/checking.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# research\n\nRole: gather project and external evidence for the current request.\n\nOutputs go under `.studio/runtime/active-context/research/`. Do not leave research only in chat. Each file should include source, finding, evidence, and relevance to implementation/checking.\n"
     )
 }
 
 fn render_agent_implement() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# implement\n\nRole: implement the task using `.studio/tasks/<task-id>/implement.jsonl`.\n\nRules:\n- Read PRD and selected manifest before editing.\n- Keep changes scoped to the task.\n- Record relevant files and decisions in the task state through Studio outputs.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# implement\n\nRole: implement the current request using `.studio/runtime/active-context/manifest.jsonl`.\n\nRules:\n- Read PRD and selected manifest before editing.\n- Keep changes scoped to the current request.\n- Record relevant files and decisions in the active context through Studio outputs.\n"
     )
 }
 
 fn render_agent_check() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# check\n\nRole: verify implementation against `.studio/tasks/<task-id>/check.jsonl`, PRD, and changed files.\n\nRules:\n- Prefer concrete failures over speculative warnings.\n- Record failed commands and missing acceptance criteria.\n- Send defects back to implementing or planning when needed.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# check\n\nRole: verify implementation against `.studio/runtime/active-context/check.jsonl`, PRD, and changed files.\n\nRules:\n- Prefer concrete failures over speculative warnings.\n- Record failed commands and missing acceptance criteria.\n- Send defects back to the selected CLI when needed.\n"
     )
 }
 
 fn render_agent_memory_distill() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# memory-distill\n\nRole: convert task evidence into durable knowledge candidates.\n\nInputs include decisions, constraints, rules, failures, checkpoints, progress, diffs, and final conclusions. Runtime command successes and generic file-update events are not durable knowledge. Outputs must include provenance, confidence, tags, and suggested target: spec, task, journal, or hold.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# memory-distill\n\nRole: convert active-context evidence into durable knowledge candidates.\n\nInputs include decisions, constraints, rules, failures, checkpoints, progress, diffs, and final conclusions. Runtime command successes and generic file-update events are not durable knowledge. Outputs must include provenance, confidence, tags, and suggested target: spec, memory, journal, or hold.\n"
     )
 }
 
@@ -1805,7 +1849,7 @@ fn render_agent_policy_check() -> String {
 
 fn render_spec_index() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# Studio Spec Index\n\nThis directory stores durable project rules used by the Studio Autonomous Workflow.\n\n## Layers\n\n- `.studio/spec/frontend/index.md` - React UI, chat surfaces, terminal dock, and workflow panel behavior.\n- `.studio/spec/tauri-runtime/index.md` - Rust commands, process orchestration, state, and app runtime rules.\n- `.studio/spec/cli-adapters/index.md` - Codex, Claude, Gemini adapters, hooks, sessions, and permissions.\n- `.studio/spec/storage/index.md` - SQLite task kernel, task bindings, facts, evidence, and migrations.\n- `.studio/spec/automation/index.md` - automation goals, workflow runs, validation, retry, and routing.\n- `.studio/spec/windows-runtime/index.md` - Windows shells, encoding, path handling, and constrained-language safety.\n\n## Policy\n\n- Spec updates are automatic only after `memory-distill` and `policy-check` accept provenance, confidence, conflict, and supersedes requirements.\n- Context manifests may reference this index as a discovery entry.\n- Context-curator should select the narrowest relevant layer index instead of injecting every spec file.\n- Keep concrete implementation contracts in topic-specific Markdown files under `.studio/spec/`.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# Studio Spec Index\n\nThis directory stores durable project rules used by the Studio Autonomous Workflow.\n\n## Layers\n\n- `.studio/spec/frontend/index.md` - React UI, chat surfaces, terminal dock, and workflow panel behavior.\n- `.studio/spec/tauri-runtime/index.md` - Rust commands, process orchestration, state, and app runtime rules.\n- `.studio/spec/cli-adapters/index.md` - Codex, Claude, Gemini adapters, hooks, sessions, and permissions.\n- `.studio/spec/storage/index.md` - SQLite context kernel, terminal bindings, facts, evidence, and migrations.\n- `.studio/spec/automation/index.md` - automation goals, workflow runs, validation, retry, and routing.\n- `.studio/spec/windows-runtime/index.md` - Windows shells, encoding, path handling, and constrained-language safety.\n\n## Policy\n\n- Spec updates are automatic only after `memory-distill` and `policy-check` accept provenance, confidence, conflict, and supersedes requirements.\n- Context manifests may reference this index as a discovery entry.\n- Context-curator should select the narrowest relevant layer index instead of injecting every spec file.\n- Keep concrete implementation contracts in topic-specific Markdown files under `.studio/spec/`.\n"
     )
 }
 
@@ -1820,7 +1864,7 @@ fn render_spec_layers() -> [(&'static str, String); 6] {
                     "Prefer existing component and state patterns before adding new UI abstractions.",
                     "Workflow state should be inspectable without inlining raw history into the prompt.",
                     "Do not let dynamic labels, counters, or streamed content resize fixed control surfaces unexpectedly.",
-                    "Surface task, manifest, checker, and policy state as operational UI, not as marketing copy.",
+                    "Surface active context, manifest, checker, and policy state as operational UI, not as marketing copy.",
                 ],
             ),
         ),
@@ -1833,7 +1877,7 @@ fn render_spec_layers() -> [(&'static str, String); 6] {
                     "Keep Tauri commands responsive; long work should run in bounded background jobs or child processes.",
                     "Propagate Studio context through explicit environment variables instead of relying on global process state.",
                     "Child processes must have bounded timeouts and clear error logging.",
-                    "Generated runtime files are projections and may be overwritten; durable state belongs under `.studio/tasks/` or SQLite.",
+                    "Generated runtime files are projections and may be overwritten; durable rules and memory belong under `.studio/spec/` and `.studio/workspace/`.",
                 ],
             ),
         ),
@@ -1843,9 +1887,9 @@ fn render_spec_layers() -> [(&'static str, String); 6] {
                 "CLI Adapters Spec",
                 "Codex, Claude, Gemini command adapters, hooks, permissions, transport sessions, and prompt prelude rules.",
                 &[
-                    "All CLIs must consume the same `.studio` task, manifest, and workflow contract.",
-                    "Adapter-specific prompts may differ, but task identity and manifest paths must stay shared.",
-                    "Use `STUDIO_CONTEXT_ID` to resolve session-scoped runtime context in native hooks.",
+                    "All CLIs must consume the same `.studio` active context, manifest, and workflow contract.",
+                    "Adapter-specific prompts may differ, but active-context paths must stay shared.",
+                    "Resolve shared state through `.studio/runtime/context.md` and `.studio/runtime/active-context/`.",
                     "Silent workflow agents must run with planning/read-only permissions unless they are an explicit retry repair.",
                 ],
             ),
@@ -1854,10 +1898,10 @@ fn render_spec_layers() -> [(&'static str, String); 6] {
             "storage/index.md",
             render_spec_layer_index(
                 "Storage Spec",
-                "SQLite task kernel, terminal state, task-tab bindings, facts, evidence, migrations, and semantic recall.",
+                "SQLite context kernel, terminal state, facts, evidence, migrations, and semantic recall.",
                 &[
-                    "Task identity is independent from terminal tab identity.",
-                    "Terminal tabs are interaction surfaces bound to tasks through explicit binding records.",
+                    "The user-selected CLI handles one request at a time; no task split/rebind lifecycle is exposed.",
+                    "Terminal tabs are interaction surfaces that contribute to the single active context.",
                     "Schema migrations must preserve existing local user state.",
                     "Durable memory promotion requires evidence, confidence, and policy approval.",
                 ],
@@ -1872,7 +1916,7 @@ fn render_spec_layers() -> [(&'static str, String); 6] {
                     "Automation should route by capability and record why a CLI was selected.",
                     "Checker and validator failures should produce actionable evidence, not silent loops.",
                     "Retries are bounded and focused; repeated failures remain visible in workflow state.",
-                    "Automation outputs should feed the same task, manifest, and memory pipeline as manual turns.",
+                    "Automation outputs should feed the same active-context manifest and memory pipeline as manual turns.",
                 ],
             ),
         ),
@@ -1899,18 +1943,30 @@ fn render_spec_layer_index(title: &str, scope: &str, rules: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# {title}\n\nScope: {scope}\n\n## Context Selection\n\nContext-curator should select this file when the current task touches this scope. Do not select it for unrelated turns.\n\n## Rules\n\n{rule_lines}\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# {title}\n\nScope: {scope}\n\n## Context Selection\n\nContext-curator should select this file when the current request touches this scope. Do not select it for unrelated turns.\n\n## Rules\n\n{rule_lines}\n"
     )
 }
 
 fn render_workspace_index() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# Studio Workspace Index\n\nThis directory stores durable journals, session traces, and task-level memory that should survive chat compaction.\n\n## Policy\n\n- Workspace memory is written by the Studio workflow, not pasted from ad hoc chat history.\n- Prefer task directories for active work and promote only durable lessons here.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# Studio Workspace Index\n\nThis directory stores durable project memory and journals that should survive chat compaction.\n\n## Layers\n\n- `.studio/workspace/memory/` stores durable project facts, codebase knowledge, decisions, and risks.\n- `.studio/workspace/journal/` stores dated failures, checkpoints, and progress notes.\n\n## Policy\n\n- Workspace memory is written by the Studio workflow, not pasted from ad hoc chat history.\n- Promote only durable lessons here; transient request state belongs in `.studio/runtime/active-context/`.\n"
+    )
+}
+
+fn render_workspace_memory_index() -> String {
+    format!(
+        "{STUDIO_WORKFLOW_MARKER}\n# Studio Memory Index\n\nDurable project memory promoted from active-context evidence lands here.\n"
+    )
+}
+
+fn render_workspace_journal_index() -> String {
+    format!(
+        "{STUDIO_WORKFLOW_MARKER}\n# Studio Journal Index\n\nDated failure, checkpoint, and progress notes promoted from active-context evidence land here.\n"
     )
 }
 
 fn clean_studio_text(value: &str) -> String {
-    let stripped = strip_ansi_sequences(value);
+    let stripped = strip_legacy_task_artifact_lines(&strip_ansi_sequences(value));
     let mut lines = Vec::new();
     let mut blank_count = 0usize;
     for line in stripped.lines() {
@@ -1950,20 +2006,124 @@ fn clean_studio_intent_option(value: Option<&str>) -> Option<String> {
         .filter(|cleaned| !is_legacy_task_pollution(cleaned))
 }
 
-fn studio_task_title(input: &StudioContextExportInput) -> String {
-    clean_studio_intent_option(input.task_title.as_deref())
-        .or_else(|| clean_studio_intent_option(input.task_goal.as_deref()))
+fn strip_legacy_task_artifact_lines(value: &str) -> String {
+    value
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !lower.contains(".studio/runtime/tasks/")
+                && !lower.contains(".studio/tasks/")
+                && !lower.contains(".studio/workspace/tasks/")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sanitized_handoff_files(input: &StudioContextExportInput) -> Vec<String> {
+    let project_root = Path::new(input.project_root.trim());
+    let mut sanitized = Vec::new();
+    let mut seen = HashSet::new();
+    for file in &input.handoff_files {
+        let Some(normalized) = normalize_handoff_file(project_root, file) else {
+            continue;
+        };
+        if is_generated_runtime_handoff_file(&normalized) {
+            continue;
+        }
+        if seen.insert(normalized.clone()) {
+            sanitized.push(normalized);
+        }
+    }
+    sanitized
+}
+
+fn normalize_handoff_file(project_root: &Path, file: &str) -> Option<String> {
+    let normalized = file.trim().trim_matches('`').replace('\\', "/");
+    if normalized.is_empty() || normalized.contains('\0') || normalized.contains("://") {
+        return None;
+    }
+    let mut project_relative = normalized;
+    let absolute = Path::new(&project_relative);
+    if absolute.is_absolute() {
+        project_relative = absolute
+            .strip_prefix(project_root)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/");
+    }
+    let path = Path::new(&project_relative);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return None;
+    }
+    let normalized = project_relative.trim_start_matches("./").trim().to_string();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn is_generated_runtime_handoff_file(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    lower.starts_with(".studio/runtime/")
+        || lower.starts_with(".studio/tasks/")
+        || lower.starts_with(".studio/workspace/tasks/")
+}
+
+fn is_generic_context_term(term: &str) -> bool {
+    matches!(
+        term,
+        "active"
+            | "assistant"
+            | "branch"
+            | "chat"
+            | "check"
+            | "checking"
+            | "cli"
+            | "context"
+            | "current"
+            | "durable"
+            | "file"
+            | "files"
+            | "goal"
+            | "implement"
+            | "implementation"
+            | "latest"
+            | "manifest"
+            | "memory"
+            | "next"
+            | "project"
+            | "prompt"
+            | "request"
+            | "runtime"
+            | "shared"
+            | "spec"
+            | "step"
+            | "studio"
+            | "user"
+            | "workflow"
+    )
+}
+
+fn studio_context_title(input: &StudioContextExportInput) -> String {
+    clean_studio_intent_option(input.context_title.as_deref())
+        .or_else(|| clean_studio_intent_option(input.context_goal.as_deref()))
         .unwrap_or_else(|| clean_studio_intent_text(&input.user_prompt))
 }
 
-fn studio_task_goal(input: &StudioContextExportInput) -> String {
-    clean_studio_intent_option(input.task_goal.as_deref())
+fn studio_context_goal(input: &StudioContextExportInput) -> String {
+    clean_studio_intent_option(input.context_goal.as_deref())
         .unwrap_or_else(|| clean_studio_intent_text(&input.user_prompt))
 }
 
 fn studio_current_request(input: &StudioContextExportInput) -> String {
     let current_request = clean_studio_intent_text(&input.user_prompt);
-    non_empty(&current_request, "Continue the active task.").to_string()
+    non_empty(&current_request, "Continue the active context.").to_string()
 }
 
 fn strip_managed_loading_policy(value: &str) -> String {
@@ -2060,7 +2220,11 @@ fn is_powershell_encoding_bootstrap_noise(line: &str) -> bool {
         || lower.contains("fullyqualifiederrorid")
 }
 
-fn render_prelude(input: &StudioContextExportInput, task_id: &str) -> String {
+fn render_prelude(input: &StudioContextExportInput, _context_id: &str) -> String {
+    if matches!(input.cli_id.as_str(), "codex" | "claude" | "gemini") {
+        return String::new();
+    }
+
     let access = if input.write_mode {
         "full write"
     } else {
@@ -2076,21 +2240,21 @@ fn render_prelude(input: &StudioContextExportInput, task_id: &str) -> String {
         "<studio-context>\n\
 Studio Context Layer is enabled for this project.\n\
 {resume_hint}\n\n\
-Read these files first when you need project or task context:\n\
+Read these files first when you need project or shared context:\n\
 - .studio/runtime/context.md\n\
 - .studio/workflow.md\n\
-- .studio/runtime/tasks/{task_id}/task.md\n\
-- .studio/tasks/{task_id}/task.json\n\
-- .studio/tasks/{task_id}/prd.md\n\
-- .studio/tasks/{task_id}/context-selection-report.md\n\
-- .studio/runtime/tasks/{task_id}/implement.jsonl\n\
-- .studio/runtime/tasks/{task_id}/check.jsonl\n\
+- .studio/runtime/active-context/current.md\n\
+- .studio/runtime/active-context/context.json\n\
+- .studio/runtime/active-context/prd.md\n\
+- .studio/runtime/active-context/context-selection-report.md\n\
+- .studio/runtime/active-context/manifest.jsonl\n\
+- .studio/runtime/active-context/check.jsonl\n\
 - .studio/spec/index.md if it exists\n\n\
 Rules:\n\
 - Do not ask the user to paste prior CLI history unless these files are insufficient.\n\
 - Treat .studio/spec as durable project rules.\n\
-- Treat .studio/workflow.md as the task state machine and agent contract.\n\
-- Treat .studio/runtime/tasks/{task_id} as the active runtime task snapshot.\n\
+- Treat .studio/workflow.md as the context injection contract.\n\
+- Treat .studio/runtime/active-context as the active runtime context snapshot.\n\
 - Context/spec curation is automatic; use the generated manifests before broad history recall.\n\
 - Treat SQLite/semantic recall as optional fallback only.\n\n\
 Current CLI: {}\n\
@@ -2100,10 +2264,10 @@ Access: {}\n\
     )
 }
 
-fn render_context(input: &StudioContextExportInput, task_id: &str) -> String {
+fn render_context(input: &StudioContextExportInput, context_id: &str) -> String {
     let next_action =
         clean_studio_option(input.handoff_next_step.as_deref()).unwrap_or_else(|| {
-            "Continue the current user request with the active task context.".to_string()
+            "Continue the current user request with the active context.".to_string()
         });
     let compacted_context = clean_studio_option(input.compacted_context.as_deref());
     let cross_tab_context = clean_studio_option(input.cross_tab_context.as_deref());
@@ -2114,15 +2278,15 @@ Updated: {}\n\n\
 - Name: {}\n\
 - Root: {}\n\
 - Branch: {}\n\n\
-## Active Runtime Task\n\n\
-- Path: .studio/runtime/tasks/{task_id}/\n\
-- Task: .studio/runtime/tasks/{task_id}/task.md\n\
-- Durable task: .studio/tasks/{task_id}/task.json\n\
-- PRD: .studio/tasks/{task_id}/prd.md\n\
+## Active Context\n\n\
+- Path: .studio/runtime/active-context/\n\
+- Current context: .studio/runtime/active-context/current.md\n\
+- Context JSON: .studio/runtime/active-context/context.json\n\
+- PRD: .studio/runtime/active-context/prd.md\n\
 - Workflow: .studio/workflow.md\n\
-- Context selection report: .studio/tasks/{task_id}/context-selection-report.md\n\
-- Implement manifest: .studio/runtime/tasks/{task_id}/implement.jsonl\n\
-- Check manifest: .studio/runtime/tasks/{task_id}/check.jsonl\n\n\
+- Context selection report: .studio/runtime/active-context/context-selection-report.md\n\
+- Manifest: .studio/runtime/active-context/manifest.jsonl\n\
+- Check manifest: .studio/runtime/active-context/check.jsonl\n\n\
 ## Workspace\n\n\
 - Dirty files: {}\n\
 - Failing checks: {}\n\
@@ -2132,7 +2296,7 @@ Updated: {}\n\n\
 {}\n\n\
 {}{}{}\
 ## Loading Policy\n\n\
-Start with this file, .studio/workflow.md, and the active runtime task. Load detailed spec/research files from the JSONL manifests only when needed. Avoid injecting unrelated historical chat into the current turn.\n",
+Start with this file, .studio/workflow.md, and the active context files. Load detailed spec/research files from the JSONL manifests only when needed. Avoid injecting unrelated historical chat into the current turn.\n",
         Local::now().to_rfc3339(),
         input.project_name,
         input.project_root,
@@ -2142,7 +2306,7 @@ Start with this file, .studio/workflow.md, and the active runtime task. Load det
         input.cli_id,
         input.terminal_tab_id,
         next_action,
-        render_runtime_working_memory_reference(input, task_id),
+        render_runtime_working_memory_reference(input, context_id),
         optional_section("Compacted Context", compacted_context.as_deref()),
         optional_section("Cross Tab Context", cross_tab_context.as_deref())
     )
@@ -2150,7 +2314,7 @@ Start with this file, .studio/workflow.md, and the active runtime task. Load det
 
 fn render_runtime_working_memory_reference(
     input: &StudioContextExportInput,
-    task_id: &str,
+    _context_id: &str,
 ) -> String {
     if input
         .working_memory
@@ -2162,29 +2326,29 @@ fn render_runtime_working_memory_reference(
         return String::new();
     }
     format!(
-        "## Working Memory\n\nWorking memory is intentionally not inlined here to avoid prompt pollution. Use `.studio/runtime/tasks/{task_id}/task.md`, `.studio/tasks/{task_id}/task.json`, manifests, and durable reports as the source of truth.\n\n"
+        "## Working Memory\n\nWorking memory is intentionally not inlined here to avoid prompt pollution. Use `.studio/runtime/active-context/current.md`, `.studio/runtime/active-context/context.json`, manifests, and durable reports as the source of truth.\n\n"
     )
 }
 
-fn render_task(input: &StudioContextExportInput, task_id: &str) -> String {
-    let goal = studio_task_goal(input);
+fn render_current_context(input: &StudioContextExportInput, context_id: &str) -> String {
+    let goal = studio_context_goal(input);
     let current_request = studio_current_request(input);
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
         .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
     let next_step = clean_studio_option(input.handoff_next_step.as_deref())
         .unwrap_or_else(|| "Continue from the latest user request.".to_string());
-    let files = if input.handoff_files.is_empty() {
+    let handoff_files = sanitized_handoff_files(input);
+    let files = if handoff_files.is_empty() {
         "- (none captured yet)".to_string()
     } else {
-        input
-            .handoff_files
+        handoff_files
             .iter()
             .map(|file| format!("- {file}"))
             .collect::<Vec<_>>()
             .join("\n")
     };
     format!(
-        "# Active Studio Task: {task_id}\n\n\
+        "# Active Studio Context: {context_id}\n\n\
 Updated: {}\n\n\
 ## Goal\n\n\
 {}\n\n\
@@ -2192,7 +2356,7 @@ Updated: {}\n\n\
 {}\n\n\
 ## Runtime Identity\n\n\
 - Workspace ID: {}\n\
-- Task ID: {task_id}\n\
+- Context ID: {context_id}\n\
 - Terminal tab: {}\n\
 - Current CLI: {}\n\
 - Branch: {}\n\n\
@@ -2203,15 +2367,15 @@ Updated: {}\n\n\
 ## Next Step\n\n\
 {}\n\n\
 ## Context Manifests\n\n\
-- Implement: .studio/runtime/tasks/{task_id}/implement.jsonl\n\
-- Check: .studio/runtime/tasks/{task_id}/check.jsonl\n\n\
+- Manifest: .studio/runtime/active-context/manifest.jsonl\n\
+- Check: .studio/runtime/active-context/check.jsonl\n\n\
 ## Maintenance Rules\n\n\
 - This is a generated runtime snapshot and may be overwritten.\n\
 - Promote durable rules to .studio/spec/ only when the user asks to preserve knowledge.\n\
 - Move session/process notes to .studio/workspace/ only when they should become durable memory.\n\
 ",
         Local::now().to_rfc3339(),
-        non_empty(&goal, "Continue the active task."),
+        non_empty(&goal, "Continue the active context."),
         current_request,
         input.workspace_id,
         input.terminal_tab_id,
@@ -2223,22 +2387,23 @@ Updated: {}\n\n\
     )
 }
 
-fn render_durable_task_json(
+fn render_active_context_json(
     input: &StudioContextExportInput,
-    task_id: &str,
+    context_id: &str,
     active_tab_ids: &[String],
-    existing_task: Option<&Value>,
+    existing_context: Option<&Value>,
 ) -> Result<String, String> {
-    let title = studio_task_title(input);
-    let goal = studio_task_goal(input);
+    let title = studio_context_title(input);
+    let goal = studio_context_goal(input);
     let current_request = studio_current_request(input);
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref());
     let next_step = clean_studio_option(input.handoff_next_step.as_deref())
         .unwrap_or_else(|| "Continue from the latest user request.".to_string());
+    let handoff_files = sanitized_handoff_files(input);
     let mut value = serde_json::json!({
-        "id": task_id,
-        "title": non_empty(&title, "Studio Task"),
-        "status": infer_task_status(input),
+        "id": context_id,
+        "title": non_empty(&title, "Active Context"),
+        "status": infer_context_phase(input),
         "workflow": ".studio/workflow.md",
         "phaseOrder": ["planning", "context_curated", "implementing", "checking", "memory_distilled", "completed"],
         "agents": {
@@ -2251,7 +2416,7 @@ fn render_durable_task_json(
         },
         "projectName": input.project_name.as_str(),
         "workspaceId": input.workspace_id.as_str(),
-        "goal": non_empty(&goal, "Continue the active task."),
+        "goal": non_empty(&goal, "Continue the active context."),
         "currentRequest": current_request,
         "contextCurator": {
             "status": "fallback",
@@ -2259,7 +2424,7 @@ fn render_durable_task_json(
             "fallback": true,
             "reason": "Using heuristic fallback manifests until the context-curator gate completes.",
             "error": null,
-            "report": format!(".studio/tasks/{task_id}/context-selection-report.md"),
+            "report": active_context_ref("context-selection-report.md"),
             "updatedAt": Local::now().to_rfc3339(),
         },
         "terminalTabId": input.terminal_tab_id.as_str(),
@@ -2268,22 +2433,25 @@ fn render_durable_task_json(
         "branch": input.branch.as_str(),
         "latestConclusion": latest_conclusion.as_deref(),
         "nextStep": next_step,
-        "relevantFiles": input.handoff_files.as_slice(),
-        "runtimeTask": format!(".studio/runtime/tasks/{task_id}/task.md"),
-        "contextSelectionReport": format!(".studio/tasks/{task_id}/context-selection-report.md"),
-        "implementManifest": format!(".studio/runtime/tasks/{task_id}/implement.jsonl"),
-        "checkManifest": format!(".studio/runtime/tasks/{task_id}/check.jsonl"),
-        "checkerReport": format!(".studio/tasks/{task_id}/checker-report.md"),
-        "checkerRetryReport": format!(".studio/tasks/{task_id}/checker-retry-report.md"),
-        "memoryCandidates": format!(".studio/tasks/{task_id}/memory-candidates.jsonl"),
-        "memoryDistillReport": format!(".studio/tasks/{task_id}/memory-distill-report.md"),
-        "policyCheck": format!(".studio/tasks/{task_id}/policy-check.json"),
+        "relevantFiles": handoff_files,
+        "runtimeContext": active_context_ref("current.md"),
+        "contextSelectionReport": active_context_ref("context-selection-report.md"),
+        "implementManifest": active_context_ref("manifest.jsonl"),
+        "checkManifest": active_context_ref("check.jsonl"),
+        "checkerReport": active_context_ref("checker-report.md"),
+        "checkerRetryReport": active_context_ref("checker-retry-report.md"),
+        "memoryCandidates": active_context_ref("memory-candidates.jsonl"),
+        "memoryDistillReport": active_context_ref("memory-distill-report.md"),
+        "policyCheck": active_context_ref("policy-check.json"),
         "updatedAt": Local::now().to_rfc3339(),
         "studioManaged": true,
     });
     if let Some(object) = value.as_object_mut() {
         for key in ["checker", "memoryDistill", "promotion"] {
-            if let Some(existing_value) = existing_task.and_then(|task| task.get(key)).cloned() {
+            if let Some(existing_value) = existing_context
+                .and_then(|context| context.get(key))
+                .cloned()
+            {
                 object.insert(key.to_string(), existing_value);
             }
         }
@@ -2294,26 +2462,20 @@ fn render_durable_task_json(
 fn write_durable_prd_if_missing_or_polluted(
     path: &Path,
     input: &StudioContextExportInput,
-    task_id: &str,
+    context_id: &str,
 ) -> Result<(), String> {
-    if path.is_file() {
-        let current = fs::read_to_string(path).unwrap_or_default();
-        if !is_legacy_task_pollution(&current) {
-            return Ok(());
-        }
-    }
-    let goal = studio_task_goal(input);
+    let goal = studio_context_goal(input);
     let current_request = studio_current_request(input);
     let content = format!(
-        "# {task_id}\n\n## Goal\n\n{}\n\n## Current Request\n\n{}\n\n## Acceptance Criteria\n\n- Use `.studio/workflow.md` as the autonomous workflow contract.\n- Curate context automatically through `.studio/tasks/{task_id}/context-selection-report.md`.\n- Follow relevant specs/research from `implement.jsonl` and `check.jsonl`.\n- Distill durable lessons with provenance, confidence, and policy-check output.\n\n## Notes\n\nCreated by Studio Autonomous Workflow for cross-CLI continuity.\n",
-        non_empty(&goal, "Continue the active task."),
+        "# {context_id}\n\n## Goal\n\n{}\n\n## Current Request\n\n{}\n\n## Acceptance Criteria\n\n- Use `.studio/workflow.md` as the context injection contract.\n- Curate context automatically through `.studio/runtime/active-context/context-selection-report.md`.\n- Follow relevant specs/research from `manifest.jsonl` and `check.jsonl`.\n- Distill durable lessons with provenance, confidence, and policy-check output.\n\n## Notes\n\nCreated by Studio Context for cross-CLI continuity.\n",
+        non_empty(&goal, "Continue the active context."),
         current_request,
     );
     atomic_write(path, &content)
 }
 
-fn load_active_tab_ids(task_json_path: &Path, current_tab_id: &str) -> Vec<String> {
-    let mut tabs = read_json_file(task_json_path)
+fn load_active_tab_ids(context_json_path: &Path, current_tab_id: &str) -> Vec<String> {
+    let mut tabs = read_json_file(context_json_path)
         .ok()
         .and_then(|value| value.get("activeTabIds").cloned())
         .and_then(|value| value.as_array().cloned())
@@ -2341,15 +2503,16 @@ fn render_memory_distill_report(
 ) -> String {
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
         .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
+    let handoff_files = sanitized_handoff_files(input);
     format!(
-        "# Memory Distill Report\n\nGenerated: {}\nTask: {task_id}\nAgent: memory-distill\nDecision: {decision}\nChecker Passed: {}\n\n## Inputs\n\n- Kernel memory entries and high-confidence facts from the Studio task kernel.\n- Latest conclusion: {}\n- Relevant files: {}\n\n## Candidate Summary\n\n- Accepted candidates: {}\n- Promotable candidates: {}\n- Rejected candidates: {}\n\n## Policy\n\nCandidates are written to `memory-candidates.jsonl`. Each accepted candidate must keep provenance and a promotion hint. Automatic durable writes are gated by `policy-check.json` and require checker pass.\n",
+        "# Memory Distill Report\n\nGenerated: {}\nContext: {task_id}\nAgent: memory-distill\nDecision: {decision}\nChecker Passed: {}\n\n## Inputs\n\n- Kernel memory entries and high-confidence facts from the Studio context kernel.\n- Latest conclusion: {}\n- Relevant files: {}\n\n## Candidate Summary\n\n- Accepted candidates: {}\n- Promotable candidates: {}\n- Rejected candidates: {}\n\n## Policy\n\nCandidates are written to `memory-candidates.jsonl`. Each accepted candidate must keep provenance and a promotion hint. Automatic durable writes are gated by `policy-check.json` and require checker pass.\n",
         Local::now().to_rfc3339(),
         if checker_passed { "yes" } else { "no" },
         latest_conclusion,
-        if input.handoff_files.is_empty() {
+        if handoff_files.is_empty() {
             "none".to_string()
         } else {
-            input.handoff_files.join(", ")
+            handoff_files.join(", ")
         },
         distill.accepted.len(),
         distill.promotable_entries,
@@ -2364,7 +2527,7 @@ fn render_policy_check_json(
 ) -> Result<String, String> {
     let value = serde_json::json!({
         "_studioManaged": true,
-        "taskId": task_id,
+        "contextId": task_id,
         "agent": "policy-check",
         "allowAutoPromote": false,
         "decision": if has_promotable_candidates { "pending_checker" } else { "hold" },
@@ -2394,7 +2557,7 @@ fn render_post_checker_policy_check_json(
 ) -> Result<String, String> {
     let value = serde_json::json!({
         "_studioManaged": true,
-        "taskId": task_id,
+        "contextId": task_id,
         "agent": "policy-check",
         "allowAutoPromote": allow_auto_promote,
         "decision": decision,
@@ -2479,11 +2642,11 @@ fn curate_context(
             .cmp(&left.score)
             .then_with(|| left.file.cmp(&right.file))
     });
-    entries.truncate(MAX_MANIFEST_ENTRIES);
+    entries.truncate(MAX_CURATED_IMPLEMENT_ENTRIES);
 
     let mut check_entries = entries.clone();
     prioritize_check_entries(&mut check_entries);
-    check_entries.truncate(MAX_MANIFEST_ENTRIES);
+    check_entries.truncate(MAX_CURATED_CHECK_ENTRIES);
 
     let implement_entries = manifest_entries_to_curated(
         entries,
@@ -2496,7 +2659,7 @@ fn curate_context(
     let report = render_curated_context_selection_report(
         task_id,
         Some(
-            "Host context-curator selected task-specific durable context from existing `.studio/spec/` and task research files.",
+            "Host context-curator selected request-specific durable context from existing `.studio/spec/` and active-context research files.",
         ),
         &implement_entries,
         &check_entries,
@@ -2549,8 +2712,7 @@ fn select_spec_manifest_entries(
     }
 
     let query = build_query_terms(input);
-    let relevant_files = input
-        .handoff_files
+    let relevant_files = sanitized_handoff_files(input)
         .iter()
         .map(|file| file.to_ascii_lowercase())
         .collect::<Vec<_>>();
@@ -2568,19 +2730,15 @@ fn select_spec_manifest_entries(
             .cmp(&left.score)
             .then_with(|| left.file.cmp(&right.file))
     });
-    entries.truncate(MAX_MANIFEST_ENTRIES);
+    entries.truncate(MAX_CURATED_SPEC_ENTRIES);
     Ok(entries)
 }
 
 fn select_research_manifest_entries(
     project_root: &Path,
-    task_id: &str,
+    _context_id: &str,
 ) -> Result<Vec<ManifestEntry>, String> {
-    let research_dir = project_root
-        .join(".studio")
-        .join("tasks")
-        .join(task_id)
-        .join("research");
+    let research_dir = active_context_dir(project_root).join("research");
     if !research_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -2591,7 +2749,7 @@ fn select_research_manifest_entries(
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
     children.sort();
-    for path in children.into_iter().take(MAX_MANIFEST_ENTRIES) {
+    for path in children.into_iter().take(MAX_CURATED_RESEARCH_ENTRIES) {
         if path.extension().and_then(|value| value.to_str()) != Some("md") {
             continue;
         }
@@ -2602,7 +2760,8 @@ fn select_research_manifest_entries(
             .replace('\\', "/");
         entries.push(ManifestEntry {
             file: relative,
-            reason: "Task research artifact produced for autonomous context curation.".to_string(),
+            reason: "Active-context research artifact produced for automatic context curation."
+                .to_string(),
             score: 25,
         });
     }
@@ -2630,7 +2789,7 @@ fn prioritize_check_entries(entries: &mut [ManifestEntry]) {
     });
 }
 
-fn infer_task_status(input: &StudioContextExportInput) -> &'static str {
+fn infer_context_phase(input: &StudioContextExportInput) -> &'static str {
     if input.write_mode {
         "implementing"
     } else {
@@ -2679,12 +2838,9 @@ fn collect_spec_entries(
             .replace('\\', "/");
         let content = fs::read_to_string(&path).unwrap_or_default();
         let score = score_spec_candidate(&relative, &content, query, relevant_files);
-        if score > 0 || name == "index.md" {
-            let reason = if score > 0 {
-                format!("Matched current task, files, or request terms (score {score}).")
-            } else {
-                "Spec index for discovering durable project rules.".to_string()
-            };
+        if score >= MIN_SPEC_MATCH_SCORE {
+            let reason =
+                format!("Matched current request, files, or request terms (score {score}).");
             entries.push(ManifestEntry {
                 file: relative,
                 reason,
@@ -2707,8 +2863,8 @@ fn build_query_terms(input: &StudioContextExportInput) -> HashSet<String> {
             terms.insert(token);
         }
     }
-    for file in &input.handoff_files {
-        for token in tokenize(file) {
+    for file in sanitized_handoff_files(input) {
+        for token in tokenize(&file) {
             terms.insert(token);
         }
     }
@@ -2720,6 +2876,7 @@ fn tokenize(value: &str) -> Vec<String> {
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
         .map(|token| token.trim_matches('-').to_ascii_lowercase())
         .filter(|token| token.chars().count() >= 3)
+        .filter(|token| !is_generic_context_term(token))
         .take(80)
         .collect()
 }
@@ -2987,37 +3144,37 @@ fn normalize_curator_file(file: &str) -> Result<String, String> {
     Ok(normalized.trim_start_matches("./").to_string())
 }
 
-fn is_allowed_curator_file(task_id: &str, file: &str) -> bool {
-    let task_research_prefix = format!(".studio/tasks/{task_id}/research/");
-    (file.starts_with(".studio/spec/") || file.starts_with(&task_research_prefix))
+fn is_allowed_curator_file(_context_id: &str, file: &str) -> bool {
+    let active_research_prefix = ".studio/runtime/active-context/research/";
+    (file.starts_with(".studio/spec/") || file.starts_with(active_research_prefix))
         && file.ends_with(".md")
 }
 
 fn render_curated_context_selection_report(
-    task_id: &str,
+    context_id: &str,
     curator_report: Option<&str>,
     implement_entries: &[CuratedManifestEntry],
     check_entries: &[CuratedManifestEntry],
 ) -> String {
     format!(
-        "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: Studio context-curator\nStatus: curated\nMode: host-curated\nStrategy: Trellis-class automatic curated projection.\n\n## Curator Summary\n\n{}\n\n## Implement Manifest\n\n{}\n\n## Check Manifest\n\n{}\n\n## Policy Gates\n\n- Context curation ran automatically; no human approval was required.\n- Curator output was host-validated before writing manifests.\n- Only existing `.studio/spec/**/*.md` and task research files were accepted.\n- Source files and absolute/parent paths were rejected.\n",
+        "# Context Selection Report\n\nGenerated: {}\nContext: {context_id}\nCurator: Studio context-curator\nStatus: curated\nMode: host-curated\nStrategy: automatic active-context projection.\n\n## Curator Summary\n\n{}\n\n## Manifest\n\n{}\n\n## Check Manifest\n\n{}\n\n## Policy Gates\n\n- Context curation ran automatically; no human approval was required.\n- Curator output was host-validated before writing manifests.\n- Only existing `.studio/spec/**/*.md` and active-context research files were accepted.\n- Source files and absolute/parent paths were rejected.\n",
         Local::now().to_rfc3339(),
         curator_report
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("Curator selected task-specific durable context."),
+            .unwrap_or("Curator selected request-specific durable context."),
         render_curated_report_entries(implement_entries),
         render_curated_report_entries(check_entries),
     )
 }
 
 fn render_context_curator_fallback_report(
-    task_id: &str,
+    context_id: &str,
     reason: &str,
     error_summary: Option<&str>,
 ) -> String {
     format!(
-        "# Context Selection Report\n\nGenerated: {}\nTask: {task_id}\nCurator: context-curator gate\nStatus: fallback\nMode: heuristic-fallback\n\n## Fallback Reason\n\n{}\n\n## Curator Error Summary\n\n{}\n\n## Active Manifest Policy\n\n- `implement.jsonl` and `check.jsonl` remain usable, but they are explicitly heuristic fallback projections.\n- Curated manifests are applied only after Studio validates existing spec/research paths from host or agent curation.\n- Full curator transcripts are intentionally not persisted in durable Studio context.\n- The UI must show this gate as fallback until a later curator run succeeds.\n",
+        "# Context Selection Report\n\nGenerated: {}\nContext: {context_id}\nCurator: context-curator gate\nStatus: fallback\nMode: heuristic-fallback\n\n## Fallback Reason\n\n{}\n\n## Curator Error Summary\n\n{}\n\n## Active Manifest Policy\n\n- `manifest.jsonl` and `check.jsonl` remain usable, but they are explicitly heuristic fallback projections.\n- Curated manifests are applied only after Studio validates existing spec/research paths from host or agent curation.\n- Full curator transcripts are intentionally not persisted in durable Studio context.\n- The UI must show this gate as fallback until a later curator run succeeds.\n",
         Local::now().to_rfc3339(),
         non_empty(reason.trim(), "Context-curator did not complete."),
         error_summary
@@ -3139,7 +3296,7 @@ fn render_checker_report(
             .join("\n")
     };
     format!(
-        "# Checker Report\n\nGenerated: {checked_at}\nTask: {task_id}\nStatus: {status}\nNeeds Retry: {}\nRetry Performed: no\n\n## Summary\n\n{}\n\n## Issues\n\n{}\n",
+        "# Checker Report\n\nGenerated: {checked_at}\nContext: {task_id}\nStatus: {status}\nNeeds Retry: {}\nRetry Performed: no\n\n## Summary\n\n{}\n\n## Issues\n\n{}\n",
         if needs_retry { "yes" } else { "no" },
         summary,
         issue_lines,
@@ -3153,7 +3310,7 @@ fn render_checker_retry_report(
     completed_at: &str,
 ) -> String {
     format!(
-        "# Checker Retry Report\n\nGenerated: {completed_at}\nTask: {task_id}\nStatus: {status}\n\n## Output\n\n{}\n",
+        "# Checker Retry Report\n\nGenerated: {completed_at}\nContext: {task_id}\nStatus: {status}\n\n## Output\n\n{}\n",
         non_empty(
             &trim_to_limit(raw_output, MAX_OPTIONAL_SECTION_CHARS),
             "Retry produced no output."
@@ -3186,11 +3343,11 @@ fn update_checker_task_state(
     );
     object.insert(
         "checkerReport".to_string(),
-        Value::String(format!(".studio/tasks/{task_id}/checker-report.md")),
+        Value::String(active_context_ref("checker-report.md")),
     );
     object.insert(
         "checkerRetryReport".to_string(),
-        Value::String(format!(".studio/tasks/{task_id}/checker-retry-report.md")),
+        Value::String(active_context_ref("checker-retry-report.md")),
     );
     object.insert(
         "checker".to_string(),
@@ -3203,7 +3360,7 @@ fn update_checker_task_state(
             "retryStatus": null,
             "retryReport": null,
             "checkedAt": checked_at,
-            "report": format!(".studio/tasks/{task_id}/checker-report.md"),
+            "report": active_context_ref("checker-report.md"),
         }),
     );
     object.insert(
@@ -3240,9 +3397,7 @@ fn update_context_curator_task_state(
     );
     object.insert(
         "contextSelectionReport".to_string(),
-        Value::String(format!(
-            ".studio/tasks/{task_id}/context-selection-report.md"
-        )),
+        Value::String(active_context_ref("context-selection-report.md")),
     );
     object.insert(
         "contextCurator".to_string(),
@@ -3252,7 +3407,7 @@ fn update_context_curator_task_state(
             "fallback": fallback,
             "reason": reason,
             "error": error,
-            "report": format!(".studio/tasks/{task_id}/context-selection-report.md"),
+            "report": active_context_ref("context-selection-report.md"),
             "updatedAt": updated_at,
         }),
     );
@@ -3300,7 +3455,7 @@ fn update_checker_retry_task_state(
     checker_object.insert("retryStatus".to_string(), Value::String(status.to_string()));
     checker_object.insert(
         "retryReport".to_string(),
-        Value::String(format!(".studio/tasks/{task_id}/checker-retry-report.md")),
+        Value::String(active_context_ref("checker-retry-report.md")),
     );
     checker_object.insert(
         "retryCompletedAt".to_string(),
@@ -3342,15 +3497,15 @@ fn update_memory_distill_task_state(
     }
     object.insert(
         "memoryCandidates".to_string(),
-        Value::String(format!(".studio/tasks/{task_id}/memory-candidates.jsonl")),
+        Value::String(active_context_ref("memory-candidates.jsonl")),
     );
     object.insert(
         "memoryDistillReport".to_string(),
-        Value::String(format!(".studio/tasks/{task_id}/memory-distill-report.md")),
+        Value::String(active_context_ref("memory-distill-report.md")),
     );
     object.insert(
         "policyCheck".to_string(),
-        Value::String(format!(".studio/tasks/{task_id}/policy-check.json")),
+        Value::String(active_context_ref("policy-check.json")),
     );
     object.insert(
         "memoryDistill".to_string(),
@@ -3359,8 +3514,8 @@ fn update_memory_distill_task_state(
             "promotableEntries": promotable_entries,
             "decision": decision,
             "checkerPassed": checker_passed,
-            "report": format!(".studio/tasks/{task_id}/memory-distill-report.md"),
-            "policyCheck": format!(".studio/tasks/{task_id}/policy-check.json"),
+            "report": active_context_ref("memory-distill-report.md"),
+            "policyCheck": active_context_ref("policy-check.json"),
             "updatedAt": updated_at,
         }),
     );
@@ -3390,7 +3545,7 @@ fn update_promotion_task_state(
     object.insert("status".to_string(), Value::String("completed".to_string()));
     object.insert(
         "promotionReport".to_string(),
-        Value::String(format!(".studio/tasks/{task_id}/promotion-report.md")),
+        Value::String(active_context_ref("promotion-report.md")),
     );
     object.insert(
         "promotion".to_string(),
@@ -3409,7 +3564,7 @@ fn update_promotion_task_state(
 
 fn append_checker_retry_to_report(
     checker_report_path: &Path,
-    task_id: &str,
+    _context_id: &str,
     status: &str,
     completed_at: &str,
 ) -> Result<(), String> {
@@ -3421,7 +3576,7 @@ fn append_checker_retry_to_report(
         return Ok(());
     }
     content.push_str(&format!(
-        "\n## Retry\n\nStatus: {status}\nPerformed: yes\nCompleted: {completed_at}\nReport: .studio/tasks/{task_id}/checker-retry-report.md\n"
+        "\n## Retry\n\nStatus: {status}\nPerformed: yes\nCompleted: {completed_at}\nReport: .studio/runtime/active-context/checker-retry-report.md\n"
     ));
     atomic_write(checker_report_path, &content)
 }
@@ -3501,8 +3656,16 @@ fn candidate_is_auto_promotable(value: &Value) -> bool {
     }
     matches!(
         kind,
-        "decision" | "constraint" | "rule" | "failure" | "checkpoint" | "progress"
-    ) || matches!(promotion_hint, "spec" | "journal")
+        "decision"
+            | "constraint"
+            | "rule"
+            | "requirement"
+            | "codebase"
+            | "risk"
+            | "failure"
+            | "checkpoint"
+            | "progress"
+    ) || matches!(promotion_hint, "spec" | "memory" | "journal")
 }
 
 fn candidate_title(value: &Value) -> String {
@@ -3519,7 +3682,7 @@ fn candidate_title(value: &Value) -> String {
     format!("{} - {}", kind, non_empty(&preview, "Studio Memory"))
 }
 
-fn render_promoted_candidate(task_id: &str, value: &Value) -> String {
+fn render_promoted_candidate(context_id: &str, value: &Value) -> String {
     let content = value
         .get("content")
         .and_then(Value::as_str)
@@ -3530,7 +3693,7 @@ fn render_promoted_candidate(task_id: &str, value: &Value) -> String {
         .unwrap_or("memory");
     let evidence = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
     format!(
-        "## Source\n\n- Task: `.studio/tasks/{task_id}`\n- Candidate type: `{candidate_type}`\n- Promoted automatically after policy-check.\n\n## Content\n\n{}\n\n## Evidence\n\n```json\n{}\n```\n",
+        "## Source\n\n- Context: `.studio/runtime/active-context`\n- Context ID: `{context_id}`\n- Candidate type: `{candidate_type}`\n- Promoted automatically after policy-check.\n\n## Content\n\n{}\n\n## Evidence\n\n```json\n{}\n```\n",
         content.trim(),
         evidence,
     )
@@ -3540,9 +3703,9 @@ impl StudioWorkflowState {
     fn empty(project_root: &str) -> Self {
         Self {
             project_root: project_root.to_string(),
-            task_id: None,
+            context_id: None,
             phase: "not_started".to_string(),
-            task_path: None,
+            context_path: None,
             prd_path: None,
             context_report_path: None,
             implement_manifest_path: None,
@@ -3584,68 +3747,6 @@ impl StudioWorkflowState {
             last_updated: None,
         }
     }
-}
-
-fn latest_task_id(project_root: &Path) -> Option<String> {
-    let tasks_dir = project_root.join(".studio").join("tasks");
-    let mut entries = fs::read_dir(tasks_dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            Some((name, modified))
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|(_, modified)| *modified);
-    entries.pop().map(|(name, _)| name)
-}
-
-fn task_id_for_terminal_tab(project_root: &Path, terminal_tab_id: &str) -> Option<String> {
-    let sessions_dir = project_root
-        .join(".studio")
-        .join("runtime")
-        .join("sessions");
-    let mut matches = fs::read_dir(sessions_dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                return None;
-            }
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            let value = read_json_file(&path).ok()?;
-            let binding_tab = value
-                .get("terminalTabId")
-                .or_else(|| value.get("terminal_tab_id"))
-                .and_then(Value::as_str)?;
-            if binding_tab != terminal_tab_id {
-                return None;
-            }
-            let task_id = value
-                .get("taskId")
-                .or_else(|| value.get("task_id"))
-                .and_then(Value::as_str)
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .or_else(|| {
-                    value
-                        .get("activeTask")
-                        .or_else(|| value.get("active_task"))
-                        .and_then(Value::as_str)
-                        .and_then(|active_task| {
-                            Path::new(active_task)
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .map(str::to_string)
-                        })
-                })?;
-            Some((task_id, modified))
-        })
-        .collect::<Vec<_>>();
-    matches.sort_by_key(|(_, modified)| *modified);
-    matches.pop().map(|(task_id, _)| task_id)
 }
 
 fn read_workflow_manifest_entries(
@@ -3722,11 +3823,11 @@ fn workflow_file_status(project_root: &Path, relative_path: &str) -> String {
 
 fn workflow_timeline(
     project_root: &Path,
-    task_id: &str,
+    context_id: &str,
     task_json: &Value,
     policy: &Value,
-    task_dir: &Path,
-    runtime_task_dir: &Path,
+    context_dir: &Path,
+    _runtime_task_dir: &Path,
     phase: &str,
     memory_candidate_entries: usize,
     memory_promotable_entries: usize,
@@ -3740,32 +3841,32 @@ fn workflow_timeline(
     let promotion = task_json.get("promotion").unwrap_or(&Value::Null);
     let mut events = Vec::new();
     events.push(StudioWorkflowTimelineEvent {
-        kind: "task".to_string(),
-        title: "Task State".to_string(),
-        summary: format!("Task {task_id} is currently in `{phase}`."),
+        kind: "context".to_string(),
+        title: "Active Context".to_string(),
+        summary: format!("Context {context_id} is currently in `{phase}`."),
         timestamp: json_string(task_json, "updatedAt")
-            .or_else(|| file_modified_at(&task_dir.join("task.json"))),
+            .or_else(|| file_modified_at(&context_dir.join("context.json"))),
         status: phase.to_string(),
-        path: Some(format!(".studio/tasks/{task_id}/task.json")),
+        path: Some(".studio/runtime/active-context/context.json".to_string()),
     });
-    if runtime_task_dir.join("task.md").is_file() {
+    if context_dir.join("current.md").is_file() {
         events.push(StudioWorkflowTimelineEvent {
             kind: "runtime".to_string(),
             title: "Runtime Projection".to_string(),
-            summary: "Generated active task context for the current CLI session.".to_string(),
-            timestamp: file_modified_at(&runtime_task_dir.join("task.md")),
+            summary: "Generated active context for the current selected CLI.".to_string(),
+            timestamp: file_modified_at(&context_dir.join("current.md")),
             status: "ready".to_string(),
-            path: Some(format!(".studio/runtime/tasks/{task_id}/task.md")),
+            path: Some(".studio/runtime/active-context/current.md".to_string()),
         });
     }
-    if task_dir.join("context-selection-report.md").is_file() {
+    if context_dir.join("context-selection-report.md").is_file() {
         let context_status =
             json_string(context_curator, "status").unwrap_or_else(|| "fallback".to_string());
         let context_summary = json_string(context_curator, "reason").unwrap_or_else(|| {
             format!(
-                "Projection contains {} implement and {} check entries.",
-                count_jsonl_entries(&task_dir.join("implement.jsonl")),
-                count_jsonl_entries(&task_dir.join("check.jsonl"))
+                "Projection contains {} manifest and {} check entries.",
+                count_jsonl_entries(&context_dir.join("manifest.jsonl")),
+                count_jsonl_entries(&context_dir.join("check.jsonl"))
             )
         });
         events.push(StudioWorkflowTimelineEvent {
@@ -3777,14 +3878,12 @@ fn workflow_timeline(
             },
             summary: context_summary,
             timestamp: json_string(context_curator, "updatedAt")
-                .or_else(|| file_modified_at(&task_dir.join("context-selection-report.md"))),
+                .or_else(|| file_modified_at(&context_dir.join("context-selection-report.md"))),
             status: context_status,
-            path: Some(format!(
-                ".studio/tasks/{task_id}/context-selection-report.md"
-            )),
+            path: Some(".studio/runtime/active-context/context-selection-report.md".to_string()),
         });
     }
-    if checker.is_object() || task_dir.join("checker-report.md").is_file() {
+    if checker.is_object() || context_dir.join("checker-report.md").is_file() {
         let checker_status =
             json_string(checker, "status").unwrap_or_else(|| "reported".to_string());
         events.push(StudioWorkflowTimelineEvent {
@@ -3793,16 +3892,16 @@ fn workflow_timeline(
             summary: json_string(checker, "summary")
                 .unwrap_or_else(|| "Checker report is available.".to_string()),
             timestamp: json_string(checker, "checkedAt")
-                .or_else(|| file_modified_at(&task_dir.join("checker-report.md"))),
+                .or_else(|| file_modified_at(&context_dir.join("checker-report.md"))),
             status: checker_status,
-            path: Some(format!(".studio/tasks/{task_id}/checker-report.md")),
+            path: Some(".studio/runtime/active-context/checker-report.md".to_string()),
         });
     }
     if checker
         .get("retryPerformed")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        || task_dir.join("checker-retry-report.md").is_file()
+        || context_dir.join("checker-retry-report.md").is_file()
     {
         events.push(StudioWorkflowTimelineEvent {
             kind: "checker_retry".to_string(),
@@ -3810,12 +3909,12 @@ fn workflow_timeline(
             summary: json_string(checker, "retrySummary")
                 .unwrap_or_else(|| "Retry report recorded for checker feedback.".to_string()),
             timestamp: json_string(checker, "retryCompletedAt")
-                .or_else(|| file_modified_at(&task_dir.join("checker-retry-report.md"))),
+                .or_else(|| file_modified_at(&context_dir.join("checker-retry-report.md"))),
             status: json_string(checker, "retryStatus").unwrap_or_else(|| "reported".to_string()),
-            path: Some(format!(".studio/tasks/{task_id}/checker-retry-report.md")),
+            path: Some(".studio/runtime/active-context/checker-retry-report.md".to_string()),
         });
     }
-    if memory_distill.is_object() || task_dir.join("memory-candidates.jsonl").is_file() {
+    if memory_distill.is_object() || context_dir.join("memory-candidates.jsonl").is_file() {
         events.push(StudioWorkflowTimelineEvent {
             kind: "memory".to_string(),
             title: "Memory Distilled".to_string(),
@@ -3824,25 +3923,25 @@ fn workflow_timeline(
                 memory_candidate_entries, memory_promotable_entries, memory_rejected_entries
             ),
             timestamp: json_string(memory_distill, "updatedAt")
-                .or_else(|| file_modified_at(&task_dir.join("memory-distill-report.md"))),
+                .or_else(|| file_modified_at(&context_dir.join("memory-distill-report.md"))),
             status: json_string(memory_distill, "decision")
                 .unwrap_or_else(|| "candidate".to_string()),
-            path: Some(format!(".studio/tasks/{task_id}/memory-distill-report.md")),
+            path: Some(".studio/runtime/active-context/memory-distill-report.md".to_string()),
         });
     }
-    if policy.is_object() || task_dir.join("policy-check.json").is_file() {
+    if policy.is_object() || context_dir.join("policy-check.json").is_file() {
         events.push(StudioWorkflowTimelineEvent {
             kind: "policy".to_string(),
             title: "Policy Check".to_string(),
             summary: json_string(policy, "reason")
                 .unwrap_or_else(|| "Policy check file is available.".to_string()),
             timestamp: json_string(policy, "updatedAt")
-                .or_else(|| file_modified_at(&task_dir.join("policy-check.json"))),
+                .or_else(|| file_modified_at(&context_dir.join("policy-check.json"))),
             status: json_string(policy, "decision").unwrap_or_else(|| "pending".to_string()),
-            path: Some(format!(".studio/tasks/{task_id}/policy-check.json")),
+            path: Some(".studio/runtime/active-context/policy-check.json".to_string()),
         });
     }
-    if promotion.is_object() || task_dir.join("promotion-report.md").is_file() {
+    if promotion.is_object() || context_dir.join("promotion-report.md").is_file() {
         events.push(StudioWorkflowTimelineEvent {
             kind: "promotion".to_string(),
             title: "Promotion".to_string(),
@@ -3851,9 +3950,9 @@ fn workflow_timeline(
                 promotion_promoted, promotion_skipped
             ),
             timestamp: json_string(promotion, "updatedAt")
-                .or_else(|| file_modified_at(&task_dir.join("promotion-report.md"))),
+                .or_else(|| file_modified_at(&context_dir.join("promotion-report.md"))),
             status: json_string(promotion, "decision").unwrap_or_else(|| "reported".to_string()),
-            path: Some(format!(".studio/tasks/{task_id}/promotion-report.md")),
+            path: Some(".studio/runtime/active-context/promotion-report.md".to_string()),
         });
     }
     let runtime_context_path = project_root
@@ -3948,70 +4047,70 @@ fn read_report_preview(path: &Path) -> Option<String> {
 
 fn workflow_artifacts(
     project_root: &Path,
-    task_id: &str,
-    task_dir: &Path,
-    runtime_task_dir: &Path,
+    _context_id: &str,
+    context_dir: &Path,
+    _runtime_task_dir: &Path,
 ) -> Vec<StudioWorkflowArtifact> {
     let items: Vec<(&str, PathBuf, String)> = vec![
         (
-            "Task JSON",
-            task_dir.join("task.json"),
-            format!(".studio/tasks/{task_id}/task.json"),
+            "Context JSON",
+            context_dir.join("context.json"),
+            ".studio/runtime/active-context/context.json".to_string(),
         ),
         (
-            "Runtime Task",
-            runtime_task_dir.join("task.md"),
-            format!(".studio/runtime/tasks/{task_id}/task.md"),
+            "Current Context",
+            context_dir.join("current.md"),
+            ".studio/runtime/active-context/current.md".to_string(),
         ),
         (
             "PRD",
-            task_dir.join("prd.md"),
-            format!(".studio/tasks/{task_id}/prd.md"),
+            context_dir.join("prd.md"),
+            ".studio/runtime/active-context/prd.md".to_string(),
         ),
         (
             "Context Report",
-            task_dir.join("context-selection-report.md"),
-            format!(".studio/tasks/{task_id}/context-selection-report.md"),
+            context_dir.join("context-selection-report.md"),
+            ".studio/runtime/active-context/context-selection-report.md".to_string(),
         ),
         (
-            "Implement Manifest",
-            task_dir.join("implement.jsonl"),
-            format!(".studio/tasks/{task_id}/implement.jsonl"),
+            "Manifest",
+            context_dir.join("manifest.jsonl"),
+            ".studio/runtime/active-context/manifest.jsonl".to_string(),
         ),
         (
             "Check Manifest",
-            task_dir.join("check.jsonl"),
-            format!(".studio/tasks/{task_id}/check.jsonl"),
+            context_dir.join("check.jsonl"),
+            ".studio/runtime/active-context/check.jsonl".to_string(),
         ),
         (
             "Checker Report",
-            task_dir.join("checker-report.md"),
-            format!(".studio/tasks/{task_id}/checker-report.md"),
+            context_dir.join("checker-report.md"),
+            ".studio/runtime/active-context/checker-report.md".to_string(),
         ),
         (
             "Checker Retry",
-            task_dir.join("checker-retry-report.md"),
-            format!(".studio/tasks/{task_id}/checker-retry-report.md"),
+            context_dir.join("checker-retry-report.md"),
+            ".studio/runtime/active-context/checker-retry-report.md".to_string(),
         ),
         (
             "Memory Distill",
-            task_dir.join("memory-distill-report.md"),
-            format!(".studio/tasks/{task_id}/memory-distill-report.md"),
+            context_dir.join("memory-distill-report.md"),
+            ".studio/runtime/active-context/memory-distill-report.md".to_string(),
         ),
         (
             "Memory Candidates",
-            task_dir.join("memory-candidates.jsonl"),
-            format!(".studio/tasks/{task_id}/memory-candidates.jsonl"),
+            context_dir.join("memory-candidates.jsonl"),
+            ".studio/runtime/active-context/memory-candidates.jsonl".to_string(),
         ),
         (
             "Policy Check",
-            task_dir.join("policy-check.json"),
-            format!(".studio/tasks/{task_id}/policy-check.json"),
+            context_dir.join("policy-check.json"),
+            ".studio/runtime/active-context/policy-check.json".to_string(),
         ),
         (
             "Promotion Report",
-            task_dir.join("promotion-report.md"),
-            format!(".studio/tasks/{task_id}/promotion-report.md"),
+            context_dir.join("promotion-report.md"),
+            ".studio/runtime/active-context/promotion-report.md".to_string(),
         ),
         (
             "Runtime Context",
@@ -4127,6 +4226,149 @@ fn list_markdown_files(dir: &Path) -> Result<Vec<String>, String> {
         .collect::<Vec<_>>();
     files.sort();
     Ok(files)
+}
+
+fn compute_shared_context_version(
+    project_root: &Path,
+    previous_binding: Option<&Value>,
+) -> Result<StudioSharedContextVersion, String> {
+    let active_context_dir = active_context_dir(project_root);
+    let spec_version =
+        hash_directory_tree(project_root, &project_root.join(".studio").join("spec"))?;
+    let workspace_version = hash_directory_tree(
+        project_root,
+        &project_root.join(".studio").join("workspace"),
+    )?;
+    let manifest_version = hash_file_set(
+        project_root,
+        &[
+            active_context_dir.join("manifest.jsonl"),
+            active_context_dir.join("check.jsonl"),
+        ],
+    )?;
+    let research_version = hash_directory_tree(project_root, &active_context_dir.join("research"))?;
+    let version = hash_strings(&[
+        spec_version.as_str(),
+        workspace_version.as_str(),
+        manifest_version.as_str(),
+        research_version.as_str(),
+    ]);
+
+    let previous_shared_context = previous_binding.and_then(|binding| binding.get("sharedContext"));
+    let mut changed_layers = Vec::new();
+    if let Some(previous) = previous_shared_context {
+        if json_string(previous, "specVersion").as_deref() != Some(spec_version.as_str()) {
+            changed_layers.push("spec".to_string());
+        }
+        if json_string(previous, "workspaceVersion").as_deref() != Some(workspace_version.as_str())
+        {
+            changed_layers.push("memory".to_string());
+        }
+        if json_string(previous, "manifestVersion").as_deref() != Some(manifest_version.as_str()) {
+            changed_layers.push("active-context".to_string());
+        }
+        if json_string(previous, "researchVersion").as_deref() != Some(research_version.as_str()) {
+            changed_layers.push("research".to_string());
+        }
+    }
+
+    Ok(StudioSharedContextVersion {
+        version: version.clone(),
+        spec_version,
+        workspace_version,
+        manifest_version,
+        research_version,
+        changed_layers: changed_layers.clone(),
+        version_hint: render_shared_context_version_hint(&version, &changed_layers),
+    })
+}
+
+fn render_shared_context_version_hint(version: &str, changed_layers: &[String]) -> String {
+    let layers = if changed_layers.is_empty() {
+        "shared context".to_string()
+    } else {
+        changed_layers.join(", ")
+    };
+    format!(
+        "Studio shared context updated to `{version}`. Changed layers: {layers}. Reload `.studio/runtime/context.md`, `.studio/spec/index.md`, `.studio/workspace/index.md`, and the latest active-context manifest references before continuing."
+    )
+}
+
+fn hash_directory_tree(project_root: &Path, dir: &Path) -> Result<String, String> {
+    if !dir.is_dir() {
+        return Ok("none".to_string());
+    }
+    let mut files = Vec::new();
+    collect_regular_files(dir, &mut files)?;
+    hash_file_set(project_root, &files)
+}
+
+fn collect_regular_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut children = fs::read_dir(dir)
+        .map_err(|err| err.to_string())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    children.sort();
+    for path in children {
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_regular_files(&path, files)?;
+            continue;
+        }
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn hash_file_set(project_root: &Path, files: &[PathBuf]) -> Result<String, String> {
+    if files.is_empty() {
+        return Ok("none".to_string());
+    }
+    let mut state = 0xcbf29ce484222325u64;
+    for path in files {
+        if !path.is_file() {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(project_root)
+            .unwrap_or(path.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        fnv1a_update(&mut state, relative.as_bytes());
+        fnv1a_update(&mut state, b"\0");
+        let content = fs::read(path).map_err(|err| err.to_string())?;
+        fnv1a_update(&mut state, &content);
+        fnv1a_update(&mut state, b"\0");
+    }
+    Ok(format!("{state:016x}"))
+}
+
+fn hash_strings(values: &[&str]) -> String {
+    let mut state = 0xcbf29ce484222325u64;
+    for value in values {
+        fnv1a_update(&mut state, value.as_bytes());
+        fnv1a_update(&mut state, b"\0");
+    }
+    format!("{state:016x}")
+}
+
+fn fnv1a_update(state: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *state ^= u64::from(*byte);
+        *state = state.wrapping_mul(0x100000001b3);
+    }
 }
 
 fn count_jsonl_entries(path: &Path) -> usize {
@@ -4267,7 +4509,7 @@ fn ensure_native_cli_hooks(project_root: &Path) -> Result<Vec<String>, String> {
             ".codex/agents/studio-implement.toml",
             render_codex_agent(
                 "studio-implement",
-                "Implementation agent. Reads PRD plus implement.jsonl and performs the code change.",
+                "Implementation agent. Reads PRD plus manifest.jsonl and performs the code change.",
             ),
         ),
         (
@@ -4281,7 +4523,7 @@ fn ensure_native_cli_hooks(project_root: &Path) -> Result<Vec<String>, String> {
             ".codex/agents/studio-research.toml",
             render_codex_agent(
                 "studio-research",
-                "Research agent. Writes research artifacts under .studio/tasks/<task-id>/research/.",
+                "Research agent. Writes research artifacts under .studio/runtime/active-context/research/.",
             ),
         ),
         (".claude/settings.json", render_claude_settings_json()),
@@ -4299,7 +4541,7 @@ fn ensure_native_cli_hooks(project_root: &Path) -> Result<Vec<String>, String> {
             render_markdown_agent(
                 "studio-implement",
                 "Implementation agent",
-                "Read `.studio/tasks/<task-id>/prd.md` and `.studio/runtime/tasks/<task-id>/implement.jsonl` before editing.",
+                "Read `.studio/runtime/active-context/prd.md` and `.studio/runtime/active-context/manifest.jsonl` before editing.",
             ),
         ),
         (
@@ -4307,7 +4549,7 @@ fn ensure_native_cli_hooks(project_root: &Path) -> Result<Vec<String>, String> {
             render_markdown_agent(
                 "studio-check",
                 "Checker agent",
-                "Read `.studio/tasks/<task-id>/prd.md` and `.studio/runtime/tasks/<task-id>/check.jsonl`, then report failures before approval.",
+                "Read `.studio/runtime/active-context/prd.md` and `.studio/runtime/active-context/check.jsonl`, then report failures before approval.",
             ),
         ),
         (
@@ -4315,7 +4557,7 @@ fn ensure_native_cli_hooks(project_root: &Path) -> Result<Vec<String>, String> {
             render_markdown_agent(
                 "studio-research",
                 "Research agent",
-                "Write focused research notes under `.studio/tasks/<task-id>/research/`; do not inline long research in the main session.",
+                "Write focused research notes under `.studio/runtime/active-context/research/`; do not inline long research in the main session.",
             ),
         ),
         (".gemini/settings.json", render_gemini_settings_json()),
@@ -4333,7 +4575,7 @@ fn ensure_native_cli_hooks(project_root: &Path) -> Result<Vec<String>, String> {
             render_markdown_agent(
                 "studio-implement",
                 "Implementation agent",
-                "Read `.studio/tasks/<task-id>/prd.md` and `.studio/runtime/tasks/<task-id>/implement.jsonl` before editing.",
+                "Read `.studio/runtime/active-context/prd.md` and `.studio/runtime/active-context/manifest.jsonl` before editing.",
             ),
         ),
         (
@@ -4341,7 +4583,7 @@ fn ensure_native_cli_hooks(project_root: &Path) -> Result<Vec<String>, String> {
             render_markdown_agent(
                 "studio-check",
                 "Checker agent",
-                "Read `.studio/tasks/<task-id>/prd.md` and `.studio/runtime/tasks/<task-id>/check.jsonl`, then report failures before approval.",
+                "Read `.studio/runtime/active-context/prd.md` and `.studio/runtime/active-context/check.jsonl`, then report failures before approval.",
             ),
         ),
         (
@@ -4349,7 +4591,7 @@ fn ensure_native_cli_hooks(project_root: &Path) -> Result<Vec<String>, String> {
             render_markdown_agent(
                 "studio-research",
                 "Research agent",
-                "Write focused research notes under `.studio/tasks/<task-id>/research/`; do not inline long research in the main session.",
+                "Write focused research notes under `.studio/runtime/active-context/research/`; do not inline long research in the main session.",
             ),
         ),
     ];
@@ -4452,13 +4694,13 @@ fn render_gemini_settings_json() -> String {
 
 fn render_codex_agent(name: &str, description: &str) -> String {
     format!(
-        "# Studio Context Native Hook agent\nname = \"{name}\"\ndescription = \"{description}\"\n\ninstructions = \"\"\"\nUse `.studio/workflow.md` as the state machine. Read `.studio/runtime/context.md` first, then the active task files and JSONL manifests referenced there. Keep context small and prefer file references. Durable `.studio/spec` and `.studio/workspace` updates require provenance, confidence, conflict checks, and policy-check approval.\n\"\"\"\n"
+        "# Studio Context Native Hook agent\nname = \"{name}\"\ndescription = \"{description}\"\n\ninstructions = \"\"\"\nUse `.studio/workflow.md` as the shared context contract. Read `.studio/runtime/context.md` first, then `.studio/runtime/active-context/` files and JSONL manifests referenced there. Keep context small and prefer file references. Durable `.studio/spec` and `.studio/workspace` updates require provenance, confidence, conflict checks, and policy-check approval.\n\"\"\"\n"
     )
 }
 
 fn render_markdown_agent(name: &str, title: &str, body: &str) -> String {
     format!(
-        "---\nname: {name}\ndescription: {title}. Studio Context Native Hook agent.\n---\n\n# {title}\n\n{body}\n\nFollow `.studio/workflow.md`. Load `.studio/runtime/context.md` first, then the manifest files referenced by the active task. Keep prompt context small and write durable memory only through policy-check gates.\n"
+        "---\nname: {name}\ndescription: {title}. Studio Context Native Hook agent.\n---\n\n# {title}\n\n{body}\n\nFollow `.studio/workflow.md`. Load `.studio/runtime/context.md` first, then the manifest files referenced by the active context. Keep prompt context small and write durable memory only through policy-check gates.\n"
     )
 }
 
@@ -4490,7 +4732,7 @@ fn should_write_managed_file(path: &Path) -> Result<bool, String> {
 
 fn render_adapter(cli_name: &str) -> String {
     format!(
-        "{STUDIO_MANAGED_MARKER}\n# Studio Context Adapter for {cli_name}\n\nThis project uses Multi CLI Studio Autonomous Workflow.\n\n## Startup Rules\n\n- First read `.studio/runtime/context.md` when it exists.\n- Then read the active task file listed there.\n- Load JSONL manifest entries only when the current task needs them.\n- Treat `.studio/workflow.md` as the task state machine and agent contract.\n- Treat `.studio/spec/` as durable project rules.\n- Treat `.studio/workspace/` as durable project memory and journals.\n- Treat `.studio/runtime/` as generated runtime state that may be overwritten.\n- Context/spec curation is automatic; use `context-selection-report.md`, `implement.jsonl`, and `check.jsonl` before broad history recall.\n- Durable spec/workspace writes are allowed only through the workflow's provenance, confidence, conflict, and policy-check gates.\n- Keep prompt context small; prefer file references over pasting long history.\n"
+        "{STUDIO_MANAGED_MARKER}\n# Studio Context Adapter for {cli_name}\n\nThis project uses Multi CLI Studio shared context.\n\n## Startup Rules\n\n- First read `.studio/runtime/context.md` when it exists.\n- Then read `.studio/runtime/active-context/current.md` and `.studio/runtime/active-context/context.json`.\n- Load JSONL manifest entries only when the current request needs them.\n- Treat `.studio/workflow.md` as the shared context contract.\n- Treat `.studio/spec/` as durable project rules.\n- Treat `.studio/workspace/` as durable project memory and journals.\n- Treat `.studio/runtime/` as generated runtime state that may be overwritten.\n- Context/spec curation is automatic; use `context-selection-report.md`, `manifest.jsonl`, and `check.jsonl` before broad history recall.\n- Durable spec/workspace writes are allowed only through the workflow's provenance, confidence, conflict, and policy-check gates.\n- Keep prompt context small; prefer file references over pasting long history.\n"
     )
 }
 
@@ -4544,4 +4786,318 @@ fn update_index(dir: &Path, path: &Path, title: &str) -> Result<(), String> {
         atomic_write(&index_path, &content)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_project_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "multi-cli-studio-context-{name}-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).expect("create temp project root");
+        root
+    }
+
+    fn fixture_input(root: &Path, _context_id: &str) -> StudioContextExportInput {
+        StudioContextExportInput {
+            project_root: root.to_string_lossy().to_string(),
+            project_name: "fixture".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            context_title: Some("Implement Studio workflow contract".to_string()),
+            context_goal: Some(
+                "Keep context reusable across Codex, Claude, and Gemini.".to_string(),
+            ),
+            terminal_tab_id: "tab-1".to_string(),
+            cli_id: "codex".to_string(),
+            branch: "main".to_string(),
+            dirty_files: 0,
+            failing_checks: 0,
+            write_mode: true,
+            is_session_resuming: false,
+            user_prompt: "Implement the workflow contract.".to_string(),
+            handoff_summary: Some("Initial fixture summary.".to_string()),
+            handoff_files: vec!["src-tauri/src/studio_context.rs".to_string()],
+            handoff_next_step: Some("Run fixture checks.".to_string()),
+            compacted_context: None,
+            cross_tab_context: None,
+            working_memory: None,
+            memory_candidates: None,
+        }
+    }
+
+    fn write_fixture_file(root: &Path, relative: &str, content: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create fixture parent");
+        }
+        fs::write(path, content).expect("write fixture file");
+    }
+
+    #[test]
+    fn export_writes_session_bound_native_cli_hooks() {
+        let root = temp_project_root("hooks");
+        let export = export_studio_context(&fixture_input(&root, "task-hooks"))
+            .expect("export")
+            .expect("studio export");
+
+        assert_eq!(export.context_id, ACTIVE_CONTEXT_ID);
+        assert!(export.prelude.is_empty());
+        assert!(root
+            .join(".studio/runtime/active-context/context.json")
+            .is_file());
+        assert!(root
+            .join(".studio/runtime/active-context/current.md")
+            .is_file());
+        assert!(root.join("AGENTS.md").is_file());
+        assert!(root.join(".codex/hooks/session-start.py").is_file());
+        assert!(root
+            .join(".claude/hooks/inject-workflow-state.py")
+            .is_file());
+        assert!(root
+            .join(".gemini/hooks/inject-subagent-context.py")
+            .is_file());
+
+        let hook = fs::read_to_string(root.join(".codex/hooks/session-start.py"))
+            .expect("read codex hook");
+        assert!(hook.contains("active-context"));
+        assert!(hook.contains("hook-state"));
+
+        let binding = read_json_file(
+            &root
+                .join(".studio/runtime/sessions")
+                .join(format!("{}.json", export.context_key)),
+        )
+        .expect("read session binding");
+        assert_eq!(
+            binding.get("contextId").and_then(Value::as_str),
+            Some(ACTIVE_CONTEXT_ID)
+        );
+        assert!(binding
+            .get("sharedContext")
+            .and_then(|value| value.get("version"))
+            .and_then(Value::as_str)
+            .is_some());
+    }
+
+    #[test]
+    fn export_tracks_shared_context_versions_and_delta_layers() {
+        let root = temp_project_root("shared-context-version");
+        let input = fixture_input(&root, "task-shared-context-version");
+        let first = export_studio_context(&input)
+            .expect("first export")
+            .expect("studio export");
+        let first_binding = read_json_file(
+            &root
+                .join(".studio/runtime/sessions")
+                .join(format!("{}.json", first.context_key)),
+        )
+        .expect("first binding");
+        let first_shared = first_binding
+            .get("sharedContext")
+            .expect("first shared context");
+        let first_version =
+            json_string(first_shared, "version").expect("first shared context version");
+
+        write_fixture_file(
+            &root,
+            ".studio/workspace/memory/panel.md",
+            "# Panel\n\nShow only injected context strings.\n",
+        );
+
+        let second = export_studio_context(&input)
+            .expect("second export")
+            .expect("studio export");
+        let second_binding = read_json_file(
+            &root
+                .join(".studio/runtime/sessions")
+                .join(format!("{}.json", second.context_key)),
+        )
+        .expect("second binding");
+        let second_shared = second_binding
+            .get("sharedContext")
+            .expect("second shared context");
+        let second_version =
+            json_string(second_shared, "version").expect("second shared context version");
+        assert_ne!(first_version, second_version);
+
+        let changed_layers = second_shared
+            .get("changedLayers")
+            .and_then(Value::as_array)
+            .expect("changed layers")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(changed_layers.contains(&"memory"));
+        assert!(json_string(second_shared, "versionHint")
+            .expect("version hint")
+            .contains("Studio shared context updated"));
+    }
+
+    #[test]
+    fn export_filters_legacy_runtime_handoff_artifacts() {
+        let root = temp_project_root("handoff-sanitize");
+        write_fixture_file(
+            &root,
+            "src/components/chat/WorkspaceRightPanel.tsx",
+            "export const panel = true;\n",
+        );
+        write_fixture_file(&root, "docs/studio-context-layer-design.md", "# design\n");
+        let mut input = fixture_input(&root, "task-handoff-sanitize");
+        input.handoff_summary = Some(
+            "Keep frontend changes.\n- .studio/runtime/tasks/old/task.md\n- .studio/tasks/old/prd.md"
+                .to_string(),
+        );
+        input.handoff_files = vec![
+            root.join("src/components/chat/WorkspaceRightPanel.tsx")
+                .to_string_lossy()
+                .to_string(),
+            ".studio/runtime/tasks/old/task.md".to_string(),
+            ".studio/tasks/old/prd.md".to_string(),
+            ".studio/runtime/context.md".to_string(),
+            "./docs/studio-context-layer-design.md".to_string(),
+        ];
+
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let context = read_json_file(&root.join(".studio/runtime/active-context/context.json"))
+            .expect("read context");
+        let relevant_files = context
+            .get("relevantFiles")
+            .and_then(Value::as_array)
+            .expect("relevant files array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            relevant_files,
+            vec![
+                "src/components/chat/WorkspaceRightPanel.tsx",
+                "docs/studio-context-layer-design.md",
+            ]
+        );
+
+        let current = fs::read_to_string(root.join(".studio/runtime/active-context/current.md"))
+            .expect("read current");
+        assert!(!current.contains(".studio/runtime/tasks/"));
+        assert!(!current.contains(".studio/tasks/"));
+        assert!(!current.contains(".studio/workspace/tasks/"));
+    }
+
+    #[test]
+    fn checker_memory_and_promotion_form_durable_e2e_loop() {
+        let root = temp_project_root("memory-loop");
+        let input = fixture_input(&root, "task-memory-loop");
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let checker = apply_checker_agent_output(
+            &root.to_string_lossy(),
+            ACTIVE_CONTEXT_ID,
+            r#"{"status":"pass","summary":"Verified fixture implementation.","issues":[]}"#,
+        )
+        .expect("checker output");
+        assert_eq!(checker.status, "pass");
+
+        let candidate = r#"{"_studioManaged":true,"candidateType":"kernelFact","kind":"rule","confidence":"high","content":"Studio workflow state must stay inspectable through durable .studio files.","sourceEvidenceIds":["evidence-1"],"promotionHint":"spec","target":"spec"}"#;
+        let distill = apply_memory_distill_candidates(
+            &root.to_string_lossy(),
+            ACTIVE_CONTEXT_ID,
+            &input,
+            Some(candidate),
+            true,
+        )
+        .expect("memory distill");
+        assert!(distill.allow_auto_promote);
+        assert_eq!(distill.promotable_entries, 1);
+
+        let promotion = auto_promote_studio_memory(&root.to_string_lossy(), ACTIVE_CONTEXT_ID)
+            .expect("auto promote");
+        assert_eq!(promotion.promoted, 1);
+        assert!(promotion
+            .paths
+            .iter()
+            .any(|path| path.contains(".studio/spec")));
+        assert!(root
+            .join(".studio/runtime/active-context/promotion-report.md")
+            .is_file());
+
+        let task_json = read_json_file(&root.join(".studio/runtime/active-context/context.json"))
+            .expect("task json");
+        assert_eq!(
+            task_json.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
+    }
+
+    #[test]
+    fn memory_promotion_writes_workspace_memory_artifact() {
+        let root = temp_project_root("workspace-memory");
+        let input = fixture_input(&root, "task-workspace-memory");
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let candidate = r#"{"_studioManaged":true,"candidateType":"kernelMemory","kind":"codebase","confidence":"high","content":"WorkspaceRightPanel context view should show only the actual cross-CLI injected text.","sourceEvidenceIds":["evidence-1"],"promotionHint":"memory"}"#;
+        let distill = apply_memory_distill_candidates(
+            &root.to_string_lossy(),
+            ACTIVE_CONTEXT_ID,
+            &input,
+            Some(candidate),
+            true,
+        )
+        .expect("memory distill");
+        assert!(distill.allow_auto_promote);
+        assert_eq!(distill.promotable_entries, 1);
+
+        let promotion = auto_promote_studio_memory(&root.to_string_lossy(), ACTIVE_CONTEXT_ID)
+            .expect("auto promote");
+        assert_eq!(promotion.promoted, 1);
+        assert!(promotion
+            .paths
+            .iter()
+            .any(|path| path.contains(".studio/workspace/memory")));
+        assert!(root.join(".studio/workspace/memory/index.md").is_file());
+    }
+
+    #[test]
+    fn context_curation_selects_small_relevant_subset() {
+        let root = temp_project_root("curation-subset");
+        write_fixture_file(
+            &root,
+            "src/components/chat/WorkspaceRightPanel.tsx",
+            "export const panel = true;\n",
+        );
+        write_fixture_file(&root, "src-tauri/src/main.rs", "fn main() {}\n");
+        let mut input = fixture_input(&root, "task-curation-subset");
+        input.user_prompt =
+            "Simplify WorkspaceRightPanel active context UI and keep Codex, Claude, and Gemini on the same shared context flow."
+                .to_string();
+        input.handoff_files = vec![
+            "src/components/chat/WorkspaceRightPanel.tsx".to_string(),
+            "src-tauri/src/main.rs".to_string(),
+        ];
+
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let selected = select_spec_manifest_entries(&root, &input).expect("select spec entries");
+        assert!(!selected.is_empty());
+        assert!(selected.len() <= MAX_CURATED_SPEC_ENTRIES);
+        assert!(selected.iter().any(|entry| {
+            entry.file == ".studio/spec/frontend/index.md"
+                || entry.file == ".studio/spec/cli-adapters/index.md"
+                || entry.file == ".studio/spec/tauri-runtime/index.md"
+        }));
+        assert!(selected
+            .iter()
+            .all(|entry| entry.file != ".studio/spec/windows-runtime/index.md"));
+    }
 }

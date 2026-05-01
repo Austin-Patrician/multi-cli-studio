@@ -449,6 +449,7 @@ export function ChatConversation() {
   const [searchRefreshTick, setSearchRefreshTick] = useState(0);
   const [planExpanded, setPlanExpanded] = useState(false);
   const [retainedPlanSurface, setRetainedPlanSurface] = useState<ActivePlanSurface | null>(null);
+  const [dismissedPlanKey, setDismissedPlanKey] = useState<string | null>(null);
 
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const compiledSearch = useMemo(
@@ -529,7 +530,10 @@ export function ChatConversation() {
   );
   const planSurfaceToRender = activePlanSurface ?? retainedPlanSurface;
   const isPlanExiting = !activePlanSurface && Boolean(retainedPlanSurface);
-  const showFloatingPlan = Boolean(planSurfaceToRender) && !isSearchOpen;
+  const showFloatingPlan =
+    Boolean(planSurfaceToRender) &&
+    planSurfaceToRender?.key !== dismissedPlanKey &&
+    !isSearchOpen;
   const showStickyControls =
     showFloatingPlan || (hasHiddenMessages && showLoadOlderHint);
 
@@ -599,6 +603,7 @@ export function ChatConversation() {
     setShowLoadOlderHint(false);
     setPlanExpanded(false);
     setRetainedPlanSurface(null);
+    setDismissedPlanKey(null);
     pendingPrependScrollRef.current = null;
     searchMatchesRef.current = [];
   }, [activeTab?.id]);
@@ -998,6 +1003,11 @@ export function ChatConversation() {
                   collapsed={!planExpanded}
                   exiting={isPlanExiting}
                   onToggle={() => setPlanExpanded((current) => !current)}
+                  onDismiss={() => {
+                    setDismissedPlanKey(planSurfaceToRender.key);
+                    setPlanExpanded(false);
+                    setRetainedPlanSurface(null);
+                  }}
                 />
               ) : null}
               {hasHiddenMessages && showLoadOlderHint ? (

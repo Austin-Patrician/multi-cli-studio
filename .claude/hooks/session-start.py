@@ -75,62 +75,83 @@ def load_context(root: Path) -> str:
     return read_text(root / ".studio" / "runtime" / "context.md")
 
 
-def discover_bound_task(root: Path) -> tuple[str | None, Path | None, Path | None] | None:
-    context_id = os.environ.get("STUDIO_CONTEXT_ID", "").strip()
-    if not context_id or "/" in context_id or "\\" in context_id or ".." in context_id:
-        return None
-    binding_path = root / ".studio" / "runtime" / "sessions" / f"{context_id}.json"
-    try:
-        data = json.loads(binding_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    task_id_value = data.get("taskId") or data.get("task_id")
-    if isinstance(task_id_value, str) and task_id_value.strip():
-        task_id = Path(task_id_value.strip()).name
-        runtime_task = root / ".studio" / "runtime" / "tasks" / task_id
-        durable_task = root / ".studio" / "tasks" / task_id
-        if runtime_task.is_dir() or durable_task.is_dir():
-            return task_id, runtime_task, durable_task
-    active_task = data.get("activeTask") or data.get("active_task")
-    if not isinstance(active_task, str) or not active_task.strip():
-        return None
-    durable_task = root / active_task.strip().rstrip("/")
-    task_id = durable_task.name
-    if not task_id:
-        return None
-    runtime_task = root / ".studio" / "runtime" / "tasks" / task_id
-    if runtime_task.is_dir() or durable_task.is_dir():
-        return task_id, runtime_task, durable_task
+def discover_active_context(root: Path) -> Path | None:
+    context_dir = root / ".studio" / "runtime" / "active-context"
+    if context_dir.is_dir():
+        return context_dir
     return None
 
 
-def discover_active_task(root: Path) -> tuple[str | None, Path | None, Path | None]:
-    bound_task = discover_bound_task(root)
-    if bound_task:
-        return bound_task
-    context = load_context(root)
-    runtime_task = None
-    durable_task = None
-    for line in context.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("- Path: .studio/runtime/tasks/"):
-            runtime_task = root / stripped.split(": ", 1)[1].rstrip("/")
-        elif stripped.startswith("- Durable task: .studio/tasks/"):
-            durable_file = root / stripped.split(": ", 1)[1]
-            durable_task = durable_file.parent
-    if runtime_task and runtime_task.is_dir():
-        return runtime_task.name, runtime_task, durable_task
-    candidates = sorted(
-        (root / ".studio" / "runtime" / "tasks").glob("*/task.md"),
-        key=lambda path: path.stat().st_mtime if path.exists() else 0,
-        reverse=True,
-    )
-    if candidates:
-        task_dir = candidates[0].parent
-        return task_dir.name, task_dir, root / ".studio" / "tasks" / task_dir.name
-    return None, None, None
+def read_json(path: Path) -> dict:
+    try:
+        payload = json.loads(read_text(path, "{}"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_json(path: Path, payload: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def resolve_context_key(root: Path, input_data: dict) -> str:
+    for value in (
+        os.environ.get("STUDIO_CONTEXT_KEY"),
+        os.environ.get("STUDIO_CONTEXT_ID"),
+        input_data.get("studioContextKey"),
+        input_data.get("contextKey"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    sessions_dir = root / ".studio" / "runtime" / "sessions"
+    if not sessions_dir.is_dir():
+        return ""
+    candidates = sorted(sessions_dir.glob(f"*-{PLATFORM}.json"))
+    if not candidates:
+        return ""
+    return candidates[-1].stem
+
+
+def load_session_binding(root: Path, input_data: dict) -> dict:
+    context_key = resolve_context_key(root, input_data)
+    if not context_key:
+        return {}
+    binding = read_json(root / ".studio" / "runtime" / "sessions" / f"{context_key}.json")
+    if "contextKey" not in binding:
+        binding["contextKey"] = context_key
+    return binding
+
+
+def hook_state_path(root: Path, context_key: str) -> Path:
+    return root / ".studio" / "runtime" / "hook-state" / f"{context_key}.json"
+
+
+def load_hook_state(root: Path, context_key: str) -> dict:
+    if not context_key:
+        return {}
+    return read_json(hook_state_path(root, context_key))
+
+
+def store_hook_state(root: Path, context_key: str, version: str, mode: str) -> None:
+    if not context_key:
+        return
+    state = load_hook_state(root, context_key)
+    state["contextKey"] = context_key
+    if version:
+        state["lastPromptVersion"] = version
+    if mode == "full" and version:
+        state["lastFullVersion"] = version
+    state["lastInjectionMode"] = mode
+    write_json(hook_state_path(root, context_key), state)
+
+
+def shared_context(binding: dict) -> dict:
+    value = binding.get("sharedContext")
+    return value if isinstance(value, dict) else {}
 
 
 def read_jsonl_manifest(root: Path, manifest: Path | None, limit: int = 12) -> list[str]:
@@ -157,41 +178,40 @@ def read_jsonl_manifest(root: Path, manifest: Path | None, limit: int = 12) -> l
     return refs
 
 
-def build_session_context(root: Path) -> str:
-    task_id, runtime_task, durable_task = discover_active_task(root)
+def build_session_context(root: Path, binding: dict) -> str:
+    active_context = discover_active_context(root)
+    shared = shared_context(binding)
     parts = [
         "<studio-context-native-hook>",
         f"Platform: {PLATFORM}",
-        "Studio Context Native Hook 已注入：workflow、active task、spec/workspace 索引和 manifest 文件引用已加载。",
+        "Studio Context Native Hook 已注入：active context、spec/workspace 索引和 manifest 文件引用已加载。",
+        f"Shared context version: {shared.get('version') or 'unknown'}",
         "Rules:",
         "- Read `.studio/runtime/context.md` first; it is the active runtime snapshot.",
-        "- Treat `.studio/workflow.md` as the task state machine and agent contract.",
+        "- Treat `.studio/workflow.md` as the context injection contract.",
         "- Treat `.studio/spec/` as durable project rules and `.studio/workspace/` as durable memory.",
         "- Use manifest file references before broad history recall; keep prompt context small.",
     ]
-    if task_id:
-        parts.append(f"Active task: `{task_id}`")
     for ref in (
         ".studio/runtime/context.md",
         ".studio/workflow.md",
-        f".studio/runtime/tasks/{task_id}/task.md" if task_id else None,
-        f".studio/tasks/{task_id}/prd.md" if task_id else None,
-        f".studio/tasks/{task_id}/context-selection-report.md" if task_id else None,
-        f".studio/runtime/tasks/{task_id}/implement.jsonl" if task_id else None,
-        f".studio/runtime/tasks/{task_id}/check.jsonl" if task_id else None,
+        ".studio/runtime/active-context/current.md",
+        ".studio/runtime/active-context/prd.md",
+        ".studio/runtime/active-context/context-selection-report.md",
+        ".studio/runtime/active-context/manifest.jsonl",
+        ".studio/runtime/active-context/check.jsonl",
         ".studio/spec/index.md",
         ".studio/workspace/index.md",
     ):
         if ref:
             parts.append(f"- `{ref}`")
-    if durable_task and durable_task.is_dir():
-        research = sorted((durable_task / "research").glob("*.md"))[:8]
+    if active_context and active_context.is_dir():
+        research = sorted((active_context / "research").glob("*.md"))[:8]
         if research:
             parts.append("Research artifacts:")
             parts.extend(f"- `{path.relative_to(root)}`" for path in research)
-    if runtime_task and runtime_task.is_dir():
-        implement_refs = read_jsonl_manifest(root, runtime_task / "implement.jsonl")
-        check_refs = read_jsonl_manifest(root, runtime_task / "check.jsonl")
+        implement_refs = read_jsonl_manifest(root, active_context / "manifest.jsonl")
+        check_refs = read_jsonl_manifest(root, active_context / "check.jsonl")
         if implement_refs:
             parts.append("Implement manifest:")
             parts.extend(implement_refs)
@@ -202,27 +222,50 @@ def build_session_context(root: Path) -> str:
     return "\n".join(parts)
 
 
-def build_prompt_context(root: Path) -> str:
-    task_id, runtime_task, durable_task = discover_active_task(root)
+def build_delta_context(binding: dict) -> str:
+    shared = shared_context(binding)
+    version = shared.get("version") or "unknown"
+    changed_layers = shared.get("changedLayers")
+    if not isinstance(changed_layers, list):
+        changed_layers = []
+    layer_text = ", ".join(
+        item for item in changed_layers if isinstance(item, str) and item.strip()
+    )
     parts = [
-        "<studio-workflow-state>",
+        "<studio-context-delta>",
         f"Platform: {PLATFORM}",
-        f"Task: {task_id or 'none'}",
-        "Before responding, load the active Studio files and follow `.studio/workflow.md`.",
+        f"Shared context version: {version}",
     ]
-    if task_id:
-        parts.extend([
-            f"Runtime task: `.studio/runtime/tasks/{task_id}/task.md`",
-            f"PRD: `.studio/tasks/{task_id}/prd.md`",
-            f"Context report: `.studio/tasks/{task_id}/context-selection-report.md`",
-            f"Implement manifest: `.studio/runtime/tasks/{task_id}/implement.jsonl`",
-            f"Check manifest: `.studio/runtime/tasks/{task_id}/check.jsonl`",
-        ])
-    policy = durable_task / "policy-check.json" if durable_task else None
-    if policy and policy.is_file():
-        parts.append(f"Policy check: `{policy.relative_to(root)}`")
-    parts.append("</studio-workflow-state>")
+    if layer_text:
+        parts.append(f"Changed layers: {layer_text}")
+    hint = shared.get("versionHint")
+    if isinstance(hint, str) and hint.strip():
+        parts.append(hint.strip())
+    else:
+        parts.append(
+            "Reload `.studio/runtime/context.md` and the latest active-context manifests before continuing."
+        )
+    parts.append("</studio-context-delta>")
     return "\n".join(parts)
+
+
+def build_prompt_context(root: Path, input_data: dict) -> tuple[str, str]:
+    binding = load_session_binding(root, input_data)
+    context_key = binding.get("contextKey")
+    if not isinstance(context_key, str):
+        context_key = ""
+    version = shared_context(binding).get("version")
+    if not isinstance(version, str):
+        version = ""
+    if not context_key or not version:
+        return build_session_context(root, binding), "full"
+    state = load_hook_state(root, context_key)
+    last_prompt_version = state.get("lastPromptVersion") or state.get("lastFullVersion")
+    if not isinstance(last_prompt_version, str) or not last_prompt_version.strip():
+        return build_session_context(root, binding), "full"
+    if last_prompt_version == version:
+        return "", "none"
+    return build_delta_context(binding), "delta"
 
 
 def detect_agent_name(input_data: dict) -> str:
@@ -248,33 +291,33 @@ def detect_agent_name(input_data: dict) -> str:
 
 def build_subagent_context(root: Path, input_data: dict) -> str:
     agent = detect_agent_name(input_data)
-    task_id, runtime_task, durable_task = discover_active_task(root)
+    active_context = discover_active_context(root)
     manifest = None
-    if runtime_task:
+    if active_context:
         if "check" in agent:
-            manifest = runtime_task / "check.jsonl"
+            manifest = active_context / "check.jsonl"
         elif "research" in agent:
             manifest = None
         else:
-            manifest = runtime_task / "implement.jsonl"
+            manifest = active_context / "manifest.jsonl"
     parts = [
         "<studio-subagent-context>",
         f"Platform: {PLATFORM}",
         f"Agent: {agent or 'unknown'}",
-        f"Task: {task_id or 'none'}",
+        "Context: active-context",
         "Required files:",
     ]
-    if task_id:
-        parts.append(f"- `.studio/tasks/{task_id}/prd.md`")
-        parts.append(f"- `.studio/tasks/{task_id}/context-selection-report.md`")
+    if active_context:
+        parts.append("- `.studio/runtime/active-context/prd.md`")
+        parts.append("- `.studio/runtime/active-context/context-selection-report.md`")
     if manifest:
         parts.append(f"- `{manifest.relative_to(root)}`")
         refs = read_jsonl_manifest(root, manifest)
         if refs:
             parts.append("Selected context:")
             parts.extend(refs)
-    if durable_task and "research" in agent:
-        parts.append(f"Research output directory: `{(durable_task / 'research').relative_to(root)}`")
+    if active_context and "research" in agent:
+        parts.append(f"Research output directory: `{(active_context / 'research').relative_to(root)}`")
     parts.append("Keep output file-referenced; do not paste large unrelated history.")
     parts.append("</studio-subagent-context>")
     return "\n".join(parts)
@@ -304,10 +347,23 @@ def main() -> int:
     input_data = read_stdin_json()
     root = project_root(input_data)
     if MODE == "session":
-        return emit(build_session_context(root))
+        binding = load_session_binding(root, input_data)
+        context_key = binding.get("contextKey")
+        shared = shared_context(binding)
+        version = shared.get("version")
+        if isinstance(context_key, str) and isinstance(version, str):
+            store_hook_state(root, context_key, version, "full")
+        return emit(build_session_context(root, binding))
     if MODE == "subagent":
         return emit(build_subagent_context(root, input_data))
-    return emit(build_prompt_context(root))
+    additional_context, mode = build_prompt_context(root, input_data)
+    binding = load_session_binding(root, input_data)
+    context_key = binding.get("contextKey")
+    shared = shared_context(binding)
+    version = shared.get("version")
+    if isinstance(context_key, str) and isinstance(version, str):
+        store_hook_state(root, context_key, version, mode)
+    return emit(additional_context)
 
 
 if __name__ == "__main__":

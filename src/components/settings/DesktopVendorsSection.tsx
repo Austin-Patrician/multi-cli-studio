@@ -328,22 +328,22 @@ export function DesktopVendorsSection({
     if (activeVendorTab === "claude") {
       if (claudeConfigFile.settings.exists) {
         return manualPath
-          ? `已检测到 Claude 本地 settings.json，但仍未找到 Claude CLI 可执行文件。请检查自定义路径 \`${manualPath}\` 是否指向可执行的 \`claude\`。`
-          : "已检测到 Claude 本地 settings.json，但当前 app 运行环境里未找到 Claude CLI 可执行文件。请安装 `claude` 或在“设置”页填写正确的自定义 CLI 路径。";
+          ? `已检测到 Claude 本地 settings.json，但仍未找到 Claude CLI 可执行文件。请检查“通用设置”页中“CLI 可执行路径”里保存的路径 \`${manualPath}\` 是否指向可执行的 \`claude\`。`
+          : "已检测到 Claude 本地 settings.json，但当前 app 运行环境里未找到 Claude CLI 可执行文件。请安装 `claude`，或前往“通用设置”页的“CLI 可执行路径”填写自定义路径。";
       }
     }
 
     if (activeVendorTab === "codex") {
       if (codexConfigFiles.config.exists || codexConfigFiles.auth.exists) {
         return manualPath
-          ? `已检测到 Codex 本地配置文件，但仍未找到 Codex CLI 可执行文件。请检查自定义路径 \`${manualPath}\` 是否指向可执行的 \`codex\`。`
-          : "已检测到 Codex 本地配置文件，但当前 app 运行环境里未找到 Codex CLI 可执行文件。请安装 `codex` 或在“设置”页填写正确的自定义 CLI 路径。";
+          ? `已检测到 Codex 本地配置文件，但仍未找到 Codex CLI 可执行文件。请检查“通用设置”页中“CLI 可执行路径”里保存的路径 \`${manualPath}\` 是否指向可执行的 \`codex\`。`
+          : "已检测到 Codex 本地配置文件，但当前 app 运行环境里未找到 Codex CLI 可执行文件。请安装 `codex`，或前往“通用设置”页的“CLI 可执行路径”填写自定义路径。";
       }
     }
 
     return manualPath
-      ? `当前未检测到该 CLI。请检查自定义路径 \`${manualPath}\` 是否正确，或安装后重新刷新运行时。`
-      : "当前未检测到该 CLI。可先在“设置”页填写自定义 CLI 路径，或安装后重新刷新运行时。";
+      ? `当前未检测到该 CLI。请检查“通用设置”页中“CLI 可执行路径”里保存的路径 \`${manualPath}\` 是否正确。`
+      : "当前未检测到该 CLI。可前往“通用设置”页的“CLI 可执行路径”填写自定义路径；保存后会自动重新检测。";
   }, [
     activeAgent?.runtime.installed,
     activeVendorTab,

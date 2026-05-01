@@ -1,12 +1,14 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
 use chrono::Local;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{AgentTransportSession, ChatMessageBlock, CompactedSummary, SelectedCustomAgent};
@@ -382,7 +384,6 @@ pub struct KernelMemoryEntry {
 
 #[derive(Debug, Clone, Default)]
 pub struct EnsureTaskPacketRequest {
-    pub task_id: Option<String>,
     pub terminal_tab_id: String,
     pub workspace_id: String,
     pub project_root: String,
@@ -1713,7 +1714,7 @@ impl TerminalStorage {
 
             CREATE TABLE IF NOT EXISTS task_packets (
                 id TEXT PRIMARY KEY,
-                terminal_tab_id TEXT NOT NULL UNIQUE,
+                terminal_tab_id TEXT NOT NULL,
                 workspace_id TEXT NOT NULL,
                 project_root TEXT NOT NULL,
                 project_name TEXT NOT NULL,
@@ -1924,6 +1925,10 @@ impl TerminalStorage {
             CREATE INDEX IF NOT EXISTS idx_message_events_message_created
                 ON message_events(message_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_task_packets_workspace ON task_packets(workspace_id);
+            CREATE INDEX IF NOT EXISTS idx_task_packets_tab_updated
+                ON task_packets(terminal_tab_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_task_packets_workspace_updated
+                ON task_packets(workspace_id, project_root, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_task_tab_bindings_task
                 ON task_tab_bindings(task_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_handoff_events_task_created
@@ -2010,7 +2015,6 @@ impl TerminalStorage {
         )?;
         ensure_column_exists(conn, "handoff_events", "delivered_at", "TEXT")?;
         ensure_column_exists(conn, "handoff_events", "delivered_message_id", "TEXT")?;
-
         ensure_column_exists(
             conn,
             "kernel_facts",
@@ -2378,7 +2382,6 @@ impl TerminalStorage {
         let mut task = self.ensure_task_packet_in_tx(
             &tx,
             &EnsureTaskPacketRequest {
-                task_id: None,
                 terminal_tab_id: request.terminal_tab_id.clone(),
                 workspace_id: request.workspace_id.clone(),
                 project_root: request.project_root.clone(),
@@ -2504,7 +2507,6 @@ impl TerminalStorage {
         let mut task = self.ensure_task_packet_in_tx(
             &tx,
             &EnsureTaskPacketRequest {
-                task_id: None,
                 terminal_tab_id: update.terminal_tab_id.clone(),
                 workspace_id: update.workspace_id.clone(),
                 project_root: update.project_root.clone(),
@@ -3622,19 +3624,6 @@ impl TerminalStorage {
         conn: &Connection,
         request: &EnsureTaskPacketRequest,
     ) -> Result<TaskPacket, String> {
-        if let Some(task_id) = request
-            .task_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            if let Some(task) = self.load_task_packet_by_id(conn, task_id)? {
-                let task = self.repair_task_intent_if_polluted_in_tx(conn, task, request)?;
-                self.upsert_task_tab_binding_in_tx(conn, &task, request)?;
-                return Ok(task);
-            }
-        }
-
         if let Some(existing) =
             self.load_task_packet_by_terminal_tab(conn, &request.terminal_tab_id)?
         {
@@ -3651,13 +3640,7 @@ impl TerminalStorage {
             cleaned_initial_goal
         };
         let task = TaskPacket {
-            id: request
-                .task_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| new_id("task")),
+            id: new_id("context"),
             terminal_tab_id: request.terminal_tab_id.clone(),
             workspace_id: request.workspace_id.clone(),
             project_root: request.project_root.clone(),
@@ -3669,7 +3652,7 @@ impl TerminalStorage {
             latest_conclusion: None,
             open_questions: Vec::new(),
             risks: Vec::new(),
-            next_step: Some("Continue the active task.".to_string()),
+            next_step: Some("Continue the active context.".to_string()),
             relevant_files: Vec::new(),
             relevant_commands: Vec::new(),
             linked_session_ids: Vec::new(),
@@ -3818,7 +3801,6 @@ impl TerminalStorage {
         let legacy_task = self.load_task_packet_by_owner_terminal_tab(conn, terminal_tab_id)?;
         if let Some(task) = legacy_task.as_ref() {
             let request = EnsureTaskPacketRequest {
-                task_id: Some(task.id.clone()),
                 terminal_tab_id: terminal_tab_id.to_string(),
                 workspace_id: task.workspace_id.clone(),
                 project_root: task.project_root.clone(),
@@ -4489,6 +4471,44 @@ fn ensure_column_exists(
     );
     conn.execute(&sql, []).map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn read_json_file(path: &Path) -> Result<Value, String> {
+    let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    serde_json::from_str(&content).map_err(|err| err.to_string())
+}
+
+fn ensure_json_object(value: &mut Value) -> &mut serde_json::Map<String, Value> {
+    if !value.is_object() {
+        *value = Value::Object(serde_json::Map::new());
+    }
+    value.as_object_mut().expect("value was forced to object")
+}
+
+fn atomic_write_text(path: &Path, content: &str) -> Result<(), String> {
+    if path.exists() {
+        if let Ok(existing) = fs::read_to_string(path) {
+            if existing == content {
+                return Ok(());
+            }
+        }
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("studio-storage");
+    let temp_path = path.with_file_name(format!(
+        ".{file_name}.tmp-{}",
+        Local::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::write(&temp_path, content).map_err(|err| err.to_string())?;
+    fs::rename(&temp_path, path).map_err(|err| {
+        let _ = fs::remove_file(&temp_path);
+        err.to_string()
+    })
 }
 
 fn parse_json_default<T: DeserializeOwned + Default>(raw: String) -> T {
@@ -5473,4 +5493,50 @@ fn build_kernel_work_item_records(
     }
 
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_project_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("multi-cli-studio-{name}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create temp project root");
+        root
+    }
+
+    fn request(root: &Path, initial_goal: &str) -> EnsureTaskPacketRequest {
+        EnsureTaskPacketRequest {
+            terminal_tab_id: "tab-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            project_root: root.to_string_lossy().to_string(),
+            project_name: "fixture".to_string(),
+            cli_id: "codex".to_string(),
+            initial_goal: initial_goal.to_string(),
+        }
+    }
+
+    #[test]
+    fn explicit_new_task_text_keeps_same_active_context() {
+        let root = temp_project_root("active-context-boundary");
+        let storage = TerminalStorage::new(root.join("terminal-state.db")).expect("storage");
+
+        let first = storage
+            .ensure_task_bundle(&request(&root, "实现上下文面板"))
+            .expect("first context")
+            .task_packet;
+        let second = storage
+            .ensure_task_bundle(&request(&root, "新任务：继续实现 slash command"))
+            .expect("second context")
+            .task_packet;
+
+        assert_eq!(first.id, second.id);
+        let bound = storage
+            .load_task_context_bundle("tab-1")
+            .expect("load bound context")
+            .expect("bound context")
+            .task_packet;
+        assert_eq!(bound.id, first.id);
+        assert_eq!(bound.status, "active");
+    }
 }

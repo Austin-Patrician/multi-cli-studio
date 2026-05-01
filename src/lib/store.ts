@@ -41,6 +41,7 @@ import {
 } from "./compaction";
 import {
   buildPromptWithAttachments,
+  cliSupportsImageAttachments,
   cloneChatAttachments,
   createChatAttachment,
 } from "./chatAttachments";
@@ -73,7 +74,8 @@ const STREAM_STALE_CHECK_MS = 3000;
 const INTERRUPTED_STREAM_TEXT = "Response interrupted before completion. You can retry this prompt.";
 const PARTIAL_STREAM_TEXT = "Streaming stopped before completion. This response may be partial.";
 const GENERATED_IMAGE_DATA_URL_PATTERN = /data:(image\/(?:png|jpe?g|webp|gif|bmp|svg\+xml));base64,([A-Za-z0-9+/=\r\n]+)(?=[\s)\]}>"']|$)/gi;
-const UNSUPPORTED_IMAGE_ATTACHMENT_MESSAGE = "Only Codex currently supports image attachments. Switch to Codex before sending images.";
+const UNSUPPORTED_IMAGE_ATTACHMENT_MESSAGE =
+  "Only Codex, Claude Code, and Gemini currently support image attachments. Switch to one of them before sending images.";
 
 type PersistenceScope = "terminalState" | "chatMessages";
 
@@ -2181,6 +2183,14 @@ export const useStore = create<StoreState>((set, get) => {
   updateSettings: async (settings) => {
     const updated = await bridge.updateSettings(settings);
     set({ settings: updated });
+    if (updated.projectRoot?.trim()) {
+      try {
+        const state = await bridge.loadAppState(updated.projectRoot, true);
+        get().setAppState(state);
+      } catch {
+        // settings save should not fail if runtime refresh is temporarily unavailable
+      }
+    }
   },
 
   openWorkspaceFolder: async () => {
@@ -2905,7 +2915,7 @@ export const useStore = create<StoreState>((set, get) => {
     const attachments = cloneChatAttachments(tab.draftAttachments) ?? [];
     const targetCli = cliIdOverride ?? tab.selectedCli;
     if (!text && attachments.length === 0) return "empty";
-    if (hasImageAttachments(attachments) && targetCli !== "codex") {
+    if (hasImageAttachments(attachments) && !cliSupportsImageAttachments(targetCli)) {
       return "unsupportedAttachments";
     }
     if (state.queuedChatByTab[tabId]) return "full";
@@ -3177,7 +3187,7 @@ export const useStore = create<StoreState>((set, get) => {
       .filter((attachment) => attachment.kind === "image")
       .map((attachment) => attachment.source);
     if ((!text && draftAttachments.length === 0) || tab.status === "streaming") return;
-    if (imageAttachments.length > 0 && selectedCliForSend !== "codex") {
+    if (imageAttachments.length > 0 && !cliSupportsImageAttachments(selectedCliForSend)) {
       throw new Error(UNSUPPORTED_IMAGE_ATTACHMENT_MESSAGE);
     }
 
@@ -4720,4 +4730,3 @@ export const useStore = create<StoreState>((set, get) => {
   },
   };
 });
-

@@ -102,6 +102,7 @@ const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 const STUDIO_CONTEXT_CURATOR_TIMEOUT_MS: u64 = 45_000;
+const STUDIO_CONTEXT_KEY_ENV: &str = "STUDIO_CONTEXT_KEY";
 const STUDIO_CONTEXT_ID_ENV: &str = "STUDIO_CONTEXT_ID";
 const STUDIO_CONTEXT_LOG_ENV: &str = "STUDIO_CONTEXT_LOG";
 const SSH_ASKPASS_PASSWORD_ENV: &str = "MULTI_CLI_STUDIO_SSH_PASSWORD";
@@ -1458,6 +1459,103 @@ fn api_attachment_image_payload(
     let base64_data = encode_base64(&bytes);
     let data_url = format!("data:{};base64,{}", media_type, base64_data);
     Ok((media_type, base64_data, data_url))
+}
+
+fn cli_supports_image_attachments(cli_id: &str) -> bool {
+    matches!(cli_id, "codex" | "claude" | "gemini")
+}
+
+fn chat_prompt_image_attachment(source: &str) -> ApiChatAttachment {
+    ApiChatAttachment {
+        id: String::new(),
+        kind: "image".to_string(),
+        file_name: Path::new(source)
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| source.to_string()),
+        media_type: guess_api_image_media_type(source).map(str::to_string),
+        source: source.to_string(),
+        display_path: None,
+    }
+}
+
+fn build_claude_cli_message_content(
+    prompt: &str,
+    image_attachments: &[String],
+) -> Result<Value, String> {
+    if image_attachments.is_empty() {
+        return Ok(Value::String(prompt.to_string()));
+    }
+
+    let mut blocks = Vec::new();
+    for image_attachment in image_attachments {
+        let attachment = chat_prompt_image_attachment(image_attachment);
+        let (media_type, base64_data, data_url) = api_attachment_image_payload(&attachment)?;
+        if data_url.starts_with("http://") || data_url.starts_with("https://") {
+            blocks.push(json!({
+                "type": "image",
+                "source": {
+                    "type": "url",
+                    "url": data_url
+                }
+            }));
+            continue;
+        }
+        if media_type.is_empty() || base64_data.is_empty() {
+            return Err(format!(
+                "Claude Code requires valid image data for `{}`.",
+                attachment.file_name
+            ));
+        }
+        blocks.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64_data
+            }
+        }));
+    }
+    if !prompt.trim().is_empty() {
+        blocks.push(json!({
+            "type": "text",
+            "text": prompt
+        }));
+    }
+    Ok(Value::Array(blocks))
+}
+
+fn build_gemini_cli_prompt(
+    prompt: &str,
+    image_attachments: &[String],
+) -> Result<Vec<Value>, String> {
+    let mut parts = Vec::new();
+    if !prompt.trim().is_empty() {
+        parts.push(json!({
+            "type": "text",
+            "text": prompt
+        }));
+    }
+    for image_attachment in image_attachments {
+        let attachment = chat_prompt_image_attachment(image_attachment);
+        let (media_type, base64_data, data_url) = api_attachment_image_payload(&attachment)?;
+        if media_type.is_empty()
+            || base64_data.is_empty()
+            || data_url.starts_with("http://")
+            || data_url.starts_with("https://")
+        {
+            return Err(format!(
+                "Gemini ACP requires local/base64 image data for `{}`.",
+                attachment.file_name
+            ));
+        }
+        parts.push(json!({
+            "type": "image",
+            "mimeType": media_type,
+            "data": base64_data
+        }));
+    }
+    Ok(parts)
 }
 
 fn build_openai_api_chat_messages(messages: &[ApiChatMessage]) -> Result<Vec<Value>, String> {
@@ -3253,8 +3351,6 @@ struct WorkingMemoryPayload {
 struct ChatPromptRequest {
     cli_id: String,
     terminal_tab_id: String,
-    #[serde(default)]
-    task_id: Option<String>,
     workspace_id: String,
     assistant_message_id: String,
     prompt: String,
@@ -8628,6 +8724,7 @@ fn run_claude_headless_turn_once(
     command_path: &str,
     workspace_target: &WorkspaceTarget,
     prompt: &str,
+    image_attachments: &[String],
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
     resume_session_id: Option<String>,
@@ -8710,6 +8807,7 @@ fn run_claude_headless_turn_once(
         .take()
         .ok_or_else(|| "Failed to capture Claude stderr".to_string())?;
 
+    let message_content = build_claude_cli_message_content(prompt, image_attachments)?;
     write_line_json_message_shared(
         &stdin,
         &json!({
@@ -8717,7 +8815,7 @@ fn run_claude_headless_turn_once(
             "session_id": "",
             "message": {
                 "role": "user",
-                "content": prompt,
+                "content": message_content,
             },
             "parent_tool_use_id": Value::Null
         }),
@@ -8926,6 +9024,7 @@ fn run_claude_headless_turn(
     command_path: &str,
     workspace_target: &WorkspaceTarget,
     prompt: &str,
+    image_attachments: &[String],
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
     terminal_tab_id: &str,
@@ -8946,6 +9045,7 @@ fn run_claude_headless_turn(
         command_path,
         workspace_target,
         prompt,
+        image_attachments,
         session,
         previous_transport_session.clone(),
         resume_session_id.clone(),
@@ -8969,6 +9069,7 @@ fn run_claude_headless_turn(
                 command_path,
                 workspace_target,
                 prompt,
+                image_attachments,
                 session,
                 fallback_transport_session,
                 None,
@@ -8991,6 +9092,7 @@ fn run_gemini_acp_turn(
     command_path: &str,
     workspace_target: &WorkspaceTarget,
     prompt: &str,
+    image_attachments: &[String],
     session: &acp::AcpSession,
     previous_transport_session: Option<AgentTransportSession>,
     terminal_tab_id: &str,
@@ -9329,6 +9431,7 @@ fn run_gemini_acp_turn(
         }
     }
 
+    let prompt_parts = build_gemini_cli_prompt(prompt, image_attachments)?;
     let prompt_result = gemini_rpc_call(
         &mut reader,
         &stdin,
@@ -9336,12 +9439,7 @@ fn run_gemini_acp_turn(
         "session/prompt",
         json!({
             "sessionId": session_id,
-            "prompt": [
-                {
-                    "type": "text",
-                    "text": prompt
-                }
-            ]
+            "prompt": prompt_parts
         }),
         app,
         terminal_tab_id,
@@ -9501,7 +9599,7 @@ fn load_app_state(
     state.environment.rust_available = rust_available();
     state.environment.notes = environment_notes();
     sync_workspace_metrics(&mut state);
-    if refresh_runtime == Some(true) {
+    if refresh_runtime != Some(false) {
         sync_agent_runtime(&mut state);
     }
     persist_state(&state)?;
@@ -9669,7 +9767,7 @@ fn take_over_writer(
                     "Keep frontend and backend state shapes aligned".to_string(),
                 ],
                 next_step: format!(
-                    "Continue the active task as {} without dropping the current project context.",
+                    "Continue the active context as {} without dropping the current project context.",
                     agent_id
                 ),
                 updated_at: "just now".to_string(),
@@ -12319,21 +12417,16 @@ fn send_chat_message(
     let requested_transport_session = request.transport_session.clone();
     let transport_kind = default_transport_kind(&cli_id);
     let terminal_storage = store.terminal_storage.clone();
-    let studio_task_bundle = if remote_workspace {
-        None
-    } else {
-        Some(
-            terminal_storage.ensure_task_bundle(&EnsureTaskPacketRequest {
-                task_id: request.task_id.clone(),
-                terminal_tab_id: terminal_tab_id.clone(),
-                workspace_id: workspace_id.clone(),
-                project_root: effective_project_root.clone(),
-                project_name: project_name.clone(),
-                cli_id: cli_id.clone(),
-                initial_goal: prompt.clone(),
-            })?,
-        )
-    };
+    if !remote_workspace {
+        terminal_storage.ensure_task_bundle(&EnsureTaskPacketRequest {
+            terminal_tab_id: terminal_tab_id.clone(),
+            workspace_id: workspace_id.clone(),
+            project_root: effective_project_root.clone(),
+            project_name: project_name.clone(),
+            cli_id: cli_id.clone(),
+            initial_goal: prompt.clone(),
+        })?;
+    }
     let pending_handoff = terminal_storage
         .load_pending_handoff_for_terminal_tab(&terminal_tab_id, &cli_id)
         .ok()
@@ -12358,8 +12451,10 @@ fn send_chat_message(
             .insert(cli_id.clone(), permission);
     }
 
-    if cli_id != "codex" && !image_attachments.is_empty() {
-        return Err("Only Codex currently supports image attachments.".to_string());
+    if !cli_supports_image_attachments(&cli_id) && !image_attachments.is_empty() {
+        return Err(
+            "Only Codex, Claude Code, and Gemini currently support image attachments.".to_string(),
+        );
     }
 
     let shell = shell_path();
@@ -12429,16 +12524,12 @@ fn send_chat_message(
                 .ok()
                 .flatten()
         };
-        let studio_task_packet = studio_task_bundle
-            .as_ref()
-            .map(|bundle| &bundle.task_packet);
         let studio_context_input = StudioContextExportInput {
             project_root: effective_project_root.clone(),
             project_name: project_name.clone(),
             workspace_id: workspace_id.clone(),
-            task_id: studio_task_packet.map(|task| task.id.clone()),
-            task_title: studio_task_packet.map(|task| task.title.clone()),
-            task_goal: studio_task_packet.map(|task| task.goal.clone()),
+            context_title: None,
+            context_goal: None,
             terminal_tab_id: terminal_tab_id.clone(),
             cli_id: cli_id.clone(),
             branch: state.workspace.branch.clone(),
@@ -12449,18 +12540,15 @@ fn send_chat_message(
             user_prompt: prompt_for_context.clone(),
             handoff_summary: pending_handoff
                 .as_ref()
-                .and_then(|handoff| handoff.latest_conclusion.clone())
-                .or_else(|| studio_task_packet.and_then(|task| task.latest_conclusion.clone())),
+                .and_then(|handoff| handoff.latest_conclusion.clone()),
             handoff_files: pending_handoff
                 .as_ref()
                 .map(|handoff| handoff.files.clone())
                 .filter(|files| !files.is_empty())
-                .or_else(|| studio_task_packet.map(|task| task.relevant_files.clone()))
                 .unwrap_or_default(),
             handoff_next_step: pending_handoff
                 .as_ref()
-                .and_then(|handoff| handoff.next_step.clone())
-                .or_else(|| studio_task_packet.and_then(|task| task.next_step.clone())),
+                .and_then(|handoff| handoff.next_step.clone()),
             compacted_context: request
                 .compacted_summaries
                 .as_ref()
@@ -12489,7 +12577,7 @@ fn send_chat_message(
                 cli_id.clone(),
                 wrapper_path.clone(),
                 studio_context_input.clone(),
-                export.task_id.clone(),
+                export.context_id.clone(),
                 Some(export.context_key.clone()),
                 request_session.clone(),
             );
@@ -12498,7 +12586,9 @@ fn send_chat_message(
             .as_ref()
             .map(|export| export.prelude.as_str());
         let studio_context_metrics = studio_context.as_ref().map(|export| export.metrics.clone());
-        let studio_workflow_task_id = studio_context.as_ref().map(|export| export.task_id.clone());
+        let studio_workflow_task_id = studio_context
+            .as_ref()
+            .map(|export| export.context_id.clone());
         let studio_context_key = studio_context
             .as_ref()
             .map(|export| export.context_key.clone());
@@ -12542,10 +12632,10 @@ fn send_chat_message(
         match serde_json::to_string(&metrics) {
             Ok(payload) => studio_context_log!("[studio-context] {payload}"),
             Err(_) => studio_context_log!(
-                "[studio-context] prelude_chars={} runtime_context_chars={} task_chars={} final_prompt_chars={}",
+                "[studio-context] prelude_chars={} runtime_context_chars={} current_context_chars={} final_prompt_chars={}",
                 metrics.prelude_chars,
                 metrics.runtime_context_chars,
-                metrics.task_chars,
+                metrics.current_context_chars,
                 metrics.final_prompt_chars
             ),
         }
@@ -12789,6 +12879,7 @@ fn send_chat_message(
         let gemini_studio_workflow_input = studio_workflow_input_for_thread.clone();
         let gemini_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
         let gemini_studio_context_key = studio_context_key_for_thread.clone();
+        let gemini_image_attachments = image_attachments.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -12797,6 +12888,7 @@ fn send_chat_message(
                 &gemini_wrapper_path,
                 &gemini_workspace_target,
                 &composed_prompt,
+                &gemini_image_attachments,
                 &request_session_for_thread,
                 gemini_requested_transport_session.clone(),
                 &stream_tab_id,
@@ -12981,6 +13073,7 @@ fn send_chat_message(
         let claude_studio_workflow_input = studio_workflow_input_for_thread.clone();
         let claude_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
         let claude_studio_context_key = studio_context_key_for_thread.clone();
+        let claude_image_attachments = image_attachments.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -12989,6 +13082,7 @@ fn send_chat_message(
                 &claude_wrapper_path,
                 &claude_workspace_target,
                 &composed_prompt,
+                &claude_image_attachments,
                 &request_session_for_thread,
                 claude_requested_transport_session.clone(),
                 &stream_tab_id,
@@ -13454,9 +13548,8 @@ fn get_studio_workflow_state(
 #[tauri::command]
 fn run_studio_policy_promotion(
     project_root: String,
-    task_id: String,
 ) -> Result<StudioPolicyPromotionResult, String> {
-    auto_promote_studio_memory(&project_root, &task_id)
+    auto_promote_studio_memory(&project_root, studio_context::ACTIVE_CONTEXT_ID)
 }
 
 #[tauri::command]
@@ -13844,6 +13937,7 @@ fn run_auto_orchestration(
                     &wrapper_path,
                     &workspace_target,
                     &worker_prompt,
+                    &[],
                     &worker_session,
                     None,
                     &terminal_tab_id,
@@ -20246,15 +20340,16 @@ fn maybe_run_studio_retry_repair(
 ) -> bool {
     let prompt = format!(
         "Studio checker found issues after the implementation. Apply one focused retry fix.\n\n\
-Task: .studio/tasks/{task_id}/prd.md\n\
-Implement manifest: .studio/tasks/{task_id}/implement.jsonl\n\
-Checker report: .studio/tasks/{task_id}/checker-report.md\n\n\
+Context: {task_id}\n\
+PRD: .studio/runtime/active-context/prd.md\n\
+Manifest: .studio/runtime/active-context/manifest.jsonl\n\
+Checker report: .studio/runtime/active-context/checker-report.md\n\n\
 Original request:\n{}\n\n\
 Checker summary:\n{}\n\n\
 Issues:\n{}\n\n\
 Rules:\n- Keep the fix minimal.\n- Do not ask for human confirmation.\n- Stop after one retry round.\n",
         if input.user_prompt.trim().is_empty() {
-            "Continue the active task."
+            "Continue the active context."
         } else {
             input.user_prompt.trim()
         },
@@ -20366,9 +20461,10 @@ fn format_studio_evidence_candidate(evidence: &KernelEvidence) -> Result<String,
 
 fn promotion_hint_for_memory_kind(kind: &str) -> &'static str {
     match kind {
-        "decision" | "constraint" | "rule" => "spec",
+        "constraint" | "rule" => "spec",
         "failure" | "checkpoint" | "progress" => "journal",
-        _ => "task",
+        "decision" | "requirement" | "codebase" | "risk" => "memory",
+        _ => "hold",
     }
 }
 
@@ -20572,7 +20668,6 @@ fn compose_tab_context_prompt(
     storage
         .build_context_assembly(
             &EnsureTaskPacketRequest {
-                task_id: None,
                 terminal_tab_id: terminal_tab_id.to_string(),
                 workspace_id: workspace_id.to_string(),
                 project_root: project_root.to_string(),
@@ -22706,6 +22801,7 @@ fn execute_auto_mode_goal(
                 &wrapper_path,
                 &workspace_target,
                 &worker_prompt,
+                &[],
                 &worker_session,
                 None,
                 &request.terminal_tab_id,
@@ -22730,6 +22826,7 @@ fn execute_auto_mode_goal(
                 &wrapper_path,
                 &workspace_target,
                 &worker_prompt,
+                &[],
                 &worker_session,
                 None,
                 &request.terminal_tab_id,
@@ -24025,6 +24122,7 @@ fn execute_automation_goal(
             &wrapper_path,
             &workspace_target,
             &composed_prompt,
+            &[],
             &session,
             previous_transport_session.clone(),
             &goal.synthetic_terminal_tab_id,
@@ -24051,6 +24149,7 @@ fn execute_automation_goal(
             &wrapper_path,
             &workspace_target,
             &composed_prompt,
+            &[],
             &session,
             previous_transport_session,
             &goal.synthetic_terminal_tab_id,
@@ -25114,7 +25213,17 @@ fn detect_runtimes() -> BTreeMap<String, AgentRuntime> {
         ("claude", "--version"),
         ("gemini", "--version"),
     ] {
-        let command_path = resolve_agent_command_path(agent_id);
+        let configured_override = configured_cli_override(agent_id);
+        let command_path = configured_override
+            .as_deref()
+            .and_then(resolve_command_candidate_path)
+            .or_else(|| {
+                if configured_override.is_some() {
+                    None
+                } else {
+                    resolve_command_candidate_path(agent_id)
+                }
+            });
 
         let version_probe = command_path
             .as_ref()
@@ -25127,7 +25236,15 @@ fn detect_runtimes() -> BTreeMap<String, AgentRuntime> {
             (Some(_), None) => {
                 Some("CLI wrapper was found, but the process could not be started.".to_string())
             }
-            (None, _) => Some("CLI wrapper was not found in the current app PATH.".to_string()),
+            (None, _) => configured_override.as_ref().map_or_else(
+                || Some("CLI wrapper was not found in the current app PATH.".to_string()),
+                |path| {
+                    Some(format!(
+                        "Configured CLI path `{}` was not found in the current runtime environment.",
+                        path
+                    ))
+                },
+            ),
         };
 
         runtimes.insert(
@@ -27282,11 +27399,33 @@ fn apply_runtime_environment(command: &mut Command) {
 
 fn apply_studio_context_environment(command: &mut Command, context_key: Option<&str>) {
     if let Some(context_key) = context_key.map(str::trim).filter(|value| !value.is_empty()) {
+        command.env(STUDIO_CONTEXT_KEY_ENV, context_key);
         command.env(STUDIO_CONTEXT_ID_ENV, context_key);
     }
 }
 
-fn resolve_command_path(command_name: &str) -> Option<String> {
+fn configured_cli_override(command_name: &str) -> Option<String> {
+    let cli_key = match command_name {
+        "codex" | "claude" | "gemini" => command_name,
+        _ => return None,
+    };
+
+    let settings = load_or_seed_settings(&default_project_root()).ok()?;
+    let configured = match cli_key {
+        "codex" => settings.cli_paths.codex,
+        "claude" => settings.cli_paths.claude,
+        "gemini" => settings.cli_paths.gemini,
+        _ => return None,
+    };
+    let trimmed = configured.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn resolve_command_candidate_path(command_name: &str) -> Option<String> {
     let command_path = Path::new(command_name);
     if command_path.components().count() > 1 || command_path.is_absolute() {
         return command_path
@@ -27305,6 +27444,13 @@ fn resolve_command_path(command_name: &str) -> Option<String> {
     }
 
     None
+}
+
+fn resolve_command_path(command_name: &str) -> Option<String> {
+    if let Some(configured_path) = configured_cli_override(command_name) {
+        return resolve_command_candidate_path(&configured_path);
+    }
+    resolve_command_candidate_path(command_name)
 }
 
 fn is_ignored_workspace_dir(name: &str) -> bool {

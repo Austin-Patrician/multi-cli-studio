@@ -1204,7 +1204,6 @@ export interface ChatMessageBlocksUpdateRequest {
 export interface ChatPromptRequest {
   cliId: AgentId;
   terminalTabId: string;
-  taskId?: string | null;
   workspaceId: string;
   assistantMessageId: string;
   prompt: string;
@@ -1227,7 +1226,7 @@ export interface ChatPromptRequest {
   workingMemory?: WorkingMemory | null;
 }
 
-export type StudioPromoteKind = "spec" | "task" | "journal";
+export type StudioPromoteKind = "spec" | "memory" | "journal";
 
 export interface StudioPromoteRequest {
   projectRoot: string;
@@ -1291,9 +1290,9 @@ export interface StudioWorkflowMemoryCandidate {
 
 export interface StudioWorkflowState {
   projectRoot: string;
-  taskId: string | null;
+  contextId: string | null;
   phase: string;
-  taskPath: string | null;
+  contextPath: string | null;
   prdPath: string | null;
   contextReportPath: string | null;
   implementManifestPath: string | null;

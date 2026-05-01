@@ -19,7 +19,7 @@ export const WORKSPACE_PANEL_MODES: Array<{
 }> = [
   { id: "activity", label: "Activity", icon: ActivityIcon },
   { id: "radar", label: "Radar", icon: RadarIcon },
-  { id: "workflow", label: "Workflow", icon: WorkflowIcon },
+  { id: "workflow", label: "Context", icon: WorkflowIcon },
   { id: "git", label: "Git", icon: GitIcon },
   { id: "files", label: "Files", icon: FilesPanelIcon },
   { id: "search", label: "Search", icon: SearchIcon },

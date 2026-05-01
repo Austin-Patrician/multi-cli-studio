@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronUp, LoaderCircle } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, LoaderCircle, X } from "lucide-react";
 import {
   AgentId,
   ChatMessage,
@@ -42,6 +42,7 @@ export type ActivePlanGroup = {
 };
 
 export type ActivePlanSurface = {
+  key: string;
   group: ActivePlanGroup;
   cliId: AgentId;
 };
@@ -354,7 +355,11 @@ export function resolveActivePlanSurface(
     return null;
   }
 
-  return { group, cliId };
+  return {
+    key: livePlan?.messageId ?? activePlanMessage?.id ?? `${cliId}:${group.plan?.title ?? group.steps[0]?.id ?? "plan"}`,
+    group,
+    cliId,
+  };
 }
 
 export function ActivePlanFloatingCard({
@@ -363,12 +368,14 @@ export function ActivePlanFloatingCard({
   collapsed,
   exiting = false,
   onToggle,
+  onDismiss,
 }: {
   group: ActivePlanGroup;
   cliId: AgentId;
   collapsed: boolean;
   exiting?: boolean;
   onToggle: () => void;
+  onDismiss: () => void;
 }) {
   const currentStep = currentActiveStep(group);
   const completedCount = group.steps.filter(
@@ -383,30 +390,41 @@ export function ActivePlanFloatingCard({
       }`}
     >
       <div className="overflow-hidden rounded-[14px] border border-slate-200/90 bg-white/92 shadow-[0_14px_34px_rgba(15,23,42,0.08)] ring-1 ring-white/80 backdrop-blur-md">
-        <button
-          type="button"
-          onClick={onToggle}
-          className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors hover:bg-slate-50/90"
-          aria-expanded={!collapsed}
-        >
-          <span className="inline-flex shrink-0 items-center rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600">
-            Plan
-          </span>
-          <span
-            className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] ${activePlanStatusTone(group.status)}`}
+        <div className="flex items-center gap-1 px-2.5 py-2">
+          <button
+            type="button"
+            onClick={onToggle}
+            className="flex min-w-0 flex-1 items-center gap-3 rounded-[10px] px-1.5 py-0.5 text-left transition-colors hover:bg-slate-50/90"
+            aria-expanded={!collapsed}
           >
-            {activePlanStatusLabel(group.status)}
-          </span>
-          <span className="shrink-0 text-[11px] font-semibold text-slate-600">
-            {completedCount}/{group.steps.length || 1}
-          </span>
-          <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-slate-900">
-            {heading}
-          </span>
-          <span className="inline-flex shrink-0 items-center justify-center text-slate-500">
-            {collapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-          </span>
-        </button>
+            <span className="inline-flex shrink-0 items-center rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-600">
+              Plan
+            </span>
+            <span
+              className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] ${activePlanStatusTone(group.status)}`}
+            >
+              {activePlanStatusLabel(group.status)}
+            </span>
+            <span className="shrink-0 text-[11px] font-semibold text-slate-600">
+              {completedCount}/{group.steps.length || 1}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-slate-900">
+              {heading}
+            </span>
+            <span className="inline-flex shrink-0 items-center justify-center text-slate-500">
+              {collapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+            aria-label="关闭计划卡片"
+            title="关闭"
+          >
+            <X size={14} />
+          </button>
+        </div>
 
         {!collapsed ? (
           <div className="border-t border-slate-200/80 px-3.5 py-3">

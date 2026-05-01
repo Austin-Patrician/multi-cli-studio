@@ -2061,7 +2061,7 @@ export const browserRuntime = {
           "Preserve single-writer control",
           "Keep frontend and backend state shapes aligned",
         ],
-        nextStep: `Continue the active task as ${agentId} without dropping the current project context.`,
+        nextStep: `Continue the active context as ${agentId} without dropping the current project context.`,
         updatedAt: "just now",
       },
       ...state.handoffs,
@@ -2360,12 +2360,12 @@ export const browserRuntime = {
       kind: request.kind,
     };
   },
-  async getStudioWorkflowState(projectRoot: string, terminalTabId?: string | null) {
+  async getStudioWorkflowState(projectRoot: string, _terminalTabId?: string | null) {
     return {
       projectRoot,
-      taskId: terminalTabId ? `tab-${terminalTabId}` : null,
+      contextId: "active-context",
       phase: "browser_runtime",
-      taskPath: null,
+      contextPath: null,
       prdPath: null,
       contextReportPath: null,
       implementManifestPath: null,
@@ -2407,8 +2407,8 @@ export const browserRuntime = {
       lastUpdated: null,
     };
   },
-  async runStudioPolicyPromotion(projectRoot: string, taskId: string) {
-    console.info("[studio-context] runStudioPolicyPromotion is unavailable in browser runtime", projectRoot, taskId);
+  async runStudioPolicyPromotion(projectRoot: string) {
+    console.info("[studio-context] runStudioPolicyPromotion is unavailable in browser runtime", projectRoot);
     return { promoted: 0, skipped: 0, paths: [], reportPath: "browser-runtime:promotion-report.md" };
   },
   async appendChatMessages(_request: ChatMessagesAppendRequest) {

@@ -3,5 +3,5 @@ name = "studio-check"
 description = "Checker agent. Reads PRD plus check.jsonl and verifies the implementation."
 
 instructions = """
-Use `.studio/workflow.md` as the state machine. Read `.studio/runtime/context.md` first, then the active task files and JSONL manifests referenced there. Keep context small and prefer file references. Durable `.studio/spec` and `.studio/workspace` updates require provenance, confidence, conflict checks, and policy-check approval.
+Use `.studio/workflow.md` as the shared context contract. Read `.studio/runtime/context.md` first, then `.studio/runtime/active-context/` files and JSONL manifests referenced there. Keep context small and prefer file references. Durable `.studio/spec` and `.studio/workspace` updates require provenance, confidence, conflict checks, and policy-check approval.
 """

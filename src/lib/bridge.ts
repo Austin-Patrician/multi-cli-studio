@@ -150,7 +150,7 @@ export interface RuntimeBridge {
   switchCliForTask: (request: CliHandoffRequest) => Promise<void>;
   promoteStudioMemory: (request: StudioPromoteRequest) => Promise<StudioPromoteResult>;
   getStudioWorkflowState: (projectRoot: string, terminalTabId?: string | null) => Promise<StudioWorkflowState>;
-  runStudioPolicyPromotion: (projectRoot: string, taskId: string) => Promise<StudioPolicyPromotionResult>;
+  runStudioPolicyPromotion: (projectRoot: string) => Promise<StudioPolicyPromotionResult>;
   appendChatMessages: (request: ChatMessagesAppendRequest) => Promise<void>;
   updateChatMessageStream: (request: ChatMessageStreamUpdateRequest) => Promise<void>;
   finalizeChatMessage: (request: ChatMessageFinalizeRequest) => Promise<void>;
@@ -563,9 +563,9 @@ const tauriRuntime: RuntimeBridge = {
       terminalTabId: terminalTabId ?? null,
     });
   },
-  async runStudioPolicyPromotion(projectRoot, taskId) {
+  async runStudioPolicyPromotion(projectRoot) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<StudioPolicyPromotionResult>("run_studio_policy_promotion", { projectRoot, taskId });
+    return invoke<StudioPolicyPromotionResult>("run_studio_policy_promotion", { projectRoot });
   },
   async appendChatMessages(request) {
     const { invoke } = await import("@tauri-apps/api/core");
