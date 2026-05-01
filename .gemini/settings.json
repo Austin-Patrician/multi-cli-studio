@@ -1,13 +1,29 @@
 {
   "hooks": {
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/bin/python3 \"${GEMINI_PROJECT_DIR}/.gemini/hooks/inject-workflow-state.py\"",
+            "name": "studio-before-agent",
+            "timeout": 5000,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "python3 .gemini/hooks/session-start.py", "timeout": 10 }] }
-    ],
-    "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "python3 .gemini/hooks/inject-workflow-state.py", "timeout": 5 }] }
-    ],
-    "PreToolUse": [
-      { "matcher": "Task", "hooks": [{ "type": "command", "command": "python3 .gemini/hooks/inject-subagent-context.py", "timeout": 30 }] }
+      {
+        "hooks": [
+          {
+            "command": "/usr/bin/python3 \"${GEMINI_PROJECT_DIR}/.gemini/hooks/session-start.py\"",
+            "name": "studio-session-start",
+            "timeout": 10000,
+            "type": "command"
+          }
+        ]
+      }
     ]
   }
 }

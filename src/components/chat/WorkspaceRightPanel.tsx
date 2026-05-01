@@ -414,10 +414,48 @@ const EMPTY_STUDIO_INJECTED_LAYERS: StudioInjectedLayerTexts = {
   activeContext: "",
 };
 
+const studioInjectedLayersCache = new Map<string, StudioInjectedLayerTexts>();
+const studioLayerCollapseStateByWorkspace = new Map<string, Record<string, boolean>>();
+const DEFAULT_STUDIO_LAYER_COLLAPSE_STATE: Record<string, boolean> = {
+  spec: true,
+  memory: true,
+  "active-context": false,
+};
+
 const STUDIO_MANAGED_MARKER_RE = /<!-- STUDIO-(?:WORKFLOW|CONTEXT):MANAGED -->\n?/g;
 
 function normalizeStudioInjectedText(content: string) {
   return content.replace(/\r\n/g, "\n").replace(STUDIO_MANAGED_MARKER_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function summarizeStudioLayerText(content: string) {
+  const normalized = content.trim();
+  if (!normalized) {
+    return {
+      preview: "当前没有注入内容",
+      lineCount: 0,
+      charCount: 0,
+    };
+  }
+
+  const lines = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const previewSource = lines.find((line) => !line.startsWith("```")) ?? normalized;
+
+  return {
+    preview: previewSource.replace(/^#+\s*/, "").slice(0, 72),
+    lineCount: lines.length,
+    charCount: normalized.length,
+  };
+}
+
+function formatStudioLayerMeta(lineCount: number, charCount: number) {
+  if (lineCount <= 0 && charCount <= 0) return "Empty";
+  const charLabel =
+    charCount >= 1000 ? `${(charCount / 1000).toFixed(charCount >= 10_000 ? 0 : 1)}k chars` : `${charCount} chars`;
+  return `${lineCount} lines · ${charLabel}`;
 }
 
 function extractMarkdownSection(content: string, heading: string) {
@@ -548,9 +586,7 @@ async function buildStudioInjectedLayers(root: string): Promise<StudioInjectedLa
     readWorkspaceTextFiles(root, indexedMemoryPaths.length > 0 ? indexedMemoryPaths : fallbackMemoryPaths),
     readWorkspaceTextFiles(root, researchPaths),
   ]);
-  const memoryText = normalizeStudioInjectedText(
-    [memoryIndex, journalIndex, durableMemoryText].filter(Boolean).join("\n\n")
-  );
+  const memoryText = normalizeStudioInjectedText(durableMemoryText);
 
   const activeContextText = normalizeStudioInjectedText(
     [
@@ -588,46 +624,114 @@ function StudioWorkflowPanel({
   terminalTabId: string | null;
   refreshToken: string;
 }) {
-  const [layers, setLayers] = useState<StudioInjectedLayerTexts>(EMPTY_STUDIO_INJECTED_LAYERS);
+  const cacheKey = useMemo(
+    () => workspace.rootPath.replace(/\\/g, "/").replace(/[\\/]+$/, ""),
+    [workspace.rootPath]
+  );
+  const [layers, setLayers] = useState<StudioInjectedLayerTexts>(
+    () => studioInjectedLayersCache.get(cacheKey) ?? EMPTY_STUDIO_INJECTED_LAYERS
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setLayers(await buildStudioInjectedLayers(workspace.rootPath));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }, [workspace.rootPath]);
+  const requestIdRef = useRef(0);
+  const [collapsedLayers, setCollapsedLayers] = useState<Record<string, boolean>>(
+    () => studioLayerCollapseStateByWorkspace.get(cacheKey) ?? DEFAULT_STUDIO_LAYER_COLLAPSE_STATE
+  );
 
   useEffect(() => {
-    void refresh();
+    setLayers(studioInjectedLayersCache.get(cacheKey) ?? EMPTY_STUDIO_INJECTED_LAYERS);
+    setError(null);
+    setCollapsedLayers(studioLayerCollapseStateByWorkspace.get(cacheKey) ?? DEFAULT_STUDIO_LAYER_COLLAPSE_STATE);
+  }, [cacheKey]);
+
+  const refresh = useCallback(async (options?: { silent?: boolean }) => {
+    const requestId = ++requestIdRef.current;
+    const hasCachedValue = studioInjectedLayersCache.has(cacheKey);
+    const shouldShowLoading = options?.silent === true ? !hasCachedValue : true;
+    if (shouldShowLoading) {
+      setLoading(true);
+    }
+    setError(null);
+    try {
+      const nextLayers = await buildStudioInjectedLayers(workspace.rootPath);
+      if (requestId !== requestIdRef.current) return;
+      studioInjectedLayersCache.set(cacheKey, nextLayers);
+      setLayers(nextLayers);
+    } catch (err) {
+      if (requestId !== requestIdRef.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [cacheKey, workspace.rootPath]);
+
+  useEffect(() => {
+    void refresh({ silent: true });
   }, [refresh, terminalTabId, refreshToken]);
+
+  const setAllCollapsed = useCallback(
+    (collapsed: boolean) => {
+      const nextState = {
+        spec: collapsed,
+        memory: collapsed,
+        "active-context": collapsed,
+      };
+      studioLayerCollapseStateByWorkspace.set(cacheKey, nextState);
+      setCollapsedLayers(nextState);
+    },
+    [cacheKey]
+  );
+
+  const toggleLayer = useCallback(
+    (id: string) => {
+      setCollapsedLayers((current) => {
+        const nextState = {
+          ...current,
+          [id]: !(current[id] ?? DEFAULT_STUDIO_LAYER_COLLAPSE_STATE[id] ?? true),
+        };
+        studioLayerCollapseStateByWorkspace.set(cacheKey, nextState);
+        return nextState;
+      });
+    },
+    [cacheKey]
+  );
 
   const displayedLayers = useMemo(
     () => [
       {
         id: "spec",
         title: "Spec",
+        eyebrow: "Rules",
+        icon: Braces,
         text: layers.spec || (loading ? "正在加载..." : "当前没有可注入的 Spec 文本。"),
+        accentClassName: "from-sky-500/12 via-cyan-500/8 to-transparent",
+        iconClassName: "text-sky-600",
       },
       {
         id: "memory",
         title: "Memory",
-        text: layers.memory || (loading ? "正在加载..." : "当前没有可注入的 Memory 文本。"),
+        eyebrow: "Durable",
+        icon: ClockIcon,
+        text: layers.memory || (loading ? "正在加载..." : "当前还没有可注入的 Durable Memory / Journal 内容。"),
+        accentClassName: "from-amber-500/12 via-orange-500/8 to-transparent",
+        iconClassName: "text-amber-600",
       },
       {
         id: "active-context",
         title: "Active Context",
+        eyebrow: "Runtime",
+        icon: WorkflowIcon,
         text: layers.activeContext || (loading ? "正在加载..." : "当前没有可注入的 Active Context 文本。"),
+        accentClassName: "from-emerald-500/12 via-teal-500/8 to-transparent",
+        iconClassName: "text-emerald-600",
       },
     ],
     [layers.activeContext, layers.memory, layers.spec, loading]
   );
+  const allExpanded = displayedLayers.every((layer) => !(collapsedLayers[layer.id] ?? DEFAULT_STUDIO_LAYER_COLLAPSE_STATE[layer.id] ?? true));
+  const layerToggleTitle = allExpanded ? "折叠全部上下文层" : "展开全部上下文层";
 
   return (
     <section className="session-activity-panel">
@@ -644,14 +748,74 @@ function StudioWorkflowPanel({
       </div>
       <div className="workspace-panel-scroll space-y-3">
         {error ? <div className="rounded-[16px] border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div> : null}
-        {displayedLayers.map((layer) => (
-          <section key={layer.id} className="rounded-[20px] border border-border bg-white p-4 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-secondary">{layer.title}</div>
-            <pre className="mt-3 max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-[18px] border border-border bg-slate-950 px-4 py-4 font-mono text-[11px] leading-5 text-slate-100 shadow-sm">
-              {layer.text}
-            </pre>
-          </section>
-        ))}
+        <section className="overflow-hidden rounded-[20px] border border-slate-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] shadow-[0_12px_30px_rgba(15,23,42,0.06)]">
+          <div className="border-b border-slate-200/80 px-4 py-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Injected Layers</div>
+                <div className="text-sm font-semibold text-slate-900">先看三层名称和摘要，需要时再展开查看最终注入字符串。</div>
+              </div>
+              <div className="flex items-center">
+                <button
+                  type="button"
+                  className="workspace-file-action h-8 w-8 border-0 bg-transparent p-0 text-slate-600 shadow-none transition hover:bg-transparent hover:text-slate-900"
+                  onClick={() => setAllCollapsed(allExpanded)}
+                  title={layerToggleTitle}
+                  aria-label={layerToggleTitle}
+                >
+                  {allExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="divide-y divide-slate-200/80">
+            {displayedLayers.map((layer) => {
+              const summary = summarizeStudioLayerText(layer.text);
+              const isCollapsed = collapsedLayers[layer.id] ?? DEFAULT_STUDIO_LAYER_COLLAPSE_STATE[layer.id] ?? true;
+              const Icon = layer.icon;
+
+              return (
+                <section key={layer.id} className="group relative">
+                  <div className={`pointer-events-none absolute inset-x-0 top-0 h-20 bg-gradient-to-r ${layer.accentClassName} opacity-70 transition duration-300 group-hover:opacity-100`} />
+                  <button
+                    type="button"
+                    className="relative flex w-full items-start gap-3 px-4 py-4 text-left transition duration-200 hover:bg-white/70"
+                    onClick={() => toggleLayer(layer.id)}
+                    aria-expanded={!isCollapsed}
+                  >
+                    <div className={`mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/70 bg-white/90 shadow-sm transition duration-200 group-hover:scale-[1.02] ${layer.iconClassName}`}>
+                      <Icon className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{layer.eyebrow}</span>
+                        <span className="rounded-full border border-slate-200 bg-white/90 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                          {formatStudioLayerMeta(summary.lineCount, summary.charCount)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-slate-900">{layer.title}</div>
+                          <div className="truncate text-xs text-slate-600">{summary.preview}</div>
+                        </div>
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white/90 text-slate-500 shadow-sm transition duration-200 group-hover:border-slate-300 group-hover:text-slate-900">
+                          {isCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                  {!isCollapsed ? (
+                    <div className="relative px-4 pb-4">
+                      <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-[18px] border border-slate-200 bg-slate-950 px-4 py-4 font-mono text-[11px] leading-5 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition duration-200">
+                        {layer.text}
+                      </pre>
+                    </div>
+                  ) : null}
+                </section>
+              );
+            })}
+          </div>
+        </section>
       </div>
     </section>
   );
@@ -1897,9 +2061,16 @@ export function WorkspaceRightPanel({
   );
   const workflowRefreshToken = useMemo(() => {
     if (!activeSession) return "";
-    const lastMessage = activeSession.messages[activeSession.messages.length - 1];
-    return [activeSession.updatedAt, activeSession.messages.length, lastMessage?.id ?? ""].join(":");
-  }, [activeSession]);
+    const lastUserMessage =
+      [...activeSession.messages]
+        .reverse()
+        .find((message) => message.role === "user") ?? null;
+    return [
+      activeTabId ?? "",
+      lastUserMessage?.id ?? "",
+      lastUserMessage?.timestamp ?? "",
+    ].join(":");
+  }, [activeSession, activeTabId]);
   const taskNodes = useMemo(() => buildTaskNodes(activeSession), [activeSession]);
   const tabSubagentsByTab = useStore((state) => state.tabSubagentsByTab);
   const activeSubagents = useMemo(

@@ -73,6 +73,7 @@ const CLAUDE_HOOK_EVENTS = [
   "Notification",
   "UserPromptSubmit",
   "Stop",
+  "SubagentStart",
   "SubagentStop",
   "PreCompact",
 ] as const;
@@ -127,12 +128,15 @@ function dirname(path: string) {
 function joinPath(...parts: string[]) {
   const filtered = parts.filter(Boolean);
   if (filtered.length === 0) return "";
+  const root = filtered[0];
+  const separator =
+    /^[A-Za-z]:[\\/]/.test(root) || (root.includes("\\") && !root.includes("/")) ? "\\" : "/";
   return filtered
     .map((part, index) => {
       if (index === 0) return part.replace(/[\\/]+$/g, "");
       return part.replace(/^[\\/]+|[\\/]+$/g, "");
     })
-    .join("\\");
+    .join(separator);
 }
 
 function parseHooksDocument(content: string): HooksDocument {

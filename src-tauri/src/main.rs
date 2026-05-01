@@ -20056,6 +20056,7 @@ fn build_studio_memory_candidates(
     {
         lines.push(format_studio_evidence_candidate(evidence)?);
     }
+    push_studio_checkpoint_memory_candidates(&mut lines, &kernel)?;
     if lines.is_empty() {
         return Ok(None);
     }
@@ -20063,13 +20064,31 @@ fn build_studio_memory_candidates(
 }
 
 fn is_promotable_studio_memory_kind(kind: &str, content: &str) -> bool {
-    if kind == "runtime" || content.trim_start().starts_with("Command succeeded:") {
+    if kind == "runtime"
+        || content.trim_start().starts_with("Command succeeded:")
+        || is_file_change_memory_noise(content)
+    {
         return false;
     }
     matches!(
         kind,
-        "decision" | "constraint" | "rule" | "failure" | "checkpoint" | "progress"
+        "decision"
+            | "constraint"
+            | "rule"
+            | "requirement"
+            | "risk"
+            | "failure"
+            | "checkpoint"
+            | "progress"
     )
+}
+
+fn is_file_change_memory_noise(content: &str) -> bool {
+    let normalized = content.trim_start().to_ascii_lowercase();
+    normalized.starts_with("file added:")
+        || normalized.starts_with("file modified:")
+        || normalized.starts_with("file deleted:")
+        || normalized.starts_with("file renamed:")
 }
 
 fn is_promotable_studio_evidence(evidence: &KernelEvidence) -> bool {
@@ -20079,6 +20098,178 @@ fn is_promotable_studio_evidence(evidence: &KernelEvidence) -> bool {
             || summary.contains("failed")
             || summary.contains("failure")
             || summary.contains("exit code"))
+}
+
+fn push_studio_checkpoint_memory_candidates(
+    lines: &mut Vec<String>,
+    kernel: &TaskKernel,
+) -> Result<(), String> {
+    let Some(snapshot) = kernel.latest_checkpoint.as_ref() else {
+        return Ok(());
+    };
+    let user_prompt = snapshot
+        .source_user_prompt
+        .as_deref()
+        .unwrap_or(kernel.task_packet.goal.as_str());
+    let assistant_summary = snapshot
+        .source_assistant_summary
+        .as_deref()
+        .or(kernel.task_packet.latest_conclusion.as_deref())
+        .unwrap_or(snapshot.summary.as_str());
+
+    if let Some(content) = durable_decision_content(user_prompt, assistant_summary) {
+        lines.push(format_studio_snapshot_candidate(
+            "decision",
+            &content,
+            "memory",
+            &snapshot.id,
+            &snapshot.created_at,
+        )?);
+    }
+
+    if should_record_checkpoint_candidate(snapshot, user_prompt, assistant_summary) {
+        lines.push(format_studio_snapshot_candidate(
+            "checkpoint",
+            &format_checkpoint_candidate_content(user_prompt, assistant_summary),
+            "journal",
+            &snapshot.id,
+            &snapshot.created_at,
+        )?);
+    }
+
+    Ok(())
+}
+
+fn durable_decision_content(user_prompt: &str, assistant_summary: &str) -> Option<String> {
+    let prompt = user_prompt.trim();
+    if prompt.is_empty()
+        || is_studio_memory_placeholder(prompt)
+        || is_referential_user_prompt(prompt)
+    {
+        return None;
+    }
+    let prompt_lower = prompt.to_ascii_lowercase();
+    let assistant_lower = assistant_summary.to_ascii_lowercase();
+    let durable_signal = [
+        "我觉得",
+        "策略",
+        "约定",
+        "设计",
+        "规则",
+        "spec",
+        "memory",
+        "active context",
+        "active-context",
+        "context tab",
+        "跨cli",
+        "跨 cli",
+        "注入",
+        "长期",
+        "以后",
+        "应该",
+        "必须",
+        "只展示",
+        "不要",
+    ]
+    .iter()
+    .any(|needle| prompt_lower.contains(needle));
+    let assistant_confirms_decision = ["implemented", "updated", "实现", "改成", "修复", "完成"]
+        .iter()
+        .any(|needle| assistant_lower.contains(needle));
+    if !durable_signal || !assistant_confirms_decision {
+        return None;
+    }
+    Some(format!(
+        "Project decision: {}",
+        truncate_str(&prompt.replace('\n', " "), 420)
+    ))
+}
+
+fn is_referential_user_prompt(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized.chars().count() < 12
+        || matches!(
+            normalized.as_str(),
+            "继续" | "continus" | "continue" | "实现" | "可以的" | "给我修这两个点"
+        )
+        || normalized.starts_with("继续把")
+}
+
+fn should_record_checkpoint_candidate(
+    snapshot: &storage::ContextSnapshot,
+    user_prompt: &str,
+    assistant_summary: &str,
+) -> bool {
+    let summary = assistant_summary.trim();
+    if summary.chars().count() < 24 || is_studio_memory_placeholder(summary) {
+        return false;
+    }
+    !snapshot.files_touched.is_empty()
+        || !snapshot.work_completed.is_empty()
+        || text_contains_checkpoint_signal(user_prompt)
+        || text_contains_checkpoint_signal(summary)
+}
+
+fn text_contains_checkpoint_signal(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    [
+        "implemented",
+        "fixed",
+        "added",
+        "updated",
+        "build passed",
+        "实现",
+        "修复",
+        "新增",
+        "改成",
+        "完成",
+        "通过",
+        ".studio/",
+        "context",
+        "memory",
+        "spec",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn is_studio_memory_placeholder(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized.is_empty()
+        || normalized.contains("no assistant conclusion captured yet")
+        || normalized.contains("continue the current user request")
+}
+
+fn format_checkpoint_candidate_content(user_prompt: &str, assistant_summary: &str) -> String {
+    let prompt = truncate_str(&user_prompt.trim().replace('\n', " "), 180);
+    let summary = truncate_str(&assistant_summary.trim().replace('\n', " "), 420);
+    if prompt.is_empty() {
+        format!("Turn checkpoint: {summary}")
+    } else {
+        format!("Turn checkpoint for `{prompt}`: {summary}")
+    }
+}
+
+fn format_studio_snapshot_candidate(
+    kind: &str,
+    content: &str,
+    promotion_hint: &str,
+    snapshot_id: &str,
+    updated_at: &str,
+) -> Result<String, String> {
+    serde_json::to_string(&json!({
+        "_studioManaged": true,
+        "candidateType": "contextSnapshot",
+        "id": snapshot_id,
+        "kind": kind,
+        "confidence": "high",
+        "content": truncate_str(content, 640),
+        "sourceFactId": snapshot_id,
+        "sourceEvidenceIds": [],
+        "updatedAt": updated_at,
+        "promotionHint": promotion_hint,
+    }))
+    .map_err(|err| err.to_string())
 }
 
 fn maybe_run_studio_context_curator(
@@ -29292,4 +29483,75 @@ pub fn run() {
 
 fn main() {
     run();
+}
+
+#[cfg(test)]
+mod studio_memory_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_checkpoint_generates_promotable_memory_candidates() {
+        let kernel = TaskKernel {
+            task_packet: storage::TaskPacket {
+                id: "task-1".to_string(),
+                terminal_tab_id: "tab-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                project_root: "/tmp/project".to_string(),
+                project_name: "fixture".to_string(),
+                title: "Context design".to_string(),
+                goal: "Design shared context".to_string(),
+                status: "active".to_string(),
+                current_owner_cli: "codex".to_string(),
+                latest_conclusion: Some(
+                    "Implemented the context tab so it shows only injected text.".to_string(),
+                ),
+                open_questions: Vec::new(),
+                risks: Vec::new(),
+                next_step: None,
+                relevant_files: vec!["src/components/chat/WorkspaceRightPanel.tsx".to_string()],
+                relevant_commands: Vec::new(),
+                linked_session_ids: Vec::new(),
+                latest_snapshot_id: Some("snapshot-1".to_string()),
+                updated_at: "2026-05-01T00:00:00Z".to_string(),
+                created_at: "2026-05-01T00:00:00Z".to_string(),
+            },
+            latest_checkpoint: Some(storage::ContextSnapshot {
+                id: "snapshot-1".to_string(),
+                task_id: "task-1".to_string(),
+                trigger_reason: "turn_complete".to_string(),
+                summary: "Latest conclusion: Implemented context tab behavior.".to_string(),
+                facts_confirmed: vec![
+                    "Implemented the context tab so it shows only injected text.".to_string(),
+                ],
+                work_completed: vec![
+                    "Implemented the context tab so it shows only injected text.".to_string(),
+                ],
+                files_touched: vec!["src/components/chat/WorkspaceRightPanel.tsx".to_string()],
+                commands_run: Vec::new(),
+                failures: Vec::new(),
+                open_questions: Vec::new(),
+                next_step: None,
+                source_user_prompt: Some(
+                    "Context tab 只展示真正跨 CLI 注入的内容，不展示结构。".to_string(),
+                ),
+                source_assistant_summary: Some(
+                    "Implemented the context tab so it shows only injected text.".to_string(),
+                ),
+                created_at: "2026-05-01T00:00:00Z".to_string(),
+            }),
+            ..TaskKernel::default()
+        };
+
+        let mut lines = Vec::new();
+        push_studio_checkpoint_memory_candidates(&mut lines, &kernel).expect("push candidates");
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("\"kind\":\"decision\"")
+                && line.contains("\"promotionHint\":\"memory\"")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("\"kind\":\"checkpoint\"")
+                && line.contains("\"promotionHint\":\"journal\"")));
+    }
 }

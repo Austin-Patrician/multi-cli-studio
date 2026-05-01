@@ -1,20 +1,72 @@
 {
+  "enabledPlugins": {},
   "env": {
     "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1"
   },
   "hooks": {
     "SessionStart": [
-      { "matcher": "startup", "hooks": [{ "type": "command", "command": "python3 .claude/hooks/session-start.py", "timeout": 10 }] },
-      { "matcher": "clear", "hooks": [{ "type": "command", "command": "python3 .claude/hooks/session-start.py", "timeout": 10 }] },
-      { "matcher": "compact", "hooks": [{ "type": "command", "command": "python3 .claude/hooks/session-start.py", "timeout": 10 }] }
+      {
+        "hooks": [
+          {
+            "command": "/usr/bin/python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/session-start.py\"",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "startup"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/bin/python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/session-start.py\"",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "resume"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/bin/python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/session-start.py\"",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "clear"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/bin/python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/session-start.py\"",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "compact"
+      }
     ],
-    "PreToolUse": [
-      { "matcher": "Task", "hooks": [{ "type": "command", "command": "python3 .claude/hooks/inject-subagent-context.py", "timeout": 30 }] },
-      { "matcher": "Agent", "hooks": [{ "type": "command", "command": "python3 .claude/hooks/inject-subagent-context.py", "timeout": 30 }] }
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/bin/python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/inject-subagent-context.py\"",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
     ],
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "python3 .claude/hooks/inject-workflow-state.py", "timeout": 5 }] }
+      {
+        "hooks": [
+          {
+            "command": "/usr/bin/python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/inject-workflow-state.py\"",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
     ]
-  },
-  "enabledPlugins": {}
+  }
 }

@@ -6,6 +6,7 @@ use std::{
 };
 
 use chrono::{DateTime, Local};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -32,9 +33,9 @@ const PYTHON_NATIVE_HOOK: &str = r#"#!/usr/bin/env python3
 Studio Context Native Hook for __STUDIO_PLATFORM__.
 
 Modes:
-- session: SessionStart additional context
-- prompt: UserPromptSubmit workflow breadcrumb
-- subagent: PreToolUse Task/Agent manifest injection
+- session: emits SessionStart additional context
+- prompt: emits UserPromptSubmit (Codex/Claude) or BeforeAgent (Gemini)
+- subagent: emits SubagentStart for Claude; currently not registered for Gemini
 """
 from __future__ import annotations
 
@@ -352,11 +353,14 @@ def build_subagent_context(root: Path, input_data: dict) -> str:
 
 
 def emit(additional_context: str) -> int:
-    event = {
-        "session": "SessionStart",
-        "prompt": "UserPromptSubmit",
-        "subagent": "PreToolUse",
-    }.get(MODE, MODE)
+    if MODE == "session":
+        event = "SessionStart"
+    elif MODE == "prompt":
+        event = "BeforeAgent" if PLATFORM == "gemini" else "UserPromptSubmit"
+    elif MODE == "subagent":
+        event = "SubagentStart" if PLATFORM == "claude" else "BeforeTool"
+    else:
+        event = MODE
     payload = {
         "hookSpecificOutput": {
             "hookEventName": event,
@@ -2712,6 +2716,7 @@ fn select_spec_manifest_entries(
     }
 
     let query = build_query_terms(input);
+    let match_text = build_context_match_text(input);
     let relevant_files = sanitized_handoff_files(input)
         .iter()
         .map(|file| file.to_ascii_lowercase())
@@ -2721,6 +2726,7 @@ fn select_spec_manifest_entries(
         project_root,
         &spec_dir,
         &query,
+        &match_text,
         &relevant_files,
         &mut entries,
     )?;
@@ -2801,6 +2807,7 @@ fn collect_spec_entries(
     project_root: &Path,
     dir: &Path,
     query: &HashSet<String>,
+    match_text: &str,
     relevant_files: &[String],
     entries: &mut Vec<ManifestEntry>,
 ) -> Result<(), String> {
@@ -2825,7 +2832,14 @@ fn collect_spec_entries(
             continue;
         }
         if path.is_dir() {
-            collect_spec_entries(project_root, &path, query, relevant_files, entries)?;
+            collect_spec_entries(
+                project_root,
+                &path,
+                query,
+                match_text,
+                relevant_files,
+                entries,
+            )?;
             continue;
         }
         if path.extension().and_then(|value| value.to_str()) != Some("md") {
@@ -2837,7 +2851,7 @@ fn collect_spec_entries(
             .to_string_lossy()
             .replace('\\', "/");
         let content = fs::read_to_string(&path).unwrap_or_default();
-        let score = score_spec_candidate(&relative, &content, query, relevant_files);
+        let score = score_spec_candidate(&relative, &content, query, match_text, relevant_files);
         if score >= MIN_SPEC_MATCH_SCORE {
             let reason =
                 format!("Matched current request, files, or request terms (score {score}).");
@@ -2849,6 +2863,18 @@ fn collect_spec_entries(
         }
     }
     Ok(())
+}
+
+fn build_context_match_text(input: &StudioContextExportInput) -> String {
+    let mut values = vec![clean_studio_text(&input.user_prompt)];
+    if let Some(summary) = clean_studio_option(input.handoff_summary.as_deref()) {
+        values.push(summary);
+    }
+    if let Some(next_step) = clean_studio_option(input.handoff_next_step.as_deref()) {
+        values.push(next_step);
+    }
+    values.extend(sanitized_handoff_files(input));
+    values.join("\n").to_ascii_lowercase()
 }
 
 fn build_query_terms(input: &StudioContextExportInput) -> HashSet<String> {
@@ -2885,6 +2911,7 @@ fn score_spec_candidate(
     relative: &str,
     content: &str,
     query: &HashSet<String>,
+    match_text: &str,
     relevant_files: &[String],
 ) -> i64 {
     let haystack = format!(
@@ -2911,7 +2938,174 @@ fn score_spec_candidate(
             }
         }
     }
+    score += score_spec_layer_intent(relative, match_text, relevant_files);
     score
+}
+
+fn score_spec_layer_intent(relative: &str, match_text: &str, relevant_files: &[String]) -> i64 {
+    let file_text = relevant_files.join("\n");
+    let combined = format!("{match_text}\n{file_text}");
+    match relative {
+        ".studio/spec/index.md" => {
+            if text_has_any(
+                &combined,
+                &[
+                    ".studio/spec",
+                    "spec",
+                    "three layers",
+                    "三层",
+                    "架构",
+                    "长期规则",
+                ],
+            ) {
+                10
+            } else {
+                0
+            }
+        }
+        ".studio/spec/frontend/index.md" => {
+            let mut score = 0;
+            if text_has_any(
+                &combined,
+                &[
+                    "frontend",
+                    "react",
+                    "component",
+                    "组件",
+                    "ui",
+                    "context tab",
+                    "workspacerightpanel",
+                    "chatpromptbar",
+                    "clibubble",
+                    "settings",
+                    "theme",
+                    "主题",
+                ],
+            ) {
+                score += 14;
+            }
+            if text_has_any(&file_text, &["src/components/", "src/lib/", "src/styles/"]) {
+                score += 8;
+            }
+            score
+        }
+        ".studio/spec/tauri-runtime/index.md" => {
+            let mut score = 0;
+            if text_has_any(
+                &combined,
+                &[
+                    "tauri",
+                    "rust",
+                    "backend",
+                    "后端",
+                    "src-tauri",
+                    "command",
+                    "subprocess",
+                    "runtime",
+                    "运行时",
+                ],
+            ) {
+                score += 12;
+            }
+            if text_has_any(&file_text, &["src-tauri/"]) {
+                score += 10;
+            }
+            score
+        }
+        ".studio/spec/cli-adapters/index.md" => {
+            if text_has_any(
+                &combined,
+                &[
+                    "cli",
+                    "codex",
+                    "claude",
+                    "gemini",
+                    "hook",
+                    "session",
+                    "inject",
+                    "injection",
+                    "注入",
+                    "跨 cli",
+                    "跨cli",
+                    "cross-cli",
+                    "subagent",
+                ],
+            ) {
+                14
+            } else {
+                0
+            }
+        }
+        ".studio/spec/storage/index.md" => {
+            if text_has_any(
+                &combined,
+                &[
+                    "memory",
+                    "workspace",
+                    ".studio/workspace",
+                    "sqlite",
+                    "kernel",
+                    "fact",
+                    "evidence",
+                    "promotion",
+                    "durable",
+                    "长期记忆",
+                    "决策",
+                    "约定",
+                ],
+            ) {
+                16
+            } else {
+                0
+            }
+        }
+        ".studio/spec/automation/index.md" => {
+            if text_has_any(
+                &combined,
+                &[
+                    "active context",
+                    "active-context",
+                    "context-curator",
+                    "curator",
+                    "manifest",
+                    "checker",
+                    "memory-distill",
+                    "policy-check",
+                    "workflow",
+                    "生成物",
+                    "链路",
+                    "当前正在做",
+                    "工作上下文",
+                ],
+            ) {
+                15
+            } else {
+                0
+            }
+        }
+        ".studio/spec/windows-runtime/index.md" => {
+            if text_has_any(
+                &combined,
+                &[
+                    "windows",
+                    "powershell",
+                    "cmd",
+                    "encoding",
+                    "编码",
+                    "constrainedlanguage",
+                ],
+            ) {
+                14
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn text_has_any(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
 }
 
 fn should_write_managed_jsonl(path: &Path) -> Result<bool, String> {
@@ -4567,10 +4761,6 @@ fn ensure_native_cli_hooks(project_root: &Path) -> Result<Vec<String>, String> {
             render_prompt_submit_hook("gemini"),
         ),
         (
-            ".gemini/hooks/inject-subagent-context.py",
-            render_subagent_context_hook("gemini"),
-        ),
-        (
             ".gemini/agents/studio-implement.md",
             render_markdown_agent(
                 "studio-implement",
@@ -4603,7 +4793,49 @@ fn ensure_native_cli_hooks(project_root: &Path) -> Result<Vec<String>, String> {
             written.push(relative_path.to_string());
         }
     }
+    if ensure_codex_hooks_feature_flag(project_root)? {
+        written.push(".codex/config.toml".to_string());
+    }
     Ok(written)
+}
+
+fn ensure_codex_hooks_feature_flag(project_root: &Path) -> Result<bool, String> {
+    let config_path = project_root.join(".codex").join("config.toml");
+    let current = fs::read_to_string(&config_path).unwrap_or_default();
+    let next = enable_codex_hooks_feature_flag(&current);
+    if current == next {
+        return Ok(false);
+    }
+    atomic_write(&config_path, &next)?;
+    Ok(true)
+}
+
+fn enable_codex_hooks_feature_flag(content: &str) -> String {
+    let false_pattern = Regex::new(r"(?im)(codex_hooks\s*=\s*)false").expect("valid regex");
+    if false_pattern.is_match(content) {
+        return false_pattern.replace(content, "${1}true").to_string();
+    }
+    let true_pattern = Regex::new(r"(?im)codex_hooks\s*=\s*true").expect("valid regex");
+    if true_pattern.is_match(content) {
+        return content.to_string();
+    }
+    let features_pattern = Regex::new(r"(?m)^\[features\]\s*$").expect("valid regex");
+    if let Some(matched) = features_pattern.find(content) {
+        let insert_at = matched.end();
+        let mut next = String::with_capacity(content.len() + "codex_hooks = true\n".len() + 1);
+        next.push_str(&content[..insert_at]);
+        next.push('\n');
+        next.push_str("codex_hooks = true\n");
+        next.push_str(&content[insert_at..]);
+        return next;
+    }
+    let trimmed = content.trim_end();
+    let prefix = if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}\n\n")
+    };
+    format!("{prefix}[features]\ncodex_hooks = true\n")
 }
 
 fn should_write_studio_hook_file(path: &Path) -> Result<bool, String> {
@@ -4614,82 +4846,167 @@ fn should_write_studio_hook_file(path: &Path) -> Result<bool, String> {
     Ok(content.contains("Studio Context Native Hook")
         || content.contains("Studio native hook")
         || content.contains("studio-implement")
-        || content.contains(".studio/runtime/context.md"))
+        || content.contains(".studio/runtime/context.md")
+        || content.contains(".codex/hooks/session-start.py")
+        || content.contains(".codex/hooks/inject-workflow-state.py")
+        || content.contains(".claude/hooks/session-start.py")
+        || content.contains(".claude/hooks/inject-workflow-state.py")
+        || content.contains(".claude/hooks/inject-subagent-context.py")
+        || content.contains(".gemini/hooks/session-start.py")
+        || content.contains(".gemini/hooks/inject-workflow-state.py"))
 }
 
 fn render_codex_hooks_json() -> String {
-    r#"{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .codex/hooks/session-start.py",
-            "timeout": 15,
-            "statusMessage": "Loading Studio Context Native Hook..."
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .codex/hooks/inject-workflow-state.py",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
-}
-"#
-    .to_string()
+    let value = serde_json::json!({
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "startup|resume|clear",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": codex_hook_command("session-start.py"),
+                            "timeout": 15,
+                            "statusMessage": "Loading Studio Context Native Hook..."
+                        }
+                    ]
+                }
+            ],
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": codex_hook_command("inject-workflow-state.py"),
+                            "timeout": 5
+                        }
+                    ]
+                }
+            ]
+        }
+    });
+    serde_json::to_string_pretty(&value).expect("serialize codex hooks") + "\n"
 }
 
 fn render_claude_settings_json() -> String {
-    r#"{
-  "env": {
-    "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1"
-  },
-  "hooks": {
-    "SessionStart": [
-      { "matcher": "startup", "hooks": [{ "type": "command", "command": "python3 .claude/hooks/session-start.py", "timeout": 10 }] },
-      { "matcher": "clear", "hooks": [{ "type": "command", "command": "python3 .claude/hooks/session-start.py", "timeout": 10 }] },
-      { "matcher": "compact", "hooks": [{ "type": "command", "command": "python3 .claude/hooks/session-start.py", "timeout": 10 }] }
-    ],
-    "PreToolUse": [
-      { "matcher": "Task", "hooks": [{ "type": "command", "command": "python3 .claude/hooks/inject-subagent-context.py", "timeout": 30 }] },
-      { "matcher": "Agent", "hooks": [{ "type": "command", "command": "python3 .claude/hooks/inject-subagent-context.py", "timeout": 30 }] }
-    ],
-    "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "python3 .claude/hooks/inject-workflow-state.py", "timeout": 5 }] }
-    ]
-  },
-  "enabledPlugins": {}
-}
-"#
-    .to_string()
+    let value = serde_json::json!({
+        "env": {
+            "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1"
+        },
+        "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "startup",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": claude_hook_command("session-start.py"),
+                            "timeout": 10
+                        }
+                    ]
+                },
+                {
+                    "matcher": "resume",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": claude_hook_command("session-start.py"),
+                            "timeout": 10
+                        }
+                    ]
+                },
+                {
+                    "matcher": "clear",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": claude_hook_command("session-start.py"),
+                            "timeout": 10
+                        }
+                    ]
+                },
+                {
+                    "matcher": "compact",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": claude_hook_command("session-start.py"),
+                            "timeout": 10
+                        }
+                    ]
+                }
+            ],
+            "SubagentStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": claude_hook_command("inject-subagent-context.py"),
+                            "timeout": 30
+                        }
+                    ]
+                }
+            ],
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": claude_hook_command("inject-workflow-state.py"),
+                            "timeout": 5
+                        }
+                    ]
+                }
+            ]
+        },
+        "enabledPlugins": {}
+    });
+    serde_json::to_string_pretty(&value).expect("serialize claude settings") + "\n"
 }
 
 fn render_gemini_settings_json() -> String {
-    r#"{
-  "hooks": {
-    "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "python3 .gemini/hooks/session-start.py", "timeout": 10 }] }
-    ],
-    "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "python3 .gemini/hooks/inject-workflow-state.py", "timeout": 5 }] }
-    ],
-    "PreToolUse": [
-      { "matcher": "Task", "hooks": [{ "type": "command", "command": "python3 .gemini/hooks/inject-subagent-context.py", "timeout": 30 }] }
-    ]
-  }
+    let value = serde_json::json!({
+        "hooks": {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "name": "studio-session-start",
+                            "type": "command",
+                            "command": gemini_hook_command("session-start.py"),
+                            "timeout": 10000
+                        }
+                    ]
+                }
+            ],
+            "BeforeAgent": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "name": "studio-before-agent",
+                            "type": "command",
+                            "command": gemini_hook_command("inject-workflow-state.py"),
+                            "timeout": 5000
+                        }
+                    ]
+                }
+            ]
+        }
+    });
+    serde_json::to_string_pretty(&value).expect("serialize gemini settings") + "\n"
 }
-"#
-    .to_string()
+
+fn codex_hook_command(script_name: &str) -> String {
+    format!("/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/{script_name}\"")
+}
+
+fn claude_hook_command(script_name: &str) -> String {
+    format!("/usr/bin/python3 \"${{CLAUDE_PROJECT_DIR}}/.claude/hooks/{script_name}\"")
+}
+
+fn gemini_hook_command(script_name: &str) -> String {
+    format!("/usr/bin/python3 \"${{GEMINI_PROJECT_DIR}}/.gemini/hooks/{script_name}\"")
 }
 
 fn render_codex_agent(name: &str, description: &str) -> String {
@@ -4854,17 +5171,40 @@ mod tests {
             .is_file());
         assert!(root.join("AGENTS.md").is_file());
         assert!(root.join(".codex/hooks/session-start.py").is_file());
+        assert!(root.join(".codex/config.toml").is_file());
         assert!(root
             .join(".claude/hooks/inject-workflow-state.py")
             .is_file());
-        assert!(root
+        assert!(!root
             .join(".gemini/hooks/inject-subagent-context.py")
-            .is_file());
+            .exists());
 
         let hook = fs::read_to_string(root.join(".codex/hooks/session-start.py"))
             .expect("read codex hook");
         assert!(hook.contains("active-context"));
         assert!(hook.contains("hook-state"));
+
+        let codex_hooks =
+            fs::read_to_string(root.join(".codex/hooks.json")).expect("read codex hooks");
+        assert!(codex_hooks.contains("git rev-parse --show-toplevel"));
+        assert!(codex_hooks.contains("startup|resume|clear"));
+
+        let codex_config =
+            fs::read_to_string(root.join(".codex/config.toml")).expect("read codex config");
+        assert!(codex_config.contains("[features]"));
+        assert!(codex_config.contains("codex_hooks = true"));
+
+        let claude_settings =
+            fs::read_to_string(root.join(".claude/settings.json")).expect("read claude settings");
+        assert!(claude_settings.contains("\"SubagentStart\""));
+        assert!(claude_settings.contains("\"resume\""));
+        assert!(claude_settings.contains("${CLAUDE_PROJECT_DIR}"));
+
+        let gemini_settings =
+            fs::read_to_string(root.join(".gemini/settings.json")).expect("read gemini settings");
+        assert!(gemini_settings.contains("\"BeforeAgent\""));
+        assert!(gemini_settings.contains("${GEMINI_PROJECT_DIR}"));
+        assert!(!gemini_settings.contains("UserPromptSubmit"));
 
         let binding = read_json_file(
             &root
@@ -4881,6 +5221,15 @@ mod tests {
             .and_then(|value| value.get("version"))
             .and_then(Value::as_str)
             .is_some());
+    }
+
+    #[test]
+    fn enable_codex_hooks_feature_flag_reuses_existing_features_table() {
+        let content = "[features]\nexperimental = true\n";
+        let next = enable_codex_hooks_feature_flag(content);
+        assert_eq!(next.matches("[features]").count(), 1);
+        assert!(next.contains("experimental = true"));
+        assert!(next.contains("codex_hooks = true"));
     }
 
     #[test]
@@ -5099,5 +5448,38 @@ mod tests {
         assert!(selected
             .iter()
             .all(|entry| entry.file != ".studio/spec/windows-runtime/index.md"));
+    }
+
+    #[test]
+    fn context_curation_for_three_layer_request_is_not_fallback() {
+        let root = temp_project_root("curation-three-layer");
+        let mut input = fixture_input(&root, "task-curation-three-layer");
+        input.user_prompt = "查看现在的 @.studio/ 是否达到我们的spec,memory,active context的设计。Spec 是项目长期规则，Memory 是项目长期记忆、决策、约定，Active Context 是当前应该注入给 CLI 的工作上下文；检查生成物，以及完整链路。".to_string();
+        input.handoff_files = Vec::new();
+
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let manifest =
+            fs::read_to_string(root.join(".studio/runtime/active-context/manifest.jsonl"))
+                .expect("read manifest");
+        assert!(!manifest.contains("\"fallback\":true"));
+        assert!(manifest.contains(".studio/spec/storage/index.md"));
+        assert!(manifest.contains(".studio/spec/automation/index.md"));
+
+        let context = read_json_file(&root.join(".studio/runtime/active-context/context.json"))
+            .expect("read context json");
+        let curator = context
+            .get("contextCurator")
+            .expect("context curator state");
+        assert_eq!(
+            curator.get("status").and_then(Value::as_str),
+            Some("curated")
+        );
+        assert_eq!(
+            curator.get("fallback").and_then(Value::as_bool),
+            Some(false)
+        );
     }
 }
