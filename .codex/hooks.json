@@ -4,21 +4,22 @@
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "python3 .codex/hooks/session-start.py",
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/session-start.py\"",
+            "statusMessage": "Loading Studio Context Native Hook...",
             "timeout": 15,
-            "statusMessage": "Loading Studio Context Native Hook..."
+            "type": "command"
           }
-        ]
+        ],
+        "matcher": "startup|resume|clear"
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "python3 .codex/hooks/inject-workflow-state.py",
-            "timeout": 5
+            "command": "/usr/bin/python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/inject-workflow-state.py\"",
+            "timeout": 5,
+            "type": "command"
           }
         ]
       }

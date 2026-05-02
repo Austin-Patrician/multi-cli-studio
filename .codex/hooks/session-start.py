@@ -4,9 +4,9 @@
 Studio Context Native Hook for codex.
 
 Modes:
-- session: SessionStart additional context
-- prompt: UserPromptSubmit workflow breadcrumb
-- subagent: PreToolUse Task/Agent manifest injection
+- session: emits SessionStart additional context
+- prompt: emits UserPromptSubmit (Codex/Claude) or BeforeAgent (Gemini)
+- subagent: emits SubagentStart for Claude; currently not registered for Gemini
 """
 from __future__ import annotations
 
@@ -324,11 +324,14 @@ def build_subagent_context(root: Path, input_data: dict) -> str:
 
 
 def emit(additional_context: str) -> int:
-    event = {
-        "session": "SessionStart",
-        "prompt": "UserPromptSubmit",
-        "subagent": "PreToolUse",
-    }.get(MODE, MODE)
+    if MODE == "session":
+        event = "SessionStart"
+    elif MODE == "prompt":
+        event = "BeforeAgent" if PLATFORM == "gemini" else "UserPromptSubmit"
+    elif MODE == "subagent":
+        event = "SubagentStart" if PLATFORM == "claude" else "BeforeTool"
+    else:
+        event = MODE
     payload = {
         "hookSpecificOutput": {
             "hookEventName": event,

@@ -706,6 +706,7 @@ function StudioWorkflowPanel({
         eyebrow: "Rules",
         icon: Braces,
         text: layers.spec || (loading ? "正在加载..." : "当前没有可注入的 Spec 文本。"),
+        summaryPreview: layers.spec ? "已选项目规则" : undefined,
         accentClassName: "from-sky-500/12 via-cyan-500/8 to-transparent",
         iconClassName: "text-sky-600",
       },
@@ -748,8 +749,8 @@ function StudioWorkflowPanel({
       </div>
       <div className="workspace-panel-scroll space-y-3">
         {error ? <div className="rounded-[16px] border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div> : null}
-        <section className="overflow-hidden rounded-[20px] border border-slate-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] shadow-[0_12px_30px_rgba(15,23,42,0.06)]">
-          <div className="border-b border-slate-200/80 px-4 py-3">
+        <section className="overflow-hidden">
+          <div className="px-1 py-2">
             <div className="flex items-start justify-between gap-3">
               <div className="space-y-1">
                 <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Injected Layers</div>
@@ -771,6 +772,7 @@ function StudioWorkflowPanel({
           <div className="divide-y divide-slate-200/80">
             {displayedLayers.map((layer) => {
               const summary = summarizeStudioLayerText(layer.text);
+              const preview = layer.summaryPreview ?? summary.preview;
               const isCollapsed = collapsedLayers[layer.id] ?? DEFAULT_STUDIO_LAYER_COLLAPSE_STATE[layer.id] ?? true;
               const Icon = layer.icon;
 
@@ -796,7 +798,7 @@ function StudioWorkflowPanel({
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-sm font-semibold text-slate-900">{layer.title}</div>
-                          <div className="truncate text-xs text-slate-600">{summary.preview}</div>
+                          <div className="truncate text-xs text-slate-600">{preview}</div>
                         </div>
                         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white/90 text-slate-500 shadow-sm transition duration-200 group-hover:border-slate-300 group-hover:text-slate-900">
                           {isCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
