@@ -61,6 +61,8 @@ import {
   SemanticRecallRequest,
   StudioPromoteRequest,
   StudioPromoteResult,
+  TranscribeAudioRequest,
+  TranscribeAudioResult,
   StudioPolicyPromotionResult,
   StudioWorkflowState,
   ToolApprovalMode,
@@ -195,6 +197,7 @@ export interface RuntimeBridge {
   saveTextToDownloads: (fileName: string, content: string) => Promise<string>;
   // Chat methods
   sendChatMessage: (request: ChatPromptRequest) => Promise<string>;
+  transcribeAudio: (request: TranscribeAudioRequest) => Promise<TranscribeAudioResult>;
   interruptChatTurn: (terminalTabId: string, messageId: string) => Promise<ChatInterruptResult>;
   runAutoOrchestration: (request: AutoOrchestrationRequest) => Promise<string>;
   respondAssistantApproval: (requestId: string, decision: AssistantApprovalDecision) => Promise<boolean>;
@@ -742,6 +745,10 @@ const tauriRuntime: RuntimeBridge = {
   async sendChatMessage(request) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<string>("send_chat_message", { request });
+  },
+  async transcribeAudio(request) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<TranscribeAudioResult>("transcribe_audio", { request });
   },
   async interruptChatTurn(terminalTabId, messageId) {
     const { invoke } = await import("@tauri-apps/api/core");

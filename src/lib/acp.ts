@@ -2,7 +2,7 @@ import { AgentId } from "./models";
 import type { VendorCustomModel } from "./vendorModels";
 
 export type AcpCommandKind =
-  | "plan" | "model" | "compact" | "clear" | "rewind"
+  | "plan" | "goal" | "model" | "compact" | "clear" | "rewind"
   | "diff" | "permissions" | "cost" | "help" | "export"
   | "status" | "session" | "effort" | "fast" | "context" | "memory" | "review";
 
@@ -131,6 +131,11 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
     execution: "local", supportedClis: ["codex", "claude", "gemini"],
   },
   {
+    kind: "goal", slash: "/goal", label: "Active Goal",
+    description: "Show the current Studio goal from the active context",
+    execution: "local", supportedClis: ["codex", "claude", "gemini"],
+  },
+  {
     kind: "model", slash: "/model", label: "Select Model",
     description: "Change the model for the active CLI",
     argsHint: "<model-name>",
@@ -246,6 +251,7 @@ export function getPickerCatalog(
 export function getCommandCategory(kind: AcpCommandKind) {
   switch (kind) {
     case "plan":
+    case "goal":
     case "model":
     case "permissions":
     case "effort":

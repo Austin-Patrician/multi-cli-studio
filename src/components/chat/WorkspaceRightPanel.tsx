@@ -1,5 +1,7 @@
 import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Activity as ActivityIcon,
   Bot,
@@ -451,6 +453,14 @@ function summarizeStudioLayerText(content: string) {
   };
 }
 
+function StudioLayerMarkdown({ content }: { content: string }) {
+  return (
+    <div className="dcc-markdown-preview mt-0 rounded-[18px] border border-slate-200 bg-white/95 px-4 py-4 text-[12px] leading-6 text-slate-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)] [&_a]:break-all [&_blockquote]:border-l-2 [&_blockquote]:border-slate-200 [&_blockquote]:bg-slate-50/80 [&_blockquote]:px-3 [&_blockquote]:py-2 [&_code]:rounded-md [&_code]:bg-slate-100 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:text-[11px] [&_h1]:text-base [&_h1]:font-semibold [&_h2]:text-sm [&_h2]:font-semibold [&_h3]:text-[13px] [&_h3]:font-semibold [&_hr]:border-slate-200 [&_li]:text-[12px] [&_ol]:my-3 [&_ol]:space-y-1 [&_ol]:pl-5 [&_p]:my-0 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:border [&_pre]:border-[#263244] [&_pre]:bg-[#111827] [&_pre]:px-4 [&_pre]:py-4 [&_pre]:text-[11px] [&_pre]:leading-5 [&_pre]:text-slate-100 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-slate-100 [&_table]:min-w-full [&_table]:border-collapse [&_table]:text-left [&_table]:text-[12px] [&_tbody_td]:border-t [&_tbody_td]:border-slate-200 [&_tbody_td]:px-3 [&_tbody_td]:py-2 [&_thead]:bg-slate-50 [&_th]:border-b [&_th]:border-slate-200 [&_th]:px-3 [&_th]:py-2 [&_th]:font-medium [&_ul]:my-3 [&_ul]:space-y-1 [&_ul]:pl-5">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    </div>
+  );
+}
+
 function formatStudioLayerMeta(lineCount: number, charCount: number) {
   if (lineCount <= 0 && charCount <= 0) return "Empty";
   const charLabel =
@@ -808,9 +818,9 @@ function StudioWorkflowPanel({
                   </button>
                   {!isCollapsed ? (
                     <div className="relative px-4 pb-4">
-                      <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words rounded-[18px] border border-slate-200 bg-slate-950 px-4 py-4 font-mono text-[11px] leading-5 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition duration-200">
-                        {layer.text}
-                      </pre>
+                      <div className="max-h-[320px] overflow-auto rounded-[18px] transition duration-200">
+                        <StudioLayerMarkdown content={layer.text} />
+                      </div>
                     </div>
                   ) : null}
                 </section>

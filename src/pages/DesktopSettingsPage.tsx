@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useOutlet, useSearchParams } from "react-router-dom";
+import { isTauri } from "@tauri-apps/api/core";
+import tauriConfig from "../../src-tauri/tauri.conf.json";
 import {
   Archive,
   ArrowLeft,
@@ -12,6 +14,7 @@ import {
   Cpu,
   FileText,
   FolderOpen,
+  Github,
   Link2,
   Monitor,
   Server,
@@ -30,6 +33,7 @@ import { DesktopHooksSection } from "../components/settings/DesktopHooksSection"
 import { DesktopProjectsSection, type DesktopProjectHealthTone, type DesktopProjectView } from "../components/settings/DesktopProjectsSection";
 import { DesktopWindowControls } from "../components/DesktopWindowChrome";
 import { GlobalGitDrawer } from "../components/settings/GlobalGitDrawer";
+import { bridge } from "../lib/bridge";
 import { useStore } from "../lib/store";
 import type { AgentId, GitPanelData, TerminalTab, WorkspaceRef } from "../lib/models";
 
@@ -45,12 +49,17 @@ type SettingsSection =
   | "hooks"
   | "skills"
   | "session-management"
-  | "usage";
+  | "usage"
+  | "about";
 type SidebarNavItem = {
   id: SettingsSection;
   label: string;
   icon: typeof Settings;
 };
+
+const GITHUB_REPO_URL = "https://github.com/Austin-Patrician/multi-cli-studio";
+const FALLBACK_APP_VERSION =
+  (tauriConfig as { version?: string }).version?.trim() || "0.0.0";
 
 const NAV_ITEMS: SidebarNavItem[] = [
   { id: "settings", label: "通用设置", icon: Settings },
@@ -65,6 +74,7 @@ const NAV_ITEMS: SidebarNavItem[] = [
   { id: "hooks", label: "Hooks", icon: Webhook },
   { id: "skills", label: "Skill", icon: BookOpen },
   { id: "usage", label: "使用统计", icon: BarChart3 },
+  { id: "about", label: "关于", icon: Monitor },
 ];
 
 function parseSettingsSection(value: string | null): SettingsSection {
@@ -81,6 +91,7 @@ function parseSettingsSection(value: string | null): SettingsSection {
     case "vendors":
     case "settings":
     case "usage":
+    case "about":
       return value;
     default:
       return "settings";
@@ -168,11 +179,13 @@ export function DesktopSettingsPage() {
   const openWorkspaceFolder = useStore((state) => state.openWorkspaceFolder);
   const openGitWorkbench = useStore((state) => state.openGitWorkbench);
   const deleteWorkspace = useStore((state) => state.deleteWorkspace);
+  const renameWorkspace = useStore((state) => state.renameWorkspace);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeVendorTab, setActiveVendorTab] = useState<AgentId>("claude");
   const [deleteTarget, setDeleteTarget] = useState<DesktopProjectView | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION);
 
   const isGeneralSettingsRoute = location.pathname.startsWith("/settings/general");
   const isModelProvidersRoute = location.pathname.startsWith("/settings/model-providers");
@@ -194,6 +207,35 @@ export function DesktopSettingsPage() {
     if (saved) {
       setSidebarCollapsed(saved === "1");
     }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAppVersion() {
+      if (!isTauri()) {
+        setAppVersion(FALLBACK_APP_VERSION);
+        return;
+      }
+
+      try {
+        const { getVersion } = await import("@tauri-apps/api/app");
+        const version = await getVersion();
+        if (!cancelled) {
+          setAppVersion(version?.trim() || FALLBACK_APP_VERSION);
+        }
+      } catch {
+        if (!cancelled) {
+          setAppVersion(FALLBACK_APP_VERSION);
+        }
+      }
+    }
+
+    void loadAppVersion();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const projectViews = useMemo<DesktopProjectView[]>(() => {
@@ -311,6 +353,19 @@ export function DesktopSettingsPage() {
       setDeleteTarget(null);
     } finally {
       setDeleteBusy(false);
+    }
+  }
+
+  async function openRepository() {
+    try {
+      const opened = await bridge.openExternalUrl(GITHUB_REPO_URL);
+      if (!opened && typeof window !== "undefined") {
+        window.open(GITHUB_REPO_URL, "_blank", "noopener,noreferrer");
+      }
+    } catch {
+      if (typeof window !== "undefined") {
+        window.open(GITHUB_REPO_URL, "_blank", "noopener,noreferrer");
+      }
     }
   }
 
@@ -455,6 +510,7 @@ export function DesktopSettingsPage() {
                 onOpenConnections={() => openSection("connections")}
                 onOpenWorkspaceTerminal={openWorkspaceTerminal}
                 onOpenWorkspaceGitPanel={openWorkspaceGitPanel}
+                onRenameProject={renameWorkspace}
                 onDeleteProject={setDeleteTarget}
               />
             ) : null}
@@ -484,6 +540,105 @@ export function DesktopSettingsPage() {
 
             {!outlet && activeSection === "usage" ? (
               <DesktopUsageSection activeWorkspace={activeWorkspace} workspaces={workspaces} />
+            ) : null}
+
+            {!outlet && activeSection === "about" ? (
+              <section className="settings-section">
+                <div className="settings-section-title">关于 Multi CLI Studio</div>
+                <div className="settings-section-subtitle">
+                  查看桌面端版本信息，并快速打开开源仓库。
+                </div>
+                <div className="dcc-detail-grid">
+                  <div className="dcc-detail-panel dcc-detail-panel-span-2">
+                    <div className="flex items-start justify-between gap-6 max-md:flex-col">
+                      <div className="flex min-w-0 items-start gap-4">
+                        <div
+                          className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border"
+                          style={{
+                            borderColor: "rgba(255,255,255,0.12)",
+                            background:
+                              "linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03))",
+                          }}
+                        >
+                          <Github size={26} />
+                        </div>
+                        <div className="min-w-0">
+                          <div
+                            className="text-xs uppercase tracking-[0.12em]"
+                            style={{ color: "var(--text-muted)" }}
+                          >
+                            Open Source
+                          </div>
+                          <div className="mt-2 text-[22px] font-semibold leading-none">
+                            Multi CLI Studio
+                          </div>
+                          <div
+                            className="mt-2 text-sm leading-6"
+                            style={{ color: "var(--text-muted)" }}
+                          >
+                            一个面向 Codex、Claude 和 Gemini 的桌面协作工作台。
+                          </div>
+                        </div>
+                      </div>
+                      <div
+                        className="inline-flex shrink-0 items-center gap-2 rounded-full border px-3 py-1 text-sm"
+                        style={{
+                          borderColor: "rgba(255,255,255,0.1)",
+                          background: "rgba(255,255,255,0.04)",
+                          color: "var(--text-primary)",
+                        }}
+                      >
+                        <span style={{ color: "var(--text-muted)" }}>Version</span>
+                        <strong>v{appVersion}</strong>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void openRepository()}
+                      className="mt-6 flex w-full items-center justify-between gap-4 rounded-xl border px-4 py-4 text-left transition hover:translate-y-[-1px]"
+                      style={{
+                        borderColor: "rgba(255,255,255,0.1)",
+                        background: "rgba(255,255,255,0.03)",
+                      }}
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium">GitHub Repository</div>
+                        <div
+                          className="mt-1 truncate text-sm"
+                          style={{ color: "var(--text-muted)" }}
+                        >
+                          {GITHUB_REPO_URL}
+                        </div>
+                      </div>
+                      <Github size={18} className="shrink-0" />
+                    </button>
+                  </div>
+
+                  <div className="dcc-detail-panel">
+                    <div className="dcc-panel-title">版本信息</div>
+                    <div className="dcc-detail-row">
+                      <span>当前版本</span>
+                      <strong>v{appVersion}</strong>
+                    </div>
+                    <div className="dcc-detail-row">
+                      <span>发布形态</span>
+                      <strong>Desktop App</strong>
+                    </div>
+                  </div>
+
+                  <div className="dcc-detail-panel">
+                    <div className="dcc-panel-title">源码入口</div>
+                    <div className="dcc-detail-row">
+                      <span>平台</span>
+                      <strong>GitHub</strong>
+                    </div>
+                    <div className="dcc-detail-row">
+                      <span>仓库</span>
+                      <strong className="truncate pl-3">Austin-Patrician/multi-cli-studio</strong>
+                    </div>
+                  </div>
+                </div>
+              </section>
             ) : null}
           </div>
         </main>

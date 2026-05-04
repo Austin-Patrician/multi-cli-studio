@@ -9,6 +9,8 @@
       <string>en</string>
       <string>zh-Hans</string>
     </array>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Multi CLI Studio uses the microphone to convert your speech into text for the chat input.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
       <dict>

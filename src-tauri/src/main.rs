@@ -102,6 +102,8 @@ const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 const STUDIO_CONTEXT_CURATOR_TIMEOUT_MS: u64 = 45_000;
+const MACOS_NATIVE_SPEECH_TIMEOUT_MS: u64 = 75_000;
+const DATA_DIR_OVERRIDE_ENV: &str = "MULTI_CLI_STUDIO_DATA_DIR";
 const STUDIO_CONTEXT_KEY_ENV: &str = "STUDIO_CONTEXT_KEY";
 const STUDIO_CONTEXT_ID_ENV: &str = "STUDIO_CONTEXT_ID";
 const STUDIO_CONTEXT_LOG_ENV: &str = "STUDIO_CONTEXT_LOG";
@@ -1319,7 +1321,7 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
             b'0'..=b'9' => byte - b'0' + 52,
             b'+' => 62,
             b'/' => 63,
-            _ => return Err("Invalid base64 image data.".to_string()),
+            _ => return Err("Invalid base64 data.".to_string()),
         } as u32;
         buffer = (buffer << 6) | value;
         bits += 6;
@@ -1882,6 +1884,165 @@ fn fetch_provider_models(
         return Err("No models were returned by the provider.".to_string());
     }
     Ok(models)
+}
+
+fn enabled_openai_compatible_provider(
+    settings: &AppSettings,
+) -> Result<ModelProviderConfig, String> {
+    let provider = settings
+        .openai_compatible_providers
+        .iter()
+        .find(|provider| provider.enabled)
+        .cloned()
+        .ok_or_else(|| {
+            "Enable an OpenAI Compatible provider in Vendors before using voice input.".to_string()
+        })?;
+    if provider.base_url.trim().is_empty() {
+        return Err("The enabled OpenAI Compatible provider is missing a Base URL.".to_string());
+    }
+    if provider.api_key.trim().is_empty() {
+        return Err("The enabled OpenAI Compatible provider is missing an API key.".to_string());
+    }
+    Ok(provider)
+}
+
+fn preferred_transcription_model(provider: &ModelProviderConfig) -> String {
+    const PREFERRED_MODELS: [&str; 3] =
+        ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"];
+    for preferred in PREFERRED_MODELS {
+        if provider
+            .models
+            .iter()
+            .any(|model| model.id.trim().eq_ignore_ascii_case(preferred))
+        {
+            return preferred.to_string();
+        }
+    }
+    provider
+        .models
+        .iter()
+        .find_map(|model| {
+            let id = model.id.trim();
+            if id.eq_ignore_ascii_case("whisper-1")
+                || id.to_ascii_lowercase().contains("transcribe")
+            {
+                Some(id.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "whisper-1".to_string())
+}
+
+fn voice_file_extension_for_mime_type(mime_type: &str) -> &'static str {
+    let normalized = mime_type.trim().to_ascii_lowercase();
+    if normalized.contains("webm") {
+        "webm"
+    } else if normalized.contains("mp4") || normalized.contains("m4a") {
+        "m4a"
+    } else if normalized.contains("wav") {
+        "wav"
+    } else if normalized.contains("mpeg") || normalized.contains("mp3") {
+        "mp3"
+    } else if normalized.contains("ogg") {
+        "ogg"
+    } else {
+        "webm"
+    }
+}
+
+fn execute_transcription_request(
+    builder: reqwest::blocking::RequestBuilder,
+) -> Result<String, String> {
+    let response = builder.send().map_err(|err| err.to_string())?;
+    let status = response.status();
+    let body = response.text().map_err(|err| err.to_string())?;
+    if !status.is_success() {
+        let detail = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|value| extract_api_error_message(&value))
+            .unwrap_or_else(|| {
+                let trimmed = body.trim();
+                if trimmed.is_empty() {
+                    format!("HTTP {}", status.as_u16())
+                } else {
+                    truncate_text(trimmed, 320)
+                }
+            });
+        return Err(format!("{} {}", status.as_u16(), detail));
+    }
+
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Err("The transcription API returned an empty response.".to_string());
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(text) = value.get("text").and_then(Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return Ok(text.to_string());
+            }
+        }
+        if let Some(text) = value.as_str() {
+            let text = text.trim();
+            if !text.is_empty() {
+                return Ok(text.to_string());
+            }
+        }
+        return Err("The transcription API response did not contain text.".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn transcribe_audio_with_provider(
+    provider: &ModelProviderConfig,
+    request: &TranscribeAudioRequest,
+) -> Result<String, String> {
+    let audio_bytes = decode_base64(&request.base64_audio)?;
+    if audio_bytes.is_empty() {
+        return Err("Audio data is required.".to_string());
+    }
+    if audio_bytes.len() > 25 * 1024 * 1024 {
+        return Err("Audio must be 25MB or smaller.".to_string());
+    }
+
+    let mime_type = if request.mime_type.trim().is_empty() {
+        "audio/webm"
+    } else {
+        request.mime_type.trim()
+    };
+    let file_name = request
+        .file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "voice-input.{}",
+                voice_file_extension_for_mime_type(mime_type)
+            )
+        });
+    let model = preferred_transcription_model(provider);
+    let client = api_http_client(90)?;
+    let part = reqwest::blocking::multipart::Part::bytes(audio_bytes)
+        .file_name(file_name)
+        .mime_str(mime_type)
+        .map_err(|err| format!("Invalid audio MIME type: {}", err))?;
+    let form = reqwest::blocking::multipart::Form::new()
+        .part("file", part)
+        .text("model", model)
+        .text("response_format", "json");
+
+    execute_transcription_request(
+        client
+            .post(openai_endpoint(&provider.base_url, "audio/transcriptions"))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", provider.api_key.trim()),
+            )
+            .multipart(form),
+    )
 }
 
 fn parse_openai_response_text(value: &Value) -> Option<String> {
@@ -3373,6 +3534,20 @@ struct ChatPromptRequest {
     cross_tab_context: Option<Vec<SharedContextEntry>>,
     #[serde(default)]
     working_memory: Option<WorkingMemoryPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscribeAudioRequest {
+    mime_type: String,
+    base64_audio: String,
+    file_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscribeAudioResult {
+    text: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -10163,6 +10338,19 @@ fn refresh_provider_models(
     };
 
     Ok(updated_provider)
+}
+
+#[tauri::command]
+fn transcribe_audio(
+    store: State<'_, AppStore>,
+    request: TranscribeAudioRequest,
+) -> Result<TranscribeAudioResult, String> {
+    let provider = {
+        let settings = store.settings.lock().map_err(|err| err.to_string())?;
+        enabled_openai_compatible_provider(&settings)?
+    };
+    let text = transcribe_audio_with_provider(&provider, &request)?;
+    Ok(TranscribeAudioResult { text })
 }
 
 #[tauri::command]
@@ -28658,9 +28846,14 @@ fn execute_workflow_run_loop(
 // ── State persistence ──────────────────────────────────────────────────
 
 fn data_dir() -> Result<PathBuf, String> {
-    let base = data_local_dir()
-        .ok_or_else(|| "Unable to locate local application data directory".to_string())?
-        .join("multi-cli-studio");
+    let base = std::env::var_os(DATA_DIR_OVERRIDE_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("multi-cli-studio")
+        });
     fs::create_dir_all(&base).map_err(|err| err.to_string())?;
     Ok(base)
 }
@@ -29179,12 +29372,75 @@ fn default_project_root() -> String {
         .unwrap_or_else(|_| ".".to_string())
 }
 
+fn backup_terminal_storage_sidecars(db_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let Some(parent) = db_path.parent() else {
+        return Ok(Vec::new());
+    };
+    let Some(file_name) = db_path.file_name().and_then(|value| value.to_str()) else {
+        return Ok(Vec::new());
+    };
+    let stamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut backups = Vec::new();
+
+    for suffix in ["", "-wal", "-shm"] {
+        let source = parent.join(format!("{file_name}{suffix}"));
+        if !source.exists() {
+            continue;
+        }
+        let backup = parent.join(format!("{file_name}{suffix}.recovery-{stamp}"));
+        fs::rename(&source, &backup).map_err(|err| {
+            format!(
+                "Failed to move {} to {}: {}",
+                source.display(),
+                backup.display(),
+                err
+            )
+        })?;
+        backups.push(backup);
+    }
+
+    Ok(backups)
+}
+
+fn initialize_terminal_storage(db_path: PathBuf) -> Result<TerminalStorage, String> {
+    match TerminalStorage::new(db_path.clone()) {
+        Ok(storage) => Ok(storage),
+        Err(initial_error) => {
+            eprintln!(
+                "Terminal sqlite storage initialization failed at {}: {}. Attempting recovery.",
+                db_path.display(),
+                initial_error
+            );
+            let backups = backup_terminal_storage_sidecars(&db_path)?;
+            let recovered = TerminalStorage::new(db_path.clone()).map_err(|retry_error| {
+                format!(
+                    "Initial error: {}. Recovery retry failed at {}: {}",
+                    initial_error,
+                    db_path.display(),
+                    retry_error
+                )
+            })?;
+            if !backups.is_empty() {
+                eprintln!(
+                    "Recovered terminal sqlite storage by backing up: {}",
+                    backups
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            Ok(recovered)
+        }
+    }
+}
+
 // ── Entry point ────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let project_root = default_project_root();
-    let terminal_storage = TerminalStorage::new(default_terminal_db_path(
+    let terminal_storage = initialize_terminal_storage(default_terminal_db_path(
         &data_dir().expect("failed to resolve local app data directory"),
     ))
     .expect("failed to initialize terminal sqlite storage");
@@ -29393,6 +29649,7 @@ pub fn run() {
             delete_automation_workflow_run,
             save_text_to_downloads,
             switch_cli_for_task,
+            transcribe_audio,
             send_chat_message,
             promote_studio_memory,
             get_studio_workflow_state,

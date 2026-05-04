@@ -110,6 +110,66 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function joinWorkspaceRelativePath(rootPath: string, relativePath: string) {
+  const normalizedRoot = rootPath.replace(/[\\/]+$/, "");
+  const normalizedRelative = relativePath.replace(/^[\\/]+/, "");
+  return `${normalizedRoot}/${normalizedRelative}`;
+}
+
+function normalizeStudioText(content: string) {
+  return content
+    .replace(/\r\n/g, "\n")
+    .replace(/<!-- STUDIO-(?:WORKFLOW|CONTEXT):MANAGED -->\n?/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractMarkdownSection(content: string, heading: string) {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const headingKey = `## ${heading}`.toLowerCase();
+  const output: string[] = [];
+  let capturing = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim().toLowerCase();
+    if (trimmed === headingKey) {
+      capturing = true;
+      continue;
+    }
+    if (capturing && trimmed.startsWith("## ")) {
+      break;
+    }
+    if (capturing) {
+      output.push(line);
+    }
+  }
+
+  return normalizeStudioText(output.join("\n"));
+}
+
+async function readStudioGoal(rootPath: string) {
+  const [currentContext, prd] = await Promise.all([
+    bridge.readExternalAbsoluteFile(
+      joinWorkspaceRelativePath(rootPath, ".studio/runtime/active-context/current.md")
+    ),
+    bridge.readExternalAbsoluteFile(
+      joinWorkspaceRelativePath(rootPath, ".studio/runtime/active-context/prd.md")
+    ),
+  ]);
+
+  const goal = currentContext.exists
+    ? extractMarkdownSection(currentContext.content, "Goal")
+    : "";
+  const workflowGoal = prd.exists
+    ? extractMarkdownSection(prd.content, "Goal")
+    : "";
+
+  return {
+    goal,
+    workflowGoal,
+  };
+}
+
 function generatedImageExtension(mediaType: string) {
   switch (mediaType.toLowerCase()) {
     case "image/jpeg":
@@ -183,6 +243,11 @@ function basename(path: string) {
   const normalized = path.replace(/[\\/]+$/, "");
   const parts = normalized.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? path;
+}
+
+function normalizeWorkspaceLabel(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
 }
 
 function samePath(left: string, right: string) {
@@ -316,9 +381,16 @@ function createWorkspaceRef(
   partial?: Partial<WorkspaceRef>
 ): WorkspaceRef {
   const locationKind = partial?.locationKind ?? "local";
+  const defaultName =
+    normalizeWorkspaceLabel(partial?.defaultName) ??
+    normalizeWorkspaceLabel(partial?.name) ??
+    basename(rootPath);
+  const customName = normalizeWorkspaceLabel(partial?.customName);
   return {
     id: partial?.id ?? createId("workspace"),
-    name: partial?.name ?? basename(rootPath),
+    name: customName ?? defaultName,
+    defaultName,
+    customName,
     rootPath,
     locationKind,
     connectionId: partial?.connectionId ?? null,
@@ -466,6 +538,17 @@ function nextClonedTabTitle(baseTitle: string, existingTitles: string[]) {
   }
 
   return `${normalizedBase} 路 ${nextIndex}`;
+}
+
+function renameWorkspaceTabTitle(title: string, previousWorkspaceName: string, nextWorkspaceName: string) {
+  const trimmedTitle = title.trim();
+  if (!trimmedTitle) return nextWorkspaceName;
+  if (trimmedTitle === previousWorkspaceName) return nextWorkspaceName;
+  const match = trimmedTitle.match(/^(.*)\s路\s(\d+)$/);
+  if (match && match[1] === previousWorkspaceName) {
+    return `${nextWorkspaceName} 路 ${match[2]}`;
+  }
+  return title;
 }
 
 function cloneChatBlocks(blocks: ChatMessageBlock[] | null | undefined) {
@@ -1519,6 +1602,7 @@ interface StoreState {
   reorderTerminalTabs: (sourceTabId: string, targetTabId: string) => void;
   closeTerminalTab: (tabId: string) => void;
   deleteWorkspace: (workspaceId: string) => Promise<void>;
+  renameWorkspace: (workspaceId: string, nextName: string) => void;
   setActiveTerminalTab: (tabId: string) => void;
   resetTerminalTabSession: (tabId?: string) => void;
   resetCliTransportSession: (cliId: AgentId, tabId?: string) => void;
@@ -1824,7 +1908,9 @@ export const useStore = create<StoreState>((set, get) => {
       updatePersistenceIssue("terminalState", error);
     }
     if (persisted && persisted.workspaces.length > 0 && persisted.terminalTabs.length > 0) {
-      workspaces = persisted.workspaces;
+      workspaces = persisted.workspaces.map((workspace) =>
+        createWorkspaceRef(workspace.rootPath, workspace)
+      );
       terminalTabs = persisted.terminalTabs.map((tab) =>
         createTerminalTab(
           workspaces.find((workspace) => workspace.id === tab.workspaceId) ??
@@ -2545,6 +2631,70 @@ export const useStore = create<StoreState>((set, get) => {
         gitCommitMessageByWorkspace,
         gitCommitLoadingByWorkspace,
         gitCommitErrorByWorkspace,
+      };
+    });
+  },
+
+  renameWorkspace: (workspaceId, nextName) => {
+    set((state) => {
+      const workspace = state.workspaces.find((item) => item.id === workspaceId) ?? null;
+      if (!workspace) return {};
+
+      const trimmedName = nextName.trim();
+      const nextCustomName =
+        trimmedName.length > 0 && trimmedName !== workspace.defaultName ? trimmedName : null;
+      const nextWorkspace = createWorkspaceRef(workspace.rootPath, {
+        ...workspace,
+        customName: nextCustomName,
+      });
+
+      if (
+        nextWorkspace.name === workspace.name &&
+        (nextWorkspace.customName ?? null) === (workspace.customName ?? null)
+      ) {
+        return {};
+      }
+
+      const previousWorkspaceName = workspace.name;
+      const workspaces = state.workspaces.map((item) =>
+        item.id === workspaceId ? nextWorkspace : item
+      );
+      const terminalTabs = state.terminalTabs.map((tab) =>
+        tab.workspaceId === workspaceId
+          ? {
+              ...tab,
+              title: renameWorkspaceTabTitle(tab.title, previousWorkspaceName, nextWorkspace.name),
+            }
+          : tab
+      );
+      const chatSessions = Object.fromEntries(
+        Object.entries(state.chatSessions).map(([tabId, session]) => [
+          tabId,
+          session.workspaceId === workspaceId
+            ? {
+                ...session,
+                projectName: nextWorkspace.name,
+              }
+            : session,
+        ])
+      );
+      const sharedContext = rebuildSharedContextMap(chatSessions, terminalTabs, workspaces);
+      const appState = state.appState
+        ? deriveActiveWorkspaceState(
+            state.appState,
+            workspaces,
+            terminalTabs,
+            state.activeTerminalTabId,
+          )
+        : null;
+
+      persistTerminalState(workspaces, terminalTabs, state.activeTerminalTabId, chatSessions);
+      return {
+        appState,
+        workspaces,
+        terminalTabs,
+        chatSessions,
+        sharedContext,
       };
     });
   },
@@ -4480,6 +4630,21 @@ export const useStore = create<StoreState>((set, get) => {
     switch (command.kind) {
       case "plan": {
         get().togglePlanMode(tab.id);
+        return;
+      }
+      case "goal": {
+        try {
+          const { goal, workflowGoal } = await readStudioGoal(workspace.rootPath);
+          const content = [
+            `Goal: ${goal || "No active goal found."}`,
+            workflowGoal && workflowGoal !== goal ? `Workflow Goal: ${workflowGoal}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n\n");
+          pushSystemMessage(content);
+        } catch {
+          pushSystemMessage("Unable to load the active Studio goal.", 1);
+        }
         return;
       }
       case "model": {

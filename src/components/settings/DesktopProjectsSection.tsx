@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { FolderOpen, GitBranch, Link2, Plus, TerminalSquare, Trash2 } from "lucide-react";
+import { FolderOpen, GitBranch, Link2, PencilLine, Plus, TerminalSquare, Trash2 } from "lucide-react";
 import type { TerminalTab, WorkspaceRef } from "../../lib/models";
+import { WorkspaceRenameDialog } from "../WorkspaceRenameDialog";
 
 const PROJECTS_PAGE_SIZE = 8;
 
@@ -24,6 +25,7 @@ type DesktopProjectsSectionProps = {
   onOpenConnections: () => void;
   onOpenWorkspaceTerminal: (workspaceId: string) => void;
   onOpenWorkspaceGitPanel: (workspaceId: string) => void;
+  onRenameProject: (workspaceId: string, nextName: string) => void;
   onDeleteProject: (project: DesktopProjectView) => void;
 };
 
@@ -41,9 +43,12 @@ export function DesktopProjectsSection({
   onOpenConnections,
   onOpenWorkspaceTerminal,
   onOpenWorkspaceGitPanel,
+  onRenameProject,
   onDeleteProject,
 }: DesktopProjectsSectionProps) {
   const [page, setPage] = useState(1);
+  const [renameTarget, setRenameTarget] = useState<WorkspaceRef | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const projectSummary = {
     mountedProjects: projects.length,
     activeSessions: projects.reduce((sum, project) => sum + project.sessionCount, 0),
@@ -62,6 +67,30 @@ export function DesktopProjectsSection({
   useEffect(() => {
     setPage((current) => Math.min(current, Math.max(1, Math.ceil(projects.length / PROJECTS_PAGE_SIZE))));
   }, [projects.length]);
+
+  useEffect(() => {
+    if (!renameTarget) return;
+    if (!projects.some((project) => project.workspace.id === renameTarget.id)) {
+      setRenameTarget(null);
+      setRenameDraft("");
+    }
+  }, [projects, renameTarget]);
+
+  function beginRename(workspace: WorkspaceRef) {
+    setRenameTarget(workspace);
+    setRenameDraft(workspace.customName ?? workspace.name);
+  }
+
+  function cancelRename() {
+    setRenameTarget(null);
+    setRenameDraft("");
+  }
+
+  function submitRename() {
+    if (!renameTarget) return;
+    onRenameProject(renameTarget.id, renameDraft);
+    cancelRename();
+  }
 
   return (
     <section className="settings-section dcc-projects-section">
@@ -169,6 +198,15 @@ export function DesktopProjectsSection({
                     </button>
                     <button
                       type="button"
+                      className="dcc-action-button secondary dcc-project-icon-button"
+                      onClick={() => beginRename(project.workspace)}
+                      aria-label="重命名项目"
+                      title="重命名项目"
+                    >
+                      <PencilLine size={15} />
+                    </button>
+                    <button
+                      type="button"
                       className="dcc-action-button danger dcc-project-icon-button"
                       onClick={() => onDeleteProject(project)}
                       aria-label="删除项目"
@@ -213,6 +251,14 @@ export function DesktopProjectsSection({
           ) : null}
         </div>
       )}
+      <WorkspaceRenameDialog
+        isOpen={Boolean(renameTarget)}
+        workspace={renameTarget}
+        value={renameDraft}
+        onChange={setRenameDraft}
+        onClose={cancelRename}
+        onSubmit={submitRename}
+      />
     </section>
   );
 }

@@ -732,6 +732,21 @@
   transition: background 0.2s, opacity 0.2s, transform 0.1s;
 }
 
+.terminal-chat-prompt .submit-button--mic {
+  background: rgba(15, 23, 42, 0.08);
+  color: var(--text-secondary);
+}
+
+.terminal-chat-prompt .submit-button--mic:hover:not(:disabled) {
+  background: rgba(15, 23, 42, 0.14);
+  color: var(--text-primary);
+}
+
+.terminal-chat-prompt .submit-button--mic.is-listening {
+  background: #dc2626;
+  color: #ffffff;
+}
+
 .terminal-chat-prompt .submit-button:hover:not(:disabled) {
   opacity: 0.9;
   transform: scale(1.05);

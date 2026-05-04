@@ -151,6 +151,8 @@ export interface SshConnectionTestResult {
 export interface WorkspaceRef {
   id: string;
   name: string;
+  defaultName: string;
+  customName?: string | null;
   rootPath: string;
   locationKind: WorkspaceLocationKind;
   connectionId?: string | null;
@@ -1224,6 +1226,16 @@ export interface ChatPromptRequest {
   crossTabContext?: SharedContextEntry[] | null;
   /** Runtime-file context only; not injected directly when Studio Context is available. */
   workingMemory?: WorkingMemory | null;
+}
+
+export interface TranscribeAudioRequest {
+  mimeType: string;
+  base64Audio: string;
+  fileName?: string | null;
+}
+
+export interface TranscribeAudioResult {
+  text: string;
 }
 
 export type StudioPromoteKind = "spec" | "memory" | "journal";

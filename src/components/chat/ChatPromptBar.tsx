@@ -19,6 +19,7 @@ import {
   Cpu,
   FileText,
   LoaderCircle,
+  Mic,
   Paperclip,
   Image as ImageIcon,
   RefreshCw,
@@ -68,7 +69,7 @@ import {
   ToolApprovalMode,
   PickedChatAttachment,
 } from "../../lib/models";
-import { bridge } from "../../lib/bridge";
+import { bridge, isTauriRuntime } from "../../lib/bridge";
 import {
   cliSupportsImageAttachments,
   createChatAttachment,
@@ -133,6 +134,7 @@ type PromptShortcutAction = {
 
 type SelectableCommandKind = AcpPickerCommandKind | "fast";
 type ReviewPromptStep = "preset" | "baseBranch" | "commit" | "custom";
+type VoiceInputState = "idle" | "recording" | "transcribing";
 
 type FooterProviderItem = {
   id: TerminalCliId;
@@ -236,10 +238,79 @@ function titleCaseCli(cliId: TerminalCliId) {
   return cliId.charAt(0).toUpperCase() + cliId.slice(1);
 }
 
+function supportsVoiceCapture() {
+  return (
+    typeof navigator !== "undefined" &&
+    typeof navigator.mediaDevices?.getUserMedia === "function" &&
+    typeof MediaRecorder !== "undefined"
+  );
+}
+
+function pickVoiceRecorderMimeType() {
+  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+    return "";
+  }
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/mp4",
+    "audio/mp4;codecs=mp4a.40.2",
+  ];
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) ?? "";
+}
+
+function voiceFileExtensionForMimeType(mimeType: string) {
+  const normalized = mimeType.trim().toLowerCase();
+  if (normalized.includes("webm")) return "webm";
+  if (normalized.includes("mp4") || normalized.includes("m4a")) return "m4a";
+  if (normalized.includes("wav")) return "wav";
+  if (normalized.includes("mpeg") || normalized.includes("mp3")) return "mp3";
+  if (normalized.includes("ogg")) return "ogg";
+  return "webm";
+}
+
+function encodeArrayBufferToBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function appendPromptText(currentPrompt: string, transcript: string) {
+  const text = transcript.trim();
+  if (!text) return currentPrompt;
+  const needsSpacer = currentPrompt.length > 0 && !/\s$/.test(currentPrompt);
+  return `${currentPrompt}${needsSpacer ? " " : ""}${text}`;
+}
+
+function describeVoiceInputError(error: unknown) {
+  if (error instanceof DOMException) {
+    if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+      return "麦克风权限被拒绝，请在系统设置里允许访问。";
+    }
+    if (error.name === "NotFoundError") {
+      return "没有检测到可用麦克风。";
+    }
+    if (error.name === "NotReadableError") {
+      return "麦克风当前不可用，请关闭占用它的应用后重试。";
+    }
+  }
+  if (error instanceof Error) {
+    const message = error.message.trim();
+    if (message) return message;
+  }
+  return "语音输入失败，请重试。";
+}
+
 const CODEX_CONTEXT_COMPACTION_TEXT = "Codex compacted the thread context.";
 const IMAGE_ATTACHMENT_SUPPORT_MESSAGE = "当前仅 Codex、Claude Code 和 Gemini 支持图片附件";
 const MAX_PASTED_IMAGE_ATTACHMENTS = 5;
 const MAX_PASTED_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_VOICE_AUDIO_BYTES = 25 * 1024 * 1024;
 
 function formatCompactCount(value: number) {
   if (!Number.isFinite(value)) return "0";
@@ -1244,6 +1315,10 @@ export function ChatPromptBar({
     index: null,
     draft: "",
   });
+  const voiceRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceStreamRef = useRef<MediaStream | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
+  const voiceMimeTypeRef = useRef("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [mentionItems, setMentionItems] = useState<FileMentionCandidate[]>([]);
   const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
@@ -1257,6 +1332,7 @@ export function ChatPromptBar({
   const [highlightedPresetIndex, setHighlightedPresetIndex] = useState(0);
   const [highlightedBranchIndex, setHighlightedBranchIndex] = useState(0);
   const [highlightedCommitIndex, setHighlightedCommitIndex] = useState(0);
+  const [voiceInputState, setVoiceInputState] = useState<VoiceInputState>("idle");
 
   const terminalTabs = useStore((s) => s.terminalTabs);
   const workspaces = useStore((s) => s.workspaces);
@@ -1388,6 +1464,9 @@ export function ChatPromptBar({
   }, [activeTab?.id]);
 
   useEffect(() => {
+    if (voiceRecorderRef.current?.state === "recording") {
+      cancelVoiceRecording();
+    }
     setQueueFeedback(null);
   }, [activeTab?.id]);
 
@@ -1786,6 +1865,28 @@ export function ChatPromptBar({
     };
   }, [queueFeedback]);
 
+  useEffect(() => {
+    return () => {
+      const recorder = voiceRecorderRef.current;
+      voiceRecorderRef.current = null;
+      voiceChunksRef.current = [];
+      voiceMimeTypeRef.current = "";
+      if (recorder && recorder.state !== "inactive") {
+        recorder.ondataavailable = null;
+        recorder.onerror = null;
+        recorder.onstop = null;
+        try {
+          recorder.stop();
+        } catch {
+          // no-op
+        }
+      }
+      const stream = voiceStreamRef.current;
+      voiceStreamRef.current = null;
+      stream?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
   const providerItems = useMemo<FooterProviderItem[]>(
     () =>
       CLI_OPTIONS.map((option) => {
@@ -1843,9 +1944,63 @@ export function ChatPromptBar({
     }
   }, [activeTab, providerItems, setTabSelectedCli, workspace?.locationKind]);
 
+  function stopVoiceStream() {
+    const stream = voiceStreamRef.current;
+    voiceStreamRef.current = null;
+    stream?.getTracks().forEach((track) => track.stop());
+  }
+
+  function cancelVoiceRecording(resetState = true) {
+    const recorder = voiceRecorderRef.current;
+    voiceRecorderRef.current = null;
+    voiceChunksRef.current = [];
+    voiceMimeTypeRef.current = "";
+    if (recorder) {
+      recorder.ondataavailable = null;
+      recorder.onerror = null;
+      recorder.onstop = null;
+      if (recorder.state !== "inactive") {
+        try {
+          recorder.stop();
+        } catch {
+          // no-op
+        }
+      }
+    }
+    stopVoiceStream();
+    if (resetState) {
+      setVoiceInputState("idle");
+    }
+  }
+
   function setPrompt(value: string) {
     if (!activeTab) return;
     setTabDraftPrompt(activeTab.id, value);
+  }
+
+  function appendTranscriptToTab(tabId: string, transcript: string) {
+    const text = transcript.trim();
+    if (!text) return;
+    const state = useStore.getState();
+    const currentTab = state.terminalTabs.find((tab) => tab.id === tabId) ?? null;
+    if (!currentTab) return;
+    const nextPrompt = appendPromptText(currentTab.draftPrompt ?? "", text);
+    if (state.activeTerminalTabId === tabId && promptHistoryStateRef.current.index !== null) {
+      promptHistoryStateRef.current = {
+        index: null,
+        draft: "",
+      };
+    }
+    setTabDraftPrompt(tabId, nextPrompt);
+    setQueueFeedback("已将语音转成文字。");
+    if (state.activeTerminalTabId === tabId) {
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(nextPrompt.length, nextPrompt.length);
+      });
+    }
   }
 
   function handlePromptChange(value: string) {
@@ -1866,6 +2021,126 @@ export function ChatPromptBar({
       const caret = el.value.length;
       el.setSelectionRange(caret, caret);
     });
+  }
+
+  async function finalizeVoiceRecording(tabId: string) {
+    try {
+      const mimeType = voiceMimeTypeRef.current || "audio/webm";
+      const audioBlob = new Blob(voiceChunksRef.current, { type: mimeType });
+      voiceRecorderRef.current = null;
+      voiceChunksRef.current = [];
+      voiceMimeTypeRef.current = "";
+      stopVoiceStream();
+
+      if (audioBlob.size <= 0) {
+        throw new Error("没有录到可用音频，请重试。");
+      }
+      if (audioBlob.size > MAX_VOICE_AUDIO_BYTES) {
+        throw new Error("录音过长，请控制在 25MB 以内。");
+      }
+      const buffer = await audioBlob.arrayBuffer();
+      const base64Audio = encodeArrayBufferToBase64(buffer);
+      const fileName = `voice-input-${Date.now()}.${voiceFileExtensionForMimeType(mimeType)}`;
+      const result = await bridge.transcribeAudio({
+        mimeType,
+        base64Audio,
+        fileName,
+      });
+      if (!result.text.trim()) {
+        throw new Error("没有识别到可用文本，请重试。");
+      }
+      appendTranscriptToTab(tabId, result.text);
+      setVoiceInputState("idle");
+    } catch (error) {
+      cancelVoiceRecording(false);
+      setVoiceInputState("idle");
+      setQueueFeedback(describeVoiceInputError(error));
+    }
+  }
+
+  async function startVoiceInput() {
+    if (!activeTab) return;
+    if (!supportsVoiceCapture()) {
+      setQueueFeedback("当前桌面环境不支持语音输入。");
+      return;
+    }
+    if (!enabledVoiceProvider) {
+      setQueueFeedback("请先在 Vendors 启用一个 OpenAI Compatible provider。");
+      return;
+    }
+    if (!voiceProviderReady) {
+      setQueueFeedback("已启用的 OpenAI Compatible provider 缺少 Base URL 或 API Key。");
+      return;
+    }
+    closeFooterMenus();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const preferredMimeType = pickVoiceRecorderMimeType();
+      let recorder: MediaRecorder;
+      try {
+        recorder = preferredMimeType
+          ? new MediaRecorder(stream, { mimeType: preferredMimeType })
+          : new MediaRecorder(stream);
+      } catch {
+        recorder = new MediaRecorder(stream);
+      }
+
+      voiceStreamRef.current = stream;
+      voiceRecorderRef.current = recorder;
+      voiceChunksRef.current = [];
+      voiceMimeTypeRef.current = recorder.mimeType || preferredMimeType || "audio/webm";
+      const targetTabId = activeTab.id;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size <= 0) return;
+        voiceChunksRef.current.push(event.data);
+        if (event.data.type.trim()) {
+          voiceMimeTypeRef.current = event.data.type.trim();
+        }
+      };
+      recorder.onerror = () => {
+        cancelVoiceRecording(false);
+        setVoiceInputState("idle");
+        setQueueFeedback("录音失败，请重试。");
+      };
+      recorder.onstop = () => {
+        void finalizeVoiceRecording(targetTabId);
+      };
+      recorder.start();
+      setVoiceInputState("recording");
+      setQueueFeedback("录音中，再点一次结束。");
+    } catch (error) {
+      cancelVoiceRecording(false);
+      setVoiceInputState("idle");
+      setQueueFeedback(describeVoiceInputError(error));
+    }
+  }
+
+  function stopVoiceInput() {
+    const recorder = voiceRecorderRef.current;
+    if (!recorder) {
+      setVoiceInputState("idle");
+      return;
+    }
+    try {
+      setVoiceInputState("transcribing");
+      setQueueFeedback("正在转写语音…");
+      recorder.stop();
+    } catch (error) {
+      cancelVoiceRecording(false);
+      setVoiceInputState("idle");
+      setQueueFeedback(describeVoiceInputError(error));
+    }
+  }
+
+  function handleVoiceButtonClick() {
+    if (voiceInputState === "recording") {
+      stopVoiceInput();
+      return;
+    }
+    if (voiceInputState === "idle") {
+      void startVoiceInput();
+    }
   }
 
   function addPickedAttachmentsToDraft(picked: PickedChatAttachment[]) {
@@ -2568,7 +2843,33 @@ export function ChatPromptBar({
     modelOptions.length === 0 &&
     (capabilityStatus === "idle" || capabilityStatus === "loading") &&
     !capabilities?.model;
-  const sendDisabled = !isStreaming && prompt.trim().length === 0 && draftAttachments.length === 0;
+  const isDesktopRuntime = isTauriRuntime();
+  const enabledVoiceProvider =
+    settings?.openaiCompatibleProviders.find((provider) => provider.enabled) ?? null;
+  const voiceCaptureSupported = isDesktopRuntime && supportsVoiceCapture();
+  const voiceProviderReady = Boolean(
+    enabledVoiceProvider &&
+    enabledVoiceProvider.baseUrl.trim() &&
+    enabledVoiceProvider.apiKey.trim()
+  );
+  const voiceDisabledReason = isStreaming
+    ? "响应进行中，暂时无法使用语音输入"
+    : !voiceCaptureSupported
+      ? "当前桌面环境不支持语音输入"
+      : !enabledVoiceProvider
+        ? "请先在 Vendors 启用一个 OpenAI Compatible provider"
+        : !voiceProviderReady
+          ? "已启用的 OpenAI Compatible provider 缺少 Base URL 或 API Key"
+          : null;
+  const sendDisabled =
+    voiceInputState !== "idle" ||
+    (!isStreaming && prompt.trim().length === 0 && draftAttachments.length === 0);
+  const voiceButtonTitle =
+    voiceInputState === "recording"
+      ? "结束录音并转写"
+      : voiceInputState === "transcribing"
+        ? "正在转写语音"
+        : voiceDisabledReason ?? "语音输入";
 
   function handleToggleFooterMenu(menu: FooterMenuId, disabled = false) {
     if (disabled) return;
@@ -3787,6 +4088,27 @@ export function ChatPromptBar({
                 </div>
 
                 <div className="button-area-right">
+                  {isDesktopRuntime ? (
+                    <button
+                      type="button"
+                      onClick={handleVoiceButtonClick}
+                      disabled={
+                        voiceInputState === "transcribing" ||
+                        (voiceInputState !== "recording" && voiceDisabledReason !== null)
+                      }
+                      title={voiceButtonTitle}
+                      aria-label={voiceButtonTitle}
+                      className={`submit-button submit-button--mic${voiceInputState === "recording" ? " is-listening" : ""}`}
+                    >
+                      {voiceInputState === "transcribing" ? (
+                        <LoaderCircle size={14} className="animate-spin" />
+                      ) : voiceInputState === "recording" ? (
+                        <Square size={14} fill="currentColor" />
+                      ) : (
+                        <Mic size={14} />
+                      )}
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     onClick={() => {

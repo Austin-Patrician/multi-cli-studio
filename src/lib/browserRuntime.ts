@@ -60,6 +60,8 @@ import {
   PickedChatAttachment,
   LocalUsageStatistics,
   StudioPromoteRequest,
+  TranscribeAudioRequest,
+  TranscribeAudioResult,
   WorkspaceSessionBatchMutationResponse,
   WorkspaceSessionCatalogPage,
   WorkspaceSessionCatalogQuery,
@@ -3104,6 +3106,9 @@ export const browserRuntime = {
 
     return messageId;
   },
+  async transcribeAudio(_request: TranscribeAudioRequest): Promise<TranscribeAudioResult> {
+    throw new Error("Voice input is available only in the desktop app.");
+  },
   async interruptChatTurn(_terminalTabId: string, _messageId: string): Promise<ChatInterruptResult> {
     return {
       status: "notRunning",
@@ -4116,6 +4121,13 @@ rename to src/components/chat/GitPanel.tsx`,
           success: true,
           output: `Plan mode: ${acpSession.planMode ? "ON" : "OFF"}`,
           sideEffects: [{ type: "planModeToggled", active: acpSession.planMode }],
+        };
+      }
+      case "goal": {
+        return {
+          success: true,
+          output: "Goal view is only available in the desktop runtime with Studio active context loaded.",
+          sideEffects: [],
         };
       }
       case "clear": {

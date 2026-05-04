@@ -1,10 +1,14 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const [, , command, ...extraArgs] = process.argv;
+const DEV_SERVER_HOST = "127.0.0.1";
+const DEV_SERVER_PORT = 1420;
 
 if (!command) {
   console.error("Usage: node ./scripts/run-tauri.mjs <command> [...args]");
@@ -18,6 +22,13 @@ const env = {
   PATH: withCargoBin(process.env.PATH),
   CARGO_NET_OFFLINE: "false",
 };
+
+if (command === "dev") {
+  await ensureDevServerPortAvailable();
+  if (!env.MULTI_CLI_STUDIO_DATA_DIR) {
+    env.MULTI_CLI_STUDIO_DATA_DIR = resolveDevDataDir(repoRoot);
+  }
+}
 
 const child =
   process.platform === "win32"
@@ -83,4 +94,41 @@ function resolveUnixTauriBinary(baseDir) {
     throw new Error("Local Tauri CLI was not found at node_modules/.bin/tauri. Run npm install first.");
   }
   return tauriBin;
+}
+
+function resolveDevDataDir(projectRoot) {
+  const projectName = path.basename(projectRoot).trim() || "workspace";
+  const hash = createHash("sha1").update(projectRoot).digest("hex").slice(0, 8);
+  return path.join(os.tmpdir(), "multi-cli-studio-tauri-dev", `${projectName}-${hash}`);
+}
+
+function ensureDevServerPortAvailable() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    const handleFailure = (error) => {
+      probe.removeAllListeners();
+      if (error?.code === "EADDRINUSE") {
+        reject(
+          new Error(
+            `Port ${DEV_SERVER_PORT} is already in use on ${DEV_SERVER_HOST}. Stop the stale dev server first. ` +
+              `Inspect it with: lsof -nP -iTCP:${DEV_SERVER_PORT} -sTCP:LISTEN`
+          )
+        );
+        return;
+      }
+      reject(error);
+    };
+
+    probe.once("error", handleFailure);
+    probe.once("listening", () => {
+      probe.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+    probe.listen(DEV_SERVER_PORT, DEV_SERVER_HOST);
+  });
 }

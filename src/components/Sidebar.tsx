@@ -1,6 +1,8 @@
 import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { PencilLine } from "lucide-react";
 import { useStore } from "../lib/store";
+import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog";
 
 // --- Navigation Icons ---
 
@@ -101,6 +103,12 @@ type SettingsMenuSection =
   | "git"
   | "mcp"
   | "skills";
+
+type SidebarWorkspaceMenuState = {
+  workspaceId: string;
+  x: number;
+  y: number;
+};
 
 const navItems: SidebarNavItem[] = [
   {
@@ -213,6 +221,7 @@ function WorkspaceTabItem({
   dragOver,
   onClick,
   onClose,
+  onContextMenu,
   onPointerDown,
   onPointerEnter,
 }: {
@@ -226,24 +235,28 @@ function WorkspaceTabItem({
   dragOver?: boolean;
   onClick: () => void;
   onClose: () => void;
+  onContextMenu?: (event: React.MouseEvent<HTMLElement>) => void;
   onPointerDown?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onPointerEnter?: () => void;
 }) {
+  const containerClass = `group relative flex w-full items-center gap-2 overflow-hidden rounded-xl border px-2.5 py-2 text-left transition-all ${
+    dragging
+      ? "border-slate-300 bg-slate-100 text-slate-500 opacity-60"
+      : dragOver
+        ? "border-emerald-300 bg-emerald-50/80 text-slate-800 shadow-[0_10px_24px_rgba(16,185,129,0.10)]"
+      : active
+        ? "border-slate-900 bg-slate-900 text-white shadow-[0_8px_20px_rgba(15,23,42,0.14)]"
+        : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+  }`;
+
   return (
     <button
       type="button"
       onClick={onClick}
       onMouseDown={onPointerDown}
       onMouseEnter={onPointerEnter}
-      className={`group relative flex w-full cursor-grab items-center gap-2 overflow-hidden rounded-xl border px-2.5 py-2 text-left transition-all active:cursor-grabbing ${
-        dragging
-          ? "border-slate-300 bg-slate-100 text-slate-500 opacity-60"
-          : dragOver
-            ? "border-emerald-300 bg-emerald-50/80 text-slate-800 shadow-[0_10px_24px_rgba(16,185,129,0.10)]"
-          : active
-          ? "border-slate-900 bg-slate-900 text-white shadow-[0_8px_20px_rgba(15,23,42,0.14)]"
-          : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
-      }`}
+      onContextMenu={onContextMenu}
+      className={`${containerClass} cursor-grab active:cursor-grabbing`}
       title={collapsed ? `${title}\n${subtitle}` : title}
     >
       <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${active ? "bg-white/10" : "bg-slate-100 text-slate-500"}`}>
@@ -302,10 +315,14 @@ export function Sidebar() {
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [draggingTabId, setDraggingTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
+  const [workspaceMenu, setWorkspaceMenu] = useState<SidebarWorkspaceMenuState | null>(null);
+  const [renameTargetWorkspaceId, setRenameTargetWorkspaceId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const navigate = useNavigate();
   const location = useLocation();
   const settingsMenuRef = useRef<HTMLDivElement | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
   const dragStartRef = useRef<{ x: number; y: number; tabId: string } | null>(null);
   const dragMovedRef = useRef(false);
   const suppressClickRef = useRef(false);
@@ -321,6 +338,7 @@ export function Sidebar() {
   const reorderTerminalTabs = useStore((s) => s.reorderTerminalTabs);
   const gitWorkbenchOpen = useStore((s) => s.gitWorkbenchOpen);
   const openGitWorkbench = useStore((s) => s.openGitWorkbench);
+  const renameWorkspace = useStore((s) => s.renameWorkspace);
 
   const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) ?? null;
   const workspaceById = useMemo(() => new Map(workspaces.map((workspace) => [workspace.id, workspace])), [workspaces]);
@@ -383,13 +401,49 @@ export function Sidebar() {
   }, [settingsMenuOpen]);
 
   useEffect(() => {
+    if (!workspaceMenu) return;
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node;
+      if (workspaceMenuRef.current && !workspaceMenuRef.current.contains(target)) {
+        setWorkspaceMenu(null);
+      }
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setWorkspaceMenu(null);
+      }
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [workspaceMenu]);
+
+  useEffect(() => {
     setSettingsMenuOpen(false);
+    setWorkspaceMenu(null);
+    setRenameTargetWorkspaceId(null);
+    setRenameDraft("");
   }, [location.pathname, location.search]);
 
-  const toggleCollapsed = () => {
-    const next = !collapsed;
+  useEffect(() => {
+    if (!renameTargetWorkspaceId) return;
+    const workspace = workspaceById.get(renameTargetWorkspaceId);
+    if (!workspace) {
+      setRenameTargetWorkspaceId(null);
+      setRenameDraft("");
+    }
+  }, [renameTargetWorkspaceId, workspaceById]);
+
+  function persistCollapsed(next: boolean) {
     setCollapsed(next);
-    localStorage.setItem('sidebar_collapsed', JSON.stringify(next));
+    localStorage.setItem("sidebar_collapsed", JSON.stringify(next));
+  }
+
+  const toggleCollapsed = () => {
+    persistCollapsed(!collapsed);
   };
 
   const settingsMenuItems = useMemo(
@@ -429,6 +483,25 @@ export function Sidebar() {
   function setDragOverState(tabId: string | null) {
     dragOverTabIdRef.current = tabId;
     setDragOverTabId(tabId);
+  }
+
+  function cancelWorkspaceRename() {
+    setRenameTargetWorkspaceId(null);
+    setRenameDraft("");
+  }
+
+  function startWorkspaceRename(workspaceId: string) {
+    const workspace = workspaceById.get(workspaceId);
+    if (!workspace) return;
+    setWorkspaceMenu(null);
+    setRenameTargetWorkspaceId(workspaceId);
+    setRenameDraft(workspace.customName ?? workspace.name);
+  }
+
+  function submitWorkspaceRename() {
+    if (!renameTargetWorkspaceId) return;
+    renameWorkspace(renameTargetWorkspaceId, renameDraft);
+    cancelWorkspaceRename();
   }
 
   function finishDrag() {
@@ -485,6 +558,19 @@ export function Sidebar() {
     window.addEventListener("mouseup", handleUp);
   }
 
+  function openWorkspaceContextMenu(
+    event: React.MouseEvent<HTMLElement>,
+    workspaceId: string,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    setWorkspaceMenu({
+      workspaceId,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
   return (
     <aside
       className="relative h-full flex flex-col bg-white border-r border-slate-200 transition-all duration-300 ease-out overflow-hidden shadow-sm"
@@ -530,33 +616,38 @@ export function Sidebar() {
               ) : null}
             </div>
             <div className="space-y-2">
-              {terminalTabs.map((tab) => (
-                <WorkspaceTabItem
-                  key={tab.id}
-                  title={tab.title}
-                  subtitle={workspaceById.get(tab.workspaceId)?.rootPath ?? "Detached workspace"}
-                  locationKind={workspaceById.get(tab.workspaceId)?.locationKind ?? "local"}
-                  active={tab.id === activeTerminalTabId}
-                  collapsed={collapsed}
-                  planMode={tab.planMode}
-                  dragging={draggingTabId === tab.id}
-                  dragOver={dragOverTabId === tab.id && draggingTabId !== tab.id}
-                  onClick={() => {
-                    if (suppressClickRef.current) {
-                      return;
-                    }
-                    setActiveTerminalTab(tab.id);
-                    navigate("/terminal");
-                  }}
-                  onClose={() => closeTerminalTab(tab.id)}
-                  onPointerDown={(event) => startPointerDrag(tab.id, event)}
-                  onPointerEnter={() => {
-                    if (draggingTabIdRef.current && draggingTabIdRef.current !== tab.id) {
-                      setDragOverState(tab.id);
-                    }
-                  }}
-                />
-              ))}
+              {terminalTabs.map((tab) => {
+                const workspace = workspaceById.get(tab.workspaceId) ?? null;
+
+                return (
+                  <WorkspaceTabItem
+                    key={tab.id}
+                    title={tab.title}
+                    subtitle={workspace?.rootPath ?? "Detached workspace"}
+                    locationKind={workspace?.locationKind ?? "local"}
+                    active={tab.id === activeTerminalTabId}
+                    collapsed={collapsed}
+                    planMode={tab.planMode}
+                    dragging={draggingTabId === tab.id}
+                    dragOver={dragOverTabId === tab.id && draggingTabId !== tab.id}
+                    onClick={() => {
+                      if (suppressClickRef.current) {
+                        return;
+                      }
+                      setActiveTerminalTab(tab.id);
+                      navigate("/terminal");
+                    }}
+                    onClose={() => closeTerminalTab(tab.id)}
+                    onContextMenu={(event) => openWorkspaceContextMenu(event, tab.workspaceId)}
+                    onPointerDown={(event) => startPointerDrag(tab.id, event)}
+                    onPointerEnter={() => {
+                      if (draggingTabIdRef.current && draggingTabIdRef.current !== tab.id) {
+                        setDragOverState(tab.id);
+                      }
+                    }}
+                  />
+                );
+              })}
             </div>
           </div>
         </div>
@@ -635,6 +726,38 @@ export function Sidebar() {
           </button>
         </div>
       </div>
+
+      {workspaceMenu ? (
+        <div
+          ref={workspaceMenuRef}
+          className="fixed z-50 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-[0_18px_40px_rgba(15,23,42,0.18)]"
+          style={{
+            left: Math.max(12, workspaceMenu.x + 6),
+            top: Math.max(12, workspaceMenu.y + 6),
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => startWorkspaceRename(workspaceMenu.workspaceId)}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-50 hover:text-slate-900"
+            aria-label="重命名工作区"
+            title="重命名工作区"
+          >
+            <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100">
+              <PencilLine size={14} />
+            </span>
+          </button>
+        </div>
+      ) : null}
+
+      <WorkspaceRenameDialog
+        isOpen={Boolean(renameTargetWorkspaceId)}
+        workspace={renameTargetWorkspaceId ? workspaceById.get(renameTargetWorkspaceId) ?? null : null}
+        value={renameDraft}
+        onChange={setRenameDraft}
+        onClose={cancelWorkspaceRename}
+        onSubmit={submitWorkspaceRename}
+      />
 
       <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-slate-100 to-transparent" />
     </aside>
