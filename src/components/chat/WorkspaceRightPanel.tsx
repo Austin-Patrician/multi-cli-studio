@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Activity as ActivityIcon,
@@ -453,10 +453,76 @@ function summarizeStudioLayerText(content: string) {
   };
 }
 
+const studioLayerMarkdownComponents = {
+  p: ({ children }) => <p className="my-0 text-[12px] leading-6 text-slate-800">{children}</p>,
+  ul: ({ children }) => <ul className="my-3 list-disc space-y-1 pl-5 text-[12px] leading-6 text-slate-700">{children}</ul>,
+  ol: ({ children }) => <ol className="my-3 list-decimal space-y-1 pl-5 text-[12px] leading-6 text-slate-700">{children}</ol>,
+  li: ({ children }) => <li className="marker:text-slate-400">{children}</li>,
+  strong: ({ children }) => <strong className="font-semibold text-slate-900">{children}</strong>,
+  em: ({ children }) => <em className="italic text-slate-700">{children}</em>,
+  a: ({ href, children }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => {
+        if (typeof href !== "string" || !/^https?:\/\//i.test(href)) return;
+        event.preventDefault();
+        const externalHref = href;
+        void bridge.openExternalUrl(externalHref).catch(() => {
+          window.open(externalHref, "_blank", "noopener,noreferrer");
+        });
+      }}
+      className="font-medium text-sky-700 underline decoration-sky-200 underline-offset-4"
+    >
+      {children}
+    </a>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="my-3 border-l-2 border-slate-200 bg-slate-50/80 px-3 py-2 text-[12px] leading-6 text-slate-700">
+      {children}
+    </blockquote>
+  ),
+  hr: () => <hr className="my-4 border-0 border-t border-slate-200" />,
+  table: ({ children }) => (
+    <div className="my-4 overflow-x-auto rounded-[14px] border border-slate-200 bg-white">
+      <table className="min-w-full border-collapse text-left text-[12px] leading-6 text-slate-700">{children}</table>
+    </div>
+  ),
+  thead: ({ children }) => <thead className="bg-slate-50 text-slate-600">{children}</thead>,
+  th: ({ children }) => <th className="border-b border-slate-200 px-3 py-2 font-semibold text-slate-900">{children}</th>,
+  td: ({ children }) => <td className="border-t border-slate-200 px-3 py-2 align-top text-slate-700">{children}</td>,
+  pre: ({ children }) => (
+    <pre className="my-3 overflow-x-auto rounded-[14px] border border-[#263244] bg-[#111827] px-4 py-4 text-[11px] leading-5 text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] [&_code]:rounded-none [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-slate-100">
+      {children}
+    </pre>
+  ),
+  code: ({ className, children, ...props }: any) => {
+    if (!className) {
+      return (
+        <code
+          {...props}
+          className="rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-700"
+        >
+          {children}
+        </code>
+      );
+    }
+
+    return (
+      <code {...props} className={`${className ?? ""} font-mono text-[11px] leading-5 text-slate-100`}>
+        {children}
+      </code>
+    );
+  },
+} satisfies Components;
+
 function StudioLayerMarkdown({ content }: { content: string }) {
   return (
-    <div className="dcc-markdown-preview mt-0 rounded-[18px] border border-slate-200 bg-white/95 px-4 py-4 text-[12px] leading-6 text-slate-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)] [&_a]:break-all [&_blockquote]:border-l-2 [&_blockquote]:border-slate-200 [&_blockquote]:bg-slate-50/80 [&_blockquote]:px-3 [&_blockquote]:py-2 [&_code]:rounded-md [&_code]:bg-slate-100 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:text-[11px] [&_h1]:text-base [&_h1]:font-semibold [&_h2]:text-sm [&_h2]:font-semibold [&_h3]:text-[13px] [&_h3]:font-semibold [&_hr]:border-slate-200 [&_li]:text-[12px] [&_ol]:my-3 [&_ol]:space-y-1 [&_ol]:pl-5 [&_p]:my-0 [&_pre]:my-3 [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:border [&_pre]:border-[#263244] [&_pre]:bg-[#111827] [&_pre]:px-4 [&_pre]:py-4 [&_pre]:text-[11px] [&_pre]:leading-5 [&_pre]:text-slate-100 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-slate-100 [&_table]:min-w-full [&_table]:border-collapse [&_table]:text-left [&_table]:text-[12px] [&_tbody_td]:border-t [&_tbody_td]:border-slate-200 [&_tbody_td]:px-3 [&_tbody_td]:py-2 [&_thead]:bg-slate-50 [&_th]:border-b [&_th]:border-slate-200 [&_th]:px-3 [&_th]:py-2 [&_th]:font-medium [&_ul]:my-3 [&_ul]:space-y-1 [&_ul]:pl-5">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    <div className="dcc-markdown-preview mt-0 rounded-[18px] border border-slate-200 bg-white/95 px-4 py-4 text-[12px] leading-6 text-slate-800 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)] [&_a]:break-all [&_h1]:text-base [&_h1]:font-semibold [&_h1]:text-slate-900 [&_h2]:text-sm [&_h2]:font-semibold [&_h2]:text-slate-900 [&_h3]:text-[13px] [&_h3]:font-semibold [&_h3]:text-slate-900">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={studioLayerMarkdownComponents}>
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }

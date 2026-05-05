@@ -1003,7 +1003,7 @@ export function ChatConversation() {
   }
 
   const messagePane = (
-    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden">
       {isSearchOpen && (
         <ChatSearchBar
           query={searchQuery}
@@ -1043,7 +1043,7 @@ export function ChatConversation() {
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="min-h-0 flex-1 overflow-y-auto px-5 py-5"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5"
       >
         <div className="mx-auto flex max-w-6xl flex-col gap-4">
           {showStickyControls ? (
@@ -1240,7 +1240,7 @@ export function ChatConversation() {
           >
             <span className="h-px w-16 rounded-full bg-slate-300 transition-colors group-hover:bg-slate-400" aria-hidden />
           </div>
-          <div className="min-h-0 flex-1">{messagePane}</div>
+          <div className="min-h-0 flex-1 overflow-hidden">{messagePane}</div>
         </div>
       ) : (
         messagePane
