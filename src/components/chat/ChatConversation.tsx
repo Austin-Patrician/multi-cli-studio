@@ -26,6 +26,7 @@ import {
   ActivePlanSurface,
   resolveActivePlanSurface,
 } from "./ActivePlanFloatingCard";
+import { ChatFilePreviewPanel } from "./ChatFilePreviewPanel";
 import { CliBubble } from "./CliBubble";
 import { CLI_OPTIONS } from "./CliSelector";
 import { ChatSearchBar } from "./ChatSearchBar";
@@ -428,12 +429,14 @@ function FinalMessageBoundary({ timestamp }: { timestamp?: string | null }) {
 
 export function ChatConversation() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const splitContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const shouldAutoFollowRef = useRef(true);
   const searchMatchesRef = useRef<SearchDomMatch[]>([]);
   const suppressMutationObserverRef = useRef(false);
   const pendingPrependScrollRef = useRef<{ previousScrollHeight: number; previousScrollTop: number } | null>(null);
+  const previewResizeCleanupRef = useRef<(() => void) | null>(null);
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -450,6 +453,7 @@ export function ChatConversation() {
   const [planExpanded, setPlanExpanded] = useState(false);
   const [retainedPlanSurface, setRetainedPlanSurface] = useState<ActivePlanSurface | null>(null);
   const [dismissedPlanKey, setDismissedPlanKey] = useState<string | null>(null);
+  const [previewPaneHeight, setPreviewPaneHeight] = useState(320);
 
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const compiledSearch = useMemo(
@@ -479,6 +483,9 @@ export function ChatConversation() {
   const activeSession = useStore((state) =>
     state.activeTerminalTabId ? state.chatSessions[state.activeTerminalTabId] ?? null : null
   );
+  const activeFilePreview = useStore((state) =>
+    state.activeTerminalTabId ? state.chatFilePreviewsByTab[state.activeTerminalTabId] ?? null : null
+  );
   const queuedPrompt = useStore((state) =>
     state.activeTerminalTabId ? state.queuedChatByTab[state.activeTerminalTabId] ?? null : null
   );
@@ -494,6 +501,7 @@ export function ChatConversation() {
             id: item.id,
             name: item.name,
             rootPath: item.rootPath,
+            locationKind: item.locationKind,
           }
         : null;
     })
@@ -548,6 +556,13 @@ export function ChatConversation() {
     }, PLAN_CARD_EXIT_MS);
     return () => window.clearTimeout(timeoutId);
   }, [activePlanSurface, retainedPlanSurface]);
+
+  useEffect(() => {
+    return () => {
+      previewResizeCleanupRef.current?.();
+      previewResizeCleanupRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -816,6 +831,13 @@ export function ChatConversation() {
     () => (queuedPrompt ? formatQueuedPromptPreview(queuedPrompt.text, queuedPrompt.attachments) : ""),
     [queuedPrompt]
   );
+  const previewRenderState =
+    workspace && activeFilePreview?.activePath
+      ? {
+          workspace,
+          previewState: activeFilePreview,
+        }
+      : null;
 
   function openSearch(selectAll = false) {
     shouldAutoFollowRef.current = false;
@@ -925,6 +947,53 @@ export function ChatConversation() {
     clearQueuedChatMessage(activeTab.id);
   }
 
+  function handlePreviewPaneResizeStart(event: React.PointerEvent<HTMLDivElement>) {
+    if (!previewRenderState || event.button !== 0) {
+      return;
+    }
+
+    const container = splitContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const startY = event.clientY;
+    const startHeight = previewPaneHeight;
+    const minHeight = 180;
+    const maxHeight = Math.max(minHeight, containerRect.height - 240);
+
+    if (maxHeight <= minHeight) {
+      return;
+    }
+
+    event.preventDefault();
+    document.body.dataset.panelResizing = "true";
+
+    const cleanup = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+      delete document.body.dataset.panelResizing;
+      previewResizeCleanupRef.current = null;
+    };
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextHeight = startHeight + (moveEvent.clientY - startY);
+      setPreviewPaneHeight(Math.max(minHeight, Math.min(maxHeight, nextHeight)));
+    };
+
+    const handlePointerUp = () => {
+      cleanup();
+    };
+
+    previewResizeCleanupRef.current?.();
+    previewResizeCleanupRef.current = cleanup;
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+  }
+
   if (!activeSession || !activeTab) {
     return (
       <div className="flex flex-1 items-center justify-center text-sm text-muted">
@@ -933,8 +1002,8 @@ export function ChatConversation() {
     );
   }
 
-  return (
-    <div className="relative flex-1 min-h-0 bg-[radial-gradient(circle_at_top,#eef4ff_0%,#ffffff_42%)]">
+  const messagePane = (
+    <div className="relative flex min-h-0 flex-1 flex-col">
       {isSearchOpen && (
         <ChatSearchBar
           query={searchQuery}
@@ -974,26 +1043,9 @@ export function ChatConversation() {
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="h-full overflow-y-auto px-5 py-5"
+        className="min-h-0 flex-1 overflow-y-auto px-5 py-5"
       >
         <div className="mx-auto flex max-w-6xl flex-col gap-4">
-          <div className="flex items-center justify-between rounded-[12px] border border-border bg-white/85 px-4 py-3 backdrop-blur">
-            <div>
-              <div className="text-base font-bold text-text">
-                Active Terminal
-              </div>
-            <div className="mt-1 text-sm font-medium text-text/70">
-              {workspace?.name} · {activeTab.selectedCli}
-            </div>
-            </div>
-            <div className="text-right text-xs text-secondary">
-              <div>
-                <div>{activeTab.planMode ? "Plan mode" : "Execution mode"}</div>
-                <div>{conversationMessageCount} messages</div>
-              </div>
-            </div>
-          </div>
-
           {showStickyControls ? (
             <div className="sticky top-1 z-10 flex flex-col items-center gap-2 px-2">
               {showFloatingPlan && planSurfaceToRender ? (
@@ -1162,6 +1214,37 @@ export function ChatConversation() {
           <div ref={bottomRef} />
         </div>
       </div>
+    </div>
+  );
+
+  return (
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-[radial-gradient(circle_at_top,#eef4ff_0%,#ffffff_42%)]">
+      {previewRenderState ? (
+        <div ref={splitContainerRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div
+            className="min-h-0 shrink-0 overflow-hidden border-b border-border bg-white"
+            style={{ height: `${previewPaneHeight}px` }}
+          >
+            <ChatFilePreviewPanel
+              tabId={activeTab.id}
+              workspace={previewRenderState.workspace}
+              previewState={previewRenderState.previewState}
+            />
+          </div>
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize file preview"
+            onPointerDown={handlePreviewPaneResizeStart}
+            className="group flex h-3 shrink-0 cursor-row-resize items-center justify-center bg-[#f4f7fb]"
+          >
+            <span className="h-px w-16 rounded-full bg-slate-300 transition-colors group-hover:bg-slate-400" aria-hidden />
+          </div>
+          <div className="min-h-0 flex-1">{messagePane}</div>
+        </div>
+      ) : (
+        messagePane
+      )}
     </div>
   );
 }

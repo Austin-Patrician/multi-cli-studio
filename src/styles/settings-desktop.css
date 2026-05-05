@@ -1873,6 +1873,15 @@
   background: #f7f7fb;
 }
 
+.dcc-markdown-preview-plain {
+  margin-top: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .dcc-skill-editor,
 .dcc-skill-preview-frame,
 .dcc-skill-code-frame {

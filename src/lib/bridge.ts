@@ -37,6 +37,7 @@ import {
   CreateAutomationRunRequest,
   CreateAutomationWorkflowRunRequest,
   CliSkillItem,
+  CodeIntelQueryResponse,
   ExternalDirectoryEntry,
   ExternalTextFile,
   FileMentionCandidate,
@@ -78,6 +79,7 @@ import {
   StreamEvent,
   TerminalEvent,
   WorkspacePickResult,
+  WorkspacePreviewFileResult,
   WorkspaceTextSearchResponse,
   WorkspaceFileIndexResponse,
   WorkspaceTreeEntry,
@@ -318,6 +320,23 @@ export interface RuntimeBridge {
     },
     workspaceId?: string | null
   ) => Promise<WorkspaceTextSearchResponse>;
+  getCodeIntelDefinition: (
+    workspaceId: string,
+    input: {
+      filePath: string;
+      line: number;
+      character: number;
+    }
+  ) => Promise<CodeIntelQueryResponse>;
+  getCodeIntelReferences: (
+    workspaceId: string,
+    input: {
+      filePath: string;
+      line: number;
+      character: number;
+      includeDeclaration?: boolean;
+    }
+  ) => Promise<CodeIntelQueryResponse>;
   createWorkspaceFile: (projectRoot: string, relativePath: string, workspaceId?: string | null) => Promise<void>;
   createWorkspaceDirectory: (projectRoot: string, relativePath: string, workspaceId?: string | null) => Promise<void>;
   trashWorkspaceItem: (projectRoot: string, relativePath: string, workspaceId?: string | null) => Promise<void>;
@@ -343,6 +362,17 @@ export interface RuntimeBridge {
     directoryPath: string
   ) => Promise<ExternalDirectoryEntry[]>;
   readExternalAbsoluteFile: (path: string) => Promise<ExternalTextFile>;
+  readWorkspacePreviewFile: (
+    projectRoot: string,
+    relativePath: string,
+    workspaceId?: string | null
+  ) => Promise<WorkspacePreviewFileResult>;
+  writeWorkspacePreviewFile: (
+    projectRoot: string,
+    relativePath: string,
+    content: string,
+    workspaceId?: string | null
+  ) => Promise<void>;
   writeExternalAbsoluteFile: (path: string, content: string) => Promise<void>;
   localUsageStatistics: (input: {
     scope: "current" | "all";
@@ -989,6 +1019,25 @@ const tauriRuntime: RuntimeBridge = {
       workspaceId: workspaceId ?? null,
     });
   },
+  async getCodeIntelDefinition(workspaceId, input) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<CodeIntelQueryResponse>("code_intel_definition", {
+      workspaceId,
+      filePath: input.filePath,
+      line: input.line,
+      character: input.character,
+    });
+  },
+  async getCodeIntelReferences(workspaceId, input) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<CodeIntelQueryResponse>("code_intel_references", {
+      workspaceId,
+      filePath: input.filePath,
+      line: input.line,
+      character: input.character,
+      includeDeclaration: input.includeDeclaration ?? false,
+    });
+  },
   async createWorkspaceFile(projectRoot, relativePath, workspaceId) {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("create_workspace_file", {
@@ -1073,6 +1122,23 @@ const tauriRuntime: RuntimeBridge = {
   async readExternalAbsoluteFile(path) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<ExternalTextFile>("read_external_absolute_file", { path });
+  },
+  async readWorkspacePreviewFile(projectRoot, relativePath, workspaceId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<WorkspacePreviewFileResult>("read_workspace_preview_file", {
+      projectRoot,
+      relativePath,
+      workspaceId: workspaceId ?? null,
+    });
+  },
+  async writeWorkspacePreviewFile(projectRoot, relativePath, content, workspaceId) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("write_workspace_preview_file", {
+      projectRoot,
+      relativePath,
+      content,
+      workspaceId: workspaceId ?? null,
+    });
   },
   async writeExternalAbsoluteFile(path, content) {
     const { invoke } = await import("@tauri-apps/api/core");

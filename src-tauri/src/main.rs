@@ -2,6 +2,7 @@
 
 mod acp;
 mod automation;
+mod code_intel;
 mod local_usage;
 mod session_management;
 mod storage;
@@ -1277,6 +1278,39 @@ fn guess_api_image_media_type(path_like: &str) -> Option<&'static str> {
         "svg" => Some("image/svg+xml"),
         "tif" | "tiff" => Some("image/tiff"),
         "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn guess_workspace_preview_kind(path_like: &str) -> &'static str {
+    if guess_api_image_media_type(path_like).is_some() {
+        return "image";
+    }
+    let extension = Path::new(path_like)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("pdf") => "pdf",
+        Some("doc") | Some("docx") | Some("xls") | Some("xlsx") | Some("ppt") | Some("pptx")
+        | Some("zip") | Some("gz") | Some("tar") | Some("rar") | Some("7z") | Some("dmg")
+        | Some("iso") | Some("mp3") | Some("mp4") | Some("mov") | Some("avi") | Some("wav")
+        | Some("ttf") | Some("otf") | Some("woff") | Some("woff2") | Some("exe") | Some("dll")
+        | Some("so") | Some("dylib") | Some("bin") | Some("wasm") => "binary-unsupported",
+        _ => "text",
+    }
+}
+
+fn guess_workspace_preview_media_type(path_like: &str) -> Option<&'static str> {
+    if let Some(media_type) = guess_api_image_media_type(path_like) {
+        return Some(media_type);
+    }
+    let extension = Path::new(path_like)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("pdf") => Some("application/pdf"),
         _ => None,
     }
 }
@@ -3954,6 +3988,18 @@ struct ExternalTextFile {
     exists: bool,
     content: String,
     truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspacePreviewFileResult {
+    exists: bool,
+    kind: String,
+    content: String,
+    truncated: bool,
+    asset_path: Option<String>,
+    media_type: Option<String>,
+    base64_data: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -20083,6 +20129,194 @@ fn read_external_absolute_file(path: String) -> Result<ExternalTextFile, String>
 }
 
 #[tauri::command]
+fn read_workspace_preview_file(
+    store: State<'_, AppStore>,
+    project_root: String,
+    relative_path: String,
+    workspace_id: Option<String>,
+) -> Result<WorkspacePreviewFileResult, String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+    let preview_kind = guess_workspace_preview_kind(&relative_path);
+    let media_type = guess_workspace_preview_media_type(&relative_path).map(str::to_string);
+
+    match workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            let (_, target) = resolve_workspace_target_path(&project_root, &relative_path)?;
+            if !target.exists() {
+                return Ok(WorkspacePreviewFileResult {
+                    exists: false,
+                    kind: preview_kind.to_string(),
+                    content: String::new(),
+                    truncated: false,
+                    asset_path: None,
+                    media_type,
+                    base64_data: None,
+                });
+            }
+            if preview_kind == "binary-unsupported" {
+                return Ok(WorkspacePreviewFileResult {
+                    exists: true,
+                    kind: preview_kind.to_string(),
+                    content: String::new(),
+                    truncated: false,
+                    asset_path: None,
+                    media_type,
+                    base64_data: None,
+                });
+            }
+            if preview_kind == "image" || preview_kind == "pdf" {
+                return Ok(workspace_preview_binary_response_local(
+                    &target,
+                    preview_kind,
+                    media_type.as_deref(),
+                ));
+            }
+            workspace_preview_text_response_local(&target)
+        }
+        remote_target @ WorkspaceTarget::Ssh { .. } => {
+            let script = r#"
+import base64, json, os, sys
+
+relative_path = sys.argv[1]
+preview_kind = sys.argv[2]
+media_type = sys.argv[3] if len(sys.argv) > 3 else ""
+text_limit = int(sys.argv[4])
+binary_limit = int(sys.argv[5])
+
+root = os.getcwd()
+target = os.path.abspath(os.path.join(root, relative_path))
+
+def result(**kwargs):
+    payload = {
+        "exists": kwargs.get("exists", False),
+        "kind": kwargs.get("kind", preview_kind),
+        "content": kwargs.get("content", ""),
+        "truncated": kwargs.get("truncated", False),
+        "assetPath": kwargs.get("assetPath"),
+        "mediaType": kwargs.get("mediaType"),
+        "base64Data": kwargs.get("base64Data"),
+    }
+    print(json.dumps(payload))
+
+try:
+    common_root = os.path.commonpath([root, target])
+except ValueError:
+    common_root = None
+
+if common_root != root:
+    raise SystemExit("Requested path is outside the workspace root.")
+
+if not os.path.exists(target):
+    result(exists=False, kind=preview_kind, mediaType=media_type or None)
+    raise SystemExit(0)
+
+if preview_kind == "binary-unsupported":
+    result(
+        exists=True,
+        kind="binary-unsupported",
+        content="",
+        truncated=False,
+        mediaType=media_type or None,
+    )
+elif preview_kind in {"image", "pdf"}:
+    with open(target, "rb") as handle:
+        data = handle.read(binary_limit + 1)
+    truncated = len(data) > binary_limit
+    result(
+        exists=True,
+        kind=preview_kind,
+        truncated=truncated,
+        mediaType=media_type or None,
+        base64Data=None if truncated else base64.b64encode(data).decode("ascii"),
+    )
+else:
+    with open(target, "rb") as handle:
+        data = handle.read(text_limit + 1)
+    truncated = len(data) > text_limit
+    if truncated:
+        data = data[:text_limit]
+    result(
+        exists=True,
+        kind="text",
+        content=data.decode("utf-8", errors="replace"),
+        truncated=truncated,
+    )
+"#;
+
+            let payload = run_workspace_python_json(
+                &remote_target,
+                script,
+                &[
+                    relative_path,
+                    preview_kind.to_string(),
+                    media_type.clone().unwrap_or_default(),
+                    WORKSPACE_PREVIEW_TEXT_LIMIT_BYTES.to_string(),
+                    WORKSPACE_PREVIEW_BINARY_LIMIT_BYTES.to_string(),
+                ],
+            )?;
+            serde_json::from_value(payload)
+                .map_err(|err| format!("Failed to decode remote workspace preview response: {err}"))
+        }
+    }
+}
+
+#[tauri::command]
+fn write_workspace_preview_file(
+    store: State<'_, AppStore>,
+    project_root: String,
+    relative_path: String,
+    content: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    let workspace_target =
+        resolve_workspace_target(&store, workspace_id.as_deref(), Some(&project_root))?;
+
+    match workspace_target {
+        WorkspaceTarget::Local { project_root } => {
+            let (_, target) = resolve_workspace_target_path(&project_root, &relative_path)?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("Unable to create parent directory: {err}"))?;
+            }
+            fs::write(&target, content).map_err(|err| format!("Unable to write file: {err}"))
+        }
+        remote_target @ WorkspaceTarget::Ssh { .. } => {
+            if content.len() > WORKSPACE_PREVIEW_REMOTE_WRITE_CHAR_LIMIT {
+                return Err(format!(
+                    "Remote file save payload is too large (>{WORKSPACE_PREVIEW_REMOTE_WRITE_CHAR_LIMIT} characters)."
+                ));
+            }
+            let script = r#"
+import os, sys
+
+relative_path = sys.argv[1]
+content = sys.argv[2]
+root = os.getcwd()
+target = os.path.abspath(os.path.join(root, relative_path))
+
+try:
+    common_root = os.path.commonpath([root, target])
+except ValueError:
+    common_root = None
+
+if common_root != root:
+    raise SystemExit("Requested path is outside the workspace root.")
+
+parent = os.path.dirname(target)
+if parent:
+    os.makedirs(parent, exist_ok=True)
+
+with open(target, "w", encoding="utf-8") as handle:
+    handle.write(content)
+"#;
+
+            run_workspace_python_status(&remote_target, script, &[relative_path, content])
+        }
+    }
+}
+
+#[tauri::command]
 fn write_external_absolute_file(path: String, content: String) -> Result<(), String> {
     let path = absolute_path(&path)?;
     if let Some(parent) = path.parent() {
@@ -26106,6 +26340,71 @@ fn external_file_response(path: &Path) -> Result<ExternalTextFile, String> {
     })
 }
 
+const WORKSPACE_PREVIEW_TEXT_LIMIT_BYTES: usize = 220_000;
+const WORKSPACE_PREVIEW_BINARY_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const WORKSPACE_PREVIEW_REMOTE_WRITE_CHAR_LIMIT: usize = 120_000;
+
+fn workspace_preview_text_response_local(
+    path: &Path,
+) -> Result<WorkspacePreviewFileResult, String> {
+    if !path.exists() {
+        return Ok(WorkspacePreviewFileResult {
+            exists: false,
+            kind: "text".to_string(),
+            content: String::new(),
+            truncated: false,
+            asset_path: None,
+            media_type: None,
+            base64_data: None,
+        });
+    }
+
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let truncated = bytes.len() > WORKSPACE_PREVIEW_TEXT_LIMIT_BYTES;
+    let slice = if truncated {
+        &bytes[..WORKSPACE_PREVIEW_TEXT_LIMIT_BYTES]
+    } else {
+        &bytes
+    };
+    let content = String::from_utf8_lossy(slice).to_string();
+    Ok(WorkspacePreviewFileResult {
+        exists: true,
+        kind: "text".to_string(),
+        content,
+        truncated,
+        asset_path: None,
+        media_type: None,
+        base64_data: None,
+    })
+}
+
+fn workspace_preview_binary_response_local(
+    path: &Path,
+    kind: &str,
+    media_type: Option<&str>,
+) -> WorkspacePreviewFileResult {
+    let bytes = fs::read(path).unwrap_or_default();
+    let truncated = bytes.len() > WORKSPACE_PREVIEW_BINARY_LIMIT_BYTES;
+    let base64_data = if truncated {
+        None
+    } else {
+        Some(encode_base64(&bytes))
+    };
+    WorkspacePreviewFileResult {
+        exists: true,
+        kind: kind.to_string(),
+        content: String::new(),
+        truncated,
+        asset_path: if truncated {
+            Some(path.to_string_lossy().to_string())
+        } else {
+            None
+        },
+        media_type: media_type.map(str::to_string),
+        base64_data,
+    }
+}
+
 fn detect_gemini_extensions(extension_root: &Path) -> AgentResourceGroup {
     let mut group = resource_group(true);
     if !extension_root.exists() {
@@ -29698,6 +29997,8 @@ pub fn run() {
             test_ssh_connection,
             search_workspace_files,
             search_workspace_text,
+            code_intel::code_intel_definition,
+            code_intel::code_intel_references,
             get_workspace_file_index,
             list_workspace_entries,
             create_workspace_file,
@@ -29705,6 +30006,8 @@ pub fn run() {
             trash_workspace_item,
             list_external_absolute_directory_children,
             read_external_absolute_file,
+            read_workspace_preview_file,
+            write_workspace_preview_file,
             write_external_absolute_file,
             local_usage::local_usage_statistics,
             session_management::list_workspace_sessions,

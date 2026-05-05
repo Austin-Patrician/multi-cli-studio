@@ -221,6 +221,14 @@ export interface TerminalTab {
   lastActiveAt: string;
 }
 
+export type ChatFilePreviewMode = "preview" | "code";
+
+export interface ChatFilePreviewState {
+  openTabs: string[];
+  activePath: string | null;
+  modeByPath: Record<string, ChatFilePreviewMode>;
+}
+
 export interface AppState {
   workspace: WorkspaceState;
   agents: AgentCard[];
@@ -1453,6 +1461,31 @@ export interface WorkspaceTextSearchResponse {
   limitHit: boolean;
 }
 
+export interface CodeIntelPosition {
+  line: number;
+  character: number;
+}
+
+export interface CodeIntelRange {
+  start: CodeIntelPosition;
+  end: CodeIntelPosition;
+}
+
+export interface CodeIntelLocation {
+  uri: string;
+  path: string;
+  range: CodeIntelRange;
+}
+
+export interface CodeIntelQueryResponse {
+  filePath: string;
+  line: number;
+  character: number;
+  language: string;
+  includeDeclaration?: boolean;
+  result: CodeIntelLocation[];
+}
+
 export interface CliSkillItem {
   name: string;
   displayName?: string | null;
@@ -1516,6 +1549,18 @@ export interface ExternalTextFile {
   exists: boolean;
   content: string;
   truncated: boolean;
+}
+
+export type WorkspacePreviewFileKind = "text" | "image" | "pdf" | "binary-unsupported";
+
+export interface WorkspacePreviewFileResult {
+  exists: boolean;
+  kind: WorkspacePreviewFileKind;
+  content: string;
+  truncated: boolean;
+  assetPath?: string | null;
+  mediaType?: string | null;
+  base64Data?: string | null;
 }
 
 export interface VendorConfigField {

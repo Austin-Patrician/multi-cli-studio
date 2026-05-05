@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.2.0",
+    "@uiw/react-codemirror": "^4.25.2",
     "@monaco-editor/react": "^4.7.0",
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/api": "^2.8.0",

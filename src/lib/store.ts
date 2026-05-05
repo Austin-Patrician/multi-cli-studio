@@ -14,6 +14,8 @@ import {
   ChatMessageBlock,
   ChatContextTurn,
   CliSkillItem,
+  ChatFilePreviewMode,
+  ChatFilePreviewState,
   ContextStore,
   ConversationSession,
   TerminalCliContextBoundary,
@@ -100,6 +102,47 @@ interface SendChatMessageOptions {
   cliIdOverride?: TerminalCliId;
   attachmentsOverride?: ChatAttachment[] | null;
   selectedAgentOverride?: SelectedCustomAgent | null;
+}
+
+function normalizeChatFilePreviewPath(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\/+/, "").trim();
+}
+
+function resolveDefaultChatFilePreviewMode(path: string): ChatFilePreviewMode {
+  return /\.(md|mdx)$/i.test(path) ? "preview" : "code";
+}
+
+function upsertChatFilePreviewState(
+  current: Record<string, ChatFilePreviewState>,
+  tabId: string,
+  path: string
+) {
+  const normalizedPath = normalizeChatFilePreviewPath(path);
+  if (!normalizedPath) {
+    return current;
+  }
+
+  const previous = current[tabId] ?? {
+    openTabs: [],
+    activePath: null,
+    modeByPath: {},
+  };
+  const openTabs = previous.openTabs.includes(normalizedPath)
+    ? previous.openTabs
+    : [...previous.openTabs, normalizedPath];
+  const nextState: ChatFilePreviewState = {
+    openTabs,
+    activePath: normalizedPath,
+    modeByPath: {
+      ...previous.modeByPath,
+      [normalizedPath]:
+        previous.modeByPath[normalizedPath] ?? resolveDefaultChatFilePreviewMode(normalizedPath),
+    },
+  };
+  return {
+    ...current,
+    [tabId]: nextState,
+  };
 }
 
 function createId(prefix: string) {
@@ -1570,6 +1613,7 @@ interface StoreState {
   queuedChatByTab: Record<string, QueuedChatMessage>;
   livePlanByTab: Record<string, LivePlanState>;
   tabSubagentsByTab: Record<string, TabSubagentState[]>;
+  chatFilePreviewsByTab: Record<string, ChatFilePreviewState>;
 
   loadInitialState: (projectRoot?: string) => Promise<void>;
   switchAgent: (agentId: AgentId) => Promise<void>;
@@ -1616,6 +1660,11 @@ interface StoreState {
     picked: PickedChatAttachment[]
   ) => { added: number; rejected: number };
   removeDraftChatAttachment: (tabId: string, attachmentId: string) => void;
+  openChatFilePreview: (tabId: string, path: string) => void;
+  closeChatFilePreviewTab: (tabId: string, path: string) => void;
+  setActiveChatFilePreviewTab: (tabId: string, path: string) => void;
+  setChatFilePreviewMode: (tabId: string, path: string, mode: ChatFilePreviewMode) => void;
+  clearChatFilePreview: (tabId: string) => void;
   togglePlanMode: (tabId?: string) => void;
   queueChatMessage: (
     tabId: string,
@@ -1721,6 +1770,7 @@ export const useStore = create<StoreState>((set, get) => {
   queuedChatByTab: {},
   livePlanByTab: {},
   tabSubagentsByTab: {},
+  chatFilePreviewsByTab: {},
 
   setAppState: (state) =>
     set((current) => ({
@@ -2525,6 +2575,8 @@ export const useStore = create<StoreState>((set, get) => {
       delete livePlanByTab[tabId];
       const tabSubagentsByTab = { ...state.tabSubagentsByTab };
       delete tabSubagentsByTab[tabId];
+      const chatFilePreviewsByTab = { ...state.chatFilePreviewsByTab };
+      delete chatFilePreviewsByTab[tabId];
       return {
         appState,
         terminalTabs: remainingTabs,
@@ -2534,6 +2586,7 @@ export const useStore = create<StoreState>((set, get) => {
         queuedChatByTab,
         livePlanByTab,
         tabSubagentsByTab,
+        chatFilePreviewsByTab,
       };
     });
     enqueueMessagePersistence(() => bridge.deleteChatSessionByTab(tabId));
@@ -2595,12 +2648,14 @@ export const useStore = create<StoreState>((set, get) => {
       const queuedChatByTab = { ...state.queuedChatByTab };
       const livePlanByTab = { ...state.livePlanByTab };
       const tabSubagentsByTab = { ...state.tabSubagentsByTab };
+      const chatFilePreviewsByTab = { ...state.chatFilePreviewsByTab };
       tabIds.forEach((tabId) => {
         delete chatSessions[tabId];
         delete sharedContext[tabId];
         delete queuedChatByTab[tabId];
         delete livePlanByTab[tabId];
         delete tabSubagentsByTab[tabId];
+        delete chatFilePreviewsByTab[tabId];
       });
 
       const gitPanelsByWorkspace = { ...state.gitPanelsByWorkspace };
@@ -2627,6 +2682,7 @@ export const useStore = create<StoreState>((set, get) => {
         queuedChatByTab,
         livePlanByTab,
         tabSubagentsByTab,
+        chatFilePreviewsByTab,
         gitPanelsByWorkspace,
         gitCommitMessageByWorkspace,
         gitCommitLoadingByWorkspace,
@@ -2734,6 +2790,8 @@ export const useStore = create<StoreState>((set, get) => {
       delete livePlanByTab[targetTabId];
       const tabSubagentsByTab = { ...state.tabSubagentsByTab };
       delete tabSubagentsByTab[targetTabId];
+      const chatFilePreviewsByTab = { ...state.chatFilePreviewsByTab };
+      delete chatFilePreviewsByTab[targetTabId];
       const sharedContext = rebuildSharedContextMap(chatSessions, terminalTabs, state.workspaces);
       const appState = state.appState
         ? deriveActiveWorkspaceState(state.appState, state.workspaces, terminalTabs, state.activeTerminalTabId)
@@ -2746,6 +2804,7 @@ export const useStore = create<StoreState>((set, get) => {
         queuedChatByTab,
         livePlanByTab,
         tabSubagentsByTab,
+        chatFilePreviewsByTab,
         sharedContext,
       };
     });
@@ -3054,6 +3113,94 @@ export const useStore = create<StoreState>((set, get) => {
         };
       });
     }
+  },
+
+  openChatFilePreview: (tabId, path) => {
+    set((state) => ({
+      chatFilePreviewsByTab: upsertChatFilePreviewState(
+        state.chatFilePreviewsByTab,
+        tabId,
+        path
+      ),
+    }));
+  },
+
+  closeChatFilePreviewTab: (tabId, path) => {
+    set((state) => {
+      const preview = state.chatFilePreviewsByTab[tabId];
+      if (!preview) return {};
+      const normalizedPath = normalizeChatFilePreviewPath(path);
+      if (!normalizedPath || !preview.openTabs.includes(normalizedPath)) return {};
+      const openTabs = preview.openTabs.filter((item) => item !== normalizedPath);
+      const modeByPath = { ...preview.modeByPath };
+      delete modeByPath[normalizedPath];
+      const chatFilePreviewsByTab = { ...state.chatFilePreviewsByTab };
+      if (openTabs.length === 0) {
+        delete chatFilePreviewsByTab[tabId];
+        return { chatFilePreviewsByTab };
+      }
+      const activePath =
+        preview.activePath === normalizedPath
+          ? openTabs[Math.max(0, openTabs.length - 1)] ?? null
+          : preview.activePath;
+      chatFilePreviewsByTab[tabId] = {
+        openTabs,
+        activePath,
+        modeByPath,
+      };
+      return { chatFilePreviewsByTab };
+    });
+  },
+
+  setActiveChatFilePreviewTab: (tabId, path) => {
+    set((state) => {
+      const preview = state.chatFilePreviewsByTab[tabId];
+      if (!preview) return {};
+      const normalizedPath = normalizeChatFilePreviewPath(path);
+      if (!normalizedPath || !preview.openTabs.includes(normalizedPath) || preview.activePath === normalizedPath) {
+        return {};
+      }
+      return {
+        chatFilePreviewsByTab: {
+          ...state.chatFilePreviewsByTab,
+          [tabId]: {
+            ...preview,
+            activePath: normalizedPath,
+          },
+        },
+      };
+    });
+  },
+
+  setChatFilePreviewMode: (tabId, path, mode) => {
+    set((state) => {
+      const preview = state.chatFilePreviewsByTab[tabId];
+      if (!preview) return {};
+      const normalizedPath = normalizeChatFilePreviewPath(path);
+      if (!normalizedPath || !preview.openTabs.includes(normalizedPath)) return {};
+      if (preview.modeByPath[normalizedPath] === mode) return {};
+      return {
+        chatFilePreviewsByTab: {
+          ...state.chatFilePreviewsByTab,
+          [tabId]: {
+            ...preview,
+            modeByPath: {
+              ...preview.modeByPath,
+              [normalizedPath]: mode,
+            },
+          },
+        },
+      };
+    });
+  },
+
+  clearChatFilePreview: (tabId) => {
+    set((state) => {
+      if (!state.chatFilePreviewsByTab[tabId]) return {};
+      const chatFilePreviewsByTab = { ...state.chatFilePreviewsByTab };
+      delete chatFilePreviewsByTab[tabId];
+      return { chatFilePreviewsByTab };
+    });
   },
 
   queueChatMessage: (tabId, prompt, cliIdOverride) => {

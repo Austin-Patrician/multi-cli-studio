@@ -135,9 +135,11 @@ function formatOpenWorkspaceError(error: unknown) {
 export function OpenWorkspaceMenu({
   path,
   disabled = false,
+  subjectLabel = "项目",
 }: {
   path: string;
   disabled?: boolean;
+  subjectLabel?: string;
 }) {
   const menuRef = useRef<HTMLDivElement | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -238,8 +240,8 @@ export function OpenWorkspaceMenu({
             void handleOpenSelectedTarget();
           }}
           disabled={disabled || openingTargetId !== null}
-          title={disabled ? "远程工作区不支持在本机打开" : `用 ${selectedTarget.label} 打开项目`}
-          aria-label={disabled ? "远程工作区不支持在本机打开" : `用 ${selectedTarget.label} 打开项目`}
+          title={disabled ? "远程工作区不支持在本机打开" : `用 ${selectedTarget.label} 打开${subjectLabel}`}
+          aria-label={disabled ? "远程工作区不支持在本机打开" : `用 ${selectedTarget.label} 打开${subjectLabel}`}
           className="inline-flex h-8 w-9 items-center justify-center rounded-l-[10px] text-slate-700 transition-all hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <img

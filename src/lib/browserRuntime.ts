@@ -66,6 +66,7 @@ import {
   WorkspaceSessionCatalogPage,
   WorkspaceSessionCatalogQuery,
   WorkspaceSessionProjectionSummary,
+  WorkspacePreviewFileResult,
   WorkspaceTextSearchResponse,
   GitFileDiff,
   GitBranchListResponse,
@@ -3260,6 +3261,14 @@ export const browserRuntime = {
     };
   },
 
+  async getCodeIntelDefinition(): Promise<never> {
+    throw new Error("Code intelligence is not available in browser runtime.");
+  },
+
+  async getCodeIntelReferences(): Promise<never> {
+    throw new Error("Code intelligence is not available in browser runtime.");
+  },
+
   async createWorkspaceFile(
     _projectRoot: string,
     _relativePath: string,
@@ -3362,6 +3371,27 @@ export const browserRuntime = {
 
   async readExternalAbsoluteFile(_path: string): Promise<ExternalTextFile> {
     return { exists: false, content: "", truncated: false };
+  },
+
+  async readWorkspacePreviewFile(): Promise<WorkspacePreviewFileResult> {
+    return {
+      exists: false,
+      kind: "text",
+      content: "",
+      truncated: false,
+      assetPath: null,
+      mediaType: null,
+      base64Data: null,
+    };
+  },
+
+  async writeWorkspacePreviewFile(
+    _projectRoot: string,
+    _relativePath: string,
+    _content: string,
+    _workspaceId?: string | null
+  ): Promise<void> {
+    throw new Error("Workspace file editing is not available in browser runtime.");
   },
 
   async writeExternalAbsoluteFile(_path: string, _content: string): Promise<void> {

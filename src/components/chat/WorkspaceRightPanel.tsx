@@ -1668,6 +1668,9 @@ function WorkspaceFilesPanel({
   workspace: WorkspaceRef;
   changes: GitFileChange[];
 }) {
+  const activeTabId = useStore((state) => state.activeTerminalTabId);
+  const terminalTabs = useStore((state) => state.terminalTabs);
+  const openChatFilePreview = useStore((state) => state.openChatFilePreview);
   const [entriesByParent, setEntriesByParent] = useState<Record<string, WorkspaceTreeEntry[]>>({});
   const [expandedDirectories, setExpandedDirectories] = useState<Record<string, boolean>>({ "": true });
   const [treeLoading, setTreeLoading] = useState(false);
@@ -1678,6 +1681,13 @@ function WorkspaceFilesPanel({
   const [createName, setCreateName] = useState("");
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const gitStatusByPath = useMemo(() => changeStatusMap(changes), [changes]);
+  const targetTabId = useMemo(
+    () =>
+      activeTabId && terminalTabs.some((tab) => tab.id === activeTabId && tab.workspaceId === workspace.id)
+        ? activeTabId
+        : terminalTabs.find((tab) => tab.workspaceId === workspace.id)?.id ?? null,
+    [activeTabId, terminalTabs, workspace.id]
+  );
 
   const syncFileTree = useCallback(
     async (options?: { force?: boolean; silent?: boolean }) => {
@@ -1773,10 +1783,10 @@ function WorkspaceFilesPanel({
                   toggleDirectory(normalizedPath);
                   return;
                 }
-                if (workspace.locationKind === "ssh") {
+                if (!targetTabId) {
                   return;
                 }
-                void bridge.openWorkspaceFile(workspace.rootPath, normalizedPath, workspace.id);
+                openChatFilePreview(targetTabId, normalizedPath);
               }}
               className={`file-tree-row ${isDirectory ? "is-folder" : "is-file"}${selectedPath === normalizedPath ? " is-selected" : ""}`}
               style={{ paddingLeft: `${12 + depth * 16}px` }}
@@ -1802,7 +1812,7 @@ function WorkspaceFilesPanel({
         ];
       });
     },
-    [entriesByParent, expandedDirectories, gitStatusByPath, selectedPath, toggleDirectory, workspace.id, workspace.locationKind, workspace.rootPath]
+    [entriesByParent, expandedDirectories, gitStatusByPath, openChatFilePreview, selectedPath, targetTabId, toggleDirectory, workspace.id, workspace.locationKind]
   );
 
   const selectedParentFolder = useMemo(() => {
