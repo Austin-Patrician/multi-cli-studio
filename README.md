@@ -42,7 +42,7 @@ Multi CLI Studio is built around a different assumption:
 
 ### Dashboard
 
-<img src="./docs/screenshots/index.png" alt="Dashboard" width="100%" />
+<img src="./docs/screenshots/terminal.png" alt="Dashboard" width="100%" />
 
 ### Terminal Workspace
 
@@ -51,10 +51,6 @@ Multi CLI Studio is built around a different assumption:
 ### Model Chat
 
 <img src="./docs/screenshots/chat.png" alt="Model Chat" width="100%" />
-
-### Model Providers
-
-<img src="./docs/screenshots/provider.png" alt="Model Providers" width="100%" />
 
 ### Automation Jobs
 
@@ -67,6 +63,55 @@ Multi CLI Studio is built around a different assumption:
 ### Settings
 
 <img src="./docs/screenshots/settings.png" alt="Settings" width="100%" />
+
+
+### ModelProvider
+
+<img src="./docs/screenshots/modelProvider.png" alt="Model Providers" width="100%" />
+
+
+### Agent
+
+<img src="./docs/screenshots/agent.png" alt="Model Providers" width="100%" />
+
+
+### Prompt
+
+<img src="./docs/screenshots/prompt.png" alt="Model Providers" width="100%" />
+
+
+### Vendors
+
+<img src="./docs/screenshots/vendor.png" alt="Model Providers" width="100%" />
+
+
+### Project
+
+<img src="./docs/screenshots/project.png" alt="Model Providers" width="100%" />
+
+
+### Remote
+
+<img src="./docs/screenshots/remote.png" alt="Model Providers" width="100%" />
+
+### Mcp
+
+<img src="./docs/screenshots/mcp.png" alt="Model Providers" width="100%" />
+
+
+### Hooks
+
+<img src="./docs/screenshots/hooks.png" alt="Model Providers" width="100%" />
+
+
+### Skill
+
+<img src="./docs/screenshots/skills.png" alt="Model Providers" width="100%" />
+
+### Using
+
+<img src="./docs/screenshots/using.png" alt="Model Providers" width="100%" />
+
 
 ## Current Capabilities
 

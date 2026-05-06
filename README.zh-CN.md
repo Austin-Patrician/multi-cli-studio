@@ -42,7 +42,7 @@ Multi CLI Studio 的核心假设不是“选一个最强工具”，而是：
 
 ### 控制面板
 
-<img src="./docs/screenshots/index.png" alt="Dashboard" width="100%" />
+<img src="./docs/screenshots/terminal.png" alt="Dashboard" width="100%" />
 
 ### 终端交互
 
@@ -52,9 +52,6 @@ Multi CLI Studio 的核心假设不是“选一个最强工具”，而是：
 
 <img src="./docs/screenshots/chat.png" alt="Model Chat" width="100%" />
 
-### 模型管理
-
-<img src="./docs/screenshots/provider.png" alt="Model Providers" width="100%" />
 
 ### 自动化任务
 
@@ -67,6 +64,56 @@ Multi CLI Studio 的核心假设不是“选一个最强工具”，而是：
 ### 系统设置
 
 <img src="./docs/screenshots/settings.png" alt="Settings" width="100%" />
+
+
+### 对话模型
+
+<img src="./docs/screenshots/modelProvider.png" alt="Model Providers" width="100%" />
+
+
+### 智能体
+
+<img src="./docs/screenshots/agent.png" alt="Model Providers" width="100%" />
+
+
+### 提示词
+
+<img src="./docs/screenshots/prompt.png" alt="Model Providers" width="100%" />
+
+
+### 供应商
+
+<img src="./docs/screenshots/vendor.png" alt="Model Providers" width="100%" />
+
+
+### 项目
+
+<img src="./docs/screenshots/project.png" alt="Model Providers" width="100%" />
+
+
+### 连接
+
+<img src="./docs/screenshots/remote.png" alt="Model Providers" width="100%" />
+
+### Mcp
+
+<img src="./docs/screenshots/mcp.png" alt="Model Providers" width="100%" />
+
+
+### Hooks
+
+<img src="./docs/screenshots/hooks.png" alt="Model Providers" width="100%" />
+
+
+### Skill
+
+<img src="./docs/screenshots/skills.png" alt="Model Providers" width="100%" />
+
+### 使用统计
+
+<img src="./docs/screenshots/using.png" alt="Model Providers" width="100%" />
+
+
 
 ## 当前能力
 
