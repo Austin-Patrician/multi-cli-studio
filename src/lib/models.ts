@@ -1314,6 +1314,10 @@ export interface StudioWorkflowState {
   phase: string;
   contextPath: string | null;
   prdPath: string | null;
+  specPath: string | null;
+  planPath: string | null;
+  tasksPath: string | null;
+  checkPath: string | null;
   contextReportPath: string | null;
   implementManifestPath: string | null;
   checkManifestPath: string | null;

@@ -601,6 +601,10 @@ pub struct StudioWorkflowState {
     pub phase: String,
     pub context_path: Option<String>,
     pub prd_path: Option<String>,
+    pub spec_path: Option<String>,
+    pub plan_path: Option<String>,
+    pub tasks_path: Option<String>,
+    pub check_path: Option<String>,
     pub context_report_path: Option<String>,
     pub implement_manifest_path: Option<String>,
     pub check_manifest_path: Option<String>,
@@ -713,6 +717,78 @@ fn active_context_ref(file_name: &str) -> String {
     format!(".studio/runtime/active-context/{file_name}")
 }
 
+fn active_context_request_matches(
+    input: &StudioContextExportInput,
+    existing_context: Option<&Value>,
+) -> bool {
+    let Some(existing) = existing_context else {
+        return false;
+    };
+    let existing_request = existing
+        .get("currentRequest")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let existing_goal = existing
+        .get("goal")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let current_request = studio_current_request(input);
+    let current_goal = studio_context_goal(input);
+    existing_request == current_request.trim()
+        && existing_goal == non_empty(&current_goal, "Continue the active context.").trim()
+}
+
+fn reset_active_context_run_state(
+    task_dir: &Path,
+    input: &StudioContextExportInput,
+    context_id: &str,
+) -> Result<(), String> {
+    let generated_at = Local::now().to_rfc3339();
+    atomic_write(
+        &task_dir.join("checker-report.md"),
+        &render_checker_report(
+            context_id,
+            "pending",
+            "Checker has not run for this active request yet.",
+            &[],
+            false,
+            &generated_at,
+        ),
+    )?;
+    atomic_write(
+        &task_dir.join("checker-retry-report.md"),
+        &render_checker_retry_report(
+            context_id,
+            "not-run",
+            "Checker retry has not run for this active request yet.",
+            &generated_at,
+        ),
+    )?;
+    atomic_write(&task_dir.join("memory-candidates.jsonl"), "")?;
+    atomic_write(
+        &task_dir.join("memory-distill-report.md"),
+        &render_memory_distill_report(
+            input,
+            context_id,
+            &MemoryDistillSanitization::default(),
+            false,
+            "pending_checker",
+        ),
+    )?;
+    atomic_write(
+        &task_dir.join("policy-check.json"),
+        &render_policy_check_json(input, context_id, false)?,
+    )?;
+    atomic_write(
+        &task_dir.join("promotion-report.md"),
+        &format!(
+            "# Promotion Report\n\nGenerated: {generated_at}\nContext: {context_id}\nDecision: pending\nReason: New active request has no promotion result yet.\n"
+        ),
+    )
+}
+
 pub fn export_studio_context(
     input: &StudioContextExportInput,
 ) -> Result<Option<StudioContextExport>, String> {
@@ -740,6 +816,11 @@ pub fn export_studio_context(
 
     let context_json_path = active_context_dir.join("context.json");
     let existing_context_json = read_json_file(&context_json_path).ok();
+    let request_matches_existing_context =
+        active_context_request_matches(input, existing_context_json.as_ref());
+    if !request_matches_existing_context {
+        reset_active_context_run_state(&active_context_dir, input, &context_id)?;
+    }
     let active_tab_ids = load_active_tab_ids(&context_json_path, &input.terminal_tab_id);
     atomic_write(
         &context_json_path,
@@ -748,6 +829,7 @@ pub fn export_studio_context(
             &context_id,
             &active_tab_ids,
             existing_context_json.as_ref(),
+            request_matches_existing_context,
         )?,
     )?;
     write_durable_prd_if_missing_or_polluted(
@@ -755,38 +837,6 @@ pub fn export_studio_context(
         input,
         &context_id,
     )?;
-
-    if let Some(memory_candidates) = input
-        .memory_candidates
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let distill = sanitize_memory_candidates(memory_candidates);
-        let candidates_content = if distill.accepted.is_empty() {
-            String::new()
-        } else {
-            format!("{}\n", distill.accepted.join("\n"))
-        };
-        let has_promotable_candidates = distill.promotable_entries > 0;
-        atomic_write(
-            &active_context_dir.join("memory-candidates.jsonl"),
-            &trim_to_limit(&candidates_content, MAX_MEMORY_CANDIDATE_CHARS),
-        )?;
-        atomic_write(
-            &active_context_dir.join("memory-distill-report.md"),
-            &render_memory_distill_report(input, &context_id, &distill, false, "pending_checker"),
-        )?;
-        atomic_write(
-            &active_context_dir.join("policy-check.json"),
-            &render_policy_check_json(input, &context_id, has_promotable_candidates)?,
-        )?;
-    } else {
-        atomic_write(
-            &active_context_dir.join("policy-check.json"),
-            &render_policy_check_json(input, &context_id, false)?,
-        )?;
-    }
 
     let curation = curate_context(project_root, input, &context_id)?;
     atomic_write(
@@ -823,6 +873,7 @@ pub fn export_studio_context(
         },
         None,
     )?;
+    write_active_context_artifact_chain(project_root, &active_context_dir, input, &context_id)?;
 
     let context_key = format!(
         "{}-{}",
@@ -877,7 +928,7 @@ pub fn build_context_curator_prompt(input: &StudioContextExportInput, context_id
         .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
     let next_step = clean_studio_option(input.handoff_next_step.as_deref())
         .unwrap_or_else(|| "Continue from the latest user request.".to_string());
-    let handoff_files = sanitized_handoff_files(input);
+    let handoff_files = active_context_relevant_files(input);
     format!(
         "You are Studio's context-curator subagent. Curate request-specific spec/research context automatically for the single active context.\n\n\
 Return only a single JSON object with this shape:\n\
@@ -933,7 +984,7 @@ pub fn build_research_agent_prompt(input: &StudioContextExportInput, task_id: &s
     let request = clean_studio_text(&input.user_prompt);
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
         .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
-    let handoff_files = sanitized_handoff_files(input);
+    let handoff_files = active_context_relevant_files(input);
     format!(
         "You are Studio's research subagent. Create durable active-context research artifacts only when they help implementation or checking.\n\n\
 Return only JSON: {{\"artifacts\":[{{\"title\":\"short topic\",\"content\":\"markdown finding\",\"sources\":[\"repo/spec/user prompt/source\"]}}]}}\n\n\
@@ -1080,6 +1131,7 @@ pub fn apply_checker_agent_output(
         needs_retry,
         &checked_at,
     )?;
+    write_active_context_check_doc(project_root, task_id)?;
     Ok(StudioCheckerApplyResult {
         status,
         summary,
@@ -1119,6 +1171,7 @@ pub fn record_checker_retry_result(
         status,
         &completed_at,
     )?;
+    write_active_context_check_doc(project_root, task_id)?;
     Ok(StudioCheckerRetryResult {
         status: status.to_string(),
         report_path: report_path.to_string_lossy().to_string(),
@@ -1411,6 +1464,10 @@ pub fn load_studio_workflow_state(
         phase,
         context_path: Some(".studio/runtime/active-context/context.json".to_string()),
         prd_path: Some(".studio/runtime/active-context/prd.md".to_string()),
+        spec_path: file_ref_if_exists(&task_dir.join("spec.md"), project_root_path),
+        plan_path: file_ref_if_exists(&task_dir.join("plan.md"), project_root_path),
+        tasks_path: file_ref_if_exists(&task_dir.join("tasks.md"), project_root_path),
+        check_path: file_ref_if_exists(&task_dir.join("check.md"), project_root_path),
         context_report_path: file_ref_if_exists(
             &task_dir.join("context-selection-report.md"),
             project_root_path,
@@ -1811,13 +1868,13 @@ fn atomic_write_if_managed(path: &Path, content: &str, marker: &str) -> Result<(
 
 fn render_studio_workflow() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# Studio Context Workflow\n\nThis project uses a Studio-native shared-context workflow. Each user turn runs exactly one selected CLI, while Codex, Claude, and Gemini read and write the same project-local context contract.\n\n## Three Layers\n\n1. `spec` - durable project rules under `.studio/spec/`.\n2. `memory` - durable project memory and journals under `.studio/workspace/`.\n3. `active_context` - generated runtime state under `.studio/runtime/active-context/`.\n\n## Active Context Files\n\n- `.studio/runtime/context.md` is the startup pointer for every CLI.\n- `.studio/runtime/active-context/current.md` is the current request snapshot.\n- `.studio/runtime/active-context/context.json` is the machine-readable active state.\n- `.studio/runtime/active-context/prd.md` captures the current request, goal, and acceptance criteria.\n- `.studio/runtime/active-context/manifest.jsonl` and `check.jsonl` list curated spec/research references.\n- `.studio/runtime/active-context/research/` stores request-specific research notes.\n\n## Machine Gates\n\n- `context_curated`: manifests contain managed entries or an explicit fallback reason.\n- `checking`: checker consumes `check.jsonl` and records concrete failures before retry.\n- `memory_distilled`: long-term updates include provenance, confidence, supersedes, and a policy decision.\n- Runtime traces, command successes, and generic file-update facts must not auto-promote into durable workspace memory.\n- Durable `.studio/spec/` and `.studio/workspace/` updates are automatic only when policy-check permits them; otherwise they remain candidates.\n\n## CLI Policy\n\n- Only the user-selected CLI handles the current request.\n- Switching CLI keeps the same active context instead of creating or archiving work units.\n- CLI-specific prompts may differ, but they must read the same active-context files and generated manifests.\n- Prefer file references over prompt stuffing.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# Studio Context Workflow\n\nThis project uses a Studio-native shared-context workflow. Each user turn runs exactly one selected CLI, while Codex, Claude, and Gemini read and write the same project-local context contract.\n\n## Three Layers\n\n1. `spec` - durable project rules under `.studio/spec/`.\n2. `memory` - durable project memory and journals under `.studio/workspace/`.\n3. `active_context` - generated runtime state under `.studio/runtime/active-context/`.\n\n## Active Context Files\n\n- `.studio/runtime/context.md` is the startup pointer for every CLI.\n- `.studio/runtime/active-context/current.md` is the current request snapshot.\n- `.studio/runtime/active-context/context.json` is the machine-readable active state.\n- `.studio/runtime/active-context/prd.md` remains a compact compatibility summary of the current request.\n- `.studio/runtime/active-context/spec.md`, `plan.md`, `tasks.md`, and `check.md` are the primary runtime artifact chain for the current request.\n- `.studio/runtime/active-context/manifest.jsonl` and `check.jsonl` list curated spec/research references.\n- `.studio/runtime/active-context/research/` stores request-specific research notes.\n\n## Machine Gates\n\n- `context_curated`: manifests contain managed entries or an explicit fallback reason.\n- `checking`: checker consumes `check.jsonl`, writes `checker-report.md`, and updates `check.md`.\n- `memory_distilled`: long-term updates include provenance, confidence, supersedes, and a policy decision.\n- Runtime traces, command successes, and generic file-update facts must not auto-promote into durable workspace memory.\n- Durable `.studio/spec/` and `.studio/workspace/` updates are automatic only when policy-check permits them; otherwise they remain candidates.\n\n## CLI Policy\n\n- Only the user-selected CLI handles the current request.\n- Switching CLI keeps the same active context instead of creating or archiving work units.\n- CLI-specific prompts may differ, but they must read the same active-context files and generated manifests.\n- Prefer file references over prompt stuffing.\n"
     )
 }
 
 fn render_agent_context_curator() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# context-curator\n\nRole: select the minimal request-specific context for implementation and checking.\n\nInputs:\n- `.studio/runtime/active-context/prd.md`\n- `.studio/spec/**/index.md` and relevant spec files\n- `.studio/runtime/active-context/research/*.md`\n- current runtime context and changed-file hints\n\nOutputs:\n- `.studio/runtime/active-context/manifest.jsonl`\n- `.studio/runtime/active-context/check.jsonl`\n- `.studio/runtime/active-context/context-selection-report.md`\n\nRules:\n- Run automatically; do not ask for human confirmation.\n- Add only spec or active-context research files, never source files to edit.\n- Explain every selected file with a reason and confidence.\n- Prefer stable curated entries over per-turn heuristic matches.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# context-curator\n\nRole: select the minimal request-specific context for implementation and checking.\n\nInputs:\n- `.studio/runtime/active-context/spec.md`\n- `.studio/runtime/active-context/plan.md`\n- `.studio/spec/**/index.md` and relevant spec files\n- `.studio/runtime/active-context/research/*.md`\n- current runtime context and changed-file hints\n\nOutputs:\n- `.studio/runtime/active-context/manifest.jsonl`\n- `.studio/runtime/active-context/check.jsonl`\n- `.studio/runtime/active-context/context-selection-report.md`\n\nRules:\n- Run automatically; do not ask for human confirmation.\n- Add only spec or active-context research files, never source files to edit.\n- Explain every selected file with a reason and confidence.\n- Prefer stable curated entries over per-turn heuristic matches.\n"
     )
 }
 
@@ -1829,13 +1886,13 @@ fn render_agent_research() -> String {
 
 fn render_agent_implement() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# implement\n\nRole: implement the current request using `.studio/runtime/active-context/manifest.jsonl`.\n\nRules:\n- Read PRD and selected manifest before editing.\n- Keep changes scoped to the current request.\n- Record relevant files and decisions in the active context through Studio outputs.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# implement\n\nRole: implement the current request using the active-context artifact chain and `.studio/runtime/active-context/manifest.jsonl`.\n\nRules:\n- Read `spec.md`, `plan.md`, `tasks.md`, and the selected manifest before editing.\n- Keep changes scoped to the current request.\n- Record relevant files and decisions in the active context through Studio outputs.\n"
     )
 }
 
 fn render_agent_check() -> String {
     format!(
-        "{STUDIO_WORKFLOW_MARKER}\n# check\n\nRole: verify implementation against `.studio/runtime/active-context/check.jsonl`, PRD, and changed files.\n\nRules:\n- Prefer concrete failures over speculative warnings.\n- Record failed commands and missing acceptance criteria.\n- Send defects back to the selected CLI when needed.\n"
+        "{STUDIO_WORKFLOW_MARKER}\n# check\n\nRole: verify implementation against `.studio/runtime/active-context/check.md`, `check.jsonl`, the active spec, and changed files.\n\nRules:\n- Prefer concrete failures over speculative warnings.\n- Record failed commands and missing acceptance criteria.\n- Send defects back to the selected CLI when needed.\n"
     )
 }
 
@@ -2039,6 +2096,142 @@ fn sanitized_handoff_files(input: &StudioContextExportInput) -> Vec<String> {
         }
     }
     sanitized
+}
+
+fn active_context_relevant_files(input: &StudioContextExportInput) -> Vec<String> {
+    let project_root = Path::new(input.project_root.trim());
+    let mut files = sanitized_handoff_files(input);
+    let mut seen = files.iter().cloned().collect::<HashSet<_>>();
+    let mut sources = vec![input.user_prompt.as_str()];
+    for value in [
+        input.context_title.as_deref(),
+        input.context_goal.as_deref(),
+        input.handoff_summary.as_deref(),
+        input.handoff_next_step.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        sources.push(value);
+    }
+
+    for source in sources {
+        for file in extract_prompt_file_mentions(project_root, source) {
+            if seen.insert(file.clone()) {
+                files.push(file);
+            }
+        }
+    }
+    files
+}
+
+fn extract_prompt_file_mentions(project_root: &Path, text: &str) -> Vec<String> {
+    let mut mentions = Vec::new();
+    let mut seen = HashSet::new();
+    let mut token = String::new();
+    for ch in text.chars() {
+        if is_file_mention_char(ch) {
+            token.push(ch);
+            continue;
+        }
+        add_prompt_file_mention(project_root, &token, &mut seen, &mut mentions);
+        token.clear();
+    }
+    add_prompt_file_mention(project_root, &token, &mut seen, &mut mentions);
+    mentions
+}
+
+fn is_file_mention_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '@' | '_' | '-' | '.' | '/' | '\\')
+}
+
+fn add_prompt_file_mention(
+    project_root: &Path,
+    token: &str,
+    seen: &mut HashSet<String>,
+    mentions: &mut Vec<String>,
+) {
+    let Some(file) = normalize_prompt_file_mention(project_root, token) else {
+        return;
+    };
+    if seen.insert(file.clone()) {
+        mentions.push(file);
+    }
+}
+
+fn normalize_prompt_file_mention(project_root: &Path, token: &str) -> Option<String> {
+    let mut candidate = token
+        .trim()
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';' | ':'
+            )
+        })
+        .trim_start_matches('@')
+        .trim()
+        .to_string();
+    while candidate.ends_with('.') && !project_root.join(&candidate).exists() {
+        candidate.pop();
+    }
+    if !looks_like_prompt_path_reference(project_root, &candidate) {
+        return None;
+    }
+    candidate = candidate.trim_end_matches(['/', '\\']).to_string();
+    let normalized = normalize_handoff_file(project_root, &candidate)?;
+    if !is_allowed_prompt_path_reference(&normalized)
+        || !is_probable_project_file_reference(project_root, &normalized)
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn looks_like_prompt_path_reference(project_root: &Path, value: &str) -> bool {
+    if looks_like_file_reference(value) {
+        return true;
+    }
+    let trimmed = value.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return false;
+    }
+    let path = project_root.join(trimmed);
+    path.is_dir()
+        || value.ends_with('/')
+        || value.ends_with('\\')
+        || (trimmed.starts_with(".studio/") && trimmed.contains('/'))
+}
+
+fn looks_like_file_reference(value: &str) -> bool {
+    let Some(last_segment) = value.rsplit(['/', '\\']).next() else {
+        return false;
+    };
+    let Some((stem, extension)) = last_segment.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty()
+        && !extension.is_empty()
+        && extension.len() <= 16
+        && extension.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn is_allowed_prompt_path_reference(relative: &str) -> bool {
+    !is_generated_runtime_handoff_file(relative)
+        || relative == ".studio/runtime/context.md"
+        || relative == ".studio/runtime/active-context"
+        || relative.starts_with(".studio/runtime/active-context/")
+}
+
+fn is_probable_project_file_reference(project_root: &Path, relative: &str) -> bool {
+    let path = project_root.join(relative);
+    if path.exists() {
+        return true;
+    }
+    relative.contains('/')
+        && path
+            .parent()
+            .map(|parent| parent.exists())
+            .unwrap_or(false)
 }
 
 fn normalize_handoff_file(project_root: &Path, file: &str) -> Option<String> {
@@ -2250,6 +2443,10 @@ Read these files first when you need project or shared context:\n\
 - .studio/runtime/active-context/current.md\n\
 - .studio/runtime/active-context/context.json\n\
 - .studio/runtime/active-context/prd.md\n\
+- .studio/runtime/active-context/spec.md\n\
+- .studio/runtime/active-context/plan.md\n\
+- .studio/runtime/active-context/tasks.md\n\
+- .studio/runtime/active-context/check.md\n\
 - .studio/runtime/active-context/context-selection-report.md\n\
 - .studio/runtime/active-context/manifest.jsonl\n\
 - .studio/runtime/active-context/check.jsonl\n\
@@ -2287,6 +2484,10 @@ Updated: {}\n\n\
 - Current context: .studio/runtime/active-context/current.md\n\
 - Context JSON: .studio/runtime/active-context/context.json\n\
 - PRD: .studio/runtime/active-context/prd.md\n\
+- Spec: .studio/runtime/active-context/spec.md\n\
+- Plan: .studio/runtime/active-context/plan.md\n\
+- Tasks: .studio/runtime/active-context/tasks.md\n\
+- Check: .studio/runtime/active-context/check.md\n\
 - Workflow: .studio/workflow.md\n\
 - Context selection report: .studio/runtime/active-context/context-selection-report.md\n\
 - Manifest: .studio/runtime/active-context/manifest.jsonl\n\
@@ -2341,7 +2542,7 @@ fn render_current_context(input: &StudioContextExportInput, context_id: &str) ->
         .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
     let next_step = clean_studio_option(input.handoff_next_step.as_deref())
         .unwrap_or_else(|| "Continue from the latest user request.".to_string());
-    let handoff_files = sanitized_handoff_files(input);
+    let handoff_files = active_context_relevant_files(input);
     let files = if handoff_files.is_empty() {
         "- (none captured yet)".to_string()
     } else {
@@ -2370,6 +2571,13 @@ Updated: {}\n\n\
 {}\n\n\
 ## Next Step\n\n\
 {}\n\n\
+## Active Context Artifacts\n\n\
+- Spec: .studio/runtime/active-context/spec.md\n\
+- Plan: .studio/runtime/active-context/plan.md\n\
+- Tasks: .studio/runtime/active-context/tasks.md\n\
+- Check: .studio/runtime/active-context/check.md\n\
+- Manifest: .studio/runtime/active-context/manifest.jsonl\n\
+- Check manifest: .studio/runtime/active-context/check.jsonl\n\n\
 ## Context Manifests\n\n\
 - Manifest: .studio/runtime/active-context/manifest.jsonl\n\
 - Check: .studio/runtime/active-context/check.jsonl\n\n\
@@ -2396,6 +2604,7 @@ fn render_active_context_json(
     context_id: &str,
     active_tab_ids: &[String],
     existing_context: Option<&Value>,
+    preserve_run_state: bool,
 ) -> Result<String, String> {
     let title = studio_context_title(input);
     let goal = studio_context_goal(input);
@@ -2403,7 +2612,7 @@ fn render_active_context_json(
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref());
     let next_step = clean_studio_option(input.handoff_next_step.as_deref())
         .unwrap_or_else(|| "Continue from the latest user request.".to_string());
-    let handoff_files = sanitized_handoff_files(input);
+    let handoff_files = active_context_relevant_files(input);
     let mut value = serde_json::json!({
         "id": context_id,
         "title": non_empty(&title, "Active Context"),
@@ -2439,6 +2648,16 @@ fn render_active_context_json(
         "nextStep": next_step,
         "relevantFiles": handoff_files,
         "runtimeContext": active_context_ref("current.md"),
+        "specPath": active_context_ref("spec.md"),
+        "planPath": active_context_ref("plan.md"),
+        "tasksPath": active_context_ref("tasks.md"),
+        "checkPath": active_context_ref("check.md"),
+        "artifactChain": {
+            "spec": active_context_ref("spec.md"),
+            "plan": active_context_ref("plan.md"),
+            "tasks": active_context_ref("tasks.md"),
+            "check": active_context_ref("check.md"),
+        },
         "contextSelectionReport": active_context_ref("context-selection-report.md"),
         "implementManifest": active_context_ref("manifest.jsonl"),
         "checkManifest": active_context_ref("check.jsonl"),
@@ -2451,12 +2670,14 @@ fn render_active_context_json(
         "studioManaged": true,
     });
     if let Some(object) = value.as_object_mut() {
-        for key in ["checker", "memoryDistill", "promotion"] {
-            if let Some(existing_value) = existing_context
-                .and_then(|context| context.get(key))
-                .cloned()
-            {
-                object.insert(key.to_string(), existing_value);
+        if preserve_run_state {
+            for key in ["checker", "memoryDistill", "promotion"] {
+                if let Some(existing_value) = existing_context
+                    .and_then(|context| context.get(key))
+                    .cloned()
+                {
+                    object.insert(key.to_string(), existing_value);
+                }
             }
         }
     }
@@ -2476,6 +2697,253 @@ fn write_durable_prd_if_missing_or_polluted(
         current_request,
     );
     atomic_write(path, &content)
+}
+
+fn write_active_context_artifact_chain(
+    project_root: &Path,
+    task_dir: &Path,
+    input: &StudioContextExportInput,
+    context_id: &str,
+) -> Result<(), String> {
+    atomic_write(
+        &task_dir.join("spec.md"),
+        &render_active_context_spec(input, context_id),
+    )?;
+    atomic_write(
+        &task_dir.join("plan.md"),
+        &render_active_context_plan(input, context_id),
+    )?;
+    atomic_write(
+        &task_dir.join("tasks.md"),
+        &render_active_context_tasks(input, context_id),
+    )?;
+    write_active_context_check_doc(project_root, context_id)
+}
+
+fn write_active_context_check_doc(project_root: &Path, context_id: &str) -> Result<(), String> {
+    let task_dir = active_context_dir(project_root);
+    atomic_write(
+        &task_dir.join("check.md"),
+        &render_active_context_check(project_root, context_id),
+    )
+}
+
+fn render_active_context_spec(input: &StudioContextExportInput, context_id: &str) -> String {
+    let goal = studio_context_goal(input);
+    let current_request = studio_current_request(input);
+    let files = render_markdown_bullets(
+        &active_context_relevant_files(input),
+        "- (none captured yet; discover from the request and manifests)",
+    );
+    format!(
+        "# Active Context Spec: {context_id}\n\n\
+Generated: {}\n\n\
+## Goal\n\n\
+{}\n\n\
+## Current Request\n\n\
+{}\n\n\
+## Acceptance Criteria\n\n\
+- Follow `.studio/workflow.md` as the shared context contract.\n\
+- Keep the change scoped to the current user request.\n\
+- Use `.studio/runtime/active-context/manifest.jsonl` and `check.jsonl` as curated context inputs.\n\
+- Keep durable promotion separate from request-local runtime state.\n\n\
+## Relevant Files\n\n\
+{}\n\n\
+## References\n\n\
+- PRD: `.studio/runtime/active-context/prd.md`\n\
+- Plan: `.studio/runtime/active-context/plan.md`\n\
+- Tasks: `.studio/runtime/active-context/tasks.md`\n\
+- Check: `.studio/runtime/active-context/check.md`\n",
+        Local::now().to_rfc3339(),
+        non_empty(&goal, "Continue the active context."),
+        current_request,
+        files,
+    )
+}
+
+fn render_active_context_plan(input: &StudioContextExportInput, context_id: &str) -> String {
+    let files = active_context_relevant_files(input);
+    let implementation_strategy = if files.is_empty() {
+        vec![
+            "Review the active-context spec and curated manifests before editing.".to_string(),
+            "Inspect the repository area that best matches the current request.".to_string(),
+            "Implement the narrowest change that satisfies the request.".to_string(),
+        ]
+    } else {
+        let mut steps = vec![
+            "Review the active-context spec and curated manifests before editing.".to_string(),
+        ];
+        steps.extend(
+            files
+                .iter()
+                .take(4)
+                .map(|file| format!("Inspect `{file}` for the request boundary and existing patterns.")),
+        );
+        steps.push(format!(
+            "Apply the requested change in {} after the target boundaries are clear.",
+            render_inline_file_list(&files)
+        ));
+        steps
+    };
+    let verification_strategy = vec![
+        "Use `.studio/runtime/active-context/check.jsonl` as the verification scope.".to_string(),
+        format!(
+            "Account for the current workspace signal: {} dirty files and {} failing checks.",
+            input.dirty_files, input.failing_checks
+        ),
+        "Record concrete checker failures in `checker-report.md` and mirror the status into `check.md`.".to_string(),
+    ];
+    format!(
+        "# Active Context Plan: {context_id}\n\n\
+Generated: {}\n\n\
+## Summary\n\n\
+Implement the current request through the active-context artifact chain: `spec.md` defines intent, `plan.md` defines execution shape, `tasks.md` defines the immediate worklist, and `check.md` tracks verification state.\n\n\
+## Inputs\n\n\
+- Spec: `.studio/runtime/active-context/spec.md`\n\
+- Context report: `.studio/runtime/active-context/context-selection-report.md`\n\
+- Implement manifest: `.studio/runtime/active-context/manifest.jsonl`\n\
+- Check manifest: `.studio/runtime/active-context/check.jsonl`\n\
+- Current CLI: `{}`\n\
+- Branch: `{}`\n\
+- Write mode: `{}`\n\n\
+## Implementation Strategy\n\n\
+{}\n\n\
+## Verification Strategy\n\n\
+{}\n\n\
+## Exit Criteria\n\n\
+- The implementation matches the current request and active-context spec.\n\
+- Relevant checks or verification notes are recorded under `check.md` and `checker-report.md`.\n\
+- The active context captures the latest conclusion, next step, and any durable-memory candidates.\n",
+        Local::now().to_rfc3339(),
+        input.cli_id,
+        input.branch,
+        if input.write_mode { "full write" } else { "read-only" },
+        render_markdown_bullets(&implementation_strategy, "- Review the current request."),
+        render_markdown_bullets(&verification_strategy, "- Verify the scoped change."),
+    )
+}
+
+fn render_active_context_tasks(input: &StudioContextExportInput, context_id: &str) -> String {
+    let mut next_id = 1usize;
+    let mut tasks = Vec::new();
+    let mut push_task = |description: String| {
+        tasks.push(format!("- [ ] T{next_id:03} {description}"));
+        next_id += 1;
+    };
+
+    push_task("Review `spec.md`, `plan.md`, `manifest.jsonl`, and `check.jsonl`.".to_string());
+    push_task("Confirm the current request boundary, acceptance criteria, and likely target modules.".to_string());
+    let files = active_context_relevant_files(input);
+    if files.is_empty() {
+        push_task("Inspect the repository area that best matches the current request.".to_string());
+        push_task("Apply the scoped implementation change for the active request.".to_string());
+    } else {
+        for file in files.iter().take(4) {
+            push_task(format!("Inspect `{file}` for the current request."));
+        }
+        push_task(format!(
+            "Apply the requested change in {}.",
+            render_inline_file_list(&files)
+        ));
+    }
+    push_task("Run or capture the relevant verification steps for the touched area.".to_string());
+    push_task("Update the active-context conclusion, next step, and checker status.".to_string());
+
+    format!(
+        "# Active Context Tasks: {context_id}\n\n\
+Generated: {}\n\n\
+## Summary\n\n\
+Immediate execution checklist for the current active context. This file stays request-local and may be regenerated as the turn evolves.\n\n\
+## Task List\n\n\
+{}\n",
+        Local::now().to_rfc3339(),
+        tasks.join("\n"),
+    )
+}
+
+fn render_active_context_check(project_root: &Path, context_id: &str) -> String {
+    let task_dir = active_context_dir(project_root);
+    let context = read_json_file(&task_dir.join("context.json")).unwrap_or(Value::Null);
+    let checker = context.get("checker").unwrap_or(&Value::Null);
+    let status = checker
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("pending");
+    let summary = checker
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or("Checker has not run yet.");
+    let issues = checker
+        .get("issues")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let retry_status = checker.get("retryStatus").and_then(Value::as_str);
+    let manifest_entries = count_jsonl_entries(&task_dir.join("check.jsonl"));
+    let findings = if issues.is_empty() {
+        if status == "pending" {
+            "- Checker output is pending.".to_string()
+        } else {
+            "- No blocking issues recorded.".to_string()
+        }
+    } else {
+        render_markdown_bullets(&issues, "- No blocking issues recorded.")
+    };
+    let retry_line = retry_status
+        .map(|value| format!("- Retry status: `{value}`"))
+        .unwrap_or_else(|| "- Retry status: `not-run`".to_string());
+    format!(
+        "# Active Context Check: {context_id}\n\n\
+Generated: {}\n\n\
+## Current Status\n\n\
+- Checker status: `{status}`\n\
+- Summary: {summary}\n\
+{}\n\n\
+## Validation Gates\n\n\
+- Verify against `.studio/runtime/active-context/spec.md` and `.studio/runtime/active-context/plan.md`.\n\
+- Use `.studio/runtime/active-context/check.jsonl` as the curated verification scope.\n\
+- Current check manifest entries: `{manifest_entries}`\n\
+- Mirror concrete checker output into `.studio/runtime/active-context/checker-report.md`.\n\n\
+## Current Findings\n\n\
+{}\n\n\
+## Reports\n\n\
+- Checker report: `.studio/runtime/active-context/checker-report.md`\n\
+- Checker retry report: `.studio/runtime/active-context/checker-retry-report.md`\n\
+- Policy check: `.studio/runtime/active-context/policy-check.json`\n",
+        Local::now().to_rfc3339(),
+        retry_line,
+        findings,
+    )
+}
+
+fn render_markdown_bullets(items: &[String], empty_line: &str) -> String {
+    if items.is_empty() {
+        return empty_line.to_string();
+    }
+    items
+        .iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_inline_file_list(files: &[String]) -> String {
+    let values = files
+        .iter()
+        .take(4)
+        .map(|file| format!("`{file}`"))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        "`the relevant files`".to_string()
+    } else {
+        values.join(", ")
+    }
 }
 
 fn load_active_tab_ids(context_json_path: &Path, current_tab_id: &str) -> Vec<String> {
@@ -2507,7 +2975,7 @@ fn render_memory_distill_report(
 ) -> String {
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
         .unwrap_or_else(|| "No assistant conclusion captured yet.".to_string());
-    let handoff_files = sanitized_handoff_files(input);
+    let handoff_files = active_context_relevant_files(input);
     format!(
         "# Memory Distill Report\n\nGenerated: {}\nContext: {task_id}\nAgent: memory-distill\nDecision: {decision}\nChecker Passed: {}\n\n## Inputs\n\n- Kernel memory entries and high-confidence facts from the Studio context kernel.\n- Latest conclusion: {}\n- Relevant files: {}\n\n## Candidate Summary\n\n- Accepted candidates: {}\n- Promotable candidates: {}\n- Rejected candidates: {}\n\n## Policy\n\nCandidates are written to `memory-candidates.jsonl`. Each accepted candidate must keep provenance and a promotion hint. Automatic durable writes are gated by `policy-check.json` and require checker pass.\n",
         Local::now().to_rfc3339(),
@@ -2717,7 +3185,7 @@ fn select_spec_manifest_entries(
 
     let query = build_query_terms(input);
     let match_text = build_context_match_text(input);
-    let relevant_files = sanitized_handoff_files(input)
+    let relevant_files = active_context_relevant_files(input)
         .iter()
         .map(|file| file.to_ascii_lowercase())
         .collect::<Vec<_>>();
@@ -2873,7 +3341,7 @@ fn build_context_match_text(input: &StudioContextExportInput) -> String {
     if let Some(next_step) = clean_studio_option(input.handoff_next_step.as_deref()) {
         values.push(next_step);
     }
-    values.extend(sanitized_handoff_files(input));
+    values.extend(active_context_relevant_files(input));
     values.join("\n").to_ascii_lowercase()
 }
 
@@ -2889,7 +3357,7 @@ fn build_query_terms(input: &StudioContextExportInput) -> HashSet<String> {
             terms.insert(token);
         }
     }
-    for file in sanitized_handoff_files(input) {
+    for file in active_context_relevant_files(input) {
         for token in tokenize(&file) {
             terms.insert(token);
         }
@@ -3001,7 +3469,6 @@ fn score_spec_layer_intent(relative: &str, match_text: &str, relevant_files: &[S
                     "src-tauri",
                     "command",
                     "subprocess",
-                    "runtime",
                     "运行时",
                 ],
             ) {
@@ -3013,6 +3480,7 @@ fn score_spec_layer_intent(relative: &str, match_text: &str, relevant_files: &[S
             score
         }
         ".studio/spec/cli-adapters/index.md" => {
+            let mut score = 0;
             if text_has_any(
                 &combined,
                 &[
@@ -3031,12 +3499,24 @@ fn score_spec_layer_intent(relative: &str, match_text: &str, relevant_files: &[S
                     "subagent",
                 ],
             ) {
-                14
-            } else {
-                0
+                score += 14;
             }
+            if text_has_any(
+                &combined,
+                &[
+                    ".studio/runtime/active-context",
+                    "current.md",
+                    "context.json",
+                    "manifest.jsonl",
+                    "check.jsonl",
+                ],
+            ) {
+                score += 10;
+            }
+            score
         }
         ".studio/spec/storage/index.md" => {
+            let mut score = 0;
             if text_has_any(
                 &combined,
                 &[
@@ -3054,10 +3534,22 @@ fn score_spec_layer_intent(relative: &str, match_text: &str, relevant_files: &[S
                     "约定",
                 ],
             ) {
-                16
-            } else {
-                0
+                score += 16;
             }
+            if text_has_any(
+                &combined,
+                &[
+                    ".studio/runtime/active-context",
+                    "memory-candidates",
+                    "memory-distill",
+                    "policy-check",
+                    "checker-report",
+                    "checker-retry-report",
+                ],
+            ) {
+                score += 10;
+            }
+            score
         }
         ".studio/spec/automation/index.md" => {
             if text_has_any(
@@ -3821,6 +4313,14 @@ fn candidate_is_runtime_noise(value: &Value) -> bool {
         || content.starts_with("command ok")
         || content.contains("generic file update")
         || content.contains("no assistant conclusion captured yet")
+        || content.contains("status error:")
+        || content.contains("selected model is at capacity")
+        || content.contains("authentication token is expired")
+        || content.contains("provided authentication token is expired")
+        || content.contains("try signing in again")
+        || content.contains("unexpected status 401")
+        || content.contains("401 unauthorized")
+        || content.contains("remote compact task")
 }
 
 fn candidate_confidence_allows_promotion(value: &Value) -> bool {
@@ -3901,6 +4401,10 @@ impl StudioWorkflowState {
             phase: "not_started".to_string(),
             context_path: None,
             prd_path: None,
+            spec_path: None,
+            plan_path: None,
+            tasks_path: None,
+            check_path: None,
             context_report_path: None,
             implement_manifest_path: None,
             check_manifest_path: None,
@@ -4260,6 +4764,26 @@ fn workflow_artifacts(
             "PRD",
             context_dir.join("prd.md"),
             ".studio/runtime/active-context/prd.md".to_string(),
+        ),
+        (
+            "Spec",
+            context_dir.join("spec.md"),
+            ".studio/runtime/active-context/spec.md".to_string(),
+        ),
+        (
+            "Plan",
+            context_dir.join("plan.md"),
+            ".studio/runtime/active-context/plan.md".to_string(),
+        ),
+        (
+            "Tasks",
+            context_dir.join("tasks.md"),
+            ".studio/runtime/active-context/tasks.md".to_string(),
+        ),
+        (
+            "Check",
+            context_dir.join("check.md"),
+            ".studio/runtime/active-context/check.md".to_string(),
         ),
         (
             "Context Report",
@@ -5049,7 +5573,7 @@ fn should_write_managed_file(path: &Path) -> Result<bool, String> {
 
 fn render_adapter(cli_name: &str) -> String {
     format!(
-        "{STUDIO_MANAGED_MARKER}\n# Studio Context Adapter for {cli_name}\n\nThis project uses Multi CLI Studio shared context.\n\n## Startup Rules\n\n- First read `.studio/runtime/context.md` when it exists.\n- Then read `.studio/runtime/active-context/current.md` and `.studio/runtime/active-context/context.json`.\n- Load JSONL manifest entries only when the current request needs them.\n- Treat `.studio/workflow.md` as the shared context contract.\n- Treat `.studio/spec/` as durable project rules.\n- Treat `.studio/workspace/` as durable project memory and journals.\n- Treat `.studio/runtime/` as generated runtime state that may be overwritten.\n- Context/spec curation is automatic; use `context-selection-report.md`, `manifest.jsonl`, and `check.jsonl` before broad history recall.\n- Durable spec/workspace writes are allowed only through the workflow's provenance, confidence, conflict, and policy-check gates.\n- Keep prompt context small; prefer file references over pasting long history.\n"
+        "{STUDIO_MANAGED_MARKER}\n# Studio Context Adapter for {cli_name}\n\nThis project uses Multi CLI Studio shared context.\n\n## Startup Rules\n\n- First read `.studio/runtime/context.md` when it exists.\n- Then read `.studio/runtime/active-context/current.md` and `.studio/runtime/active-context/context.json`.\n- Read `.studio/runtime/active-context/spec.md`, `plan.md`, `tasks.md`, and `check.md` when they exist for the current request.\n- Load JSONL manifest entries only when the current request needs them.\n- Treat `.studio/workflow.md` as the shared context contract.\n- Treat `.studio/spec/` as durable project rules.\n- Treat `.studio/workspace/` as durable project memory and journals.\n- Treat `.studio/runtime/` as generated runtime state that may be overwritten.\n- Context/spec curation is automatic; use `context-selection-report.md`, `manifest.jsonl`, and `check.jsonl` before broad history recall.\n- Durable spec/workspace writes are allowed only through the workflow's provenance, confidence, conflict, and policy-check gates.\n- Keep prompt context small; prefer file references over pasting long history.\n"
     )
 }
 
@@ -5169,6 +5693,10 @@ mod tests {
         assert!(root
             .join(".studio/runtime/active-context/current.md")
             .is_file());
+        assert!(root.join(".studio/runtime/active-context/spec.md").is_file());
+        assert!(root.join(".studio/runtime/active-context/plan.md").is_file());
+        assert!(root.join(".studio/runtime/active-context/tasks.md").is_file());
+        assert!(root.join(".studio/runtime/active-context/check.md").is_file());
         assert!(root.join("AGENTS.md").is_file());
         assert!(root.join(".codex/hooks/session-start.py").is_file());
         assert!(root.join(".codex/config.toml").is_file());
@@ -5221,6 +5749,25 @@ mod tests {
             .and_then(|value| value.get("version"))
             .and_then(Value::as_str)
             .is_some());
+
+        let context = read_json_file(&root.join(".studio/runtime/active-context/context.json"))
+            .expect("read context");
+        assert_eq!(
+            context.get("specPath").and_then(Value::as_str),
+            Some(".studio/runtime/active-context/spec.md")
+        );
+        assert_eq!(
+            context.get("planPath").and_then(Value::as_str),
+            Some(".studio/runtime/active-context/plan.md")
+        );
+        assert_eq!(
+            context.get("tasksPath").and_then(Value::as_str),
+            Some(".studio/runtime/active-context/tasks.md")
+        );
+        assert_eq!(
+            context.get("checkPath").and_then(Value::as_str),
+            Some(".studio/runtime/active-context/check.md")
+        );
     }
 
     #[test]
@@ -5339,6 +5886,184 @@ mod tests {
     }
 
     #[test]
+    fn export_extracts_prompt_file_mentions_into_active_artifacts() {
+        let root = temp_project_root("prompt-file-mentions");
+        write_fixture_file(&root, "README.md", "# Fixture\n");
+        let mut input = fixture_input(&root, "task-prompt-file-mentions");
+        input.user_prompt = "继续把 README.md 里的英文介绍同步成同一口径".to_string();
+        input.context_goal = None;
+        input.context_title = None;
+        input.handoff_files = Vec::new();
+
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let context = read_json_file(&root.join(".studio/runtime/active-context/context.json"))
+            .expect("read context");
+        let relevant_files = context
+            .get("relevantFiles")
+            .and_then(Value::as_array)
+            .expect("relevant files")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(relevant_files, vec!["README.md"]);
+
+        let spec =
+            fs::read_to_string(root.join(".studio/runtime/active-context/spec.md")).expect("read spec");
+        let plan =
+            fs::read_to_string(root.join(".studio/runtime/active-context/plan.md")).expect("read plan");
+        let tasks =
+            fs::read_to_string(root.join(".studio/runtime/active-context/tasks.md")).expect("read tasks");
+        assert!(spec.contains("- README.md"));
+        assert!(plan.contains("Inspect `README.md`"));
+        assert!(tasks.contains("Inspect `README.md`"));
+        assert!(tasks.contains("Apply the requested change in `README.md`."));
+    }
+
+    #[test]
+    fn export_keeps_explicit_active_context_runtime_paths_relevant() {
+        let root = temp_project_root("active-context-runtime-path");
+        let mut input = fixture_input(&root, "task-active-context-runtime-path");
+        input.user_prompt =
+            "查看 @.studio/runtime/active-context/ 的产物，看看是否符合设计标准".to_string();
+        input.context_goal = None;
+        input.context_title = None;
+        input.handoff_files = Vec::new();
+
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let context = read_json_file(&root.join(".studio/runtime/active-context/context.json"))
+            .expect("read context");
+        let relevant_files = context
+            .get("relevantFiles")
+            .and_then(Value::as_array)
+            .expect("relevant files")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(relevant_files, vec![".studio/runtime/active-context"]);
+
+        let manifest =
+            fs::read_to_string(root.join(".studio/runtime/active-context/manifest.jsonl"))
+                .expect("read manifest");
+        assert!(manifest.contains(".studio/spec/automation/index.md"));
+        assert!(manifest.contains(".studio/spec/cli-adapters/index.md"));
+        assert!(manifest.contains(".studio/spec/storage/index.md"));
+    }
+
+    #[test]
+    fn export_does_not_seed_memory_candidates_from_kernel_input() {
+        let root = temp_project_root("no-memory-seed");
+        let mut input = fixture_input(&root, "task-no-memory-seed");
+        input.user_prompt = "Implement the workflow contract.".to_string();
+        input.memory_candidates = Some(
+            r#"{"_studioManaged":true,"candidateType":"kernelEvidence","kind":"failure","confidence":"high","content":"Status error: Selected model is at capacity. Please try a different model.","sourceEvidenceIds":["evidence-1"],"promotionHint":"journal"}"#.to_string(),
+        );
+
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let candidates = fs::read_to_string(root.join(".studio/runtime/active-context/memory-candidates.jsonl"))
+            .expect("read memory candidates");
+        assert!(candidates.trim().is_empty());
+
+        let report = fs::read_to_string(root.join(".studio/runtime/active-context/memory-distill-report.md"))
+            .expect("read memory distill report");
+        assert!(report.contains("- Accepted candidates: 0"));
+        assert!(report.contains("- Promotable candidates: 0"));
+        assert!(report.contains("- Rejected candidates: 0"));
+
+        let policy = read_json_file(&root.join(".studio/runtime/active-context/policy-check.json"))
+            .expect("read policy");
+        assert_eq!(policy.get("decision").and_then(Value::as_str), Some("hold"));
+        assert_eq!(
+            policy
+                .get("candidateCounts")
+                .and_then(|value| value.get("promotable"))
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn memory_distill_rejects_transient_runtime_noise_candidates() {
+        let root = temp_project_root("reject-runtime-noise");
+        let input = fixture_input(&root, "task-reject-runtime-noise");
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let candidates = concat!(
+            r#"{"_studioManaged":true,"candidateType":"kernelEvidence","kind":"failure","confidence":"high","content":"Status error: Selected model is at capacity. Please try a different model.","sourceEvidenceIds":["evidence-1"],"promotionHint":"journal"}"#,
+            "\n",
+            r#"{"_studioManaged":true,"candidateType":"contextSnapshot","kind":"checkpoint","confidence":"high","content":"Turn checkpoint for `给我按照修复方向修复`: Error running remote compact task: unexpected status 401 Unauthorized. Please try signing in again.","sourceFactId":"snapshot-1","sourceEvidenceIds":[],"promotionHint":"journal"}"#
+        );
+        let distill = apply_memory_distill_candidates(
+            &root.to_string_lossy(),
+            ACTIVE_CONTEXT_ID,
+            &input,
+            Some(candidates),
+            true,
+        )
+        .expect("memory distill");
+
+        assert_eq!(distill.candidate_entries, 0);
+        assert_eq!(distill.promotable_entries, 0);
+        assert_eq!(distill.rejected_entries, 2);
+        assert!(!distill.allow_auto_promote);
+
+        let content = fs::read_to_string(root.join(".studio/runtime/active-context/memory-candidates.jsonl"))
+            .expect("read memory candidates");
+        assert!(content.trim().is_empty());
+    }
+
+    #[test]
+    fn export_resets_checker_state_when_request_changes() {
+        let root = temp_project_root("checker-reset");
+        let mut input = fixture_input(&root, "task-checker-reset");
+        input.user_prompt = "First request.".to_string();
+        input.context_goal = None;
+        input.context_title = None;
+        export_studio_context(&input)
+            .expect("first export")
+            .expect("studio export");
+        apply_checker_agent_output(
+            &root.to_string_lossy(),
+            ACTIVE_CONTEXT_ID,
+            r#"{"status":"fail","summary":"Old checker failure.","issues":["Old issue."]}"#,
+        )
+        .expect("checker output");
+
+        write_fixture_file(&root, "README.md", "# Fixture\n");
+        input.user_prompt = "Update README.md.".to_string();
+        export_studio_context(&input)
+            .expect("second export")
+            .expect("studio export");
+
+        let context = read_json_file(&root.join(".studio/runtime/active-context/context.json"))
+            .expect("read context");
+        assert!(context.get("checker").is_none());
+
+        let check =
+            fs::read_to_string(root.join(".studio/runtime/active-context/check.md")).expect("read check");
+        assert!(check.contains("Checker status: `pending`"));
+        assert!(check.contains("Checker has not run yet."));
+        assert!(!check.contains("Old checker failure"));
+
+        let checker_report = fs::read_to_string(
+            root.join(".studio/runtime/active-context/checker-report.md"),
+        )
+        .expect("read checker report");
+        assert!(checker_report.contains("Status: pending"));
+        assert!(!checker_report.contains("Old checker failure"));
+    }
+
+    #[test]
     fn checker_memory_and_promotion_form_durable_e2e_loop() {
         let root = temp_project_root("memory-loop");
         let input = fixture_input(&root, "task-memory-loop");
@@ -5372,7 +6097,8 @@ mod tests {
         assert!(promotion
             .paths
             .iter()
-            .any(|path| path.contains(".studio/spec")));
+            .map(|path| path.replace('\\', "/"))
+            .any(|path| path.contains("/.studio/spec/")));
         assert!(root
             .join(".studio/runtime/active-context/promotion-report.md")
             .is_file());
@@ -5411,7 +6137,8 @@ mod tests {
         assert!(promotion
             .paths
             .iter()
-            .any(|path| path.contains(".studio/workspace/memory")));
+            .map(|path| path.replace('\\', "/"))
+            .any(|path| path.contains("/.studio/workspace/memory/")));
         assert!(root.join(".studio/workspace/memory/index.md").is_file());
     }
 

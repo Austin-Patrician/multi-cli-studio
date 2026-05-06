@@ -797,6 +797,10 @@ async function buildStudioInjectedLayers(root: string): Promise<StudioInjectedLa
   const [
     currentContext,
     prd,
+    runtimeSpec,
+    runtimePlan,
+    runtimeTasks,
+    runtimeCheck,
     implementManifest,
     checkManifest,
     memoryIndex,
@@ -804,6 +808,10 @@ async function buildStudioInjectedLayers(root: string): Promise<StudioInjectedLa
   ] = await Promise.all([
     readWorkspaceTextFile(root, ".studio/runtime/active-context/current.md"),
     readWorkspaceTextFile(root, ".studio/runtime/active-context/prd.md"),
+    readWorkspaceTextFile(root, ".studio/runtime/active-context/spec.md"),
+    readWorkspaceTextFile(root, ".studio/runtime/active-context/plan.md"),
+    readWorkspaceTextFile(root, ".studio/runtime/active-context/tasks.md"),
+    readWorkspaceTextFile(root, ".studio/runtime/active-context/check.md"),
     readWorkspaceTextFile(root, ".studio/runtime/active-context/manifest.jsonl"),
     readWorkspaceTextFile(root, ".studio/runtime/active-context/check.jsonl"),
     readWorkspaceTextFile(root, ".studio/workspace/memory/index.md"),
@@ -839,13 +847,20 @@ async function buildStudioInjectedLayers(root: string): Promise<StudioInjectedLa
 
   const activeContextText = normalizeStudioInjectedText(
     [
-      formatInjectedSection("Goal", extractMarkdownSection(currentContext, "Goal")),
-      formatInjectedSection("Current Request", extractMarkdownSection(currentContext, "Current Request")),
-      formatInjectedSection("Workflow Goal", extractMarkdownSection(prd, "Goal")),
+      formatInjectedSection("Goal", extractMarkdownSection(runtimeSpec, "Goal") || extractMarkdownSection(currentContext, "Goal")),
+      formatInjectedSection(
+        "Current Request",
+        extractMarkdownSection(runtimeSpec, "Current Request") || extractMarkdownSection(currentContext, "Current Request")
+      ),
       formatInjectedSection(
         "Acceptance Criteria",
-        extractMarkdownSection(prd, "Acceptance Criteria")
+        extractMarkdownSection(runtimeSpec, "Acceptance Criteria") || extractMarkdownSection(prd, "Acceptance Criteria")
       ),
+      formatInjectedSection("Plan Summary", extractMarkdownSection(runtimePlan, "Summary")),
+      formatInjectedSection("Implementation Strategy", extractMarkdownSection(runtimePlan, "Implementation Strategy")),
+      formatInjectedSection("Task List", extractMarkdownSection(runtimeTasks, "Task List")),
+      formatInjectedSection("Check Status", extractMarkdownSection(runtimeCheck, "Current Status")),
+      formatInjectedSection("Check Findings", extractMarkdownSection(runtimeCheck, "Current Findings")),
       formatInjectedSection(
         "Latest Conclusion",
         extractMarkdownSection(currentContext, "Latest Conclusion")
