@@ -1984,6 +1984,15 @@ export type ChatMessageBlock =
       state?: "pending" | "accepted" | "switched" | "cancelled" | null;
     }
   | {
+      kind: "codexGoal";
+      status: string;
+      objective?: string | null;
+      message?: string | null;
+      elapsedSeconds?: number | null;
+      tokensUsed?: number | null;
+      tokenBudget?: number | null;
+    }
+  | {
       kind: "plan";
       text: string;
     }

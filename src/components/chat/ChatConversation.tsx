@@ -1,5 +1,6 @@
 import {
   Fragment,
+  useCallback,
   useDeferredValue,
   useEffect,
   useLayoutEffect,
@@ -43,6 +44,8 @@ const SEARCH_MATCH_BASE_CLASS =
   "rounded-[4px] bg-[#fff0a8] px-0.5 text-inherit shadow-[inset_0_-1px_0_rgba(180,83,9,0.18)]";
 const SEARCH_MATCH_CURRENT_CLASS =
   "rounded-[4px] bg-[#f59e0b] px-0.5 text-[#111827] shadow-[0_0_0_1px_rgba(255,255,255,0.55)]";
+const MESSAGE_JUMP_HIGHLIGHT_MS = 1600;
+const MESSAGE_JUMP_EVENT = "terminal-chat-scroll-message";
 
 type SearchOptions = {
   caseSensitive: boolean;
@@ -204,6 +207,16 @@ function setCurrentMatchStyles(matches: SearchDomMatch[], currentIndex: number) 
     match.element.className =
       index === currentIndex ? SEARCH_MATCH_CURRENT_CLASS : SEARCH_MATCH_BASE_CLASS;
   });
+}
+
+function findMessageElement(root: HTMLElement, messageId: string) {
+  const candidates = root.querySelectorAll<HTMLElement>("[data-chat-message-id]");
+  for (const candidate of candidates) {
+    if (candidate.dataset.chatMessageId === messageId) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function applySearchHighlights(
@@ -436,6 +449,8 @@ export function ChatConversation() {
   const searchMatchesRef = useRef<SearchDomMatch[]>([]);
   const suppressMutationObserverRef = useRef(false);
   const pendingPrependScrollRef = useRef<{ previousScrollHeight: number; previousScrollTop: number } | null>(null);
+  const pendingMessageJumpRef = useRef<string | null>(null);
+  const messageHighlightTimeoutRef = useRef<number | null>(null);
   const previewResizeCleanupRef = useRef<(() => void) | null>(null);
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -453,6 +468,7 @@ export function ChatConversation() {
   const [planExpanded, setPlanExpanded] = useState(false);
   const [retainedPlanSurface, setRetainedPlanSurface] = useState<ActivePlanSurface | null>(null);
   const [dismissedPlanKey, setDismissedPlanKey] = useState<string | null>(null);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [previewPaneHeight, setPreviewPaneHeight] = useState(320);
 
   const deferredSearchQuery = useDeferredValue(searchQuery);
@@ -545,6 +561,28 @@ export function ChatConversation() {
   const showStickyControls =
     showFloatingPlan || (hasHiddenMessages && showLoadOlderHint);
 
+  const flashAndScrollToMessage = useCallback((messageId: string) => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) return false;
+    const target = findMessageElement(scrollContainer, messageId);
+    if (!target) return false;
+
+    shouldAutoFollowRef.current = false;
+    target.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+    setHighlightedMessageId(messageId);
+    if (messageHighlightTimeoutRef.current != null) {
+      window.clearTimeout(messageHighlightTimeoutRef.current);
+    }
+    messageHighlightTimeoutRef.current = window.setTimeout(() => {
+      setHighlightedMessageId((current) => (current === messageId ? null : current));
+      messageHighlightTimeoutRef.current = null;
+    }, MESSAGE_JUMP_HIGHLIGHT_MS);
+    return true;
+  }, []);
+
   useEffect(() => {
     if (activePlanSurface) {
       setRetainedPlanSurface(activePlanSurface);
@@ -561,6 +599,10 @@ export function ChatConversation() {
     return () => {
       previewResizeCleanupRef.current?.();
       previewResizeCleanupRef.current = null;
+      if (messageHighlightTimeoutRef.current != null) {
+        window.clearTimeout(messageHighlightTimeoutRef.current);
+        messageHighlightTimeoutRef.current = null;
+      }
     };
   }, []);
 
@@ -609,6 +651,48 @@ export function ChatConversation() {
   }, [activeTab]);
 
   useEffect(() => {
+    function handleScrollToMessageRequest(event: Event) {
+      const detail =
+        "detail" in event
+          ? (event as CustomEvent<{ tabId?: string; messageId?: string }>).detail
+          : null;
+      if (!activeTab || !detail?.tabId || detail.tabId !== activeTab.id || !detail.messageId) {
+        return;
+      }
+
+      const targetIndex = allMessages.findIndex((message) => message.id === detail.messageId);
+      if (targetIndex < 0) return;
+
+      pendingMessageJumpRef.current = detail.messageId;
+      const requiredVisibleCount = allMessages.length - targetIndex;
+      if (!shouldShowAllMessages && requiredVisibleCount > visibleMessageCount) {
+        setVisibleMessageCount((current) =>
+          Math.max(current, requiredVisibleCount, INITIAL_VISIBLE_MESSAGE_COUNT)
+        );
+        setShowLoadOlderHint(false);
+        return;
+      }
+
+      requestAnimationFrame(() => {
+        if (flashAndScrollToMessage(detail.messageId!)) {
+          pendingMessageJumpRef.current = null;
+        }
+      });
+    }
+
+    window.addEventListener(MESSAGE_JUMP_EVENT, handleScrollToMessageRequest as EventListener);
+    return () => {
+      window.removeEventListener(MESSAGE_JUMP_EVENT, handleScrollToMessageRequest as EventListener);
+    };
+  }, [
+    activeTab,
+    allMessages,
+    flashAndScrollToMessage,
+    shouldShowAllMessages,
+    visibleMessageCount,
+  ]);
+
+  useEffect(() => {
     setIsSearchOpen(false);
     setSearchQuery("");
     setCurrentMatchIndex(0);
@@ -619,7 +703,9 @@ export function ChatConversation() {
     setPlanExpanded(false);
     setRetainedPlanSurface(null);
     setDismissedPlanKey(null);
+    setHighlightedMessageId(null);
     pendingPrependScrollRef.current = null;
+    pendingMessageJumpRef.current = null;
     searchMatchesRef.current = [];
   }, [activeTab?.id]);
 
@@ -706,6 +792,18 @@ export function ChatConversation() {
     }
     scrollContainer.scrollTop = scrollContainer.scrollHeight;
   }, [activeTab?.id, visibleMessages.length, isSearchOpen]);
+
+  useLayoutEffect(() => {
+    const pendingMessageId = pendingMessageJumpRef.current;
+    if (!pendingMessageId) return;
+    if (!visibleMessages.some((message) => message.id === pendingMessageId)) return;
+
+    requestAnimationFrame(() => {
+      if (flashAndScrollToMessage(pendingMessageId)) {
+        pendingMessageJumpRef.current = null;
+      }
+    });
+  }, [flashAndScrollToMessage, visibleMessages]);
 
   useLayoutEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -1096,6 +1194,12 @@ export function ChatConversation() {
 
             return visibleMessages.map((msg, index) => {
               const isLastVisibleMessage = index === visibleMessages.length - 1;
+              const isHighlightedMessage = highlightedMessageId === msg.id;
+              const messageLocatorClass = `rounded-[18px] transition-[background-color,box-shadow] duration-500 ${
+                isHighlightedMessage
+                  ? "bg-sky-50/80 shadow-[0_0_0_2px_rgba(14,165,233,0.24),0_16px_42px_rgba(14,165,233,0.12)]"
+                  : "bg-transparent shadow-none"
+              }`;
 
               if (msg.role === "system") {
                 const systemTone =
@@ -1104,13 +1208,15 @@ export function ChatConversation() {
                     : "border-border bg-white text-secondary";
                 return (
                   <Fragment key={msg.id}>
-                    <div className="flex justify-center">
-                      <span
-                        data-chat-search-ignore="true"
-                        className={`rounded-[12px] border px-3 py-1 text-xs ${systemTone}`}
-                      >
-                        {msg.content}
-                      </span>
+                    <div data-chat-message-id={msg.id} className={messageLocatorClass}>
+                      <div className="flex justify-center">
+                        <span
+                          data-chat-search-ignore="true"
+                          className={`rounded-[12px] border px-3 py-1 text-xs ${systemTone}`}
+                        >
+                          {msg.content}
+                        </span>
+                      </div>
                     </div>
                     {isLastVisibleMessage && shouldShowFinalMessageBoundary ? (
                       <FinalMessageBoundary timestamp={msg.timestamp} />
@@ -1128,12 +1234,14 @@ export function ChatConversation() {
                 };
                 return (
                   <Fragment key={msg.id}>
-                    <UserBubble
-                      message={msg}
-                      onCopy={handleCopyPrompt}
-                      onDelete={handleDeleteMessage}
-                      deleteDisabled={activeTab.status === "streaming"}
-                    />
+                    <div data-chat-message-id={msg.id} className={messageLocatorClass}>
+                      <UserBubble
+                        message={msg}
+                        onCopy={handleCopyPrompt}
+                        onDelete={handleDeleteMessage}
+                        deleteDisabled={activeTab.status === "streaming"}
+                      />
+                    </div>
                     {isLastVisibleMessage && shouldShowFinalMessageBoundary ? (
                       <FinalMessageBoundary timestamp={msg.timestamp} />
                     ) : null}
@@ -1145,25 +1253,27 @@ export function ChatConversation() {
 
               return (
                 <Fragment key={msg.id}>
-                  <CliBubble
-                    message={msg}
-                    workspaceRoot={workspace?.rootPath ?? null}
-                    onRegenerate={
-                      !msg.isStreaming && regeneratePrompt
-                        ? () =>
-                            handleRegeneratePrompt(
-                              regeneratePrompt.content,
-                              regeneratePrompt.cliId,
-                              regeneratePrompt.attachments,
-                              regeneratePrompt.selectedAgent
-                            )
-                        : null
-                    }
-                    onDelete={!msg.isStreaming ? handleDeleteMessage : null}
-                    actionsDisabled={activeTab.status === "streaming" || msg.isStreaming}
-                    onApprovalDecision={handleAssistantApproval}
-                    onAutoRouteAction={handleAutoRoute}
-                  />
+                  <div data-chat-message-id={msg.id} className={messageLocatorClass}>
+                    <CliBubble
+                      message={msg}
+                      workspaceRoot={workspace?.rootPath ?? null}
+                      onRegenerate={
+                        !msg.isStreaming && regeneratePrompt
+                          ? () =>
+                              handleRegeneratePrompt(
+                                regeneratePrompt.content,
+                                regeneratePrompt.cliId,
+                                regeneratePrompt.attachments,
+                                regeneratePrompt.selectedAgent
+                              )
+                          : null
+                      }
+                      onDelete={!msg.isStreaming ? handleDeleteMessage : null}
+                      actionsDisabled={activeTab.status === "streaming" || msg.isStreaming}
+                      onApprovalDecision={handleAssistantApproval}
+                      onAutoRouteAction={handleAutoRoute}
+                    />
+                  </div>
                   {isLastVisibleMessage && shouldShowFinalMessageBoundary ? (
                     <FinalMessageBoundary timestamp={msg.timestamp} />
                   ) : null}

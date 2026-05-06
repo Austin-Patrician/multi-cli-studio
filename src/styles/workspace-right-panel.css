@@ -1960,7 +1960,30 @@
   grid-template-columns: 18px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
+  width: 100%;
   padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  border-radius: 8px;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+button.workspace-task-node {
+  cursor: pointer;
+}
+
+button.workspace-task-node:hover {
+  background: rgba(241, 245, 249, 0.78);
+  box-shadow: 0 0 0 4px rgba(241, 245, 249, 0.78);
+}
+
+button.workspace-task-node:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18);
 }
 
 .workspace-task-node-marker {

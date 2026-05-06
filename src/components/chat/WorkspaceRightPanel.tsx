@@ -232,6 +232,8 @@ function formatActivityDetail(message: ChatMessage, block: ChatMessageBlock | nu
       return block.text;
     case "autoRoute":
       return `${block.targetCli} · ${block.reason}`;
+    case "codexGoal":
+      return block.objective?.trim() || block.message?.trim() || block.status;
     default:
       return (message.rawContent ?? message.content).trim();
   }
@@ -269,6 +271,8 @@ function formatActivityLabel(message: ChatMessage, block: ChatMessageBlock | nul
       return "Output";
     case "plan":
       return "Plan";
+    case "codexGoal":
+      return "Goal";
     default:
       return "Activity";
   }
@@ -300,6 +304,8 @@ function formatActivityKind(message: ChatMessage, block: ChatMessageBlock | null
       return "reasoning";
     case "autoRoute":
       return "routing";
+    case "codexGoal":
+      return "task";
     default:
       return "message";
   }
@@ -1062,9 +1068,13 @@ function WorkspaceSessionRadarPanel({
 function WorkspaceStatusRail({
   tasks,
   subagents,
+  terminalTabId,
+  onOpenTask,
 }: {
   tasks: TaskNode[];
   subagents: TabSubagentState[];
+  terminalTabId: string | null;
+  onOpenTask: (terminalTabId: string, messageId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<"tasks" | "subagents">(() =>
@@ -1119,7 +1129,15 @@ function WorkspaceStatusRail({
                 const isLastVisibleTask = index === visibleTasks.length - 1;
                 return (
                   <Fragment key={task.id}>
-                    <div className={`workspace-task-node${task.isLatest ? " is-latest" : ""}`}>
+                    <button
+                      type="button"
+                      className={`workspace-task-node${task.isLatest ? " is-latest" : ""}`}
+                      title="双击跳转到这条消息"
+                      onDoubleClick={() => {
+                        if (!terminalTabId) return;
+                        onOpenTask(terminalTabId, task.id);
+                      }}
+                    >
                       <div className="workspace-task-node-marker" aria-hidden>
                         <div className="workspace-task-node-dot" />
                       </div>
@@ -1127,7 +1145,7 @@ function WorkspaceStatusRail({
                         <div className="workspace-task-node-detail">{task.detail}</div>
                         <div className="workspace-task-node-time">{task.timestamp || "just now"}</div>
                       </div>
-                    </div>
+                    </button>
                     {!expanded && hasMoreTasks && isLastVisibleTask ? (
                       <button
                         type="button"
@@ -2166,6 +2184,17 @@ export function WorkspaceRightPanel({
     [activeTabId, tabSubagentsByTab]
   );
 
+  const handleOpenTaskMessage = useCallback((terminalTabId: string, messageId: string) => {
+    window.dispatchEvent(
+      new CustomEvent("terminal-chat-scroll-message", {
+        detail: {
+          tabId: terminalTabId,
+          messageId,
+        },
+      })
+    );
+  }, []);
+
   const sessionSummaries = useMemo(() => {
     if (!workspace || mode !== "radar") return [];
     return workspaceTabs
@@ -2223,7 +2252,12 @@ export function WorkspaceRightPanel({
           </div>
 
           {!statusPanelCollapsed ? (
-            <WorkspaceStatusRail tasks={taskNodes} subagents={activeSubagents} />
+            <WorkspaceStatusRail
+              tasks={taskNodes}
+              subagents={activeSubagents}
+              terminalTabId={activeTabId}
+              onOpenTask={handleOpenTaskMessage}
+            />
           ) : null}
         </div>
       </div>

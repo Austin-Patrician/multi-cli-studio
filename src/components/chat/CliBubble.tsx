@@ -24,6 +24,12 @@ const CLI_BADGE: Record<AgentId, { bg: string; text: string; label: string }> = 
   gemini: { bg: "bg-emerald-500", text: "text-white", label: "Gemini" },
 };
 
+type RuntimeCodexGoalBlockData = Extract<ChatMessageBlock, { kind: "codexGoal" }>;
+
+function isCodexGoalBlock(block: ChatMessageBlock): block is RuntimeCodexGoalBlockData {
+  return block.kind === "codexGoal";
+}
+
 function imageArtifactSrc(path: string, source?: string | null) {
   if (source?.startsWith("data:")) return source;
   if (path.startsWith("data:")) return path;
@@ -151,6 +157,33 @@ function formatMessageDuration(durationMs: number) {
   const totalHours = totalMinutes / 60;
   const hoursText = totalHours >= 10 ? totalHours.toFixed(0) : totalHours.toFixed(1);
   return `${hoursText}h`;
+}
+
+function formatGoalElapsedSeconds(seconds: number | null | undefined) {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null;
+  const wholeSeconds = Math.floor(seconds);
+  if (wholeSeconds < 60) return `${wholeSeconds}s`;
+  const minutes = Math.floor(wholeSeconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function formatGoalTokens(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return null;
+  const sign = value < 0 ? "-" : "";
+  const absolute = Math.abs(value);
+  if (absolute >= 1_000_000) return `${sign}${(absolute / 1_000_000).toFixed(1)}M`;
+  if (absolute >= 1_000) return `${sign}${(absolute / 1_000).toFixed(1)}K`;
+  return `${sign}${Math.round(absolute)}`;
+}
+
+function formatGoalTokenUsage(block: RuntimeCodexGoalBlockData) {
+  const used = formatGoalTokens(block.tokensUsed);
+  if (!used) return null;
+  const budget = formatGoalTokens(block.tokenBudget);
+  return budget ? `${used}/${budget}` : used;
 }
 
 function samePath(left: string, right: string) {
@@ -350,6 +383,16 @@ function StatusIcon({ level }: { level: "error" | "warning" }) {
       ) : (
         <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M10.29 3.86l-8 14A2 2 0 004 21h16a2 2 0 001.71-3.14l-8-14a2 2 0 00-3.42 0z" />
       )}
+    </svg>
+  );
+}
+
+function GoalIcon() {
+  return (
+    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 5.5v-2m0 17v-2m6.5-6.5h2m-17 0h2" />
+      <circle cx="12" cy="12" r="6.5" />
+      <circle cx="12" cy="12" r="2.2" />
     </svg>
   );
 }
@@ -1022,6 +1065,7 @@ function RuntimeStreamingMarker({
         label = "Planning";
         break;
       case "status":
+      case "codexGoal":
         label = "Responding";
         break;
       case "text":
@@ -1948,6 +1992,138 @@ function RuntimeStatusBlock({
   );
 }
 
+function codexGoalStatusLabel(status: string) {
+  switch (status) {
+    case "active":
+      return "Active";
+    case "paused":
+      return "Paused";
+    case "budgetLimited":
+      return "Budget limited";
+    case "complete":
+      return "Complete";
+    case "loading":
+      return "Loading";
+    case "none":
+      return "No goal";
+    case "cleared":
+      return "Cleared";
+    default:
+      return titleCase(status || "Goal");
+  }
+}
+
+function codexGoalTone(status: string) {
+  switch (status) {
+    case "active":
+      return {
+        shell: "border-sky-200 bg-sky-50/80 text-sky-950",
+        icon: "bg-white text-sky-700 ring-1 ring-sky-200",
+        rail: "bg-sky-500",
+        pill: "border-sky-200 bg-white/80 text-sky-800",
+        dot: "bg-blue-500",
+      };
+    case "complete":
+      return {
+        shell: "border-emerald-200 bg-emerald-50/80 text-emerald-950",
+        icon: "bg-white text-emerald-700 ring-1 ring-emerald-200",
+        rail: "bg-emerald-500",
+        pill: "border-emerald-200 bg-white/80 text-emerald-800",
+        dot: "bg-emerald-500",
+      };
+    case "paused":
+    case "budgetLimited":
+      return {
+        shell: "border-amber-200 bg-amber-50/85 text-amber-950",
+        icon: "bg-white text-amber-700 ring-1 ring-amber-200",
+        rail: "bg-amber-500",
+        pill: "border-amber-200 bg-white/80 text-amber-800",
+        dot: "bg-amber-500",
+      };
+    default:
+      return {
+        shell: "border-slate-200 bg-slate-50/90 text-slate-800",
+        icon: "bg-white text-slate-500 ring-1 ring-slate-200",
+        rail: "bg-slate-400",
+        pill: "border-slate-200 bg-white/80 text-slate-700",
+        dot: "bg-slate-400",
+      };
+  }
+}
+
+function codexGoalDescription(block: RuntimeCodexGoalBlockData, isStreaming: boolean) {
+  const message = block.message?.trim();
+  if (message && block.status !== "active") return message;
+  switch (block.status) {
+    case "active":
+      return isStreaming ? "Working toward the active goal" : "Goal is active";
+    case "complete":
+      return "Goal completed";
+    case "paused":
+      return "Goal paused";
+    case "budgetLimited":
+      return "Goal paused by budget";
+    case "cleared":
+      return "Goal cleared";
+    case "none":
+      return "No goal is set";
+    case "loading":
+      return message || "Updating goal state";
+    default:
+      return message || "Goal state updated";
+  }
+}
+
+function RuntimeCodexGoalBlock({
+  block,
+  isStreaming,
+}: {
+  block: RuntimeCodexGoalBlockData;
+  isStreaming: boolean;
+}) {
+  const tone = codexGoalTone(block.status);
+  const label = codexGoalStatusLabel(block.status);
+  const description = codexGoalDescription(block, isStreaming);
+  const showLiveMetrics = isStreaming && block.status === "active";
+  const elapsed = showLiveMetrics ? formatGoalElapsedSeconds(block.elapsedSeconds) : null;
+  const tokens = showLiveMetrics ? formatGoalTokenUsage(block) : null;
+
+  return (
+    <section
+      className={`relative overflow-hidden rounded-[8px] border px-3.5 py-2.5 ${tone.shell}`}
+      title={`Codex goal: ${label}`}
+    >
+      <div className={`absolute inset-y-0 left-0 w-1 ${tone.rail}`} />
+      <div className="flex min-w-0 items-center justify-between gap-3 pl-1">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${tone.icon}`}>
+            <GoalIcon />
+          </span>
+          <div className="min-w-0">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] opacity-65">
+              Codex goal
+            </div>
+            <div className="mt-0.5 truncate text-[13px] font-medium leading-5 opacity-90">
+              {description}
+            </div>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] font-semibold ${tone.pill}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${tone.dot} ${showLiveMetrics ? "animate-pulse" : ""}`} />
+            {label}
+          </span>
+          {(elapsed || tokens) && (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-current/10 bg-white/65 px-2 py-1 text-[11px] font-medium opacity-75">
+              {elapsed && <span>{elapsed}</span>}
+              {tokens && <span>{tokens}</span>}
+            </span>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
 function StructuredAssistantBlocks({
   blocks,
   workspaceRoot,
@@ -2046,6 +2222,8 @@ function RuntimeStructuredBlocks({
             );
           case "status":
             return <RuntimeStatusBlock key={key} block={block} />;
+          case "codexGoal":
+            return <RuntimeCodexGoalBlock key={key} block={block} isStreaming={isStreaming} />;
           default:
             return null;
         }
@@ -2094,10 +2272,16 @@ export function CliBubble({
   const contentFormat = message.contentFormat ?? detectAssistantContentFormat(rawText);
   const parsed = useMemo(() => parseAssistantDisplayBlocks(rawText), [rawText]);
   const runtimeBlocks = message.blocks ?? null;
+  const hasCodexGoalBlock =
+    runtimeBlocks?.some((block) => isCodexGoalBlock(block)) ?? false;
+  const hasNonGoalRuntimeBlocks =
+    runtimeBlocks?.some((block) => !isCodexGoalBlock(block)) ?? false;
   const hasTextRuntimeBlocks =
     runtimeBlocks?.some((block) => block.kind === "text") ?? false;
   const shouldRenderRuntimeFallbackText =
-    !hasTextRuntimeBlocks && message.content.trim().length > 0;
+    !hasTextRuntimeBlocks &&
+    message.content.trim().length > 0 &&
+    (message.isStreaming || hasNonGoalRuntimeBlocks || !hasCodexGoalBlock);
   const formatLabel =
     runtimeBlocks?.length
       ? "structured"

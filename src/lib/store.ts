@@ -104,6 +104,10 @@ interface SendChatMessageOptions {
   selectedAgentOverride?: SelectedCustomAgent | null;
 }
 
+function isCodexGoalSlashPrompt(value: string) {
+  return /^\/goal(?:\s|$)/i.test(value.trim());
+}
+
 function normalizeChatFilePreviewPath(path: string) {
   return path.replace(/\\/g, "/").replace(/^\/+/, "").trim();
 }
@@ -3470,16 +3474,22 @@ export const useStore = create<StoreState>((set, get) => {
     const selectedCliForSend = options?.cliIdOverride ?? tab.selectedCli;
     const effectiveCli = resolveTerminalCliId(selectedCliForSend, workspace.activeAgent);
     const shouldClearDraft = prompt == null;
-    const draftAttachments = cloneChatAttachments(
-      options?.attachmentsOverride ?? tab.draftAttachments
-    ) ?? [];
     const text = (prompt ?? tab.draftPrompt).trim();
-    const visiblePrompt = buildPromptWithAttachments(text, draftAttachments);
+    const isCodexGoalCommand =
+      selectedCliForSend === "codex" && isCodexGoalSlashPrompt(text);
+    const draftAttachments = isCodexGoalCommand
+      ? []
+      : cloneChatAttachments(options?.attachmentsOverride ?? tab.draftAttachments) ?? [];
+    const visiblePrompt = isCodexGoalCommand
+      ? text
+      : buildPromptWithAttachments(text, draftAttachments);
     const resolvedSelectedAgent = resolveSelectedCustomAgent(
       options?.selectedAgentOverride ?? tab.selectedAgent ?? null,
       settings?.customAgents
     );
-    const actualPrompt = injectSelectedAgentPrompt(visiblePrompt, resolvedSelectedAgent);
+    const actualPrompt = isCodexGoalCommand
+      ? visiblePrompt
+      : injectSelectedAgentPrompt(visiblePrompt, resolvedSelectedAgent);
     const imageAttachments = draftAttachments
       .filter((attachment) => attachment.kind === "image")
       .map((attachment) => attachment.source);
@@ -4774,12 +4784,25 @@ export const useStore = create<StoreState>((set, get) => {
     const pushSystemMessage = (content: string, exitCode = 0) =>
       get().appendChatSystemMessage(tab.id, effectiveCli, content, exitCode);
 
-    switch (command.kind) {
+      switch (command.kind) {
       case "plan": {
         get().togglePlanMode(tab.id);
         return;
       }
       case "goal": {
+        pushSystemMessage("Use /goal directly in a Codex conversation.", 1);
+        return;
+      }
+      case "context": {
+        const target = command.args[0]?.trim().toLowerCase() ?? "";
+        if (!target) {
+          pushSystemMessage("Usage: /context goal", 1);
+          return;
+        }
+        if (target !== "goal") {
+          pushSystemMessage(`Unknown /context target '${target}'. Supported: goal`, 1);
+          return;
+        }
         try {
           const { goal, workflowGoal } = await readStudioGoal(workspace.rootPath);
           const content = [

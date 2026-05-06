@@ -4155,8 +4155,23 @@ rename to src/components/chat/GitPanel.tsx`,
       }
       case "goal": {
         return {
+          success: false,
+          output: "Codex /goal is only available in the desktop runtime.",
+          sideEffects: [],
+        };
+      }
+      case "context": {
+        const target = command.args[0]?.trim().toLowerCase() ?? "";
+        if (target !== "goal") {
+          return {
+            success: false,
+            output: "Usage: /context goal",
+            sideEffects: [],
+          };
+        }
+        return {
           success: true,
-          output: "Goal view is only available in the desktop runtime with Studio active context loaded.",
+          output: "Studio context goal is only available in the desktop runtime with active context loaded.",
           sideEffects: [],
         };
       }
@@ -4234,14 +4249,6 @@ rename to src/components/chat/GitPanel.tsx`,
         }
         const output = md.join("\n");
         return { success: true, output: output.length > 5000 ? output.slice(0, 5000) + `\n\n... (${output.length} total characters)` : output, sideEffects: [] };
-      }
-      case "context": {
-        const lines = ["Context usage per CLI:"];
-        for (const [agentId, agentCtx] of Object.entries(contextStore.agents)) {
-          const chars = agentCtx.conversationHistory.reduce((s, t) => s + t.rawOutput.length + t.userPrompt.length, 0);
-          lines.push(`  ${agentId}: ${agentCtx.conversationHistory.length} turns, ~${chars} chars`);
-        }
-        return { success: true, output: lines.join("\n"), sideEffects: [] };
       }
       case "memory": {
         return { success: true, output: "Memory files are managed at the project root.\nCLAUDE.md: (browser mode - file access unavailable)\nAGENTS.md: (browser mode - file access unavailable)", sideEffects: [] };

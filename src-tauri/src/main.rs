@@ -3767,6 +3767,14 @@ enum ChatMessageBlock {
         mode_hint: Option<String>,
         state: Option<String>,
     },
+    CodexGoal {
+        status: String,
+        objective: Option<String>,
+        message: Option<String>,
+        elapsed_seconds: Option<i64>,
+        tokens_used: Option<i64>,
+        token_budget: Option<i64>,
+    },
     Plan {
         text: String,
     },
@@ -4359,6 +4367,7 @@ struct CodexStreamState {
     final_content: String,
     blocks: Vec<ChatMessageBlock>,
     block_prefix: Vec<ChatMessageBlock>,
+    goal_blocks: Vec<ChatMessageBlock>,
     delta_by_item: BTreeMap<String, String>,
     approval_block_by_request_id: BTreeMap<String, usize>,
     latest_plan_text: Option<String>,
@@ -4366,6 +4375,8 @@ struct CodexStreamState {
     turn_id: Option<String>,
     completion: Option<CodexTurnCompletion>,
     usage: ApiUsage,
+    show_goal_updates: bool,
+    await_goal_continuation: bool,
 }
 
 #[derive(Debug, Default)]
@@ -6673,6 +6684,287 @@ fn append_text_chunk(buffer: &mut String, text: &str) {
     buffer.push_str(text);
 }
 
+#[derive(Debug, Clone)]
+enum CodexGoalCommand {
+    Show,
+    Clear,
+    SetStatus { status: String },
+    SetObjective {
+        objective: String,
+        token_budget: Option<i64>,
+    },
+}
+
+fn parse_codex_goal_command(prompt: &str) -> Result<Option<CodexGoalCommand>, String> {
+    let trimmed = prompt.trim();
+    let Some(remainder) = trimmed.strip_prefix("/goal") else {
+        return Ok(None);
+    };
+    if !remainder.is_empty()
+        && !remainder
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_whitespace())
+    {
+        return Ok(None);
+    }
+    let remainder = remainder.trim();
+    if remainder.is_empty() {
+        return Ok(Some(CodexGoalCommand::Show));
+    }
+
+    match remainder.to_ascii_lowercase().as_str() {
+        "clear" => return Ok(Some(CodexGoalCommand::Clear)),
+        "pause" => {
+            return Ok(Some(CodexGoalCommand::SetStatus {
+                status: "paused".to_string(),
+            }))
+        }
+        "resume" => {
+            return Ok(Some(CodexGoalCommand::SetStatus {
+                status: "active".to_string(),
+            }))
+        }
+        _ => {}
+    }
+
+    let (objective, token_budget) = parse_codex_goal_objective(remainder)?;
+    Ok(Some(CodexGoalCommand::SetObjective {
+        objective,
+        token_budget,
+    }))
+}
+
+fn parse_codex_goal_objective(value: &str) -> Result<(String, Option<i64>), String> {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix("--tokens") {
+        let rest = rest.trim_start();
+        let rest = if let Some(after_equals) = rest.strip_prefix('=') {
+            after_equals
+        } else {
+            rest
+        };
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let token_text = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Missing token budget after /goal --tokens.".to_string())?;
+        let objective = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "Goal objective must not be empty.".to_string())?;
+        return Ok((objective.to_string(), Some(parse_compact_token_budget(token_text)?)));
+    }
+    if trimmed.is_empty() {
+        return Err("Goal objective must not be empty.".to_string());
+    }
+    Ok((trimmed.to_string(), None))
+}
+
+fn parse_compact_token_budget(value: &str) -> Result<i64, String> {
+    let trimmed = value.trim().replace(',', "").replace('_', "");
+    if trimmed.is_empty() {
+        return Err("Token budget cannot be empty.".to_string());
+    }
+
+    let (number_text, multiplier) = match trimmed.chars().last() {
+        Some('k') | Some('K') => (&trimmed[..trimmed.len() - 1], 1_000_f64),
+        Some('m') | Some('M') => (&trimmed[..trimmed.len() - 1], 1_000_000_f64),
+        Some('b') | Some('B') => (&trimmed[..trimmed.len() - 1], 1_000_000_000_f64),
+        _ => (trimmed.as_str(), 1_f64),
+    };
+
+    let numeric = number_text
+        .parse::<f64>()
+        .map_err(|_| format!("Invalid token budget '{}'.", value))?;
+    if !numeric.is_finite() || numeric <= 0_f64 {
+        return Err(format!("Invalid token budget '{}'.", value));
+    }
+
+    Ok((numeric * multiplier).round() as i64)
+}
+
+fn format_goal_elapsed_seconds(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    let hours = minutes / 60;
+    let remaining_minutes = minutes % 60;
+    if remaining_minutes == 0 {
+        format!("{hours}h")
+    } else {
+        format!("{hours}h {remaining_minutes}m")
+    }
+}
+
+fn format_goal_tokens(value: i64) -> String {
+    let absolute = value.unsigned_abs() as f64;
+    let sign = if value < 0 { "-" } else { "" };
+    if absolute >= 1_000_000_f64 {
+        return format!("{sign}{:.1}M", absolute / 1_000_000_f64);
+    }
+    if absolute >= 1_000_f64 {
+        return format!("{sign}{:.1}K", absolute / 1_000_f64);
+    }
+    format!("{sign}{value}")
+}
+
+fn codex_goal_status_label(status: &str) -> &'static str {
+    match status {
+        "active" => "Active",
+        "paused" => "Paused",
+        "budgetLimited" => "Budget limited",
+        "complete" => "Complete",
+        "loading" => "Loading",
+        "none" => "No goal",
+        "cleared" => "Cleared",
+        "info" => "Info",
+        _ => "Unknown",
+    }
+}
+
+fn codex_goal_summary_text(goal: &Value) -> String {
+    let status = goal
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let objective = goal
+        .get("objective")
+        .and_then(Value::as_str)
+        .unwrap_or("No objective set.");
+    let token_budget = goal.get("tokenBudget").and_then(Value::as_i64);
+    let tokens_used = goal.get("tokensUsed").and_then(Value::as_i64).unwrap_or(0);
+    let time_used_seconds = goal
+        .get("timeUsedSeconds")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let show_usage_metrics = matches!(status, "active" | "paused" | "budgetLimited");
+    let command_hint = match status {
+        "active" => "Commands: /goal pause, /goal clear",
+        "paused" => "Commands: /goal resume, /goal clear",
+        _ => "Commands: /goal clear",
+    };
+
+    let mut lines = vec![
+        format!("Status: {}", codex_goal_status_label(status)),
+        format!("Objective: {}", objective.trim()),
+    ];
+    if show_usage_metrics && time_used_seconds > 0 {
+        lines.push(format!(
+            "Elapsed: {}",
+            format_goal_elapsed_seconds(time_used_seconds)
+        ));
+    }
+    if show_usage_metrics {
+        if let Some(token_budget) = token_budget {
+            lines.push(format!(
+                "Tokens: {} / {}",
+                format_goal_tokens(tokens_used),
+                format_goal_tokens(token_budget)
+            ));
+        } else if tokens_used > 0 {
+            lines.push(format!("Tokens: {}", format_goal_tokens(tokens_used)));
+        }
+    }
+    lines.push(command_hint.to_string());
+    lines.join("\n")
+}
+
+fn codex_goal_block_from_goal(goal: &Value) -> ChatMessageBlock {
+    let status = goal
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let objective = goal
+        .get("objective")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let token_budget = goal.get("tokenBudget").and_then(Value::as_i64);
+    let tokens_used = goal.get("tokensUsed").and_then(Value::as_i64);
+    let elapsed_seconds = goal.get("timeUsedSeconds").and_then(Value::as_i64);
+
+    ChatMessageBlock::CodexGoal {
+        status: status.to_string(),
+        objective,
+        message: None,
+        elapsed_seconds,
+        tokens_used,
+        token_budget,
+    }
+}
+
+fn codex_goal_blocks(goal: &Value) -> Vec<ChatMessageBlock> {
+    vec![codex_goal_block_from_goal(goal)]
+}
+
+fn codex_goal_empty_blocks(text: &str) -> Vec<ChatMessageBlock> {
+    let status = match text {
+        "No goal is currently set." | "No goal to clear." => "none",
+        "Goal cleared." => "cleared",
+        _ => "loading",
+    };
+    vec![ChatMessageBlock::CodexGoal {
+        status: status.to_string(),
+        objective: None,
+        message: Some(text.to_string()),
+        elapsed_seconds: None,
+        tokens_used: None,
+        token_budget: None,
+    }]
+}
+
+fn collect_codex_stream_blocks(stream_state: &CodexStreamState) -> Vec<ChatMessageBlock> {
+    let mut merged = Vec::new();
+    if !stream_state.block_prefix.is_empty() {
+        merged.extend_from_slice(&stream_state.block_prefix);
+    }
+    if !stream_state.goal_blocks.is_empty() {
+        merged.extend_from_slice(&stream_state.goal_blocks);
+    }
+    if !stream_state.blocks.is_empty() {
+        merged.extend_from_slice(&stream_state.blocks);
+    }
+    merged
+}
+
+fn emit_codex_stream_block_update(
+    app: &AppHandle,
+    terminal_tab_id: &str,
+    message_id: &str,
+    stream_state: &CodexStreamState,
+) {
+    let blocks = collect_codex_stream_blocks(stream_state);
+    let _ = app.emit(
+        "stream-chunk",
+        StreamEvent {
+            terminal_tab_id: terminal_tab_id.to_string(),
+            message_id: message_id.to_string(),
+            chunk: String::new(),
+            done: false,
+            exit_code: None,
+            duration_ms: None,
+            final_content: None,
+            content_format: None,
+            transport_kind: None,
+            transport_session: None,
+            blocks: Some(blocks),
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            interrupted_by_user: None,
+        },
+    );
+}
+
 fn format_turn_plan(params: &Value) -> Option<String> {
     let mut lines = Vec::new();
     if let Some(explanation) = params.get("explanation").and_then(Value::as_str) {
@@ -6936,6 +7228,27 @@ fn render_chat_blocks(
                 }
                 sections.push(section);
             }
+            ChatMessageBlock::CodexGoal {
+                status,
+                objective,
+                message,
+                ..
+            } => {
+                let mut section = format!("Codex goal: {}", codex_goal_status_label(status));
+                if let Some(objective) = objective {
+                    let trimmed = objective.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str(&format!("\nObjective: {}", trimmed));
+                    }
+                }
+                if let Some(message) = message {
+                    let trimmed = message.trim();
+                    if !trimmed.is_empty() {
+                        section.push_str(&format!("\n{}", trimmed));
+                    }
+                }
+                sections.push(section);
+            }
             ChatMessageBlock::Plan { text } => {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
@@ -7129,13 +7442,7 @@ fn handle_codex_server_request(
             summary,
             Some("approvedAlways".to_string()),
         );
-        emit_stream_block_update_with_prefix(
-            app,
-            terminal_tab_id,
-            message_id,
-            &stream_state.block_prefix,
-            &stream_state.blocks,
-        );
+        emit_codex_stream_block_update(app, terminal_tab_id, message_id, stream_state);
 
         return write_jsonrpc_message_shared(
             writer,
@@ -7160,13 +7467,7 @@ fn handle_codex_server_request(
         summary,
         Some("pending".to_string()),
     );
-    emit_stream_block_update_with_prefix(
-        app,
-        terminal_tab_id,
-        message_id,
-        &stream_state.block_prefix,
-        &stream_state.blocks,
-    );
+    emit_codex_stream_block_update(app, terminal_tab_id, message_id, stream_state);
 
     let (sender, receiver) = mpsc::channel::<ClaudeApprovalDecision>();
     {
@@ -7194,13 +7495,7 @@ fn handle_codex_server_request(
         None,
         Some(claude_approval_state(decision).to_string()),
     );
-    emit_stream_block_update_with_prefix(
-        app,
-        terminal_tab_id,
-        message_id,
-        &stream_state.block_prefix,
-        &stream_state.blocks,
-    );
+    emit_codex_stream_block_update(app, terminal_tab_id, message_id, stream_state);
 
     write_jsonrpc_message_shared(
         writer,
@@ -7241,6 +7536,20 @@ fn handle_codex_notification(
     }
 
     match method {
+        "thread/goal/updated" if stream_state.show_goal_updates => {
+            if let Some(goal) = params.get("goal") {
+                stream_state.goal_blocks = codex_goal_blocks(goal);
+                if !stream_state.await_goal_continuation {
+                    stream_state.final_content = codex_goal_summary_text(goal);
+                }
+                blocks_changed = true;
+            }
+        }
+        "thread/goal/cleared" if stream_state.show_goal_updates => {
+            stream_state.final_content = "Goal cleared.".to_string();
+            stream_state.goal_blocks = codex_goal_empty_blocks("Goal cleared.");
+            blocks_changed = true;
+        }
         "item/agentMessage/delta" => {
             let delta = params.get("delta").and_then(Value::as_str).unwrap_or("");
             if !delta.is_empty() {
@@ -7720,13 +8029,7 @@ fn handle_codex_notification(
     }
 
     if blocks_changed {
-        emit_stream_block_update_with_prefix(
-            app,
-            terminal_tab_id,
-            message_id,
-            &stream_state.block_prefix,
-            &stream_state.blocks,
-        );
+        emit_codex_stream_block_update(app, terminal_tab_id, message_id, stream_state);
     }
 
     Ok(())
@@ -7754,6 +8057,8 @@ fn run_codex_app_server_turn(
         workspace_target,
         command_path,
         &[
+            "--enable".to_string(),
+            "goals".to_string(),
             "app-server".to_string(),
             "--listen".to_string(),
             "stdio://".to_string(),
@@ -7832,6 +8137,9 @@ fn run_codex_app_server_turn(
             "clientInfo": {
                 "name": "multi-cli-studio",
                 "version": env!("CARGO_PKG_VERSION")
+            },
+            "capabilities": {
+                "experimentalApi": true
             }
         }),
         app,
@@ -8145,6 +8453,425 @@ fn run_codex_app_server_turn(
         transport_session,
         usage: stream_state.usage,
     })
+}
+
+fn run_codex_goal_command(
+    app: &AppHandle,
+    command_path: &str,
+    workspace_target: &WorkspaceTarget,
+    goal_command: &CodexGoalCommand,
+    session: &acp::AcpSession,
+    previous_transport_session: Option<AgentTransportSession>,
+    terminal_tab_id: &str,
+    message_id: &str,
+    write_mode: bool,
+    studio_context_key: Option<&str>,
+) -> Result<CodexTurnOutcome, String> {
+    let mut cmd = spawn_workspace_command(
+        workspace_target,
+        command_path,
+        &[
+            "--enable".to_string(),
+            "goals".to_string(),
+            "app-server".to_string(),
+            "--listen".to_string(),
+            "stdio://".to_string(),
+        ],
+        !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
+    )?;
+    apply_studio_context_environment(&mut cmd, studio_context_key);
+
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| format!("Failed to start Codex app-server: {}", err))?;
+    let stdin =
+        Arc::new(Mutex::new(child.stdin.take().ok_or_else(|| {
+            "Failed to open Codex app-server stdin".to_string()
+        })?));
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to open Codex app-server stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to open Codex app-server stderr".to_string())?;
+
+    let stderr_buffer = Arc::new(Mutex::new(String::new()));
+    let stderr_sink = stderr_buffer.clone();
+    let stderr_handle = thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
+            if let Ok(mut buffer) = stderr_sink.lock() {
+                buffer.push_str(&line);
+                buffer.push('\n');
+            }
+        }
+    });
+
+    let mut reader = BufReader::new(stdout);
+    let next_id = Arc::new(Mutex::new(1_u64));
+    let mut stream_state = CodexStreamState::default();
+    stream_state.show_goal_updates = true;
+    let await_goal_continuation = !session.plan_mode
+        && match goal_command {
+            CodexGoalCommand::SetObjective { .. } => true,
+            CodexGoalCommand::SetStatus { status } => status.eq_ignore_ascii_case("active"),
+            _ => false,
+        };
+    stream_state.await_goal_continuation = await_goal_continuation;
+    let approval_rules = Arc::new(Mutex::new(CodexSessionApprovalRules::default()));
+    let approvals = Arc::new(Mutex::new(BTreeMap::new()));
+    let permission_mode = codex_permission_mode(session, write_mode);
+    let sandbox_mode = codex_sandbox_mode(&permission_mode);
+    let requested_model = session.model.get("codex").cloned();
+    let project_root = workspace_target_project_root(workspace_target);
+
+    stream_state.goal_blocks = codex_goal_empty_blocks(match goal_command {
+        CodexGoalCommand::Show => "Loading Codex goal…",
+        CodexGoalCommand::Clear => "Clearing Codex goal…",
+        CodexGoalCommand::SetStatus { status } if status.eq_ignore_ascii_case("paused") => {
+            "Pausing Codex goal…"
+        }
+        CodexGoalCommand::SetStatus { .. } => "Resuming Codex goal…",
+        CodexGoalCommand::SetObjective { .. } => "Setting Codex goal…",
+    });
+    emit_codex_stream_block_update(app, terminal_tab_id, message_id, &stream_state);
+
+    let result = (|| -> Result<CodexTurnOutcome, String> {
+        let _initialize = codex_rpc_call(
+            &mut reader,
+            &stdin,
+            &next_id,
+            "initialize",
+            json!({
+                "clientInfo": {
+                    "name": "multi-cli-studio",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {
+                    "experimentalApi": true
+                }
+            }),
+            app,
+            terminal_tab_id,
+            message_id,
+            project_root,
+            &mut stream_state,
+            &approval_rules,
+            &approvals,
+            None,
+        )?;
+        write_jsonrpc_message_shared(&stdin, &json!({ "method": "initialized" }))?;
+
+        let thread_result = if let Some(thread_id) = previous_transport_session
+            .as_ref()
+            .and_then(|session| session.thread_id.clone())
+        {
+            codex_rpc_call(
+                &mut reader,
+                &stdin,
+                &next_id,
+                "thread/resume",
+                json!({
+                    "threadId": thread_id,
+                    "cwd": project_root,
+                    "approvalPolicy": "on-request",
+                    "sandbox": sandbox_mode,
+                    "personality": "pragmatic",
+                    "model": requested_model,
+                }),
+                app,
+                terminal_tab_id,
+                message_id,
+                project_root,
+                &mut stream_state,
+                &approval_rules,
+                &approvals,
+                None,
+            )?
+        } else if matches!(goal_command, CodexGoalCommand::SetObjective { .. }) {
+            codex_rpc_call(
+                &mut reader,
+                &stdin,
+                &next_id,
+                "thread/start",
+                json!({
+                    "cwd": project_root,
+                    "approvalPolicy": "on-request",
+                    "sandbox": sandbox_mode,
+                    "personality": "pragmatic",
+                    "model": requested_model,
+                    "ephemeral": false
+                }),
+                app,
+                terminal_tab_id,
+                message_id,
+                project_root,
+                &mut stream_state,
+                &approval_rules,
+                &approvals,
+                None,
+            )?
+        } else {
+            return Err("No active Codex session. Use /goal <objective> first.".to_string());
+        };
+
+        if let Some(thread_id) = thread_result
+            .get("thread")
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+        {
+            stream_state.thread_id = Some(thread_id.to_string());
+        }
+
+        let effective_model = thread_result
+            .get("model")
+            .and_then(Value::as_str)
+            .map(|value| value.to_string())
+            .or(requested_model.clone())
+            .or_else(|| {
+                previous_transport_session
+                    .as_ref()
+                    .and_then(|session| session.model.clone())
+            });
+        let thread_id = stream_state
+            .thread_id
+            .clone()
+            .ok_or_else(|| "Codex app-server did not return a thread id".to_string())?;
+
+        match goal_command {
+            CodexGoalCommand::Show => {
+                let result = codex_rpc_call(
+                    &mut reader,
+                    &stdin,
+                    &next_id,
+                    "thread/goal/get",
+                    json!({ "threadId": thread_id }),
+                    app,
+                    terminal_tab_id,
+                    message_id,
+                    project_root,
+                    &mut stream_state,
+                    &approval_rules,
+                    &approvals,
+                    None,
+                )?;
+                if let Some(goal) = result.get("goal") {
+                    if goal.is_null() {
+                        stream_state.final_content =
+                            "No goal is currently set.\nUse /goal <objective> to create one."
+                                .to_string();
+                        stream_state.goal_blocks =
+                            codex_goal_empty_blocks("No goal is currently set.");
+                    } else {
+                        stream_state.final_content = codex_goal_summary_text(goal);
+                        stream_state.goal_blocks = codex_goal_blocks(goal);
+                    }
+                }
+            }
+            CodexGoalCommand::Clear => {
+                let result = codex_rpc_call(
+                    &mut reader,
+                    &stdin,
+                    &next_id,
+                    "thread/goal/clear",
+                    json!({ "threadId": thread_id }),
+                    app,
+                    terminal_tab_id,
+                    message_id,
+                    project_root,
+                    &mut stream_state,
+                    &approval_rules,
+                    &approvals,
+                    None,
+                )?;
+                if !result
+                    .get("cleared")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    stream_state.final_content =
+                        "No goal is currently set.\nUse /goal <objective> to create one."
+                            .to_string();
+                    stream_state.goal_blocks = codex_goal_empty_blocks("No goal to clear.");
+                } else {
+                    stream_state.final_content = "Goal cleared.".to_string();
+                    stream_state.goal_blocks = codex_goal_empty_blocks("Goal cleared.");
+                }
+            }
+            CodexGoalCommand::SetStatus { status } => {
+                let result = codex_rpc_call(
+                    &mut reader,
+                    &stdin,
+                    &next_id,
+                    "thread/goal/set",
+                    json!({
+                        "threadId": thread_id,
+                        "status": status,
+                    }),
+                    app,
+                    terminal_tab_id,
+                    message_id,
+                    project_root,
+                    &mut stream_state,
+                    &approval_rules,
+                    &approvals,
+                    None,
+                )?;
+                let goal = result
+                    .get("goal")
+                    .ok_or_else(|| "Codex goal response did not include goal state".to_string())?;
+                stream_state.goal_blocks = codex_goal_blocks(goal);
+                if !await_goal_continuation {
+                    stream_state.final_content = codex_goal_summary_text(goal);
+                }
+            }
+            CodexGoalCommand::SetObjective {
+                objective,
+                token_budget,
+            } => {
+                let mut params = serde_json::Map::new();
+                params.insert("threadId".to_string(), Value::String(thread_id));
+                params.insert("objective".to_string(), Value::String(objective.clone()));
+                params.insert("status".to_string(), Value::String("active".to_string()));
+                if let Some(token_budget) = token_budget {
+                    params.insert("tokenBudget".to_string(), json!(token_budget));
+                }
+                let result = codex_rpc_call(
+                    &mut reader,
+                    &stdin,
+                    &next_id,
+                    "thread/goal/set",
+                    Value::Object(params),
+                    app,
+                    terminal_tab_id,
+                    message_id,
+                    project_root,
+                    &mut stream_state,
+                    &approval_rules,
+                    &approvals,
+                    None,
+                )?;
+                let goal = result
+                    .get("goal")
+                    .ok_or_else(|| "Codex goal response did not include goal state".to_string())?;
+                stream_state.goal_blocks = codex_goal_blocks(goal);
+                if !await_goal_continuation {
+                    stream_state.final_content = codex_goal_summary_text(goal);
+                }
+            }
+        }
+
+        if await_goal_continuation {
+            while stream_state.completion.is_none() {
+                let message = read_jsonrpc_message(&mut reader)?.ok_or_else(|| {
+                    "Codex app-server closed before the goal continuation completed".to_string()
+                })?;
+                if let Some(method) = message.get("method").and_then(Value::as_str) {
+                    if let Some(server_request_id) = message.get("id") {
+                        handle_codex_server_request(
+                            &stdin,
+                            app,
+                            terminal_tab_id,
+                            message_id,
+                            project_root,
+                            server_request_id,
+                            method,
+                            message.get("params").unwrap_or(&Value::Null),
+                            &mut stream_state,
+                            &approval_rules,
+                            &approvals,
+                        )?;
+                    } else {
+                        handle_codex_notification(
+                            app,
+                            terminal_tab_id,
+                            message_id,
+                            method,
+                            message.get("params").unwrap_or(&Value::Null),
+                            &mut stream_state,
+                            None,
+                        )?;
+                    }
+                }
+            }
+        }
+
+        let exit_code = if let Some(completion) = stream_state.completion.clone() {
+            match completion.status.as_str() {
+                "completed" => Some(0),
+                "interrupted" => Some(130),
+                "failed" => Some(1),
+                _ => None,
+            }
+        } else {
+            Some(0)
+        };
+        let final_content = if stream_state.final_content.trim().is_empty() {
+            if let Some(completion) = stream_state.completion.clone() {
+                completion.error_text.clone().unwrap_or_default()
+            } else {
+                "Goal updated.".to_string()
+            }
+        } else {
+            stream_state.final_content.clone()
+        };
+        let transport_session = build_transport_session(
+            "codex",
+            previous_transport_session,
+            stream_state.thread_id.clone(),
+            stream_state.turn_id.clone(),
+            effective_model,
+            Some(permission_mode),
+            stream_state.usage.context_window_tokens,
+        );
+
+        Ok(CodexTurnOutcome {
+            final_content: final_content.clone(),
+            content_format: if collect_codex_stream_blocks(&stream_state)
+                .iter()
+                .any(|block| matches!(block, ChatMessageBlock::Text { .. }))
+            {
+                "markdown".to_string()
+            } else {
+                "plain".to_string()
+            },
+            raw_output: final_content,
+            exit_code,
+            blocks: collect_codex_stream_blocks(&stream_state),
+            transport_session,
+            usage: stream_state.usage.clone(),
+        })
+    })();
+
+    drop(stdin);
+    match child.try_wait() {
+        Ok(Some(_)) => {}
+        _ => {
+            terminate_process_tree(child.id());
+            let _ = child.wait();
+        }
+    }
+    let _ = stderr_handle.join();
+    let stderr_output = stderr_buffer
+        .lock()
+        .map(|buffer| buffer.clone())
+        .unwrap_or_default();
+    let trimmed_stderr = stderr_output.trim();
+
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(err) if trimmed_stderr.is_empty() => Err(err),
+        Err(err) => Err(format!("{}\n\nstderr:\n{}", err, trimmed_stderr)),
+    }
 }
 
 fn handle_claude_stream_event(
@@ -12638,6 +13365,11 @@ fn send_chat_message(
     let cli_id = request.cli_id.clone();
     let terminal_tab_id = request.terminal_tab_id.clone();
     let prompt = request.prompt.clone();
+    let goal_command = if cli_id == "codex" {
+        parse_codex_goal_command(&prompt)?
+    } else {
+        None
+    };
     let image_attachments = request.image_attachments.clone().unwrap_or_default();
     let project_root = request.project_root.clone();
     let workspace_id = request.workspace_id.clone();
@@ -12651,7 +13383,7 @@ fn send_chat_message(
     let requested_transport_session = request.transport_session.clone();
     let transport_kind = default_transport_kind(&cli_id);
     let terminal_storage = store.terminal_storage.clone();
-    if !remote_workspace {
+    if !remote_workspace && goal_command.is_none() {
         terminal_storage.ensure_task_bundle(&EnsureTaskPacketRequest {
             terminal_tab_id: terminal_tab_id.clone(),
             workspace_id: workspace_id.clone(),
@@ -12661,10 +13393,14 @@ fn send_chat_message(
             initial_goal: prompt.clone(),
         })?;
     }
-    let pending_handoff = terminal_storage
-        .load_pending_handoff_for_terminal_tab(&terminal_tab_id, &cli_id)
-        .ok()
-        .flatten();
+    let pending_handoff = if goal_command.is_some() {
+        None
+    } else {
+        terminal_storage
+            .load_pending_handoff_for_terminal_tab(&terminal_tab_id, &cli_id)
+            .ok()
+            .flatten()
+    };
     let force_fresh_session = pending_handoff.is_some();
     let effective_previous_transport_session = if force_fresh_session {
         None
@@ -12709,6 +13445,77 @@ fn send_chat_message(
 
         (wrapper, settings.process_timeout_ms)
     };
+
+    if let Some(goal_command) = goal_command {
+        let msg_id = message_id.clone();
+        let app_handle = app.clone();
+        let codex_wrapper_path = wrapper_path.clone();
+        let codex_requested_transport_session = effective_previous_transport_session.clone();
+        let codex_transport_kind = transport_kind.clone();
+        let codex_workspace_target = workspace_target.clone();
+        let request_session_for_thread = request_session.clone();
+
+        thread::spawn(move || {
+            let start = Instant::now();
+            let outcome = run_codex_goal_command(
+                &app_handle,
+                &codex_wrapper_path,
+                &codex_workspace_target,
+                &goal_command,
+                &request_session_for_thread,
+                codex_requested_transport_session.clone(),
+                &terminal_tab_id,
+                &msg_id,
+                write_mode,
+                None,
+            );
+            let duration_ms = start.elapsed().as_millis() as u64;
+
+            match outcome {
+                Ok(outcome) => emit_chat_done_event(
+                    &app_handle,
+                    &terminal_tab_id,
+                    &msg_id,
+                    outcome.exit_code,
+                    duration_ms,
+                    outcome.final_content,
+                    Some(outcome.content_format),
+                    Some(codex_transport_kind),
+                    Some(outcome.transport_session),
+                    Some(outcome.blocks),
+                    Some(&outcome.usage),
+                    false,
+                ),
+                Err(error) => emit_chat_done_event(
+                    &app_handle,
+                    &terminal_tab_id,
+                    &msg_id,
+                    Some(1),
+                    duration_ms,
+                    error.clone(),
+                    Some("log".to_string()),
+                    Some(codex_transport_kind),
+                    Some(build_transport_session(
+                        "codex",
+                        codex_requested_transport_session,
+                        None,
+                        None,
+                        request_session_for_thread.model.get("codex").cloned(),
+                        Some(codex_permission_mode(&request_session_for_thread, write_mode)),
+                        None,
+                    )),
+                    Some(vec![ChatMessageBlock::Status {
+                        level: "error".to_string(),
+                        text: error,
+                    }]),
+                    None,
+                    false,
+                ),
+            }
+        });
+
+        return Ok(message_id);
+    }
 
     let (prompt_for_context, selected_codex_skills, selected_claude_skill) = match cli_id.as_str() {
         "codex" => {
@@ -14647,6 +15454,11 @@ fn execute_acp_command(
                 side_effects: vec![acp::AcpSideEffect::PlanModeToggled { active }],
             })
         }
+        "goal" => Ok(acp::AcpCommandResult {
+            success: false,
+            output: "Use /goal directly in a Codex conversation.".into(),
+            side_effects: vec![],
+        }),
         "clear" => {
             let mut ctx = store.context.lock().map_err(|e| e.to_string())?;
             ctx.conversation_history.clear();
@@ -14817,24 +15629,19 @@ fn execute_acp_command(
             })
         }
         "context" => {
-            let ctx = store.context.lock().map_err(|e| e.to_string())?;
-            let mut lines = vec!["Context usage per CLI:".to_string()];
-            for (agent_id, agent_ctx) in &ctx.agents {
-                let chars: usize = agent_ctx
-                    .conversation_history
-                    .iter()
-                    .map(|t| t.raw_output.len() + t.user_prompt.len())
-                    .sum();
-                lines.push(format!(
-                    "  {}: {} turns, ~{} chars",
-                    agent_id,
-                    agent_ctx.conversation_history.len(),
-                    chars
-                ));
+            let target = command.args.first().map(|value| value.trim()).unwrap_or("");
+            if !target.eq_ignore_ascii_case("goal") {
+                return Ok(acp::AcpCommandResult {
+                    success: false,
+                    output: "Usage: /context goal".into(),
+                    side_effects: vec![],
+                });
             }
             Ok(acp::AcpCommandResult {
-                success: true,
-                output: lines.join("\n"),
+                success: false,
+                output:
+                    "Studio context goal is resolved by the desktop chat runtime, not the ACP backend."
+                        .into(),
                 side_effects: vec![],
             })
         }

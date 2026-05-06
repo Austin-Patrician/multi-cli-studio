@@ -233,6 +233,10 @@ function parseSkillSlashQuery(value: string) {
   return match[1] ?? "";
 }
 
+function isCodexGoalSlashPrompt(value: string) {
+  return /^\/goal(?:\s.*)?$/i.test(value.trim());
+}
+
 function titleCaseCli(cliId: TerminalCliId) {
   if (cliId === "auto") return "Auto";
   return cliId.charAt(0).toUpperCase() + cliId.slice(1);
@@ -694,6 +698,13 @@ function commandHelpSubtitle(command: AcpCommandDef, tab: TerminalTab) {
   return details.join("\n");
 }
 
+function commandVisibleInPromptBar(command: AcpCommandDef, tab: TerminalTab) {
+  if (command.kind === "goal") {
+    return tab.selectedCli === "codex";
+  }
+  return tab.selectedCli === "auto" || command.supportedClis.includes(tab.selectedCli);
+}
+
 function buildReviewCommandText(target: ReviewPresetChoice | { type: "baseBranch"; branch: string } | { type: "commit"; sha: string; title?: string } | { type: "custom"; instructions: string }) {
   if (target === "uncommitted") {
     return "/review";
@@ -748,7 +759,7 @@ function buildCommandListOverlay(
   customPrompts: CustomPromptTemplate[],
 ): CommandOverlayState {
   const supportedCommands = ACP_COMMANDS.filter((command) =>
-    activeTab.selectedCli === "auto" || command.supportedClis.includes(activeTab.selectedCli)
+    commandVisibleInPromptBar(command, activeTab)
   ).filter((command) => {
     const normalized = query.toLowerCase();
     return (
@@ -840,7 +851,7 @@ function buildCommandListOverlay(
 
 function buildHelpOverlay(activeTab: TerminalTab): CommandOverlayState {
   const commands = ACP_COMMANDS.filter((command) =>
-    activeTab.selectedCli === "auto" || command.supportedClis.includes(activeTab.selectedCli)
+    commandVisibleInPromptBar(command, activeTab)
   );
   const sections: PromptOverlaySection[] = [];
 
@@ -1608,6 +1619,9 @@ export function ChatPromptBar({
     if (reviewPromptOpen || (/^\/review\b/i.test(rawSlashPrompt) && supportsReviewQuickAction)) {
       return null;
     }
+    if (activeTab.selectedCli === "codex" && isCodexGoalSlashPrompt(rawSlashPrompt)) {
+      return null;
+    }
 
     if (skillSlashQuery != null && activeTab.selectedCli !== "auto") {
       return buildSkillCommandOverlay(effectiveCli, skillSlashQuery, cliSkills, cliSkillStatus);
@@ -2341,8 +2355,14 @@ export function ChatPromptBar({
               ? error
               : "发送失败";
         setQueueFeedback(detail);
-      });
+        });
       return;
+    }
+    if (isCodexGoalSlashPrompt(rawSlashPrompt)) {
+      if (activeTab.selectedCli !== "codex") {
+        setQueueFeedback("/goal 仅在选择 Codex 时可用。");
+        return;
+      }
     }
     if (
       draftAttachments.some((attachment) => attachment.kind === "image") &&
@@ -2410,6 +2430,9 @@ export function ChatPromptBar({
 
       const parsed = parseSlashCommand(rawSlashPrompt);
       if (parsed && commandOverlay.kind === "command-list") {
+        if (parsed.kind === "goal") {
+          return;
+        }
         setPrompt("");
         void executeAcpCommand(parsed, activeTab.id);
         return;
@@ -2470,6 +2493,7 @@ export function ChatPromptBar({
   function selectCommand(command: AcpCommandDef) {
     if (!activeTab) return;
     if (!command.supportedClis.includes(effectiveCli)) return;
+    if (command.kind === "goal" && activeTab.selectedCli !== "codex") return;
 
     if (command.kind === "help") {
       setPrompt("/help");
@@ -2493,6 +2517,16 @@ export function ChatPromptBar({
 
     if (command.kind === "fast" && effectiveCli === "codex") {
       setPrompt("/fast ");
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      return;
+    }
+    if (command.kind === "goal") {
+      setPrompt("/goal ");
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      return;
+    }
+    if (command.kind === "context") {
+      setPrompt("/context goal");
       requestAnimationFrame(() => textareaRef.current?.focus());
       return;
     }

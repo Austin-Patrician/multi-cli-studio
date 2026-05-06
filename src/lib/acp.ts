@@ -6,7 +6,7 @@ export type AcpCommandKind =
   | "diff" | "permissions" | "cost" | "help" | "export"
   | "status" | "session" | "effort" | "fast" | "context" | "memory" | "review";
 
-export type CommandExecution = "local" | "flag-inject" | "git-local";
+export type CommandExecution = "local" | "flag-inject" | "git-local" | "native-chat";
 
 export interface AcpCommandDef {
   kind: AcpCommandKind;
@@ -131,9 +131,10 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
     execution: "local", supportedClis: ["codex", "claude", "gemini"],
   },
   {
-    kind: "goal", slash: "/goal", label: "Active Goal",
-    description: "Show the current Studio goal from the active context",
-    execution: "local", supportedClis: ["codex", "claude", "gemini"],
+    kind: "goal", slash: "/goal", label: "Goal",
+    description: "Set or view the current Codex goal workflow",
+    argsHint: "[objective|pause|resume|clear]",
+    execution: "native-chat", supportedClis: ["codex"],
   },
   {
     kind: "model", slash: "/model", label: "Select Model",
@@ -205,8 +206,9 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
     execution: "flag-inject", supportedClis: ["codex"],
   },
   {
-    kind: "context", slash: "/context", label: "Context Usage",
-    description: "Show how much context window is used per CLI",
+    kind: "context", slash: "/context", label: "Context",
+    description: "Show context data such as the current Studio goal",
+    argsHint: "goal",
     execution: "local", supportedClis: ["codex", "claude", "gemini"],
   },
   {
@@ -261,6 +263,7 @@ export function getCommandCategory(kind: AcpCommandKind) {
     case "review":
       return "session";
     case "diff":
+    case "context":
     case "memory":
       return "workspace";
     default:
