@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   TerminalSquare,
   Trash2,
+  X,
   XCircle,
 } from "lucide-react";
 import type {
@@ -33,7 +34,9 @@ import type {
   ChatMessageBlock,
   ConversationSession,
   FileMentionCandidate,
+  GitFileDiff,
   GitFileChange,
+  GitFileStatus,
   TerminalTab,
   TabSubagentState,
   WorkspaceRef,
@@ -43,6 +46,7 @@ import type {
 } from "../../lib/models";
 import { bridge } from "../../lib/bridge";
 import { useStore } from "../../lib/store";
+import { GitDiffBlock, type GitDiffStyle } from "../settings/GitDiffBlock";
 import {
   isWorkspaceFileIndexFresh,
   loadWorkspaceFileIndex,
@@ -71,6 +75,18 @@ type TaskNode = {
   isLatest: boolean;
 };
 
+type ConversationFileChangeEntry = GitFileStatus & {
+  diff: string;
+  lastTimestamp: number;
+};
+
+type ConversationFileDiffModalState = {
+  file: ConversationFileChangeEntry;
+  diff: GitFileDiff | null;
+  loading: boolean;
+  error: string | null;
+};
+
 type ActivityEntry = {
   id: string;
   messageId: string;
@@ -88,6 +104,7 @@ const EMPTY_TREE: WorkspaceTreeEntry[] = [];
 const EMPTY_CHAT_SESSIONS: Record<string, ConversationSession> = {};
 const EMPTY_GIT_CHANGES: GitFileChange[] = [];
 const EMPTY_SUBAGENTS: TabSubagentState[] = [];
+const STATUS_RAIL_DIFF_STYLE_STORAGE_KEY = "workspace_status_rail_file_change_diff_style";
 const REMOTE_FILE_TREE_CACHE_TTL_MS = 30_000;
 const workspaceTreeUiStateByWorkspace = new Map<
   string,
@@ -106,6 +123,69 @@ function dirname(path: string) {
   const parts = normalized.split(/[\\/]/).filter(Boolean);
   if (parts.length <= 1) return "";
   return parts.slice(0, -1).join("/");
+}
+
+function splitNameAndExtension(name: string) {
+  const lastDot = name.lastIndexOf(".");
+  if (lastDot <= 0 || lastDot === name.length - 1) {
+    return { base: name, extension: "" };
+  }
+  return {
+    base: name.slice(0, lastDot),
+    extension: name.slice(lastDot + 1).toLowerCase(),
+  };
+}
+
+function normalizeGitLikeStatus(status: GitFileChange["status"]) {
+  switch (status) {
+    case "added":
+      return "A";
+    case "deleted":
+      return "D";
+    case "renamed":
+      return "R";
+    default:
+      return "M";
+  }
+}
+
+function gitLikeStatusToneClass(status: GitFileChange["status"]) {
+  switch (status) {
+    case "added":
+      return "is-add";
+    case "deleted":
+      return "is-del";
+    case "renamed":
+      return "is-rename";
+    default:
+      return "is-mod";
+  }
+}
+
+function gitLikeStatusSymbol(status: GitFileChange["status"]) {
+  switch (status) {
+    case "added":
+      return "(A)";
+    case "deleted":
+      return "(D)";
+    case "renamed":
+      return "(R)";
+    default:
+      return "(U)";
+  }
+}
+
+function gitLikeStatusIconClass(status: GitFileChange["status"]) {
+  switch (status) {
+    case "added":
+      return "diff-icon-added";
+    case "deleted":
+      return "diff-icon-deleted";
+    case "renamed":
+      return "diff-icon-renamed";
+    default:
+      return "diff-icon-modified";
+  }
 }
 
 function formatTimeAgo(iso: string | null | undefined) {
@@ -200,6 +280,93 @@ function buildTaskNodes(session: ConversationSession | null): TaskNode[] {
       ...prompt,
       isLatest: index === 0,
     }));
+}
+
+function parseConversationFilePatch(diffText: string) {
+  let additions = 0;
+  let deletions = 0;
+
+  for (const line of diffText.split(/\r?\n/)) {
+    if (!line) continue;
+    if (
+      line.startsWith("diff --git") ||
+      line.startsWith("index ") ||
+      line.startsWith("--- ") ||
+      line.startsWith("+++ ")
+    ) {
+      continue;
+    }
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      additions += 1;
+      continue;
+    }
+    if (line.startsWith("-") && !line.startsWith("---")) {
+      deletions += 1;
+    }
+  }
+
+  return { additions, deletions };
+}
+
+function mergeConversationDiff(current: string, next: string) {
+  const normalizedCurrent = current.trim();
+  const normalizedNext = next.trim();
+  if (!normalizedCurrent) return normalizedNext;
+  if (!normalizedNext) return normalizedCurrent;
+  if (normalizedCurrent === normalizedNext) return normalizedCurrent;
+  return `${normalizedCurrent}\n\n${normalizedNext}`;
+}
+
+function mapConversationFileChangeStatus(
+  block: Extract<ChatMessageBlock, { kind: "fileChange" }>
+): GitFileChange["status"] {
+  if (block.movePath?.trim()) return "renamed";
+  if (block.changeType === "add") return "added";
+  if (block.changeType === "delete") return "deleted";
+  return "modified";
+}
+
+function buildConversationFileChanges(session: ConversationSession | null): ConversationFileChangeEntry[] {
+  if (!session) return [];
+
+  const latestUserIndex = [...session.messages]
+    .map((message, index) => ({ message, index }))
+    .reverse()
+    .find((entry) => entry.message.role === "user")?.index ?? -1;
+  const turnMessages = latestUserIndex >= 0 ? session.messages.slice(latestUserIndex + 1) : session.messages;
+  const changes = new Map<string, ConversationFileChangeEntry>();
+
+  turnMessages.forEach((message) => {
+    const timestamp = Date.parse(message.timestamp);
+    const lastTimestamp = Number.isFinite(timestamp) ? timestamp : 0;
+    for (const block of message.blocks ?? []) {
+      if (block.kind !== "fileChange") continue;
+      const key = `${block.movePath ?? ""}::${block.path}`;
+      const patch = parseConversationFilePatch(block.diff);
+      const status = mapConversationFileChangeStatus(block);
+      const existing = changes.get(key);
+      if (existing) {
+        existing.additions += patch.additions;
+        existing.deletions += patch.deletions;
+        existing.diff = mergeConversationDiff(existing.diff, block.diff);
+        existing.status = status;
+        existing.previousPath = block.movePath ?? existing.previousPath ?? null;
+        existing.lastTimestamp = Math.max(existing.lastTimestamp, lastTimestamp);
+      } else {
+        changes.set(key, {
+          path: block.path,
+          status,
+          previousPath: block.movePath ?? null,
+          additions: patch.additions,
+          deletions: patch.deletions,
+          diff: block.diff,
+          lastTimestamp,
+        });
+      }
+    }
+  });
+
+  return Array.from(changes.values()).sort((left, right) => right.lastTimestamp - left.lastTimestamp);
 }
 
 function formatActivityDetail(message: ChatMessage, block: ChatMessageBlock | null) {
@@ -1068,31 +1235,115 @@ function WorkspaceSessionRadarPanel({
 function WorkspaceStatusRail({
   tasks,
   subagents,
+  fileChanges,
+  workspace,
   terminalTabId,
   onOpenTask,
 }: {
   tasks: TaskNode[];
   subagents: TabSubagentState[];
+  fileChanges: ConversationFileChangeEntry[];
+  workspace: WorkspaceRef | null;
   terminalTabId: string | null;
   onOpenTask: (terminalTabId: string, messageId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [activeTab, setActiveTab] = useState<"tasks" | "subagents">(() =>
-    tasks.length > 0 ? "tasks" : "subagents"
+  const [activeTab, setActiveTab] = useState<"tasks" | "changes" | "subagents">(() =>
+    tasks.length > 0 ? "tasks" : fileChanges.length > 0 ? "changes" : "subagents"
   );
+  const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
+  const [diffModal, setDiffModal] = useState<ConversationFileDiffModalState | null>(null);
+  const [diffViewStyle, setDiffViewStyle] = useState<GitDiffStyle>(() => {
+    if (typeof window === "undefined") return "split";
+    const stored = window.localStorage.getItem(STATUS_RAIL_DIFF_STYLE_STORAGE_KEY);
+    return stored === "unified" ? "unified" : "split";
+  });
   const hasMoreTasks = tasks.length > 10;
+  const hasMoreChanges = fileChanges.length > 10;
   const visibleTasks = expanded ? tasks : tasks.slice(0, 10);
+  const visibleChanges = expanded ? fileChanges : fileChanges.slice(0, 10);
   const visibleSubagents = subagents.slice(0, expanded ? subagents.length : 10);
 
   useEffect(() => {
-    if (activeTab === "tasks" && tasks.length === 0 && subagents.length > 0) {
-      setActiveTab("subagents");
-      return;
+    if (activeTab === "tasks" && tasks.length === 0) {
+      if (fileChanges.length > 0) {
+        setActiveTab("changes");
+        return;
+      }
+      if (subagents.length > 0) {
+        setActiveTab("subagents");
+        return;
+      }
     }
-    if (activeTab === "subagents" && subagents.length === 0 && tasks.length > 0) {
-      setActiveTab("tasks");
+    if (activeTab === "changes" && fileChanges.length === 0) {
+      if (tasks.length > 0) {
+        setActiveTab("tasks");
+        return;
+      }
+      if (subagents.length > 0) {
+        setActiveTab("subagents");
+        return;
+      }
     }
-  }, [activeTab, subagents.length, tasks.length]);
+    if (activeTab === "subagents" && subagents.length === 0) {
+      if (tasks.length > 0) {
+        setActiveTab("tasks");
+        return;
+      }
+      if (fileChanges.length > 0) {
+        setActiveTab("changes");
+      }
+    }
+  }, [activeTab, fileChanges.length, subagents.length, tasks.length]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(STATUS_RAIL_DIFF_STYLE_STORAGE_KEY, diffViewStyle);
+  }, [diffViewStyle]);
+
+  useEffect(() => {
+    setExpanded(false);
+    setSelectedFileKey(null);
+    setDiffModal(null);
+  }, [terminalTabId]);
+
+  const openConversationDiff = useCallback(
+    async (file: ConversationFileChangeEntry) => {
+      setSelectedFileKey(`${file.previousPath ?? ""}::${file.path}`);
+      setDiffModal({ file, diff: null, loading: true, error: null });
+
+      const fallbackDiff: GitFileDiff = {
+        path: file.path,
+        status: file.status,
+        previousPath: file.previousPath ?? null,
+        diff: file.diff,
+        isBinary: false,
+      };
+
+      if (!workspace?.rootPath) {
+        setDiffModal({ file, diff: fallbackDiff, loading: false, error: null });
+        return;
+      }
+
+      try {
+        const liveDiff = await bridge.getGitFileDiff(workspace.rootPath, file.path, workspace.id);
+        const resolvedDiff = liveDiff?.diff?.trim() ? liveDiff : fallbackDiff;
+        setDiffModal({ file, diff: resolvedDiff, loading: false, error: null });
+      } catch (error) {
+        setDiffModal({
+          file,
+          diff: fallbackDiff.diff.trim() ? fallbackDiff : null,
+          loading: false,
+          error: fallbackDiff.diff.trim()
+            ? null
+            : error instanceof Error
+              ? error.message
+              : String(error),
+        });
+      }
+    },
+    [workspace]
+  );
 
   return (
     <section className="workspace-task-rail">
@@ -1105,6 +1356,14 @@ function WorkspaceStatusRail({
           >
             <span className="workspace-task-pill-label">任务</span>
             <span className="workspace-task-pill-value">{tasks.length}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("changes")}
+            className={`workspace-task-pill${activeTab === "changes" ? " is-active" : ""}`}
+          >
+            <span className="workspace-task-pill-label">File Change</span>
+            <span className="workspace-task-pill-value">{fileChanges.length}</span>
           </button>
           <button
             type="button"
@@ -1162,6 +1421,85 @@ function WorkspaceStatusRail({
               })}
             </div>
           </>
+        )
+      ) : activeTab === "changes" ? (
+        fileChanges.length === 0 ? (
+          <div className="workspace-task-rail-empty">
+            当前轮对话还没有产生文件改动。
+          </div>
+        ) : (
+          <div className="git-history-changes diff-panel workspace-status-filechange-panel">
+            <div className="diff-list">
+              <div className="git-history-worktree-sections is-single is-flat-view">
+                <div className="git-history-worktree-section diff-section diff-section--unstaged">
+                  <div className="git-history-worktree-section-list diff-section-list">
+                    {visibleChanges.map((file, index) => {
+                      const fileKey = `${file.previousPath ?? ""}::${file.path}`;
+                      const segments = file.path.replace(/\\/g, "/").split("/").filter(Boolean);
+                      const name = segments[segments.length - 1] ?? file.path;
+                      const dir = segments.length > 1 ? segments.slice(0, -1).join("/") : "";
+                      const { base, extension } = splitNameAndExtension(name);
+                      const isLastVisibleFile = index === visibleChanges.length - 1;
+                      return (
+                        <Fragment key={fileKey}>
+                          <div
+                            className={`diff-row git-filetree-row${selectedFileKey === fileKey ? " active" : ""}`}
+                            data-status={normalizeGitLikeStatus(file.status)}
+                            data-path={file.path}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={file.path}
+                            onClick={() => void openConversationDiff(file)}
+                            onDoubleClick={() => void openConversationDiff(file)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                void openConversationDiff(file);
+                              }
+                            }}
+                          >
+                            <span className={`diff-icon ${gitLikeStatusIconClass(file.status)}`} aria-hidden>
+                              {gitLikeStatusSymbol(file.status)}
+                            </span>
+                            <span className="diff-file-icon" aria-hidden>
+                              <FileIcon filePath={file.path} className="h-4 w-4" />
+                            </span>
+                            <div className="diff-file">
+                              <div className="diff-path">
+                                <span className="diff-name">
+                                  <span className="diff-name-base">{base}</span>
+                                  {extension ? <span className="diff-name-ext">.{extension}</span> : null}
+                                </span>
+                              </div>
+                              {dir ? <div className="diff-dir">{dir}</div> : null}
+                            </div>
+                            <div className="diff-row-meta">
+                              <span className="diff-counts-inline git-filetree-badge" aria-label={`+${file.additions} -${file.deletions}`}>
+                                <span className="diff-add">+{file.additions}</span>
+                                <span className="diff-sep">/</span>
+                                <span className="diff-del">-{file.deletions}</span>
+                              </span>
+                            </div>
+                          </div>
+                          {!expanded && hasMoreChanges && isLastVisibleFile ? (
+                            <button
+                              type="button"
+                              className="workspace-task-rail-more"
+                              onClick={() => {
+                                setExpanded(true);
+                              }}
+                            >
+                              Load More
+                            </button>
+                          ) : null}
+                        </Fragment>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         )
       ) : subagents.length === 0 ? (
         <div className="workspace-task-rail-empty">
@@ -1232,6 +1570,83 @@ function WorkspaceStatusRail({
           </div>
         </>
       )}
+      {diffModal ? (
+        <div className="git-history-diff-modal-overlay" role="presentation" onClick={() => setDiffModal(null)}>
+          <div
+            className="git-history-diff-modal"
+            role="dialog"
+            aria-modal="true"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="git-history-diff-modal-header">
+              <div className="git-history-diff-modal-title">
+                <span className={`git-history-file-status ${gitLikeStatusToneClass(diffModal.file.status)}`}>
+                  {normalizeGitLikeStatus(diffModal.file.status)}
+                </span>
+                <span className="git-history-tree-icon is-file" aria-hidden>
+                  <FileIcon filePath={diffModal.file.path} className="h-4 w-4" />
+                </span>
+                <span className="git-history-diff-modal-path">{diffModal.file.path}</span>
+                <span className="git-history-diff-modal-stats">
+                  <span className="is-add">+{diffModal.file.additions}</span>
+                  <span className="is-sep">/</span>
+                  <span className="is-del">-{diffModal.file.deletions}</span>
+                </span>
+              </div>
+              <div className="git-history-diff-modal-actions">
+                {!diffModal.loading && !diffModal.error && diffModal.diff?.diff.trim() ? (
+                  <div className="diff-viewer-header-controls is-external">
+                    <div className="diff-viewer-header-mode" role="group" aria-label="Diff style">
+                      <button
+                        type="button"
+                        className={`diff-viewer-header-mode-icon-button ${diffViewStyle === "split" ? "active" : ""}`}
+                        onClick={() => setDiffViewStyle("split")}
+                        aria-label="Dual panel diff"
+                        title="Dual panel diff"
+                      >
+                        <span className="diff-viewer-mode-glyph diff-viewer-mode-glyph-split" aria-hidden />
+                        <span className="diff-viewer-mode-label">Dual panel</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`diff-viewer-header-mode-icon-button ${diffViewStyle === "unified" ? "active" : ""}`}
+                        onClick={() => setDiffViewStyle("unified")}
+                        aria-label="Single column diff"
+                        title="Single column diff"
+                      >
+                        <span className="diff-viewer-mode-glyph diff-viewer-mode-glyph-unified" aria-hidden />
+                        <span className="diff-viewer-mode-label">Single column</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  className="git-history-diff-modal-close"
+                  onClick={() => setDiffModal(null)}
+                  aria-label="Close diff"
+                  title="Close diff"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+            {diffModal.loading ? <div className="git-history-empty">Loading diff...</div> : null}
+            {diffModal.error ? <div className="git-history-error">{diffModal.error}</div> : null}
+            {!diffModal.loading && !diffModal.error ? (
+              diffModal.diff?.isBinary || !diffModal.diff?.diff.trim() ? (
+                <pre className="git-history-diff-modal-code">
+                  {diffModal.diff?.diff || "No diff available."}
+                </pre>
+              ) : (
+                <div className="git-history-diff-modal-viewer">
+                  <GitDiffBlock diff={diffModal.diff.diff} style={diffViewStyle} />
+                </div>
+              )
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -2178,6 +2593,10 @@ export function WorkspaceRightPanel({
     ].join(":");
   }, [activeSession, activeTabId]);
   const taskNodes = useMemo(() => buildTaskNodes(activeSession), [activeSession]);
+  const conversationFileChanges = useMemo(
+    () => buildConversationFileChanges(activeSession),
+    [activeSession]
+  );
   const tabSubagentsByTab = useStore((state) => state.tabSubagentsByTab);
   const activeSubagents = useMemo(
     () => (activeTabId ? tabSubagentsByTab[activeTabId] ?? EMPTY_SUBAGENTS : EMPTY_SUBAGENTS),
@@ -2255,6 +2674,8 @@ export function WorkspaceRightPanel({
             <WorkspaceStatusRail
               tasks={taskNodes}
               subagents={activeSubagents}
+              fileChanges={conversationFileChanges}
+              workspace={workspace}
               terminalTabId={activeTabId}
               onOpenTask={handleOpenTaskMessage}
             />
