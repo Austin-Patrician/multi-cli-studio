@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -450,6 +449,7 @@ pub struct SemanticRecallRequest {
     pub limit: Option<usize>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct CompactContextResult {
     pub task_id: String,
@@ -478,6 +478,7 @@ pub struct ContextBudgetProfile {
     pub allow_pack_expansion: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct ContextAssemblyResult {
     pub prompt: String,
@@ -2954,6 +2955,7 @@ impl TerminalStorage {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn count_messages_for_session(
         &self,
         tx: &Connection,
@@ -4473,11 +4475,13 @@ fn ensure_column_exists(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn read_json_file(path: &Path) -> Result<Value, String> {
     let content = fs::read_to_string(path).map_err(|err| err.to_string())?;
     serde_json::from_str(&content).map_err(|err| err.to_string())
 }
 
+#[allow(dead_code)]
 fn ensure_json_object(value: &mut Value) -> &mut serde_json::Map<String, Value> {
     if !value.is_object() {
         *value = Value::Object(serde_json::Map::new());
@@ -4485,6 +4489,7 @@ fn ensure_json_object(value: &mut Value) -> &mut serde_json::Map<String, Value> 
     value.as_object_mut().expect("value was forced to object")
 }
 
+#[allow(dead_code)]
 fn atomic_write_text(path: &Path, content: &str) -> Result<(), String> {
     if path.exists() {
         if let Ok(existing) = fs::read_to_string(path) {

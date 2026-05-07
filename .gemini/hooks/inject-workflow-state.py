@@ -184,7 +184,7 @@ def build_session_context(root: Path, binding: dict) -> str:
     parts = [
         "<studio-context-native-hook>",
         f"Platform: {PLATFORM}",
-        "Studio Context Native Hook 已注入：active context、spec/workspace 索引和 manifest 文件引用已加载。",
+        "Studio Context Native Hook 已注入：active context artifact chain、spec/workspace 索引和 manifest 文件引用已加载。",
         f"Shared context version: {shared.get('version') or 'unknown'}",
         "Rules:",
         "- Read `.studio/runtime/context.md` first; it is the active runtime snapshot.",
@@ -196,7 +196,12 @@ def build_session_context(root: Path, binding: dict) -> str:
         ".studio/runtime/context.md",
         ".studio/workflow.md",
         ".studio/runtime/active-context/current.md",
+        ".studio/runtime/active-context/context.json",
         ".studio/runtime/active-context/prd.md",
+        ".studio/runtime/active-context/spec.md",
+        ".studio/runtime/active-context/plan.md",
+        ".studio/runtime/active-context/tasks.md",
+        ".studio/runtime/active-context/check.md",
         ".studio/runtime/active-context/context-selection-report.md",
         ".studio/runtime/active-context/manifest.jsonl",
         ".studio/runtime/active-context/check.jsonl",
@@ -243,7 +248,7 @@ def build_delta_context(binding: dict) -> str:
         parts.append(hint.strip())
     else:
         parts.append(
-            "Reload `.studio/runtime/context.md` and the latest active-context manifests before continuing."
+            "Reload `.studio/runtime/context.md`, `.studio/runtime/active-context/current.md`, `.studio/runtime/active-context/spec.md`, `.studio/runtime/active-context/plan.md`, `.studio/runtime/active-context/tasks.md`, `.studio/runtime/active-context/check.md`, and the latest active-context manifests before continuing."
         )
     parts.append("</studio-context-delta>")
     return "\n".join(parts)
@@ -308,7 +313,13 @@ def build_subagent_context(root: Path, input_data: dict) -> str:
         "Required files:",
     ]
     if active_context:
+        parts.append("- `.studio/runtime/active-context/current.md`")
+        parts.append("- `.studio/runtime/active-context/context.json`")
         parts.append("- `.studio/runtime/active-context/prd.md`")
+        parts.append("- `.studio/runtime/active-context/spec.md`")
+        parts.append("- `.studio/runtime/active-context/plan.md`")
+        parts.append("- `.studio/runtime/active-context/tasks.md`")
+        parts.append("- `.studio/runtime/active-context/check.md`")
         parts.append("- `.studio/runtime/active-context/context-selection-report.md`")
     if manifest:
         parts.append(f"- `{manifest.relative_to(root)}`")

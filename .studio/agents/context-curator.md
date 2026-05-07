@@ -4,7 +4,8 @@
 Role: select the minimal request-specific context for implementation and checking.
 
 Inputs:
-- `.studio/runtime/active-context/prd.md`
+- `.studio/runtime/active-context/spec.md`
+- `.studio/runtime/active-context/plan.md`
 - `.studio/spec/**/index.md` and relevant spec files
 - `.studio/runtime/active-context/research/*.md`
 - current runtime context and changed-file hints

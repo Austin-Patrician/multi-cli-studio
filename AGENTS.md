@@ -7,6 +7,7 @@ This project uses Multi CLI Studio shared context.
 
 - First read `.studio/runtime/context.md` when it exists.
 - Then read `.studio/runtime/active-context/current.md` and `.studio/runtime/active-context/context.json`.
+- Read `.studio/runtime/active-context/spec.md`, `.studio/runtime/active-context/plan.md`, `.studio/runtime/active-context/tasks.md`, and `.studio/runtime/active-context/check.md` when they exist for the current request.
 - Load JSONL manifest entries only when the current request needs them.
 - Treat `.studio/workflow.md` as the shared context contract.
 - Treat `.studio/spec/` as durable project rules.

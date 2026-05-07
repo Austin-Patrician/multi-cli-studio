@@ -18,7 +18,7 @@ const MAX_CURRENT_CONTEXT_CHARS: usize = 24_000;
 const MAX_ADAPTER_CHARS: usize = 8_000;
 const MAX_REPORT_CHARS: usize = 24_000;
 const MAX_MANIFEST_ENTRIES: usize = 12;
-const MAX_CURATED_SPEC_ENTRIES: usize = 3;
+const MAX_CURATED_SPEC_ENTRIES: usize = 4;
 const MAX_CURATED_RESEARCH_ENTRIES: usize = 2;
 const MAX_CURATED_IMPLEMENT_ENTRIES: usize = 4;
 const MAX_CURATED_CHECK_ENTRIES: usize = 4;
@@ -434,6 +434,7 @@ pub struct StudioContextExportInput {
     pub compacted_context: Option<String>,
     pub cross_tab_context: Option<String>,
     pub working_memory: Option<String>,
+    #[allow(dead_code)]
     pub memory_candidates: Option<String>,
 }
 
@@ -479,12 +480,14 @@ struct ContextCuratorEntry {
     confidence: Option<f64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ResearchAgentOutput {
     #[serde(default)]
     artifacts: Vec<ResearchArtifactOutput>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ResearchArtifactOutput {
     #[serde(default)]
@@ -512,6 +515,7 @@ pub struct StudioContextCurationApplyResult {
     pub report_path: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct StudioResearchApplyResult {
     pub artifacts: usize,
@@ -751,18 +755,150 @@ fn active_context_request_matches(
         && existing_goal == non_empty(&current_goal, "Continue the active context.").trim()
 }
 
+fn infer_turn_kind(input: &StudioContextExportInput) -> &'static str {
+    if !input.write_mode {
+        return "analysis";
+    }
+    let prompt_text = clean_studio_text(&input.user_prompt).to_ascii_lowercase();
+    let has_direct_implementation_intent = text_has_any(
+        &prompt_text,
+        &[
+            "修复",
+            "修改",
+            "实现",
+            "落地",
+            "补上",
+            "更新",
+            "改成",
+            "删除",
+            "新增",
+            "fix",
+            "implement",
+            "update",
+            "change",
+            "add",
+            "remove",
+        ],
+    );
+    if !has_direct_implementation_intent
+        && text_has_any(
+            &prompt_text,
+            &[
+                "分析",
+                "查看",
+                "检查",
+                "看看",
+                "是否",
+                "为什么",
+                "解释",
+                "说一说",
+                "review",
+                "analyze",
+                "inspect",
+                "explain",
+                "why",
+            ],
+        )
+    {
+        return "analysis";
+    }
+    let text = build_context_match_text(input);
+    if text_has_any(
+        &text,
+        &[
+            "修复",
+            "修改",
+            "实现",
+            "落地",
+            "补上",
+            "更新",
+            "改成",
+            "删除",
+            "新增",
+            "fix",
+            "implement",
+            "update",
+            "change",
+            "add",
+            "remove",
+        ],
+    ) {
+        return "implementation";
+    }
+    if text_has_any(
+        &text,
+        &[
+            "分析",
+            "查看",
+            "检查",
+            "看看",
+            "是否",
+            "为什么",
+            "解释",
+            "说一说",
+            "review",
+            "analyze",
+            "inspect",
+            "explain",
+            "why",
+        ],
+    ) {
+        return "analysis";
+    }
+    "implementation"
+}
+
+fn default_checker_status(input: &StudioContextExportInput) -> &'static str {
+    if infer_turn_kind(input) == "implementation" {
+        "queued"
+    } else {
+        "not_applicable"
+    }
+}
+
+fn default_checker_summary(input: &StudioContextExportInput) -> &'static str {
+    if infer_turn_kind(input) == "implementation" {
+        "Checker is queued until implementation output is available for this turn."
+    } else {
+        "Checker is not applicable because this turn is classified as analysis-only."
+    }
+}
+
+fn default_checker_retry_status(checker_status: &str) -> &'static str {
+    if checker_status == "fail" {
+        "not_run"
+    } else {
+        "not_applicable"
+    }
+}
+
+fn checker_has_current_status(checker: &Value) -> bool {
+    checker
+        .get("status")
+        .and_then(Value::as_str)
+        .map(|status| {
+            matches!(
+                status,
+                "not_applicable" | "queued" | "running" | "skipped" | "pass" | "fail"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn reset_active_context_run_state(
     task_dir: &Path,
     input: &StudioContextExportInput,
     context_id: &str,
 ) -> Result<(), String> {
     let generated_at = Local::now().to_rfc3339();
+    let checker_status = default_checker_status(input);
+    let checker_summary = default_checker_summary(input);
     atomic_write(
         &task_dir.join("checker-report.md"),
         &render_checker_report(
             context_id,
-            "pending",
-            "Checker has not run for this active request yet.",
+            checker_status,
+            checker_summary,
             &[],
             false,
             &generated_at,
@@ -772,8 +908,8 @@ fn reset_active_context_run_state(
         &task_dir.join("checker-retry-report.md"),
         &render_checker_retry_report(
             context_id,
-            "not-run",
-            "Checker retry has not run for this active request yet.",
+            default_checker_retry_status(checker_status),
+            "Checker retry is not applicable for the current checker state.",
             &generated_at,
         ),
     )?;
@@ -992,6 +1128,7 @@ Relevant files:\n{}\n",
     )
 }
 
+#[allow(dead_code)]
 pub fn build_research_agent_prompt(input: &StudioContextExportInput, task_id: &str) -> String {
     let request = clean_studio_text(&input.user_prompt);
     let latest_conclusion = clean_studio_option(input.handoff_summary.as_deref())
@@ -1027,6 +1164,7 @@ Relevant files:\n{}\n",
     )
 }
 
+#[allow(dead_code)]
 pub fn apply_research_agent_output(
     project_root: &str,
     task_id: &str,
@@ -1188,6 +1326,31 @@ pub fn record_checker_retry_result(
         status: status.to_string(),
         report_path: report_path.to_string_lossy().to_string(),
     })
+}
+
+pub fn set_checker_gate_state(
+    project_root: &str,
+    task_id: &str,
+    checker_status: &str,
+    summary: &str,
+) -> Result<(), String> {
+    let project_root = Path::new(project_root.trim());
+    if project_root.as_os_str().is_empty() || !project_root.is_dir() {
+        return Err("Project root is missing or not a local directory.".to_string());
+    }
+    let task_dir = active_context_dir(project_root);
+    fs::create_dir_all(&task_dir).map_err(|err| err.to_string())?;
+    let checked_at = Local::now().to_rfc3339();
+    let report = render_checker_report(task_id, checker_status, summary, &[], false, &checked_at);
+    atomic_write(&task_dir.join("checker-report.md"), &report)?;
+    update_checker_gate_task_state(
+        &task_dir.join("context.json"),
+        task_id,
+        checker_status,
+        summary,
+        &checked_at,
+    )?;
+    write_active_context_check_doc(project_root, task_id)
 }
 
 pub fn apply_memory_distill_candidates(
@@ -2239,11 +2402,7 @@ fn is_probable_project_file_reference(project_root: &Path, relative: &str) -> bo
     if path.exists() {
         return true;
     }
-    relative.contains('/')
-        && path
-            .parent()
-            .map(|parent| parent.exists())
-            .unwrap_or(false)
+    relative.contains('/') && path.parent().map(|parent| parent.exists()).unwrap_or(false)
 }
 
 fn normalize_handoff_file(project_root: &Path, file: &str) -> Option<String> {
@@ -2505,8 +2664,8 @@ Updated: {}\n\n\
 - Manifest: .studio/runtime/active-context/manifest.jsonl\n\
 - Check manifest: .studio/runtime/active-context/check.jsonl\n\n\
 ## Workspace\n\n\
-- Dirty files: {}\n\
-- Failing checks: {}\n\
+- Dirty files: {} (fresh `git status --porcelain` count)\n\
+- Known failing checks: {} (last recorded Studio validation result)\n\
 - Current CLI: {}\n\
 - Terminal tab: {}\n\n\
 ## Next Action\n\n\
@@ -2625,6 +2784,9 @@ fn render_active_context_json(
     let next_step = clean_studio_option(input.handoff_next_step.as_deref())
         .unwrap_or_else(|| "Continue from the latest user request.".to_string());
     let handoff_files = active_context_relevant_files(input);
+    let turn_kind = infer_turn_kind(input);
+    let checker_status = default_checker_status(input);
+    let checker_summary = default_checker_summary(input);
     let mut value = serde_json::json!({
         "id": context_id,
         "title": non_empty(&title, "Active Context"),
@@ -2641,6 +2803,13 @@ fn render_active_context_json(
         },
         "projectName": input.project_name.as_str(),
         "workspaceId": input.workspace_id.as_str(),
+        "workspaceHealth": {
+            "dirtyFiles": input.dirty_files,
+            "dirtyFilesSource": "git status --porcelain",
+            "failingChecks": input.failing_checks,
+            "failingChecksSource": "last recorded Studio validation result",
+        },
+        "turnKind": turn_kind,
         "goal": non_empty(&goal, "Continue the active context."),
         "currentRequest": current_request,
         "contextCurator": {
@@ -2675,6 +2844,17 @@ fn render_active_context_json(
         "checkManifest": active_context_ref("check.jsonl"),
         "checkerReport": active_context_ref("checker-report.md"),
         "checkerRetryReport": active_context_ref("checker-retry-report.md"),
+        "checker": {
+            "status": checker_status,
+            "summary": checker_summary,
+            "issues": [],
+            "needsRetry": false,
+            "retryPerformed": false,
+            "retryStatus": Value::Null,
+            "retryReport": Value::Null,
+            "checkedAt": Value::Null,
+            "report": active_context_ref("checker-report.md"),
+        },
         "memoryCandidates": active_context_ref("memory-candidates.jsonl"),
         "memoryDistillReport": active_context_ref("memory-distill-report.md"),
         "policyCheck": active_context_ref("policy-check.json"),
@@ -2683,13 +2863,20 @@ fn render_active_context_json(
     });
     if let Some(object) = value.as_object_mut() {
         if preserve_run_state {
-            for key in ["checker", "memoryDistill", "promotion"] {
+            for key in ["memoryDistill", "promotion"] {
                 if let Some(existing_value) = existing_context
                     .and_then(|context| context.get(key))
                     .cloned()
                 {
                     object.insert(key.to_string(), existing_value);
                 }
+            }
+            if let Some(existing_checker) = existing_context
+                .and_then(|context| context.get("checker"))
+                .filter(|checker| checker_has_current_status(checker))
+                .cloned()
+            {
+                object.insert("checker".to_string(), existing_checker);
             }
         }
     }
@@ -2743,6 +2930,7 @@ fn write_active_context_check_doc(project_root: &Path, context_id: &str) -> Resu
 fn render_active_context_spec(input: &StudioContextExportInput, context_id: &str) -> String {
     let goal = studio_context_goal(input);
     let current_request = studio_current_request(input);
+    let turn_kind = infer_turn_kind(input);
     let files = render_markdown_bullets(
         &active_context_relevant_files(input),
         "- (none captured yet; discover from the request and manifests)",
@@ -2756,7 +2944,7 @@ Generated: {}\n\n\
 {}\n\n\
 ## Acceptance Criteria\n\n\
 - Follow `.studio/workflow.md` as the shared context contract.\n\
-- Keep the change scoped to the current user request.\n\
+- Treat this as a `{turn_kind}` turn and keep the response scoped to the current user request.\n\
 - Use `.studio/runtime/active-context/manifest.jsonl` and `check.jsonl` as curated context inputs.\n\
 - Keep durable promotion separate from request-local runtime state.\n\n\
 ## Relevant Files\n\n\
@@ -2775,7 +2963,27 @@ Generated: {}\n\n\
 
 fn render_active_context_plan(input: &StudioContextExportInput, context_id: &str) -> String {
     let files = active_context_relevant_files(input);
-    let implementation_strategy = if files.is_empty() {
+    let turn_kind = infer_turn_kind(input);
+    let execution_strategy = if turn_kind == "analysis" {
+        let mut steps = vec![
+            "Review the active-context spec and curated manifests before drawing conclusions."
+                .to_string(),
+        ];
+        if files.is_empty() {
+            steps.push(
+                "Inspect the repository area that best matches the current question.".to_string(),
+            );
+        } else {
+            steps.extend(
+                files
+                    .iter()
+                    .take(4)
+                    .map(|file| format!("Inspect `{file}` as evidence for the current analysis.")),
+            );
+        }
+        steps.push("Report findings, risks, and production-readiness judgment without editing files unless the user asks for changes.".to_string());
+        steps
+    } else if files.is_empty() {
         vec![
             "Review the active-context spec and curated manifests before editing.".to_string(),
             "Inspect the repository area that best matches the current request.".to_string(),
@@ -2785,12 +2993,9 @@ fn render_active_context_plan(input: &StudioContextExportInput, context_id: &str
         let mut steps = vec![
             "Review the active-context spec and curated manifests before editing.".to_string(),
         ];
-        steps.extend(
-            files
-                .iter()
-                .take(4)
-                .map(|file| format!("Inspect `{file}` for the request boundary and existing patterns.")),
-        );
+        steps.extend(files.iter().take(4).map(|file| {
+            format!("Inspect `{file}` for the request boundary and existing patterns.")
+        }));
         steps.push(format!(
             "Apply the requested change in {} after the target boundaries are clear.",
             render_inline_file_list(&files)
@@ -2800,7 +3005,7 @@ fn render_active_context_plan(input: &StudioContextExportInput, context_id: &str
     let verification_strategy = vec![
         "Use `.studio/runtime/active-context/check.jsonl` as the verification scope.".to_string(),
         format!(
-            "Account for the current workspace signal: {} dirty files and {} failing checks.",
+            "Account for the current workspace signal: {} dirty files and {} last recorded failing checks.",
             input.dirty_files, input.failing_checks
         ),
         "Record concrete checker failures in `checker-report.md` and mirror the status into `check.md`.".to_string(),
@@ -2809,7 +3014,7 @@ fn render_active_context_plan(input: &StudioContextExportInput, context_id: &str
         "# Active Context Plan: {context_id}\n\n\
 Generated: {}\n\n\
 ## Summary\n\n\
-Implement the current request through the active-context artifact chain: `spec.md` defines intent, `plan.md` defines execution shape, `tasks.md` defines the immediate worklist, and `check.md` tracks verification state.\n\n\
+Use the active-context artifact chain for this `{turn_kind}` turn: `spec.md` defines intent, `plan.md` defines execution shape, `tasks.md` defines the immediate worklist, and `check.md` tracks verification state.\n\n\
 ## Inputs\n\n\
 - Spec: `.studio/runtime/active-context/spec.md`\n\
 - Context report: `.studio/runtime/active-context/context-selection-report.md`\n\
@@ -2817,8 +3022,9 @@ Implement the current request through the active-context artifact chain: `spec.m
 - Check manifest: `.studio/runtime/active-context/check.jsonl`\n\
 - Current CLI: `{}`\n\
 - Branch: `{}`\n\
+- Turn kind: `{turn_kind}`\n\
 - Write mode: `{}`\n\n\
-## Implementation Strategy\n\n\
+## Execution Strategy\n\n\
 {}\n\n\
 ## Verification Strategy\n\n\
 {}\n\n\
@@ -2830,7 +3036,7 @@ Implement the current request through the active-context artifact chain: `spec.m
         input.cli_id,
         input.branch,
         if input.write_mode { "full write" } else { "read-only" },
-        render_markdown_bullets(&implementation_strategy, "- Review the current request."),
+        render_markdown_bullets(&execution_strategy, "- Review the current request."),
         render_markdown_bullets(&verification_strategy, "- Verify the scoped change."),
     )
 }
@@ -2844,19 +3050,36 @@ fn render_active_context_tasks(input: &StudioContextExportInput, context_id: &st
     };
 
     push_task("Review `spec.md`, `plan.md`, `manifest.jsonl`, and `check.jsonl`.".to_string());
-    push_task("Confirm the current request boundary, acceptance criteria, and likely target modules.".to_string());
+    push_task(
+        "Confirm the current request boundary, acceptance criteria, and likely target modules."
+            .to_string(),
+    );
     let files = active_context_relevant_files(input);
     if files.is_empty() {
         push_task("Inspect the repository area that best matches the current request.".to_string());
-        push_task("Apply the scoped implementation change for the active request.".to_string());
+        if infer_turn_kind(input) == "implementation" {
+            push_task("Apply the scoped implementation change for the active request.".to_string());
+        } else {
+            push_task(
+                "Record analysis findings and production-readiness risks without editing files."
+                    .to_string(),
+            );
+        }
     } else {
         for file in files.iter().take(4) {
             push_task(format!("Inspect `{file}` for the current request."));
         }
-        push_task(format!(
-            "Apply the requested change in {}.",
-            render_inline_file_list(&files)
-        ));
+        if infer_turn_kind(input) == "implementation" {
+            push_task(format!(
+                "Apply the requested change in {}.",
+                render_inline_file_list(&files)
+            ));
+        } else {
+            push_task(format!(
+                "Use {} as evidence for the analysis and avoid file edits unless explicitly requested.",
+                render_inline_file_list(&files)
+            ));
+        }
     }
     push_task("Run or capture the relevant verification steps for the touched area.".to_string());
     push_task("Update the active-context conclusion, next step, and checker status.".to_string());
@@ -2880,11 +3103,11 @@ fn render_active_context_check(project_root: &Path, context_id: &str) -> String 
     let status = checker
         .get("status")
         .and_then(Value::as_str)
-        .unwrap_or("pending");
+        .unwrap_or("queued");
     let summary = checker
         .get("summary")
         .and_then(Value::as_str)
-        .unwrap_or("Checker has not run yet.");
+        .unwrap_or("Checker is queued until implementation output is available for this turn.");
     let issues = checker
         .get("issues")
         .and_then(Value::as_array)
@@ -2897,25 +3120,34 @@ fn render_active_context_check(project_root: &Path, context_id: &str) -> String 
         })
         .unwrap_or_default();
     let retry_status = checker.get("retryStatus").and_then(Value::as_str);
+    let turn_kind = context
+        .get("turnKind")
+        .and_then(Value::as_str)
+        .unwrap_or("implementation");
     let manifest_entries = count_jsonl_entries(&task_dir.join("check.jsonl"));
     let findings = if issues.is_empty() {
-        if status == "pending" {
-            "- Checker output is pending.".to_string()
-        } else {
-            "- No blocking issues recorded.".to_string()
+        match status {
+            "queued" => "- Checker is queued for this write-enabled turn.".to_string(),
+            "running" => "- Checker is currently running.".to_string(),
+            "not_applicable" => "- Checker does not apply to this turn.".to_string(),
+            "skipped" => {
+                "- Checker did not complete, so no blocking issues were recorded.".to_string()
+            }
+            _ => "- No blocking issues recorded.".to_string(),
         }
     } else {
         render_markdown_bullets(&issues, "- No blocking issues recorded.")
     };
     let retry_line = retry_status
         .map(|value| format!("- Retry status: `{value}`"))
-        .unwrap_or_else(|| "- Retry status: `not-run`".to_string());
+        .unwrap_or_else(|| format!("- Retry status: `{}`", default_checker_retry_status(status)));
     format!(
         "# Active Context Check: {context_id}\n\n\
 Generated: {}\n\n\
 ## Current Status\n\n\
 - Checker status: `{status}`\n\
 - Summary: {summary}\n\
+- Turn kind: `{turn_kind}`\n\
 {}\n\n\
 ## Validation Gates\n\n\
 - Verify against `.studio/runtime/active-context/spec.md` and `.studio/runtime/active-context/plan.md`.\n\
@@ -3015,7 +3247,7 @@ fn render_policy_check_json(
         "agent": "policy-check",
         "allowAutoPromote": false,
         "decision": if has_promotable_candidates { "pending_checker" } else { "hold" },
-        "checkerStatus": "not_run",
+        "checkerStatus": default_checker_status(input),
         "reason": if has_promotable_candidates {
             "Promotable candidates exist, but automatic promotion waits for the checker gate."
         } else {
@@ -3431,6 +3663,7 @@ fn score_spec_layer_intent(relative: &str, match_text: &str, relevant_files: &[S
                 &combined,
                 &[
                     ".studio/spec",
+                    ".studio/",
                     "spec",
                     "three layers",
                     "三层",
@@ -3525,6 +3758,9 @@ fn score_spec_layer_intent(relative: &str, match_text: &str, relevant_files: &[S
             ) {
                 score += 10;
             }
+            if is_studio_architecture_request(&combined) {
+                score += 16;
+            }
             score
         }
         ".studio/spec/storage/index.md" => {
@@ -3561,9 +3797,13 @@ fn score_spec_layer_intent(relative: &str, match_text: &str, relevant_files: &[S
             ) {
                 score += 10;
             }
+            if is_studio_architecture_request(&combined) {
+                score += 16;
+            }
             score
         }
         ".studio/spec/automation/index.md" => {
+            let mut score = 0;
             if text_has_any(
                 &combined,
                 &[
@@ -3582,10 +3822,12 @@ fn score_spec_layer_intent(relative: &str, match_text: &str, relevant_files: &[S
                     "工作上下文",
                 ],
             ) {
-                15
-            } else {
-                0
+                score += 15;
             }
+            if is_studio_architecture_request(&combined) {
+                score += 16;
+            }
+            score
         }
         ".studio/spec/windows-runtime/index.md" => {
             if text_has_any(
@@ -3606,6 +3848,25 @@ fn score_spec_layer_intent(relative: &str, match_text: &str, relevant_files: &[S
         }
         _ => 0,
     }
+}
+
+fn is_studio_architecture_request(value: &str) -> bool {
+    text_has_any(value, &[".studio", "studio"])
+        && text_has_any(
+            value,
+            &[
+                "三层",
+                "three layers",
+                "架构",
+                "生成物",
+                "生产可用",
+                "active context",
+                "active-context",
+                "workflow",
+                "spec",
+                "memory",
+            ],
+        )
 }
 
 fn text_has_any(value: &str, needles: &[&str]) -> bool {
@@ -3672,6 +3933,7 @@ fn parse_context_curator_output(raw_output: &str) -> Result<ContextCuratorOutput
     ))
 }
 
+#[allow(dead_code)]
 fn parse_research_agent_output(raw_output: &str) -> Result<ResearchAgentOutput, String> {
     let trimmed = raw_output.trim();
     if trimmed.is_empty() {
@@ -4057,6 +4319,56 @@ fn update_checker_task_state(
             "retryPerformed": false,
             "retryStatus": null,
             "retryReport": null,
+            "checkedAt": checked_at,
+            "report": active_context_ref("checker-report.md"),
+        }),
+    );
+    object.insert(
+        "updatedAt".to_string(),
+        Value::String(checked_at.to_string()),
+    );
+    let content = serde_json::to_string_pretty(&task_json).map_err(|err| err.to_string())?;
+    atomic_write(task_json_path, &content)
+}
+
+fn update_checker_gate_task_state(
+    task_json_path: &Path,
+    task_id: &str,
+    checker_status: &str,
+    summary: &str,
+    checked_at: &str,
+) -> Result<(), String> {
+    let mut task_json = read_json_file(task_json_path).unwrap_or_else(|_| {
+        serde_json::json!({
+            "id": task_id,
+            "studioManaged": true,
+        })
+    });
+    let object = ensure_json_object(&mut task_json);
+    object
+        .entry("id".to_string())
+        .or_insert_with(|| Value::String(task_id.to_string()));
+    if checker_status == "running" {
+        object.insert("status".to_string(), Value::String("checking".to_string()));
+    }
+    object.insert(
+        "checkerReport".to_string(),
+        Value::String(active_context_ref("checker-report.md")),
+    );
+    object.insert(
+        "checkerRetryReport".to_string(),
+        Value::String(active_context_ref("checker-retry-report.md")),
+    );
+    object.insert(
+        "checker".to_string(),
+        serde_json::json!({
+            "status": checker_status,
+            "summary": summary,
+            "issues": [],
+            "needsRetry": false,
+            "retryPerformed": false,
+            "retryStatus": Value::Null,
+            "retryReport": Value::Null,
             "checkedAt": checked_at,
             "report": active_context_ref("checker-report.md"),
         }),
@@ -5705,10 +6017,18 @@ mod tests {
         assert!(root
             .join(".studio/runtime/active-context/current.md")
             .is_file());
-        assert!(root.join(".studio/runtime/active-context/spec.md").is_file());
-        assert!(root.join(".studio/runtime/active-context/plan.md").is_file());
-        assert!(root.join(".studio/runtime/active-context/tasks.md").is_file());
-        assert!(root.join(".studio/runtime/active-context/check.md").is_file());
+        assert!(root
+            .join(".studio/runtime/active-context/spec.md")
+            .is_file());
+        assert!(root
+            .join(".studio/runtime/active-context/plan.md")
+            .is_file());
+        assert!(root
+            .join(".studio/runtime/active-context/tasks.md")
+            .is_file());
+        assert!(root
+            .join(".studio/runtime/active-context/check.md")
+            .is_file());
         assert!(root.join("AGENTS.md").is_file());
         assert!(root.join(".codex/hooks/session-start.py").is_file());
         assert!(root.join(".codex/config.toml").is_file());
@@ -5789,6 +6109,13 @@ mod tests {
         assert_eq!(
             context.get("checkPath").and_then(Value::as_str),
             Some(".studio/runtime/active-context/check.md")
+        );
+        assert_eq!(
+            context
+                .get("workspaceHealth")
+                .and_then(|value| value.get("dirtyFilesSource"))
+                .and_then(Value::as_str),
+            Some("git status --porcelain")
         );
     }
 
@@ -5932,12 +6259,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(relevant_files, vec!["README.md"]);
 
-        let spec =
-            fs::read_to_string(root.join(".studio/runtime/active-context/spec.md")).expect("read spec");
-        let plan =
-            fs::read_to_string(root.join(".studio/runtime/active-context/plan.md")).expect("read plan");
-        let tasks =
-            fs::read_to_string(root.join(".studio/runtime/active-context/tasks.md")).expect("read tasks");
+        let spec = fs::read_to_string(root.join(".studio/runtime/active-context/spec.md"))
+            .expect("read spec");
+        let plan = fs::read_to_string(root.join(".studio/runtime/active-context/plan.md"))
+            .expect("read plan");
+        let tasks = fs::read_to_string(root.join(".studio/runtime/active-context/tasks.md"))
+            .expect("read tasks");
         assert!(spec.contains("- README.md"));
         assert!(plan.contains("Inspect `README.md`"));
         assert!(tasks.contains("Inspect `README.md`"));
@@ -5990,12 +6317,15 @@ mod tests {
             .expect("export")
             .expect("studio export");
 
-        let candidates = fs::read_to_string(root.join(".studio/runtime/active-context/memory-candidates.jsonl"))
-            .expect("read memory candidates");
+        let candidates =
+            fs::read_to_string(root.join(".studio/runtime/active-context/memory-candidates.jsonl"))
+                .expect("read memory candidates");
         assert!(candidates.trim().is_empty());
 
-        let report = fs::read_to_string(root.join(".studio/runtime/active-context/memory-distill-report.md"))
-            .expect("read memory distill report");
+        let report = fs::read_to_string(
+            root.join(".studio/runtime/active-context/memory-distill-report.md"),
+        )
+        .expect("read memory distill report");
         assert!(report.contains("- Accepted candidates: 0"));
         assert!(report.contains("- Promotable candidates: 0"));
         assert!(report.contains("- Rejected candidates: 0"));
@@ -6010,6 +6340,115 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(0)
         );
+    }
+
+    #[test]
+    fn export_sets_checker_not_applicable_for_read_only_turns() {
+        let root = temp_project_root("checker-not-applicable");
+        let mut input = fixture_input(&root, "task-checker-not-applicable");
+        input.write_mode = false;
+        input.user_prompt = "Explain the current README without changing files.".to_string();
+
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let context = read_json_file(&root.join(".studio/runtime/active-context/context.json"))
+            .expect("read context");
+        assert_eq!(
+            context
+                .get("checker")
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("not_applicable")
+        );
+
+        let check = fs::read_to_string(root.join(".studio/runtime/active-context/check.md"))
+            .expect("read check");
+        assert!(check.contains("Checker status: `not_applicable`"));
+        assert!(check.contains("Checker does not apply to this turn."));
+    }
+
+    #[test]
+    fn export_sets_checker_not_applicable_for_analysis_turns() {
+        let root = temp_project_root("checker-analysis-turn");
+        let mut input = fixture_input(&root, "task-checker-analysis-turn");
+        input.write_mode = true;
+        input.user_prompt = "再分析一下现在的 @.studio/ 生成物是否符合三层架构设计。".to_string();
+        input.handoff_files = Vec::new();
+
+        export_studio_context(&input)
+            .expect("export")
+            .expect("studio export");
+
+        let context = read_json_file(&root.join(".studio/runtime/active-context/context.json"))
+            .expect("read context");
+        assert_eq!(
+            context.get("turnKind").and_then(Value::as_str),
+            Some("analysis")
+        );
+        assert_eq!(
+            context
+                .get("checker")
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("not_applicable")
+        );
+
+        let plan = fs::read_to_string(root.join(".studio/runtime/active-context/plan.md"))
+            .expect("read plan");
+        assert!(plan.contains("Turn kind: `analysis`"));
+        assert!(plan.contains("without editing files"));
+
+        let tasks = fs::read_to_string(root.join(".studio/runtime/active-context/tasks.md"))
+            .expect("read tasks");
+        assert!(tasks.contains("avoid file edits"));
+
+        let check = fs::read_to_string(root.join(".studio/runtime/active-context/check.md"))
+            .expect("read check");
+        assert!(check.contains("Checker status: `not_applicable`"));
+        assert!(check.contains("Turn kind: `analysis`"));
+    }
+
+    #[test]
+    fn export_does_not_preserve_legacy_pending_checker_status() {
+        let root = temp_project_root("checker-legacy-pending");
+        let mut input = fixture_input(&root, "task-checker-legacy-pending");
+        input.user_prompt = "Update README.md.".to_string();
+        export_studio_context(&input)
+            .expect("first export")
+            .expect("studio export");
+
+        let context_path = root.join(".studio/runtime/active-context/context.json");
+        let mut context = read_json_file(&context_path).expect("read context");
+        context["checker"] = serde_json::json!({
+            "status": "pending",
+            "summary": "Checker has not run yet.",
+            "issues": [],
+        });
+        atomic_write(
+            &context_path,
+            &serde_json::to_string_pretty(&context).expect("serialize context"),
+        )
+        .expect("write context");
+
+        export_studio_context(&input)
+            .expect("second export")
+            .expect("studio export");
+
+        let context = read_json_file(&context_path).expect("read refreshed context");
+        assert_eq!(
+            context
+                .get("checker")
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("queued")
+        );
+
+        let check = fs::read_to_string(root.join(".studio/runtime/active-context/check.md"))
+            .expect("read check");
+        assert!(check.contains("Checker status: `queued`"));
+        assert!(!check.contains("pending"));
     }
 
     #[test]
@@ -6039,8 +6478,9 @@ mod tests {
         assert_eq!(distill.rejected_entries, 2);
         assert!(!distill.allow_auto_promote);
 
-        let content = fs::read_to_string(root.join(".studio/runtime/active-context/memory-candidates.jsonl"))
-            .expect("read memory candidates");
+        let content =
+            fs::read_to_string(root.join(".studio/runtime/active-context/memory-candidates.jsonl"))
+                .expect("read memory candidates");
         assert!(content.trim().is_empty());
     }
 
@@ -6069,19 +6509,24 @@ mod tests {
 
         let context = read_json_file(&root.join(".studio/runtime/active-context/context.json"))
             .expect("read context");
-        assert!(context.get("checker").is_none());
+        assert_eq!(
+            context
+                .get("checker")
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str),
+            Some("queued")
+        );
 
-        let check =
-            fs::read_to_string(root.join(".studio/runtime/active-context/check.md")).expect("read check");
-        assert!(check.contains("Checker status: `pending`"));
-        assert!(check.contains("Checker has not run yet."));
+        let check = fs::read_to_string(root.join(".studio/runtime/active-context/check.md"))
+            .expect("read check");
+        assert!(check.contains("Checker status: `queued`"));
+        assert!(check.contains("Checker is queued"));
         assert!(!check.contains("Old checker failure"));
 
-        let checker_report = fs::read_to_string(
-            root.join(".studio/runtime/active-context/checker-report.md"),
-        )
-        .expect("read checker report");
-        assert!(checker_report.contains("Status: pending"));
+        let checker_report =
+            fs::read_to_string(root.join(".studio/runtime/active-context/checker-report.md"))
+                .expect("read checker report");
+        assert!(checker_report.contains("Status: queued"));
         assert!(!checker_report.contains("Old checker failure"));
     }
 
@@ -6215,6 +6660,7 @@ mod tests {
                 .expect("read manifest");
         assert!(!manifest.contains("\"fallback\":true"));
         assert!(manifest.contains(".studio/spec/storage/index.md"));
+        assert!(manifest.contains(".studio/spec/cli-adapters/index.md"));
         assert!(manifest.contains(".studio/spec/automation/index.md"));
 
         let context = read_json_file(&root.join(".studio/runtime/active-context/context.json"))

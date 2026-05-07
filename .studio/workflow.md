@@ -14,14 +14,15 @@ This project uses a Studio-native shared-context workflow. Each user turn runs e
 - `.studio/runtime/context.md` is the startup pointer for every CLI.
 - `.studio/runtime/active-context/current.md` is the current request snapshot.
 - `.studio/runtime/active-context/context.json` is the machine-readable active state.
-- `.studio/runtime/active-context/prd.md` captures the current request, goal, and acceptance criteria.
+- `.studio/runtime/active-context/prd.md` remains a compact compatibility summary of the current request.
+- `.studio/runtime/active-context/spec.md`, `plan.md`, `tasks.md`, and `check.md` are the primary runtime artifact chain for the current request.
 - `.studio/runtime/active-context/manifest.jsonl` and `check.jsonl` list curated spec/research references.
 - `.studio/runtime/active-context/research/` stores request-specific research notes.
 
 ## Machine Gates
 
 - `context_curated`: manifests contain managed entries or an explicit fallback reason.
-- `checking`: checker consumes `check.jsonl` and records concrete failures before retry.
+- `checking`: checker consumes `check.jsonl`, writes `checker-report.md`, and updates `check.md`.
 - `memory_distilled`: long-term updates include provenance, confidence, supersedes, and a policy decision.
 - Runtime traces, command successes, and generic file-update facts must not auto-promote into durable workspace memory.
 - Durable `.studio/spec/` and `.studio/workspace/` updates are automatic only when policy-check permits them; otherwise they remain candidates.

@@ -63,9 +63,9 @@ use studio_context::{
     apply_checker_agent_output, apply_context_curator_output, apply_memory_distill_candidates,
     auto_promote_studio_memory, build_checker_agent_prompt, build_context_curator_prompt,
     export_studio_context, load_studio_workflow_state, promote_studio_context,
-    record_checker_retry_result, record_context_curator_fallback, StudioCheckerApplyResult,
-    StudioContextCurationApplyResult, StudioContextExportInput, StudioPolicyPromotionResult,
-    StudioPromoteRequest, StudioPromoteResult, StudioWorkflowState,
+    record_checker_retry_result, record_context_curator_fallback, set_checker_gate_state,
+    StudioCheckerApplyResult, StudioContextCurationApplyResult, StudioContextExportInput,
+    StudioPolicyPromotionResult, StudioPromoteRequest, StudioPromoteResult, StudioWorkflowState,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
@@ -103,7 +103,6 @@ const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 const STUDIO_CONTEXT_CURATOR_TIMEOUT_MS: u64 = 45_000;
-const MACOS_NATIVE_SPEECH_TIMEOUT_MS: u64 = 75_000;
 const DATA_DIR_OVERRIDE_ENV: &str = "MULTI_CLI_STUDIO_DATA_DIR";
 const STUDIO_CONTEXT_KEY_ENV: &str = "STUDIO_CONTEXT_KEY";
 const STUDIO_CONTEXT_ID_ENV: &str = "STUDIO_CONTEXT_ID";
@@ -598,6 +597,7 @@ struct ModelProviderConfig {
     last_refreshed_at: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ApiChatMessage {
@@ -1231,6 +1231,7 @@ fn collect_system_prompt(messages: &[ApiChatMessage]) -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 fn collapse_chat_messages(
     messages: &[ApiChatMessage],
     assistant_role: &str,
@@ -1744,6 +1745,7 @@ fn build_gemini_api_chat_contents(messages: &[ApiChatMessage]) -> Result<Vec<Val
     Ok(payload)
 }
 
+#[allow(dead_code)]
 fn value_text_parts(value: &Value) -> Vec<String> {
     match value {
         Value::String(text) => {
@@ -2079,6 +2081,7 @@ fn transcribe_audio_with_provider(
     )
 }
 
+#[allow(dead_code)]
 fn parse_openai_response_text(value: &Value) -> Option<String> {
     value
         .get("choices")
@@ -2100,6 +2103,7 @@ fn parse_openai_response_text(value: &Value) -> Option<String> {
         })
 }
 
+#[allow(dead_code)]
 fn parse_claude_response_text(value: &Value) -> Option<String> {
     value
         .get("content")
@@ -2115,6 +2119,7 @@ fn parse_claude_response_text(value: &Value) -> Option<String> {
         .filter(|text| !text.trim().is_empty())
 }
 
+#[allow(dead_code)]
 fn parse_gemini_response_text(value: &Value) -> Option<String> {
     value
         .get("candidates")
@@ -4314,6 +4319,7 @@ struct RuntimeLogSession {
     finalized: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct LiveCodexTurnTarget {
     child_pid: u32,
@@ -4324,6 +4330,7 @@ struct LiveCodexTurnTarget {
     interrupt_sent: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct LiveGeminiTurnTarget {
     child_pid: u32,
@@ -4332,6 +4339,7 @@ struct LiveGeminiTurnTarget {
     interrupt_sent: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct LiveProcessTurnTarget {
     cli_id: String,
@@ -4347,6 +4355,7 @@ enum LiveChatTurnTarget {
     Process(LiveProcessTurnTarget),
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct LiveChatTurnHandle {
     terminal_tab_id: String,
@@ -6688,7 +6697,9 @@ fn append_text_chunk(buffer: &mut String, text: &str) {
 enum CodexGoalCommand {
     Show,
     Clear,
-    SetStatus { status: String },
+    SetStatus {
+        status: String,
+    },
     SetObjective {
         objective: String,
         token_budget: Option<i64>,
@@ -6755,7 +6766,10 @@ fn parse_codex_goal_objective(value: &str) -> Result<(String, Option<i64>), Stri
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| "Goal objective must not be empty.".to_string())?;
-        return Ok((objective.to_string(), Some(parse_compact_token_budget(token_text)?)));
+        return Ok((
+            objective.to_string(),
+            Some(parse_compact_token_budget(token_text)?),
+        ));
     }
     if trimmed.is_empty() {
         return Err("Goal objective must not be empty.".to_string());
@@ -13501,7 +13515,10 @@ fn send_chat_message(
                         None,
                         None,
                         request_session_for_thread.model.get("codex").cloned(),
-                        Some(codex_permission_mode(&request_session_for_thread, write_mode)),
+                        Some(codex_permission_mode(
+                            &request_session_for_thread,
+                            write_mode,
+                        )),
                         None,
                     )),
                     Some(vec![ChatMessageBlock::Status {
@@ -13546,7 +13563,7 @@ fn send_chat_message(
         studio_context_key,
     ) = {
         let mut state = store.state.lock().map_err(|e| e.to_string())?.clone();
-        state.workspace.project_root = project_root.clone();
+        state.workspace.project_root = effective_project_root.clone();
         state.workspace.project_name = project_name.clone();
         state.workspace.branch = if remote_workspace {
             "workspace".to_string()
@@ -13554,6 +13571,7 @@ fn send_chat_message(
             git_output(&effective_project_root, &["branch", "--show-current"])
                 .unwrap_or_else(|| "workspace".to_string())
         };
+        sync_workspace_metrics(&mut state);
         let is_resuming = effective_previous_transport_session
             .as_ref()
             .and_then(|s| s.thread_id.as_ref())
@@ -16171,6 +16189,7 @@ fn split_choice_values(raw: &str) -> Vec<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn git_command_output(project_root: &str, args: &[&str]) -> Result<std::process::Output, String> {
     let mut command = Command::new("git");
     command.args(args).current_dir(project_root);
@@ -16179,6 +16198,7 @@ fn git_command_output(project_root: &str, args: &[&str]) -> Result<std::process:
     command.output().map_err(|err| err.to_string())
 }
 
+#[allow(dead_code)]
 fn git_command_status(project_root: &str, args: &[&str]) -> Result<(), String> {
     let mut command = Command::new("git");
     command.args(args).current_dir(project_root);
@@ -16268,6 +16288,7 @@ fn parse_git_log_entries_from_stdout(stdout: &str) -> Vec<GitLogEntry> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn parse_git_log_entries(project_root: &str, args: &[&str]) -> Vec<GitLogEntry> {
     let Ok(output) = git_command_output(project_root, args) else {
         return Vec::new();
@@ -16317,6 +16338,7 @@ fn parse_git_history_commits_from_stdout(stdout: &str) -> Vec<GitHistoryCommit> 
         .collect()
 }
 
+#[allow(dead_code)]
 fn parse_git_history_commits(project_root: &str, revision: Option<&str>) -> Vec<GitHistoryCommit> {
     let mut command = Command::new("git");
     command.current_dir(project_root);
@@ -16358,6 +16380,7 @@ fn normalize_remote_target_branch(remote_name: &str, branch_name: &str) -> Strin
     branch_trimmed.to_string()
 }
 
+#[allow(dead_code)]
 fn parse_git_history_commits_with_args(
     project_root: &str,
     revisions: &[String],
@@ -16670,6 +16693,7 @@ fn build_git_commit_history_for_target(
     }
 }
 
+#[allow(dead_code)]
 fn git_head_snapshot_id(project_root: &str) -> String {
     git_output(project_root, &["rev-parse", "HEAD"])
         .unwrap_or_else(|| format!("snapshot-{}", Local::now().timestamp_millis()))
@@ -16680,6 +16704,7 @@ fn git_head_snapshot_id_for_target(target: &WorkspaceTarget) -> String {
         .unwrap_or_else(|| format!("snapshot-{}", Local::now().timestamp_millis()))
 }
 
+#[allow(dead_code)]
 fn git_status_letter(status: &str) -> String {
     match status {
         "added" => "A".to_string(),
@@ -16726,6 +16751,7 @@ fn parse_git_diff_tree_name_status_from_stdout(
         .collect()
 }
 
+#[allow(dead_code)]
 fn parse_git_diff_tree_name_status(
     project_root: &str,
     commit: &str,
@@ -16773,6 +16799,7 @@ fn parse_git_diff_tree_name_status_for_target(
     .unwrap_or_default()
 }
 
+#[allow(dead_code)]
 fn parse_git_diff_tree_numstat(project_root: &str, commit: &str) -> HashMap<String, (u32, u32)> {
     let mut command = Command::new("git");
     command.current_dir(project_root);
@@ -16798,6 +16825,7 @@ fn parse_git_diff_tree_numstat_for_target(
         .unwrap_or_default()
 }
 
+#[allow(dead_code)]
 fn git_commit_file_diff(project_root: &str, commit: &str, path: &str) -> String {
     let mut command = Command::new("git");
     command.current_dir(project_root);
@@ -17177,6 +17205,7 @@ fn build_git_commit_details_for_target(
     }
 }
 
+#[allow(dead_code)]
 fn get_git_upstream(project_root: &str) -> Option<String> {
     git_output(
         project_root,
@@ -17254,6 +17283,7 @@ fn parse_branch_ref_lines(
         .collect()
 }
 
+#[allow(dead_code)]
 fn parse_branch_ref_lines_for_target(
     target: &WorkspaceTarget,
     args: &[&str],
@@ -17506,8 +17536,9 @@ fn github_api_get_json(url: &str) -> Result<Value, String> {
     response.json::<Value>().map_err(|err| err.to_string())
 }
 
+#[allow(dead_code)]
 fn parse_numstat_output(project_root: &str, args: &[&str]) -> HashMap<String, (u32, u32)> {
-    let mut stats = HashMap::new();
+    let stats = HashMap::new();
     let Ok(output) = git_command_output(project_root, args) else {
         return stats;
     };
@@ -17673,6 +17704,7 @@ fn status_from_code(status_char: char) -> String {
     .to_string()
 }
 
+#[allow(dead_code)]
 fn build_git_file_statuses(
     project_root: &str,
 ) -> Result<(Vec<GitFileStatus>, Vec<GitFileStatus>), String> {
@@ -20511,7 +20543,7 @@ fn ensure_pty_session(
         })
         .map_err(|err| err.to_string())?;
 
-    let mut command = match &workspace_target {
+    let command = match &workspace_target {
         WorkspaceTarget::Local { project_root } => {
             let shell = shell_path();
             let mut command = CommandBuilder::new(shell.clone());
@@ -21698,9 +21730,30 @@ fn maybe_run_studio_checker_and_retry(
     implementation_output: &str,
     write_mode: bool,
 ) -> Option<StudioCheckerApplyResult> {
-    if !write_mode || implementation_output.trim().is_empty() {
+    if !write_mode {
+        let _ = set_checker_gate_state(
+            project_root,
+            task_id,
+            "not_applicable",
+            "Checker is not applicable because this turn is not write-enabled.",
+        );
         return None;
     }
+    if implementation_output.trim().is_empty() {
+        let _ = set_checker_gate_state(
+            project_root,
+            task_id,
+            "not_applicable",
+            "Checker is not applicable because this turn produced no implementation output.",
+        );
+        return None;
+    }
+    let _ = set_checker_gate_state(
+        project_root,
+        task_id,
+        "running",
+        "Checker is running for the latest implementation.",
+    );
     let prompt = build_checker_agent_prompt(input, task_id, implementation_output);
     let mut checker_session = session.clone();
     checker_session.plan_mode = true;
@@ -21718,6 +21771,14 @@ fn maybe_run_studio_checker_and_retry(
         Ok(outcome) => outcome,
         Err(error) => {
             studio_context_log!("[studio-context] checker skipped: {error}");
+            let _ = set_checker_gate_state(
+                project_root,
+                task_id,
+                "skipped",
+                &format!(
+                    "Checker was skipped because the silent checker agent failed to start: {error}"
+                ),
+            );
             return None;
         }
     };
@@ -21730,6 +21791,12 @@ fn maybe_run_studio_checker_and_retry(
         Ok(result) => result,
         Err(error) => {
             studio_context_log!("[studio-context] checker output ignored: {error}");
+            let _ = set_checker_gate_state(
+                project_root,
+                task_id,
+                "skipped",
+                &format!("Checker output was skipped because it could not be applied: {error}"),
+            );
             return None;
         }
     };
@@ -22828,6 +22895,7 @@ fn run_silent_agent_turn_once(
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct AutomationExecutionOutcome {
     owner_cli: String,
@@ -27817,7 +27885,7 @@ fn ensure_ssh_control_path_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::new())
 }
 
-fn apply_ssh_connection_reuse_args(command: &mut Command) -> Result<(), String> {
+fn apply_ssh_connection_reuse_args(_command: &mut Command) -> Result<(), String> {
     #[cfg(unix)]
     {
         let control_path = ensure_ssh_control_path_dir()?.join("%C");
@@ -27834,7 +27902,7 @@ fn apply_ssh_connection_reuse_args(command: &mut Command) -> Result<(), String> 
     Ok(())
 }
 
-fn apply_ssh_connection_reuse_args_to_pty(command: &mut CommandBuilder) -> Result<(), String> {
+fn apply_ssh_connection_reuse_args_to_pty(_command: &mut CommandBuilder) -> Result<(), String> {
     #[cfg(unix)]
     {
         let control_path = ensure_ssh_control_path_dir()?.join("%C");
@@ -28285,6 +28353,7 @@ fn emit_runtime_log_exited(app: &AppHandle, snapshot: RuntimeLogSessionSnapshot)
     let _ = app.emit("runtime-log:session-exited", snapshot);
 }
 
+#[allow(dead_code)]
 fn resolve_runtime_workspace_root(store: &AppStore, workspace_id: &str) -> Result<String, String> {
     if let Some(state) = store.terminal_storage.load_state()? {
         if let Some(workspace) = state.workspaces.iter().find(|item| item.id == workspace_id) {
@@ -28732,6 +28801,7 @@ fn ps_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+#[allow(dead_code)]
 fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -28784,6 +28854,7 @@ fn command_lookup_names(command_name: &str) -> Vec<String> {
     names
 }
 
+#[allow(dead_code)]
 fn append_candidate_dir(candidates: &mut Vec<PathBuf>, path: PathBuf) {
     if path.is_dir() {
         candidates.push(path);
