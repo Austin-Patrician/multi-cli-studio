@@ -213,7 +213,7 @@ def build_session_context(root: Path, binding: dict) -> str:
     parts = [
         "<studio-context-native-hook>",
         f"Platform: {PLATFORM}",
-        "Studio Context Native Hook 已注入：active context、spec/workspace 索引和 manifest 文件引用已加载。",
+        "Studio Context Native Hook 已注入：active context artifact chain、spec/workspace 索引和 manifest 文件引用已加载。",
         f"Shared context version: {shared.get('version') or 'unknown'}",
         "Rules:",
         "- Read `.studio/runtime/context.md` first; it is the active runtime snapshot.",
@@ -225,7 +225,12 @@ def build_session_context(root: Path, binding: dict) -> str:
         ".studio/runtime/context.md",
         ".studio/workflow.md",
         ".studio/runtime/active-context/current.md",
+        ".studio/runtime/active-context/context.json",
         ".studio/runtime/active-context/prd.md",
+        ".studio/runtime/active-context/spec.md",
+        ".studio/runtime/active-context/plan.md",
+        ".studio/runtime/active-context/tasks.md",
+        ".studio/runtime/active-context/check.md",
         ".studio/runtime/active-context/context-selection-report.md",
         ".studio/runtime/active-context/manifest.jsonl",
         ".studio/runtime/active-context/check.jsonl",
@@ -272,7 +277,7 @@ def build_delta_context(binding: dict) -> str:
         parts.append(hint.strip())
     else:
         parts.append(
-            "Reload `.studio/runtime/context.md` and the latest active-context manifests before continuing."
+            "Reload `.studio/runtime/context.md`, `.studio/runtime/active-context/current.md`, `.studio/runtime/active-context/spec.md`, `.studio/runtime/active-context/plan.md`, `.studio/runtime/active-context/tasks.md`, `.studio/runtime/active-context/check.md`, and the latest active-context manifests before continuing."
         )
     parts.append("</studio-context-delta>")
     return "\n".join(parts)
@@ -337,7 +342,13 @@ def build_subagent_context(root: Path, input_data: dict) -> str:
         "Required files:",
     ]
     if active_context:
+        parts.append("- `.studio/runtime/active-context/current.md`")
+        parts.append("- `.studio/runtime/active-context/context.json`")
         parts.append("- `.studio/runtime/active-context/prd.md`")
+        parts.append("- `.studio/runtime/active-context/spec.md`")
+        parts.append("- `.studio/runtime/active-context/plan.md`")
+        parts.append("- `.studio/runtime/active-context/tasks.md`")
+        parts.append("- `.studio/runtime/active-context/check.md`")
         parts.append("- `.studio/runtime/active-context/context-selection-report.md`")
     if manifest:
         parts.append(f"- `{manifest.relative_to(root)}`")
@@ -804,6 +815,8 @@ pub fn export_studio_context(
     fs::create_dir_all(&active_context_dir).map_err(|err| err.to_string())?;
     fs::create_dir_all(&sessions_dir).map_err(|err| err.to_string())?;
     ensure_workflow_files(project_root)?;
+    let mut adapter_files = ensure_adapters(project_root)?;
+    adapter_files.extend(ensure_native_cli_hooks(project_root)?);
 
     let context_id = ACTIVE_CONTEXT_ID.to_string();
 
@@ -837,6 +850,7 @@ pub fn export_studio_context(
         input,
         &context_id,
     )?;
+    write_active_context_artifact_chain(project_root, &active_context_dir, input, &context_id)?;
 
     let curation = curate_context(project_root, input, &context_id)?;
     atomic_write(
@@ -901,8 +915,6 @@ pub fn export_studio_context(
     let binding_json = serde_json::to_string_pretty(&binding).map_err(|err| err.to_string())?;
     atomic_write(&session_binding_path, &binding_json)?;
 
-    let mut adapter_files = ensure_adapters(project_root)?;
-    adapter_files.extend(ensure_native_cli_hooks(project_root)?);
     cleanup_old_entries(&sessions_dir, KEEP_SESSION_BINDINGS)?;
 
     let prelude = render_prelude(input, &context_id);
@@ -5573,7 +5585,7 @@ fn should_write_managed_file(path: &Path) -> Result<bool, String> {
 
 fn render_adapter(cli_name: &str) -> String {
     format!(
-        "{STUDIO_MANAGED_MARKER}\n# Studio Context Adapter for {cli_name}\n\nThis project uses Multi CLI Studio shared context.\n\n## Startup Rules\n\n- First read `.studio/runtime/context.md` when it exists.\n- Then read `.studio/runtime/active-context/current.md` and `.studio/runtime/active-context/context.json`.\n- Read `.studio/runtime/active-context/spec.md`, `plan.md`, `tasks.md`, and `check.md` when they exist for the current request.\n- Load JSONL manifest entries only when the current request needs them.\n- Treat `.studio/workflow.md` as the shared context contract.\n- Treat `.studio/spec/` as durable project rules.\n- Treat `.studio/workspace/` as durable project memory and journals.\n- Treat `.studio/runtime/` as generated runtime state that may be overwritten.\n- Context/spec curation is automatic; use `context-selection-report.md`, `manifest.jsonl`, and `check.jsonl` before broad history recall.\n- Durable spec/workspace writes are allowed only through the workflow's provenance, confidence, conflict, and policy-check gates.\n- Keep prompt context small; prefer file references over pasting long history.\n"
+        "{STUDIO_MANAGED_MARKER}\n# Studio Context Adapter for {cli_name}\n\nThis project uses Multi CLI Studio shared context.\n\n## Startup Rules\n\n- First read `.studio/runtime/context.md` when it exists.\n- Then read `.studio/runtime/active-context/current.md` and `.studio/runtime/active-context/context.json`.\n- Read `.studio/runtime/active-context/spec.md`, `.studio/runtime/active-context/plan.md`, `.studio/runtime/active-context/tasks.md`, and `.studio/runtime/active-context/check.md` when they exist for the current request.\n- Load JSONL manifest entries only when the current request needs them.\n- Treat `.studio/workflow.md` as the shared context contract.\n- Treat `.studio/spec/` as durable project rules.\n- Treat `.studio/workspace/` as durable project memory and journals.\n- Treat `.studio/runtime/` as generated runtime state that may be overwritten.\n- Context/spec curation is automatic; use `context-selection-report.md`, `manifest.jsonl`, and `check.jsonl` before broad history recall.\n- Durable spec/workspace writes are allowed only through the workflow's provenance, confidence, conflict, and policy-check gates.\n- Keep prompt context small; prefer file references over pasting long history.\n"
     )
 }
 
@@ -5711,6 +5723,16 @@ mod tests {
             .expect("read codex hook");
         assert!(hook.contains("active-context"));
         assert!(hook.contains("hook-state"));
+        assert!(hook.contains(".studio/runtime/active-context/spec.md"));
+        assert!(hook.contains(".studio/runtime/active-context/plan.md"));
+        assert!(hook.contains(".studio/runtime/active-context/tasks.md"));
+        assert!(hook.contains(".studio/runtime/active-context/check.md"));
+
+        let agents = fs::read_to_string(root.join("AGENTS.md")).expect("read agents adapter");
+        assert!(agents.contains(".studio/runtime/active-context/spec.md"));
+        assert!(agents.contains(".studio/runtime/active-context/plan.md"));
+        assert!(agents.contains(".studio/runtime/active-context/tasks.md"));
+        assert!(agents.contains(".studio/runtime/active-context/check.md"));
 
         let codex_hooks =
             fs::read_to_string(root.join(".codex/hooks.json")).expect("read codex hooks");

@@ -13610,7 +13610,13 @@ fn send_chat_message(
         let studio_context = if remote_workspace {
             None
         } else {
-            export_studio_context(&studio_context_input).ok().flatten()
+            match export_studio_context(&studio_context_input) {
+                Ok(result) => result,
+                Err(error) => {
+                    eprintln!("[studio-context] export failed: {error}");
+                    None
+                }
+            }
         };
         if let Some(export) = studio_context.as_ref() {
             start_studio_context_curator_job(
