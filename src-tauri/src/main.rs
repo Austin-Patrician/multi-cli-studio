@@ -19690,7 +19690,14 @@ fn search_workspace_files(
 
             let lower_query = query.to_lowercase();
             let mut results = Vec::new();
-            collect_workspace_files(&root, &root, &lower_query, &mut results)?;
+            let mut visited_entries = 0usize;
+            collect_workspace_files(
+                &root,
+                &root,
+                &lower_query,
+                &mut results,
+                &mut visited_entries,
+            )?;
             results.sort_by(|left, right| {
                 let left_kind = if left.kind == "directory" { 0 } else { 1 };
                 let right_kind = if right.kind == "directory" { 0 } else { 1 };
@@ -19706,16 +19713,27 @@ fn search_workspace_files(
             let script = r#"
 import json, os, sys
 
-IGNORED_DIRS = {".git", "node_modules", "target", "dist", "build", ".next", ".turbo"}
+MAX_RESULTS = 40
+MAX_VISITED = 12000
+IGNORED_DIRS = {
+    ".git", ".vs", ".idea", ".vscode",
+    "node_modules", "target", "dist", "build", ".next", ".turbo",
+    "binaries", "deriveddatacache", "intermediate", "saved",
+}
 root = os.getcwd()
 query = (sys.argv[1] if len(sys.argv) > 1 else "").strip().lower()
 results = []
+visited = 0
 
 for dirpath, dirnames, filenames in os.walk(root):
-    dirnames[:] = [name for name in dirnames if name not in IGNORED_DIRS]
+    dirnames[:] = [name for name in dirnames if name.lower() not in IGNORED_DIRS]
     dirnames.sort(key=lambda item: item.lower())
     filenames.sort(key=lambda item: item.lower())
     for name in dirnames:
+        visited += 1
+        if visited >= MAX_VISITED:
+            print(json.dumps(results))
+            raise SystemExit(0)
         full_path = os.path.join(dirpath, name)
         relative = os.path.relpath(full_path, root).replace(os.sep, "/")
         haystack = relative.lower()
@@ -19727,10 +19745,14 @@ for dirpath, dirnames, filenames in os.walk(root):
                 "absolutePath": None,
                 "kind": "directory",
             })
-            if len(results) >= 40:
+            if len(results) >= MAX_RESULTS:
                 print(json.dumps(results))
                 raise SystemExit(0)
     for name in filenames:
+        visited += 1
+        if visited >= MAX_VISITED:
+            print(json.dumps(results))
+            raise SystemExit(0)
         full_path = os.path.join(dirpath, name)
         relative = os.path.relpath(full_path, root).replace(os.sep, "/")
         haystack = relative.lower()
@@ -19742,7 +19764,7 @@ for dirpath, dirnames, filenames in os.walk(root):
                 "absolutePath": None,
                 "kind": "file",
             })
-            if len(results) >= 40:
+            if len(results) >= MAX_RESULTS:
                 print(json.dumps(results))
                 raise SystemExit(0)
 
@@ -20269,7 +20291,7 @@ fn list_workspace_entries(
 
             for entry in read_dir.flatten() {
                 let file_name = entry.file_name().to_string_lossy().to_string();
-                if file_name == ".git" {
+                if is_ignored_workspace_dir(&file_name) {
                     continue;
                 }
 
@@ -20313,6 +20335,11 @@ fn list_workspace_entries(
             let script = r#"
 import json, os, sys
 
+IGNORED_DIRS = {
+    ".git", ".vs", ".idea", ".vscode",
+    "node_modules", "target", "dist", "build", ".next", ".turbo",
+    "binaries", "deriveddatacache", "intermediate", "saved",
+}
 root = os.path.realpath(os.getcwd())
 requested = (sys.argv[1] if len(sys.argv) > 1 else "").strip().replace("\\", "/").strip("/")
 target = root if not requested else os.path.realpath(os.path.join(root, requested))
@@ -20329,14 +20356,14 @@ if not os.path.isdir(target):
 
 entries = []
 for name in os.listdir(target):
-    if name == ".git":
+    if name.lower() in IGNORED_DIRS:
         continue
     child = os.path.join(target, name)
     is_dir = os.path.isdir(child)
     has_children = False
     if is_dir:
         try:
-            has_children = any(item != ".git" for item in os.listdir(child))
+            has_children = any(item.lower() not in IGNORED_DIRS for item in os.listdir(child))
         except OSError:
             has_children = False
     entries.append({
@@ -29016,9 +29043,23 @@ fn resolve_command_path(command_name: &str) -> Option<String> {
 }
 
 fn is_ignored_workspace_dir(name: &str) -> bool {
+    let lower_name = name.to_ascii_lowercase();
     matches!(
-        name,
-        ".git" | "node_modules" | "target" | "dist" | "build" | ".next" | ".turbo"
+        lower_name.as_str(),
+        ".git"
+            | ".vs"
+            | ".idea"
+            | ".vscode"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".turbo"
+            | "binaries"
+            | "deriveddatacache"
+            | "intermediate"
+            | "saved"
     )
 }
 
@@ -29256,19 +29297,31 @@ fn collect_workspace_text_search_results(
     Ok(())
 }
 
+const MAX_WORKSPACE_FILE_SEARCH_RESULTS: usize = 40;
+const MAX_WORKSPACE_FILE_SEARCH_VISITED_ENTRIES: usize = 12_000;
+
 fn collect_workspace_files(
     root: &Path,
     current: &Path,
     lower_query: &str,
     results: &mut Vec<FileMentionCandidate>,
+    visited_entries: &mut usize,
 ) -> Result<(), String> {
-    if results.len() >= 40 {
+    if results.len() >= MAX_WORKSPACE_FILE_SEARCH_RESULTS
+        || *visited_entries >= MAX_WORKSPACE_FILE_SEARCH_VISITED_ENTRIES
+    {
         return Ok(());
     }
 
     let entries = fs::read_dir(current).map_err(|err| err.to_string())?;
     for entry in entries {
+        if results.len() >= MAX_WORKSPACE_FILE_SEARCH_RESULTS
+            || *visited_entries >= MAX_WORKSPACE_FILE_SEARCH_VISITED_ENTRIES
+        {
+            return Ok(());
+        }
         let entry = entry.map_err(|err| err.to_string())?;
+        *visited_entries += 1;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
 
@@ -29293,12 +29346,14 @@ fn collect_workspace_files(
                     absolute_path: Some(path.to_string_lossy().to_string()),
                     kind: "directory".to_string(),
                 });
-                if results.len() >= 40 {
+                if results.len() >= MAX_WORKSPACE_FILE_SEARCH_RESULTS {
                     return Ok(());
                 }
             }
-            collect_workspace_files(root, &path, lower_query, results)?;
-            if results.len() >= 40 {
+            collect_workspace_files(root, &path, lower_query, results, visited_entries)?;
+            if results.len() >= MAX_WORKSPACE_FILE_SEARCH_RESULTS
+                || *visited_entries >= MAX_WORKSPACE_FILE_SEARCH_VISITED_ENTRIES
+            {
                 return Ok(());
             }
             continue;

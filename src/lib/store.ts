@@ -64,10 +64,7 @@ import {
   summarizeForContext,
 } from "./messageFormatting";
 import { notifyTerminalCompletion, type TerminalCompletionNotice } from "./desktopNotifications";
-import {
-  loadWorkspaceFileIndex,
-  searchWorkspaceFileIndex,
-} from "./workspaceFileIndex";
+import { searchWorkspaceFileIndex } from "./workspaceFileIndex";
 
 const DEFAULT_PROCESS_TIMEOUT_MS = 300000;
 const STREAM_RUNTIME_STALE_GRACE_MS = 10000;
@@ -4660,25 +4657,7 @@ export const useStore = create<StoreState>((set, get) => {
       if (cached.length > 0) {
         return cached;
       }
-      const index = await loadWorkspaceFileIndex({
-        workspaceId: workspace.id,
-        projectRoot: workspace.rootPath,
-      });
-      const normalized = query.trim().toLowerCase();
-      return index.files
-        .filter((item) => {
-          const relativePath = item.relativePath.toLowerCase();
-          return relativePath.includes(normalized) || item.name.toLowerCase().includes(normalized);
-        })
-        .sort((left, right) => {
-          if (left.kind !== right.kind) {
-            return left.kind === "directory" ? -1 : 1;
-          }
-          return left.relativePath.localeCompare(right.relativePath, undefined, {
-            sensitivity: "base",
-          });
-        })
-        .slice(0, 40);
+      return await bridge.searchWorkspaceFiles(workspace.rootPath, query, workspace.id);
     } catch {
       return [];
     }

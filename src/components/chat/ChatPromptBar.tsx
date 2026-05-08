@@ -78,7 +78,6 @@ import { AgentIcon } from "../AgentIcon";
 import { resolveSelectedCustomAgent } from "../../lib/customAgents";
 import { useStore } from "../../lib/store";
 import { useVendorModels, VENDOR_MODEL_STORAGE_KEYS } from "../../lib/vendorModels";
-import { loadWorkspaceFileIndex } from "../../lib/workspaceFileIndex";
 import { CLI_OPTIONS } from "./CliSelector";
 import { PromptOverlay, PromptOverlayItem, PromptOverlaySection } from "./PromptOverlay";
 import {
@@ -1551,14 +1550,6 @@ export function ChatPromptBar({
     skillToken,
     workspace,
   ]);
-
-  useEffect(() => {
-    if (!workspace) return;
-    void loadWorkspaceFileIndex({
-      workspaceId: workspace.id,
-      projectRoot: workspace.rootPath,
-    });
-  }, [workspace]);
 
   useEffect(() => {
     if (!promptTemplateToken) {

@@ -2187,6 +2187,7 @@ function WorkspaceFilesPanel({
   const openChatFilePreview = useStore((state) => state.openChatFilePreview);
   const [entriesByParent, setEntriesByParent] = useState<Record<string, WorkspaceTreeEntry[]>>({});
   const [expandedDirectories, setExpandedDirectories] = useState<Record<string, boolean>>({ "": true });
+  const [loadingDirectories, setLoadingDirectories] = useState<Record<string, boolean>>({});
   const [treeLoading, setTreeLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -2203,60 +2204,57 @@ function WorkspaceFilesPanel({
     [activeTabId, terminalTabs, workspace.id]
   );
 
-  const syncFileTree = useCallback(
-    async (options?: { force?: boolean; silent?: boolean }) => {
-      const force = Boolean(options?.force);
+  const loadDirectoryEntries = useCallback(
+    async (path: string, options?: { silent?: boolean }) => {
+      const normalizedPath = path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
       const silent = Boolean(options?.silent);
-      if (!silent) {
+      if (normalizedPath === "") {
         setTreeLoading(true);
+      } else if (!silent) {
+        setLoadingDirectories((current) => ({ ...current, [normalizedPath]: true }));
       }
       setErrorMessage(null);
       try {
-        const index = await loadWorkspaceFileIndex({
-          workspaceId: workspace.id,
-          projectRoot: workspace.rootPath,
-          force,
-          maxAgeMs:
-            workspace.locationKind === "ssh" ? REMOTE_FILE_TREE_CACHE_TTL_MS : Number.POSITIVE_INFINITY,
-        });
-        setEntriesByParent(index.entriesByParent);
+        const entries = await bridge.listWorkspaceEntries(
+          workspace.rootPath,
+          normalizedPath || undefined,
+          workspace.id
+        );
+        setEntriesByParent((current) => ({
+          ...current,
+          [normalizedPath]: entries,
+        }));
       } catch (error) {
         const detail = error instanceof Error ? error.message : "Unable to load workspace files.";
         setErrorMessage(detail);
       } finally {
-        if (!silent) {
+        if (normalizedPath === "") {
           setTreeLoading(false);
+        } else if (!silent) {
+          setLoadingDirectories((current) => {
+            const next = { ...current };
+            delete next[normalizedPath];
+            return next;
+          });
         }
       }
     },
-    [workspace.id, workspace.locationKind, workspace.rootPath]
+    [workspace.id, workspace.rootPath]
   );
 
   useEffect(() => {
-    const cachedUiState = workspaceTreeUiStateByWorkspace.get(workspace.id);
-    const cachedIndex = peekWorkspaceFileIndex(workspace.id);
-    setEntriesByParent(cachedIndex?.entriesByParent ?? {});
-    setExpandedDirectories(cachedUiState?.expandedDirectories ?? { "": true });
+    const rootExpanded = workspaceTreeUiStateByWorkspace.get(workspace.id)?.expandedDirectories?.[""] ?? true;
+    setEntriesByParent({});
+    setExpandedDirectories({ "": rootExpanded });
+    setLoadingDirectories({});
     setErrorMessage(null);
     setSelectedPath(null);
     setSelectedKind(null);
     setCreateDialogKind(null);
     setCreateName("");
     setDeleteDialogOpen(false);
-    const hasCachedRoot = Boolean(
-      cachedIndex && Object.prototype.hasOwnProperty.call(cachedIndex.entriesByParent, "")
-    );
-    const cacheFresh =
-      workspace.locationKind !== "ssh" ||
-      isWorkspaceFileIndexFresh(workspace.id, REMOTE_FILE_TREE_CACHE_TTL_MS);
-    if (!hasCachedRoot) {
-      void syncFileTree();
-      return;
-    }
-    if (!cacheFresh) {
-      void syncFileTree({ force: true, silent: true });
-    }
-  }, [syncFileTree, workspace.id, workspace.locationKind]);
+    void loadDirectoryEntries("");
+  }, [loadDirectoryEntries, workspace.id]);
 
   useEffect(() => {
     workspaceTreeUiStateByWorkspace.set(workspace.id, {
@@ -2266,12 +2264,16 @@ function WorkspaceFilesPanel({
 
   const toggleDirectory = useCallback(
     (path: string) => {
+      const normalizedPath = path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
       setExpandedDirectories((current) => {
-        const isExpanded = Boolean(current[path]);
-        return { ...current, [path]: !isExpanded };
+        const isExpanded = Boolean(current[normalizedPath]);
+        return { ...current, [normalizedPath]: !isExpanded };
       });
+      if (!Object.prototype.hasOwnProperty.call(entriesByParent, normalizedPath)) {
+        void loadDirectoryEntries(normalizedPath);
+      }
     },
-    []
+    [entriesByParent, loadDirectoryEntries]
   );
 
   const renderDirectory = useCallback(
@@ -2281,8 +2283,10 @@ function WorkspaceFilesPanel({
         const normalizedPath = entry.path.replace(/\\/g, "/");
         const isDirectory = entry.kind === "directory";
         const isExpanded = Boolean(expandedDirectories[normalizedPath]);
+        const hasLoadedChildren = Object.prototype.hasOwnProperty.call(entriesByParent, normalizedPath);
+        const isLoadingChildren = Boolean(loadingDirectories[normalizedPath]);
         const gitStatus = gitStatusByPath.get(normalizedPath);
-        const children = isDirectory && isExpanded ? renderDirectory(normalizedPath, depth + 1) : [];
+        const children = isDirectory && isExpanded && hasLoadedChildren ? renderDirectory(normalizedPath, depth + 1) : [];
 
         return [
           <div key={normalizedPath} className="file-tree-row-wrap">
@@ -2321,12 +2325,20 @@ function WorkspaceFilesPanel({
                 {entry.name}
               </span>
             </button>
-            {isDirectory && isExpanded ? children : null}
+            {isDirectory && isExpanded ? (
+              hasLoadedChildren ? (
+                children
+              ) : (
+                <div className="file-tree-empty py-1 text-left" style={{ paddingLeft: `${34 + (depth + 1) * 16}px` }}>
+                  {isLoadingChildren ? "Loading..." : "No files loaded."}
+                </div>
+              )
+            ) : null}
           </div>,
         ];
       });
     },
-    [entriesByParent, expandedDirectories, gitStatusByPath, openChatFilePreview, selectedPath, targetTabId, toggleDirectory, workspace.id, workspace.locationKind]
+    [entriesByParent, expandedDirectories, gitStatusByPath, loadingDirectories, openChatFilePreview, selectedPath, targetTabId, toggleDirectory]
   );
 
   const selectedParentFolder = useMemo(() => {
@@ -2342,8 +2354,13 @@ function WorkspaceFilesPanel({
   const selectedParentDisplay = selectedParentFolder || workspace.rootPath;
 
   const refreshFileTree = useCallback(async () => {
-    await syncFileTree({ force: true });
-  }, [syncFileTree]);
+    const loadedPaths = Object.keys(entriesByParent);
+    if (loadedPaths.length === 0) {
+      await loadDirectoryEntries("");
+      return;
+    }
+    await Promise.all(loadedPaths.map((path) => loadDirectoryEntries(path, { silent: path !== "" })));
+  }, [entriesByParent, loadDirectoryEntries]);
 
   const resolveCreateTargetPath = useCallback(
     (draft: string | null) => {
@@ -2375,11 +2392,11 @@ function WorkspaceFilesPanel({
         await bridge.createWorkspaceDirectory(workspace.rootPath, nextPath, workspace.id);
       }
       closeCreateDialog();
-      await refreshFileTree();
+      await loadDirectoryEntries(selectedParentFolder);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [closeCreateDialog, createDialogKind, createName, refreshFileTree, resolveCreateTargetPath, workspace.rootPath]);
+  }, [closeCreateDialog, createDialogKind, createName, loadDirectoryEntries, resolveCreateTargetPath, selectedParentFolder, workspace.id, workspace.rootPath]);
 
   const openDeleteDialog = useCallback(() => {
     if (!selectedPath || !selectedKind) return;
@@ -2394,14 +2411,30 @@ function WorkspaceFilesPanel({
     if (!selectedPath || !selectedKind) return;
     try {
       await bridge.trashWorkspaceItem(workspace.rootPath, selectedPath, workspace.id);
+      const deletedPath = selectedPath;
+      const parentFolder =
+        selectedKind === "directory"
+          ? selectedPath.lastIndexOf("/") >= 0
+            ? selectedPath.slice(0, selectedPath.lastIndexOf("/"))
+            : ""
+          : selectedParentFolder;
       setSelectedPath(null);
       setSelectedKind(null);
       setDeleteDialogOpen(false);
-      await refreshFileTree();
+      setEntriesByParent((current) => {
+        const next = { ...current };
+        for (const key of Object.keys(next)) {
+          if (key === deletedPath || key.startsWith(`${deletedPath}/`)) {
+            delete next[key];
+          }
+        }
+        return next;
+      });
+      await loadDirectoryEntries(parentFolder || "");
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [refreshFileTree, selectedKind, selectedPath, workspace.rootPath]);
+  }, [loadDirectoryEntries, selectedKind, selectedParentFolder, selectedPath, workspace.id, workspace.rootPath]);
 
   return (
     <div className="file-tree-panel">
