@@ -27912,7 +27912,7 @@ fn ensure_ssh_control_path_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::new())
 }
 
-fn apply_ssh_connection_reuse_args(_command: &mut Command) -> Result<(), String> {
+fn apply_ssh_connection_reuse_args(command: &mut Command) -> Result<(), String> {
     #[cfg(unix)]
     {
         let control_path = ensure_ssh_control_path_dir()?.join("%C");
@@ -27929,7 +27929,7 @@ fn apply_ssh_connection_reuse_args(_command: &mut Command) -> Result<(), String>
     Ok(())
 }
 
-fn apply_ssh_connection_reuse_args_to_pty(_command: &mut CommandBuilder) -> Result<(), String> {
+fn apply_ssh_connection_reuse_args_to_pty(command: &mut CommandBuilder) -> Result<(), String> {
     #[cfg(unix)]
     {
         let control_path = ensure_ssh_control_path_dir()?.join("%C");
