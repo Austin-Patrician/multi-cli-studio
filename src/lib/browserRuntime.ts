@@ -96,6 +96,7 @@ import {
   WorkspaceFileIndexResponse,
   WorkspacePickResult,
   WorkspaceTreeEntry,
+  type StorageInfo,
 } from "./models";
 import { parseApiAssistantContent } from "./apiChatFormatting";
 import {
@@ -2017,6 +2018,18 @@ export const browserRuntime = {
     }
     emitState();
     return structuredClone(state);
+  },
+
+  async getStorageInfo(): Promise<StorageInfo> {
+    return {
+      dataDir: "Browser localStorage",
+      terminalDbPath: TERMINAL_STATE_KEY,
+      sessionPath: STORAGE_KEY,
+      contextPath: CONTEXT_KEY,
+      settingsPath: SETTINGS_KEY,
+      dataDirOverrideEnv: "MULTI_CLI_STUDIO_DATA_DIR",
+      dataDirOverrideActive: false,
+    };
   },
 
   async switchActiveAgent(agentId: AgentId) {

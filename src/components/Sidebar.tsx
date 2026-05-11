@@ -1,6 +1,6 @@
 import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
-import { PencilLine } from "lucide-react";
+import { bridge } from "../lib/bridge";
 import { useStore } from "../lib/store";
 import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog";
 
@@ -222,6 +222,7 @@ function WorkspaceTabItem({
   onClick,
   onClose,
   onContextMenu,
+  onDoubleClick,
   onPointerDown,
   onPointerEnter,
 }: {
@@ -236,6 +237,7 @@ function WorkspaceTabItem({
   onClick: () => void;
   onClose: () => void;
   onContextMenu?: (event: React.MouseEvent<HTMLElement>) => void;
+  onDoubleClick?: (event: React.MouseEvent<HTMLElement>) => void;
   onPointerDown?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onPointerEnter?: () => void;
 }) {
@@ -256,6 +258,7 @@ function WorkspaceTabItem({
       onMouseDown={onPointerDown}
       onMouseEnter={onPointerEnter}
       onContextMenu={onContextMenu}
+      onDoubleClick={onDoubleClick}
       className={`${containerClass} cursor-grab active:cursor-grabbing`}
       title={collapsed ? `${title}\n${subtitle}` : title}
     >
@@ -504,6 +507,18 @@ export function Sidebar() {
     cancelWorkspaceRename();
   }
 
+  async function revealWorkspaceLocation(workspaceId: string) {
+    const workspace = workspaceById.get(workspaceId);
+    if (!workspace || workspace.locationKind === "ssh" || !workspace.rootPath) return;
+    setWorkspaceMenu(null);
+
+    try {
+      await bridge.revealPathInFileManager(workspace.rootPath);
+    } catch (error) {
+      console.error("[multi-cli-studio] Failed to reveal workspace location", error);
+    }
+  }
+
   function finishDrag() {
     const sourceTabId = draggingTabIdRef.current || dragStartRef.current?.tabId || null;
     const targetTabId = dragOverTabIdRef.current;
@@ -570,6 +585,10 @@ export function Sidebar() {
       y: event.clientY,
     });
   }
+
+  const workspaceMenuWorkspace = workspaceMenu ? workspaceById.get(workspaceMenu.workspaceId) ?? null : null;
+  const canRevealWorkspaceLocation =
+    Boolean(workspaceMenuWorkspace?.rootPath) && workspaceMenuWorkspace?.locationKind !== "ssh";
 
   return (
     <aside
@@ -639,6 +658,7 @@ export function Sidebar() {
                     }}
                     onClose={() => closeTerminalTab(tab.id)}
                     onContextMenu={(event) => openWorkspaceContextMenu(event, tab.workspaceId)}
+                    onDoubleClick={(event) => openWorkspaceContextMenu(event, tab.workspaceId)}
                     onPointerDown={(event) => startPointerDrag(tab.id, event)}
                     onPointerEnter={() => {
                       if (draggingTabIdRef.current && draggingTabIdRef.current !== tab.id) {
@@ -730,7 +750,7 @@ export function Sidebar() {
       {workspaceMenu ? (
         <div
           ref={workspaceMenuRef}
-          className="fixed z-50 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-[0_18px_40px_rgba(15,23,42,0.18)]"
+          className="fixed z-50 rounded-[12px] border border-slate-200 bg-white p-1.5 shadow-[0_18px_40px_rgba(15,23,42,0.18)]"
           style={{
             left: Math.max(12, workspaceMenu.x + 6),
             top: Math.max(12, workspaceMenu.y + 6),
@@ -739,13 +759,22 @@ export function Sidebar() {
           <button
             type="button"
             onClick={() => startWorkspaceRename(workspaceMenu.workspaceId)}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-50 hover:text-slate-900"
+            disabled={!workspaceMenuWorkspace}
+            className="flex w-full min-w-[104px] items-center rounded-lg px-2.5 py-1.5 text-left text-[11px] font-medium text-slate-600 transition hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
             aria-label="重命名工作区"
             title="重命名工作区"
           >
-            <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100">
-              <PencilLine size={14} />
-            </span>
+            <span>重命名工作区</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void revealWorkspaceLocation(workspaceMenu.workspaceId)}
+            disabled={!canRevealWorkspaceLocation}
+            className="mt-1 flex w-full min-w-[104px] items-center rounded-lg px-2.5 py-1.5 text-left text-[11px] font-medium text-slate-600 transition hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label="打开工作区位置"
+            title={workspaceMenuWorkspace?.locationKind === "ssh" ? "远程工作区不能在本机打开位置" : "打开工作区位置"}
+          >
+            <span>打开位置</span>
           </button>
         </div>
       ) : null}

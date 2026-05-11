@@ -300,6 +300,16 @@ export interface ContextStore {
   maxOutputCharsPerTurn: number;
 }
 
+export interface StorageInfo {
+  dataDir: string;
+  terminalDbPath: string;
+  sessionPath: string;
+  contextPath: string;
+  settingsPath: string;
+  dataDirOverrideEnv: string;
+  dataDirOverrideActive: boolean;
+}
+
 /** User-configurable settings */
 export interface NotificationConfig {
   notifyOnCompletion: boolean;

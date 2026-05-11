@@ -60,6 +60,7 @@ import {
   PersistedTerminalState,
   SemanticMemoryChunk,
   SemanticRecallRequest,
+  StorageInfo,
   StudioPromoteRequest,
   StudioPromoteResult,
   TranscribeAudioRequest,
@@ -141,6 +142,7 @@ export interface RuntimeBridge {
   getConversationHistory: (agentId: AgentId) => Promise<ConversationTurn[]>;
   getSettings: () => Promise<AppSettings>;
   updateSettings: (settings: AppSettings) => Promise<AppSettings>;
+  getStorageInfo: () => Promise<StorageInfo>;
   refreshProviderModels: (
     serviceType: ModelProviderServiceType,
     providerId: string
@@ -549,6 +551,10 @@ const tauriRuntime: RuntimeBridge = {
   async updateSettings(settings) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AppSettings>("update_settings", { settings });
+  },
+  async getStorageInfo() {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<StorageInfo>("get_storage_info");
   },
   async refreshProviderModels(serviceType, providerId) {
     const { invoke } = await import("@tauri-apps/api/core");

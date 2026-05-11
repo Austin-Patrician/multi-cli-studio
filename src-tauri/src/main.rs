@@ -108,6 +108,7 @@ const STUDIO_CONTEXT_KEY_ENV: &str = "STUDIO_CONTEXT_KEY";
 const STUDIO_CONTEXT_ID_ENV: &str = "STUDIO_CONTEXT_ID";
 const STUDIO_CONTEXT_LOG_ENV: &str = "STUDIO_CONTEXT_LOG";
 const SSH_ASKPASS_PASSWORD_ENV: &str = "MULTI_CLI_STUDIO_SSH_PASSWORD";
+const SSH_TEST_TIMEOUT_MS: u64 = 15_000;
 
 #[cfg(target_os = "windows")]
 const SSH_ASKPASS_HELPER_NAME: &str = "multi-cli-studio-ssh-askpass.cmd";
@@ -4273,6 +4274,18 @@ struct AppStore {
     codex_session_approval_rules: Arc<Mutex<CodexSessionApprovalRules>>,
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     live_chat_turns: Arc<Mutex<BTreeMap<String, Arc<LiveChatTurnHandle>>>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageInfo {
+    data_dir: String,
+    terminal_db_path: String,
+    session_path: String,
+    context_path: String,
+    settings_path: String,
+    data_dir_override_env: String,
+    data_dir_override_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -10961,6 +10974,25 @@ fn get_settings(store: State<'_, AppStore>) -> Result<AppSettings, String> {
     let mut settings = store.settings.lock().map_err(|err| err.to_string())?;
     normalize_settings_providers(&mut settings);
     Ok(settings.clone())
+}
+
+#[tauri::command]
+fn get_storage_info() -> Result<StorageInfo, String> {
+    let data_dir = data_dir()?;
+    let data_dir_override_active = std::env::var_os(DATA_DIR_OVERRIDE_ENV)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    Ok(StorageInfo {
+        terminal_db_path: default_terminal_db_path(&data_dir)
+            .to_string_lossy()
+            .to_string(),
+        session_path: state_file()?.to_string_lossy().to_string(),
+        context_path: context_file()?.to_string_lossy().to_string(),
+        settings_path: settings_file()?.to_string_lossy().to_string(),
+        data_dir: data_dir.to_string_lossy().to_string(),
+        data_dir_override_env: DATA_DIR_OVERRIDE_ENV.to_string(),
+        data_dir_override_active,
+    })
 }
 
 #[tauri::command]
@@ -28135,14 +28167,55 @@ fn run_ssh_capture(
         .arg("sh")
         .arg("-lc")
         .arg(build_remote_runtime_script(remote_command));
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().map_err(|err| err.to_string())?;
-    Ok(CliCommandOutput {
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    })
+    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    let started_at = Instant::now();
+
+    loop {
+        match child.try_wait().map_err(|err| err.to_string())? {
+            Some(status) => {
+                let mut stdout = String::new();
+                if let Some(mut stream) = child.stdout.take() {
+                    stream
+                        .read_to_string(&mut stdout)
+                        .map_err(|err| err.to_string())?;
+                }
+                let mut stderr = String::new();
+                if let Some(mut stream) = child.stderr.take() {
+                    stream
+                        .read_to_string(&mut stderr)
+                        .map_err(|err| err.to_string())?;
+                }
+                return Ok(CliCommandOutput {
+                    success: status.success(),
+                    stdout,
+                    stderr,
+                });
+            }
+            None => {
+                if started_at.elapsed() >= Duration::from_millis(SSH_TEST_TIMEOUT_MS) {
+                    terminate_process_tree(child.id());
+                    let _ = child.wait();
+                    let mut stderr = String::new();
+                    if let Some(mut stream) = child.stderr.take() {
+                        let _ = stream.read_to_string(&mut stderr);
+                    }
+                    let detail = stderr.trim();
+                    return Err(if detail.is_empty() {
+                        format!("SSH test timed out after {}ms", SSH_TEST_TIMEOUT_MS)
+                    } else {
+                        format!(
+                            "SSH test timed out after {}ms.\n\nstderr:\n{}",
+                            SSH_TEST_TIMEOUT_MS, detail
+                        )
+                    });
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
 }
 
 fn command_output_detail(output: &CliCommandOutput, fallback: &str) -> String {
@@ -30966,6 +31039,7 @@ pub fn run() {
             runtime_log_get_session,
             runtime_log_mark_exit,
             get_settings,
+            get_storage_info,
             update_settings,
             refresh_provider_models,
             send_api_chat_message,

@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { isTauri } from "@tauri-apps/api/core";
 import tauriConfig from "../../src-tauri/tauri.conf.json";
 import { bridge } from "../lib/bridge";
-import { AgentId, AgentResourceGroup, AgentResourceKind, AgentRuntimeResources, AppSettings, TerminalCliId } from "../lib/models";
+import { AgentId, AgentResourceGroup, AgentResourceKind, AgentRuntimeResources, AppSettings, TerminalCliId, type StorageInfo } from "../lib/models";
 import { useStore } from "../lib/store";
 import { requestDesktopNotificationPermission } from "../lib/desktopNotifications";
 import { getProvidersForServiceType, MODEL_PROVIDER_META, MODEL_PROVIDER_SERVICE_ORDER } from "../lib/modelProviders";
@@ -297,6 +297,8 @@ export function SettingsPage({
   const [emailTestBusy, setEmailTestBusy] = useState(false);
   const [emailRecipientsInput, setEmailRecipientsInput] = useState("");
   const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION);
+  const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
+  const [storageInfoError, setStorageInfoError] = useState<string | null>(null);
   const linkBrowserMode = local ? externalLinkBrowserMode(local.externalLinkBrowser) : "default";
 
   const activeSection = forcedSection ?? parseSettingsSection(searchParams.get("section"));
@@ -343,6 +345,31 @@ export function SettingsPage({
     }
 
     void loadAppVersion();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadStorageInfo() {
+      try {
+        const info = await bridge.getStorageInfo();
+        if (!cancelled) {
+          setStorageInfo(info);
+          setStorageInfoError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setStorageInfo(null);
+          setStorageInfoError(error instanceof Error ? error.message : "无法读取存储路径");
+        }
+      }
+    }
+
+    void loadStorageInfo();
 
     return () => {
       cancelled = true;
@@ -470,6 +497,17 @@ export function SettingsPage({
       userInitiated: true,
       announceNoUpdate: true,
     });
+  }
+
+  async function handleRevealStoragePath(path: string) {
+    try {
+      const opened = await bridge.revealPathInFileManager(path);
+      if (!opened) {
+        setBanner("当前运行环境不支持打开文件位置");
+      }
+    } catch (error) {
+      setBanner(error instanceof Error ? error.message : "打开文件位置失败");
+    }
   }
 
   if (!local) {
@@ -689,6 +727,59 @@ export function SettingsPage({
                             </div>
                           );
                         })}
+                      </div>
+                    }
+                  />
+                </FormGroup>
+
+                <FormGroup title="本地数据存储">
+                  <FormRow
+                    vertical
+                    label="SQLite 数据库地址"
+                    description="终端状态、会话记录、聊天消息和任务上下文等运行数据会写入这个数据库文件。"
+                    control={
+                      <div className="space-y-3">
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[12px] font-mono leading-5 text-slate-700 shadow-[inset_0_1px_2px_rgba(0,0,0,0.03)]">
+                          <div className="break-all">
+                            {storageInfo?.terminalDbPath ?? storageInfoError ?? "正在读取..."}
+                          </div>
+                        </div>
+                        <div className="flex justify-end">
+                          <SecondaryButton
+                            onClick={() => storageInfo && void handleRevealStoragePath(storageInfo.terminalDbPath)}
+                            disabled={!storageInfo || !isTauri()}
+                            className="px-3 py-1.5 text-[12px]"
+                          >
+                            在文件管理器中显示
+                          </SecondaryButton>
+                        </div>
+                      </div>
+                    }
+                  />
+                  <FormRow
+                    vertical
+                    label="应用数据目录"
+                    description="设置、上下文、会话快照等文件和 SQLite 数据库位于同一个应用数据目录。"
+                    control={
+                      <div className="grid gap-2">
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[12px] font-mono leading-5 text-slate-700 shadow-[inset_0_1px_2px_rgba(0,0,0,0.03)]">
+                          <div className="break-all">
+                            {storageInfo?.dataDir ?? storageInfoError ?? "正在读取..."}
+                          </div>
+                        </div>
+                        {storageInfo ? (
+                          <div className="flex flex-wrap gap-2 text-[11px] font-medium text-slate-500">
+                            <span className="rounded-md border border-slate-200 bg-white px-2 py-1">
+                              session.json
+                            </span>
+                            <span className="rounded-md border border-slate-200 bg-white px-2 py-1">
+                              context.json
+                            </span>
+                            <span className="rounded-md border border-slate-200 bg-white px-2 py-1">
+                              settings.json
+                            </span>
+                          </div>
+                        ) : null}
                       </div>
                     }
                   />
