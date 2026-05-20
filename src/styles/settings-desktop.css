@@ -3210,10 +3210,18 @@
   gap: 8px;
 }
 
+.git-history-diff-modal-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
 .git-history-diff-modal-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .git-history-diff-modal-path {
@@ -3233,6 +3241,7 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  flex-shrink: 0;
 }
 
 .git-history-diff-modal-stats .is-add {
@@ -4966,6 +4975,7 @@
   display: inline-flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .git-history-diff-modal .diff-viewer-header-controls.is-external .diff-viewer-header-mode {

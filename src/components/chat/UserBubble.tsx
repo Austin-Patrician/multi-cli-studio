@@ -244,7 +244,7 @@ export function UserBubble({
               ref={contentRef}
               data-chat-searchable-content="true"
               data-chat-search-message-id={message.id}
-              className="max-w-full rounded-2xl rounded-br-md bg-accent px-3.5 py-2.5 text-sm leading-6 whitespace-pre-wrap text-white"
+              className="max-w-full rounded-2xl rounded-br-md bg-accent px-3.5 py-2.5 text-sm leading-6 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-white"
               style={
                 isCollapsible && !expanded
                   ? {

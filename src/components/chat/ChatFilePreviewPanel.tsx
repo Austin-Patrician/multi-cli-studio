@@ -106,13 +106,6 @@ function appendPromptText(currentPrompt: string, nextText: string) {
   return `${currentPrompt}${needsSpacer ? "\n\n" : ""}${trimmed}`;
 }
 
-function snippetFenceLanguage(path: string) {
-  const extension = fileExtension(path);
-  if (!extension) return "";
-  if (extension === "md") return "markdown";
-  return extension;
-}
-
 function escapeRegex(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -588,7 +581,7 @@ export function ChatFilePreviewPanel({
   const truncated = Boolean(fileState?.truncated);
   const isTextFile = fileState?.exists && fileState.kind === "text";
   const currentTextContent = isTextFile ? editorContent : fileState?.content ?? "";
-  const canAddToChat = isTextFile && currentTextContent.trim().length > 0;
+  const canAddToChat = Boolean(activePath);
   const canEditText = isTextFile && !truncated;
   const isDirty = canEditText && editorContent !== savedContent;
   const canSymbolLookup = isTextFile && currentTextContent.trim().length > 0;
@@ -599,10 +592,7 @@ export function ChatFilePreviewPanel({
 
   const handleAddToChat = () => {
     if (!canAddToChat || !activePath) return;
-    const language = snippetFenceLanguage(activePath);
-    const fence = language ? `\`\`\`${language}` : "```";
-    const body = `${activePath}\n${fence}\n${currentTextContent}${truncated ? "\n\n[truncated preview]" : ""}\n\`\`\``;
-    setTabDraftPrompt(tabId, appendPromptText(currentDraftPrompt, body));
+    setTabDraftPrompt(tabId, appendPromptText(currentDraftPrompt, `@${activePath}`));
     window.dispatchEvent(new Event("terminal-queue-edit-focus"));
   };
 

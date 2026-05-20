@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   TerminalSquare,
   Trash2,
+  Plus,
   X,
   XCircle,
 } from "lucide-react";
@@ -45,6 +46,7 @@ import type {
   WorkspaceTreeEntry,
 } from "../../lib/models";
 import { bridge } from "../../lib/bridge";
+import { compactPathForDisplay } from "../../lib/pathDisplay";
 import { useStore } from "../../lib/store";
 import { GitDiffBlock, type GitDiffStyle } from "../settings/GitDiffBlock";
 import {
@@ -734,6 +736,13 @@ function formatInjectedSection(title: string, content: string) {
   const normalized = normalizeStudioInjectedText(content);
   if (!normalized) return "";
   return `${title}\n${normalized}`;
+}
+
+function buildWorkspaceMentionText(relativePath: string, isDirectory: boolean) {
+  const normalizedPath = relativePath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (!normalizedPath) return "";
+  const mentionPath = isDirectory ? `${normalizedPath}/` : normalizedPath;
+  return `@${mentionPath}`;
 }
 
 function parseJsonlManifestPaths(content: string) {
@@ -1601,7 +1610,9 @@ function WorkspaceStatusRail({
                 <span className="git-history-tree-icon is-file" aria-hidden>
                   <FileIcon filePath={diffModal.file.path} className="h-4 w-4" />
                 </span>
-                <span className="git-history-diff-modal-path">{diffModal.file.path}</span>
+                <span className="git-history-diff-modal-path" title={diffModal.file.path}>
+                  {compactPathForDisplay(diffModal.file.path)}
+                </span>
                 <span className="git-history-diff-modal-stats">
                   <span className="is-add">+{diffModal.file.additions}</span>
                   <span className="is-sep">/</span>
@@ -2276,6 +2287,25 @@ function WorkspaceFilesPanel({
     [entriesByParent, loadDirectoryEntries]
   );
 
+  const addPathMentionToPrompt = useCallback(
+    (path: string, kind: WorkspaceTreeEntry["kind"]) => {
+      if (!targetTabId) return;
+      const normalizedPath = path.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      if (!normalizedPath) return;
+      const text = buildWorkspaceMentionText(normalizedPath, kind === "directory");
+      if (!text) return;
+      window.dispatchEvent(
+        new CustomEvent("terminal-chat-insert-prompt-text", {
+          detail: {
+            tabId: targetTabId,
+            text,
+          },
+        })
+      );
+    },
+    [targetTabId]
+  );
+
   const renderDirectory = useCallback(
     (parentPath: string, depth: number) => {
       const entries = entriesByParent[parentPath] ?? EMPTY_TREE;
@@ -2290,41 +2320,58 @@ function WorkspaceFilesPanel({
 
         return [
           <div key={normalizedPath} className="file-tree-row-wrap">
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedPath(normalizedPath);
-                setSelectedKind(entry.kind);
-              }}
-              onDoubleClick={() => {
-                if (isDirectory) {
-                  toggleDirectory(normalizedPath);
-                  return;
-                }
-                if (!targetTabId) {
-                  return;
-                }
-                openChatFilePreview(targetTabId, normalizedPath);
-              }}
-              className={`file-tree-row ${isDirectory ? "is-folder" : "is-file"}${selectedPath === normalizedPath ? " is-selected" : ""}`}
-              style={{ paddingLeft: `${12 + depth * 16}px` }}
-            >
-              <span className={`file-tree-chevron${isExpanded ? " is-open" : ""}`} aria-hidden>
-                {isDirectory ? <ChevronRight className="h-3.5 w-3.5" /> : null}
-              </span>
-              {!isDirectory ? <span className="file-tree-spacer" aria-hidden /> : null}
-              <span className="file-tree-icon" aria-hidden>
-                <FileIcon
-                  filePath={entry.path}
-                  isFolder={isDirectory}
-                  isOpen={isExpanded}
-                  className="h-3.5 w-3.5"
-                />
-              </span>
-              <span className={`file-tree-name${gitStatusClass(gitStatus)}`}>
-                {entry.name}
-              </span>
-            </button>
+            <div className="file-tree-row-shell">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedPath(normalizedPath);
+                  setSelectedKind(entry.kind);
+                }}
+                onDoubleClick={() => {
+                  if (isDirectory) {
+                    toggleDirectory(normalizedPath);
+                    return;
+                  }
+                  if (!targetTabId) {
+                    return;
+                  }
+                  openChatFilePreview(targetTabId, normalizedPath);
+                }}
+                className={`file-tree-row ${isDirectory ? "is-folder" : "is-file"}${selectedPath === normalizedPath ? " is-selected" : ""}`}
+                style={{ paddingLeft: `${12 + depth * 16}px` }}
+              >
+                <span className={`file-tree-chevron${isExpanded ? " is-open" : ""}`} aria-hidden>
+                  {isDirectory ? <ChevronRight className="h-3.5 w-3.5" /> : null}
+                </span>
+                {!isDirectory ? <span className="file-tree-spacer" aria-hidden /> : null}
+                <span className="file-tree-icon" aria-hidden>
+                  <FileIcon
+                    filePath={entry.path}
+                    isFolder={isDirectory}
+                    isOpen={isExpanded}
+                    className="h-3.5 w-3.5"
+                  />
+                </span>
+                <span className={`file-tree-name${gitStatusClass(gitStatus)}`}>
+                  {entry.name}
+                </span>
+              </button>
+              {targetTabId ? (
+                <button
+                  type="button"
+                  className="file-tree-inline-action"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    addPathMentionToPrompt(normalizedPath, entry.kind);
+                  }}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  title={isDirectory ? "添加 @ 文件夹到聊天输入框" : "添加 @ 文件到聊天输入框"}
+                  aria-label={isDirectory ? `Mention folder ${entry.name}` : `Mention file ${entry.name}`}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              ) : null}
+            </div>
             {isDirectory && isExpanded ? (
               hasLoadedChildren ? (
                 children
@@ -2338,9 +2385,8 @@ function WorkspaceFilesPanel({
         ];
       });
     },
-    [entriesByParent, expandedDirectories, gitStatusByPath, loadingDirectories, openChatFilePreview, selectedPath, targetTabId, toggleDirectory]
+    [addPathMentionToPrompt, entriesByParent, expandedDirectories, gitStatusByPath, loadingDirectories, openChatFilePreview, selectedPath, targetTabId, toggleDirectory]
   );
-
   const selectedParentFolder = useMemo(() => {
     if (!selectedPath) return "";
     if (selectedKind === "directory") return selectedPath;

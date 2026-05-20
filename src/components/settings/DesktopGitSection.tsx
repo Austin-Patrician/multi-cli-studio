@@ -30,6 +30,7 @@ import {
   Pencil,
 } from "lucide-react";
 import { bridge } from "../../lib/bridge";
+import { compactPathForDisplay } from "../../lib/pathDisplay";
 import { FileIcon } from "../FileIcon";
 import { GitTooltipButton } from "../GitTooltipButton";
 import { GitDiffBlock, type GitDiffStyle } from "./GitDiffBlock";
@@ -1370,7 +1371,9 @@ function DiffModal({
             <span className="git-history-tree-icon is-file" aria-hidden>
               <FileIcon filePath={file.path} className="h-4 w-4" />
             </span>
-            <span className="git-history-diff-modal-path">{file.path}</span>
+            <span className="git-history-diff-modal-path" title={file.path}>
+              {compactPathForDisplay(file.path)}
+            </span>
             <span className="git-history-diff-modal-stats">
               <span className="is-add">+{file.additions}</span>
               <span className="is-sep">/</span>

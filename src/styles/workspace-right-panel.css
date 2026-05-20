@@ -1051,12 +1051,25 @@
   display: block;
 }
 
+.file-tree-row-shell {
+  position: relative;
+}
+
+.file-tree-row:hover + .file-tree-inline-action,
+.file-tree-row:focus-visible + .file-tree-inline-action,
+.file-tree-inline-action:hover,
+.file-tree-inline-action:focus-visible {
+  opacity: 1;
+  transform: translateY(-50%) scale(1);
+  pointer-events: auto;
+}
+
 .file-tree-row {
   display: flex;
   align-items: center;
   gap: 5px;
   width: 100%;
-  padding: 2px 6px;
+  padding: 2px 28px 2px 6px;
   border-radius: 7px;
   border: 1px solid transparent;
   background: transparent;
@@ -1095,6 +1108,32 @@
 .file-tree-row:hover {
   background: var(--workspace-panel-surface-hover);
   border-color: var(--workspace-panel-border);
+}
+
+.file-tree-inline-action {
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--workspace-panel-text-muted);
+  box-shadow: none;
+  opacity: 0;
+  transform: translateY(-50%) scale(0.92);
+  pointer-events: none;
+  transition: opacity 140ms ease, transform 160ms ease, color 140ms ease, background 140ms ease;
+}
+
+.file-tree-inline-action:hover,
+.file-tree-inline-action:focus-visible {
+  background: transparent;
+  color: #2563eb;
 }
 
 .file-tree-row-root {

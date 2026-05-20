@@ -290,6 +290,32 @@ function appendPromptText(currentPrompt: string, transcript: string) {
   return `${currentPrompt}${needsSpacer ? " " : ""}${text}`;
 }
 
+function insertPromptTextAtSelection(
+  currentPrompt: string,
+  text: string,
+  selectionStart: number,
+  selectionEnd: number
+) {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return {
+      nextPrompt: currentPrompt,
+      nextCaret: selectionEnd,
+    };
+  }
+  const prefix = currentPrompt.slice(0, selectionStart);
+  const suffix = currentPrompt.slice(selectionEnd);
+  const needsLeadingSpace = prefix.length > 0 && !/\s$/.test(prefix);
+  const needsTrailingSpace = suffix.length > 0 && !/^\s/.test(suffix);
+  const inserted = `${needsLeadingSpace ? " " : ""}${trimmed}${needsTrailingSpace ? " " : ""}`;
+  const nextPrompt = `${prefix}${inserted}${suffix}`;
+  const nextCaret = prefix.length + inserted.length;
+  return {
+    nextPrompt,
+    nextCaret,
+  };
+}
+
 function describeVoiceInputError(error: unknown) {
   if (error instanceof DOMException) {
     if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
@@ -868,7 +894,7 @@ function buildHelpOverlay(activeTab: TerminalTab): CommandOverlayState {
     appendSectionItem(sections, "prompt-tools", "Prompt Tools", {
       id: "help-skills",
       title: "/skills",
-      subtitle: "Open the skill picker for the active CLI and insert one at the start of the prompt.",
+      subtitle: "Open the skill picker for the active CLI and insert one into the prompt.",
       meta: "Prompt Skills",
     });
   }
@@ -1137,7 +1163,7 @@ function buildSkillOverlay(
     return {
       title: `${titleCaseCli(cliId)} Skills`,
       description: `Loading the skills currently available for ${titleCaseCli(cliId)} in this workspace.`,
-      footer: "Type to narrow the list. Enter inserts the selected skill at the start of the prompt.",
+      footer: "Type to narrow the list. Enter inserts the selected skill into the prompt.",
       sections: [
         {
           id: "loading",
@@ -1861,6 +1887,53 @@ export function ChatPromptBar({
   }, []);
 
   useEffect(() => {
+    function handleInsertPromptText(event: Event) {
+      const detail = (event as CustomEvent<{ tabId?: string; text?: string }>).detail;
+      const tabId = detail?.tabId ?? "";
+      const text = detail?.text?.trim() ?? "";
+      if (!tabId || !text) return;
+
+      const state = useStore.getState();
+      const currentTab = state.terminalTabs.find((tab) => tab.id === tabId) ?? null;
+      if (!currentTab) return;
+
+      if (state.activeTerminalTabId === tabId && textareaRef.current) {
+        const el = textareaRef.current;
+        const selectionStart = el.selectionStart ?? currentTab.draftPrompt.length;
+        const selectionEnd = el.selectionEnd ?? selectionStart;
+        const { nextPrompt, nextCaret } = insertPromptTextAtSelection(
+          currentTab.draftPrompt ?? "",
+          text,
+          selectionStart,
+          selectionEnd
+        );
+        if (promptHistoryStateRef.current.index !== null) {
+          promptHistoryStateRef.current = {
+            index: null,
+            draft: "",
+          };
+        }
+        setTabDraftPrompt(tabId, nextPrompt);
+        requestAnimationFrame(() => {
+          const input = textareaRef.current;
+          if (!input) return;
+          input.focus();
+          input.setSelectionRange(nextCaret, nextCaret);
+        });
+        return;
+      }
+
+      const nextPrompt = appendPromptText(currentTab.draftPrompt ?? "", text);
+      setTabDraftPrompt(tabId, nextPrompt);
+    }
+
+    window.addEventListener("terminal-chat-insert-prompt-text", handleInsertPromptText as EventListener);
+    return () => {
+      window.removeEventListener("terminal-chat-insert-prompt-text", handleInsertPromptText as EventListener);
+    };
+  }, [setTabDraftPrompt]);
+
+  useEffect(() => {
     if (!queueFeedback || typeof window === "undefined") return;
     const timer = window.setTimeout(() => {
       setQueueFeedback(null);
@@ -2539,12 +2612,24 @@ export function ChatPromptBar({
 
   function selectSkill(skill: CliSkillItem) {
     if (!activeTab) return;
-    const trimmedPrompt = prompt.trimStart();
-    const promptWithoutLeadingSkill = trimmedPrompt.replace(/^\$(?:[A-Za-z0-9._-]+)?\s*/, "");
     const fromSkillCommand = commandOverlay?.kind === "skill-command" || parseSkillSlashQuery(rawSlashPrompt) != null;
-    const nextPrompt = fromSkillCommand
-      ? `$${skill.name} `
-      : `$${skill.name}${promptWithoutLeadingSkill ? ` ${promptWithoutLeadingSkill}` : " "}`;
+    if (skillToken && !fromSkillCommand) {
+      const suffix = /^\s/.test(prompt.slice(skillToken.end)) ? "" : " ";
+      const insertedText = `$${skill.name}${suffix}`;
+      const nextPrompt = `${prompt.slice(0, skillToken.start)}${insertedText}${prompt.slice(skillToken.end)}`;
+      setPrompt(nextPrompt);
+      setDismissedSkillKey(skillKey);
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        const nextCaret = skillToken.start + insertedText.length;
+        el.focus();
+        el.setSelectionRange(nextCaret, nextCaret);
+      });
+      return;
+    }
+
+    const nextPrompt = `$${skill.name} `;
     setPrompt(nextPrompt);
     setDismissedSkillKey(skillKey);
     requestAnimationFrame(() => {

@@ -1299,7 +1299,7 @@ export function ChatConversation() {
                   <QueuedCliBadge cliId={queuedPrompt.cliId} />
                 </div>
                 <div
-                  className="max-w-full rounded-[12px] border border-sky-200/90 bg-sky-50/90 px-3.5 py-2.5 text-sm whitespace-pre-wrap text-sky-950 shadow-[0_14px_34px_rgba(14,116,144,0.08)]"
+                  className="max-w-full rounded-[12px] border border-sky-200/90 bg-sky-50/90 px-3.5 py-2.5 text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-sky-950 shadow-[0_14px_34px_rgba(14,116,144,0.08)]"
                   title={queuedPromptPreview || queuedPrompt.text}
                 >
                   {queuedPromptPreview || "Queued attachment message"}
