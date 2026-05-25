@@ -22178,6 +22178,9 @@ fn compose_tab_context_prompt(
         rules, state.workspace.dirty_files, state.workspace.failing_checks,
     );
 
+    let studio_context_prelude = studio_context_prelude
+        .map(str::trim)
+        .filter(|ctx| !ctx.is_empty());
     let studio_context_section = studio_context_prelude
         .map(|ctx| format!("\n\n{}", ctx))
         .unwrap_or_default();
@@ -27956,6 +27959,7 @@ fn apply_ssh_connection_reuse_args(command: &mut Command) -> Result<(), String> 
     }
     #[cfg(not(unix))]
     {
+        let _ = command;
         let _ = ensure_ssh_control_path_dir()?;
     }
     Ok(())
@@ -27974,6 +27978,7 @@ fn apply_ssh_connection_reuse_args_to_pty(command: &mut CommandBuilder) -> Resul
     }
     #[cfg(not(unix))]
     {
+        let _ = command;
         let _ = ensure_ssh_control_path_dir()?;
     }
     Ok(())

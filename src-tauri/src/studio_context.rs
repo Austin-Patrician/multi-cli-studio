@@ -3258,7 +3258,7 @@ fn render_policy_check_json(
             "rejected": 0
         },
         "failingChecks": input.failing_checks,
-        "requires": ["provenance", "confidence", "no_conflict", "supersedes_when_replacing"],
+        "requires": ["content", "source_reference", "confidence", "noise_filter", "promotable_kind", "target"],
         "updatedAt": Local::now().to_rfc3339(),
     });
     serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
@@ -3279,18 +3279,18 @@ fn render_post_checker_policy_check_json(
         "decision": decision,
         "checkerStatus": if checker_passed { "pass" } else { "not_passed" },
         "reason": if allow_auto_promote {
-            "Checker passed and at least one candidate satisfied provenance, confidence, conflict, and target gates."
+            "Checker passed and at least one candidate satisfied implemented content, source-reference, confidence, noise-filter, kind, and target gates."
         } else if !checker_passed {
             "Checker has not passed; durable memory promotion is held."
         } else {
-            "Checker passed, but no candidate satisfied the promotion gates."
+            "Checker passed, but no candidate satisfied the implemented promotion gates."
         },
         "candidateCounts": {
             "accepted": distill.accepted.len(),
             "promotable": distill.promotable_entries,
             "rejected": distill.rejected_entries,
         },
-        "requires": ["provenance", "confidence", "no_conflict", "supersedes_when_replacing"],
+        "requires": ["content", "source_reference", "confidence", "noise_filter", "promotable_kind", "target"],
         "updatedAt": Local::now().to_rfc3339(),
     });
     serde_json::to_string_pretty(&value).map_err(|err| err.to_string())

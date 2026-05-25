@@ -1358,6 +1358,289 @@ function ModelSelectionControl({
   );
 }
 
+function isCursorOnFirstLine(textarea: HTMLTextAreaElement) {
+  return !textarea.value.slice(0, textarea.selectionStart).includes("\n");
+}
+
+function isCursorOnLastLine(textarea: HTMLTextAreaElement) {
+  return !textarea.value.slice(textarea.selectionEnd).includes("\n");
+}
+
+function focusComposerEnd(textarea: HTMLTextAreaElement | null) {
+  if (!textarea) return;
+  window.requestAnimationFrame(() => {
+    textarea.focus();
+    const end = textarea.value.length;
+    textarea.setSelectionRange(end, end);
+  });
+}
+
+function ModelChatComposer({
+  sessionId,
+  initialDraft,
+  attachments,
+  promptHistory,
+  loading,
+  activeSelection,
+  activeSelectionOption,
+  activeSelectionOrigin,
+  optionGroups,
+  onDraftChange,
+  onSend,
+  onPickAttachments,
+  onPasteImages,
+  onRemoveAttachment,
+  onSelectServiceType,
+  onSelectModel,
+}: {
+  sessionId: string;
+  initialDraft: string;
+  attachments: ChatAttachment[];
+  promptHistory: string[];
+  loading: boolean;
+  activeSelection: ApiChatSelection | null;
+  activeSelectionOption: ResolvedModelOption | null;
+  activeSelectionOrigin: ApiChatGenerationMeta | null;
+  optionGroups: Array<{
+    serviceType: ModelProviderServiceType;
+    options: ResolvedModelOption[];
+  }>;
+  onDraftChange: (sessionId: string, draft: string) => void;
+  onSend: (draft: string, attachments: ChatAttachment[]) => boolean;
+  onPickAttachments: () => void;
+  onPasteImages: (items: DataTransferItemList) => void;
+  onRemoveAttachment: (attachmentId: string) => void;
+  onSelectServiceType: (serviceType: ModelProviderServiceType) => void;
+  onSelectModel: (selection: ApiChatSelection) => void;
+}) {
+  const [draft, setDraft] = useState(initialDraft);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const historyIndexRef = useRef<number | null>(null);
+  const draftBeforeHistoryRef = useRef("");
+
+  useEffect(() => {
+    setDraft(initialDraft);
+    historyIndexRef.current = null;
+    draftBeforeHistoryRef.current = "";
+  }, [initialDraft, sessionId]);
+
+  useEffect(() => {
+    const node = composerRef.current;
+    if (!node) return;
+    node.style.height = "0px";
+    node.style.height = `${Math.min(Math.max(node.scrollHeight, 28), 180)}px`;
+  }, [draft, sessionId]);
+
+  function updateDraft(nextDraft: string) {
+    setDraft(nextDraft);
+    onDraftChange(sessionId, nextDraft);
+  }
+
+  function setHistoryDraft(nextDraft: string) {
+    setDraft(nextDraft);
+    onDraftChange(sessionId, nextDraft);
+  }
+
+  function handleHistoryNavigation(direction: -1 | 1) {
+    if (promptHistory.length === 0) return;
+    const currentIndex = historyIndexRef.current;
+    if (currentIndex == null) {
+      if (direction > 0) return;
+      draftBeforeHistoryRef.current = draft;
+      historyIndexRef.current = promptHistory.length - 1;
+      setHistoryDraft(promptHistory[promptHistory.length - 1] ?? "");
+      focusComposerEnd(composerRef.current);
+      return;
+    }
+
+    const nextIndex = currentIndex + direction;
+    if (nextIndex < 0) {
+      historyIndexRef.current = 0;
+      setHistoryDraft(promptHistory[0] ?? "");
+      focusComposerEnd(composerRef.current);
+      return;
+    }
+    if (nextIndex >= promptHistory.length) {
+      historyIndexRef.current = null;
+      setHistoryDraft(draftBeforeHistoryRef.current);
+      focusComposerEnd(composerRef.current);
+      return;
+    }
+
+    historyIndexRef.current = nextIndex;
+    setHistoryDraft(promptHistory[nextIndex] ?? "");
+    focusComposerEnd(composerRef.current);
+  }
+
+  function submitDraft() {
+    if (onSend(draft, attachments)) {
+      historyIndexRef.current = null;
+      draftBeforeHistoryRef.current = "";
+      updateDraft("");
+      focusComposerEnd(composerRef.current);
+    }
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (!loading) {
+        submitDraft();
+      }
+      return;
+    }
+
+    if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return;
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown" && event.key !== "Escape") return;
+
+    if (event.key === "Escape") {
+      if (historyIndexRef.current == null) return;
+      event.preventDefault();
+      historyIndexRef.current = null;
+      setHistoryDraft(draftBeforeHistoryRef.current);
+      focusComposerEnd(composerRef.current);
+      return;
+    }
+
+    const textarea = event.currentTarget;
+    if (textarea.selectionStart !== textarea.selectionEnd) return;
+    if (
+      event.key === "ArrowUp" &&
+      (historyIndexRef.current != null || draft.trim().length === 0 || isCursorOnFirstLine(textarea))
+    ) {
+      event.preventDefault();
+      handleHistoryNavigation(-1);
+      return;
+    }
+
+    if (
+      event.key === "ArrowDown" &&
+      historyIndexRef.current != null &&
+      isCursorOnLastLine(textarea)
+    ) {
+      event.preventDefault();
+      handleHistoryNavigation(1);
+    }
+  }
+
+  function handlePaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+    const hasImage = Array.from(items).some(
+      (item) => item.kind === "file" && item.type.startsWith("image/")
+    );
+    if (!hasImage) return;
+    event.preventDefault();
+    onPasteImages(items);
+  }
+
+  return (
+    <div className="terminal-chat-prompt px-0 py-0">
+      <div className="terminal-chat-prompt-shell">
+        <div className="terminal-chat-input-box bg-white/98 shadow-[0_24px_64px_rgba(15,23,42,0.10)] backdrop-blur">
+          <div className="terminal-chat-input-area">
+            {attachments.length > 0 && (
+              <div className="terminal-chat-input-context">
+                <div className="terminal-chat-attachments">
+                  {attachments.map((attachment) => {
+                    const label = attachmentLabel(attachment);
+                    const previewSrc = attachmentPreviewSrc(attachment);
+                    return (
+                      <div
+                        key={attachment.id}
+                        className={`terminal-chat-attachment-chip terminal-chat-attachment-chip--${attachment.kind}`}
+                        title={label}
+                      >
+                        {previewSrc ? (
+                          <span className="terminal-chat-attachment-thumb" aria-hidden="true">
+                            <img src={previewSrc} alt="" />
+                          </span>
+                        ) : (
+                          <span className="terminal-chat-attachment-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+                              <path d="M5 7.5A2.5 2.5 0 017.5 5h9A2.5 2.5 0 0119 7.5v9a2.5 2.5 0 01-2.5 2.5h-9A2.5 2.5 0 015 16.5v-9z" stroke="currentColor" strokeWidth="1.6" />
+                              <path d="M8 15l2.6-2.8a1 1 0 011.5.04L14 14l1.1-1.2a1 1 0 011.47-.02L18 14.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </span>
+                        )}
+                        <span className="terminal-chat-attachment-name">{label}</span>
+                        <button
+                          type="button"
+                          onClick={() => onRemoveAttachment(attachment.id)}
+                          className="terminal-chat-attachment-remove"
+                          title="移除图片"
+                          aria-label="移除图片"
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
+                            <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                          </svg>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <textarea
+              ref={composerRef}
+              value={draft}
+              onChange={(event) => updateDraft(event.target.value)}
+              onPaste={handlePaste}
+              onKeyDown={handleKeyDown}
+              rows={1}
+              placeholder="有问题，尽管问，也可以直接附图"
+              className="terminal-chat-textarea text-[15px]"
+            />
+          </div>
+
+          <div className="button-area" data-provider={activeSelection?.serviceType ?? "openaiCompatible"}>
+            <div className="button-area-left">
+              <div className="terminal-chat-footer-control">
+                <button
+                  type="button"
+                  onClick={onPickAttachments}
+                  disabled={loading}
+                  className="selector-button selector-shortcut-button"
+                  title="添加图片"
+                  aria-label="添加图片"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+                    <path d="M8 7.5V6.8A2.8 2.8 0 0110.8 4h2.4A2.8 2.8 0 0116 6.8v.7h1.2A2.8 2.8 0 0120 10.3v6.9a2.8 2.8 0 01-2.8 2.8H6.8A2.8 2.8 0 014 17.2v-6.9a2.8 2.8 0 012.8-2.8H8z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                    <path d="M12 10v4m-2-2h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </div>
+
+              <ModelSelectionControl
+                optionGroups={optionGroups}
+                activeSelection={activeSelection}
+                activeSelectionOrigin={activeSelectionOrigin}
+                onSelectServiceType={onSelectServiceType}
+                onSelectModel={onSelectModel}
+                className="min-w-0 flex-1"
+              />
+            </div>
+
+            <div className="button-area-right">
+              <button
+                type="button"
+                onClick={submitDraft}
+                disabled={loading || !activeSelectionOption || (!draft.trim() && attachments.length === 0)}
+                className="submit-button inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] bg-[#111111] text-white transition-all hover:-translate-y-[1px] hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
+                title={loading ? "等待响应" : "发送"}
+                aria-label={loading ? "等待响应" : "发送"}
+              >
+                <SendIcon />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function UserMessageBubble({
   message,
   origin,
@@ -1597,7 +1880,6 @@ export function ModelChatPage() {
   const [sessions, setSessions] = useState<ApiChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>({});
   const [composerAttachments, setComposerAttachments] = useState<Record<string, ChatAttachment[]>>({});
   const [loading, setLoading] = useState(false);
   const [liveStream, setLiveStream] = useState<LiveApiStream | null>(null);
@@ -1605,7 +1887,7 @@ export function ModelChatPage() {
   const [statusText, setStatusText] = useState<string | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerDraftsRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -1704,8 +1986,18 @@ export function ModelChatPage() {
       })).filter((group) => group.options.length > 0),
     [availableOptions]
   );
-  const activeDraft = activeSession ? composerDrafts[activeSession.id] ?? "" : "";
+  const activeDraft = activeSession ? composerDraftsRef.current[activeSession.id] ?? "" : "";
   const activeAttachments = activeSession ? composerAttachments[activeSession.id] ?? [] : [];
+  const promptHistory = useMemo(
+    () =>
+      activeSession
+        ? activeSession.messages
+            .filter((message) => message.role === "user")
+            .map((message) => (message.rawContent ?? message.content).trim())
+            .filter((content) => content.length > 0)
+        : [],
+    [activeSession?.messages]
+  );
   const activeSelection =
     settings && activeSession
       ? syncSelectionWithSettings(activeSession.defaultSelection, settings)
@@ -1727,13 +2019,6 @@ export function ModelChatPage() {
       ? liveStream.message
       : null;
   const anyProviderEnabled = availableOptions.length > 0;
-
-  useEffect(() => {
-    const node = composerRef.current;
-    if (!node) return;
-    node.style.height = "0px";
-    node.style.height = `${Math.min(Math.max(node.scrollHeight, 28), 180)}px`;
-  }, [activeDraft, activeSessionId]);
 
   function updateSession(
     sessionId: string,
@@ -1892,7 +2177,7 @@ export function ModelChatPage() {
     const session = createSession(settings, activeSession?.defaultSelection ?? activeSelection);
     setSessions((current) => [session, ...current]);
     setActiveSessionId(session.id);
-    setComposerDrafts((current) => ({ ...current, [session.id]: "" }));
+    composerDraftsRef.current[session.id] = "";
     setStatusText(null);
     setErrorText(null);
   }
@@ -1910,11 +2195,7 @@ export function ModelChatPage() {
       }
       return nextSessions;
     });
-    setComposerDrafts((current) => {
-      const nextDrafts = { ...current };
-      delete nextDrafts[sessionId];
-      return nextDrafts;
-    });
+    delete composerDraftsRef.current[sessionId];
     setComposerAttachments((current) => {
       const nextAttachments = { ...current };
       delete nextAttachments[sessionId];
@@ -2033,11 +2314,10 @@ export function ModelChatPage() {
     }
   }
 
-  async function sendMessage() {
-    if (!settings || !activeSession || !activeSelection || !activeSelectionOption || loading) return;
-    const content = activeDraft.trim();
-    const attachments = activeAttachments;
-    if (!content && attachments.length === 0) return;
+  function sendMessage(draft: string, attachments: ChatAttachment[]) {
+    if (!settings || !activeSession || !activeSelection || !activeSelectionOption || loading) return false;
+    const content = draft.trim();
+    if (!content && attachments.length === 0) return false;
     const requestedAt = new Date().toISOString();
 
     const origin: ApiChatGenerationMeta = {
@@ -2067,9 +2347,9 @@ export function ModelChatPage() {
         ? deriveTitleFromMessages(nextMessages)
         : activeSession.title;
 
-    setComposerDrafts((current) => ({ ...current, [activeSession.id]: "" }));
+    composerDraftsRef.current[activeSession.id] = "";
     setComposerAttachments((current) => ({ ...current, [activeSession.id]: [] }));
-    await requestAssistantResponse({
+    void requestAssistantResponse({
       session: activeSession,
       selection: activeSelection,
       origin,
@@ -2077,6 +2357,7 @@ export function ModelChatPage() {
       requestMessages,
       title: nextTitle,
     });
+    return true;
   }
 
   function canRegenerateAssistantMessage(session: ApiChatSession, messageId: string) {
@@ -2124,24 +2405,6 @@ export function ModelChatPage() {
       title: session.title,
       successStatusText: "已重新生成回复。",
     });
-  }
-
-  function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key !== "Enter" || event.shiftKey) return;
-    event.preventDefault();
-    if (loading) return;
-    void sendMessage();
-  }
-
-  function handleComposerPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
-    const items = event.clipboardData?.items;
-    if (!items) return;
-    const hasImage = Array.from(items).some(
-      (item) => item.kind === "file" && item.type.startsWith("image/")
-    );
-    if (!hasImage) return;
-    event.preventDefault();
-    void pasteComposerImages(items);
   }
 
   if (loadingSettings) {
@@ -2436,118 +2699,26 @@ export function ModelChatPage() {
                     </div>
                   ) : null}
 
-                  <div className="terminal-chat-prompt px-0 py-0">
-                    <div className="terminal-chat-prompt-shell">
-                      <div className="terminal-chat-input-box bg-white/98 shadow-[0_24px_64px_rgba(15,23,42,0.10)] backdrop-blur">
-                        <div className="terminal-chat-input-area">
-                          {activeAttachments.length > 0 && (
-                            <div className="terminal-chat-input-context">
-                              <div className="terminal-chat-attachments">
-                                {activeAttachments.map((attachment) => {
-                                  const label = attachmentLabel(attachment);
-                                  const previewSrc = attachmentPreviewSrc(attachment);
-                                  return (
-                                    <div
-                                      key={attachment.id}
-                                      className={`terminal-chat-attachment-chip terminal-chat-attachment-chip--${attachment.kind}`}
-                                      title={label}
-                                    >
-                                      {previewSrc ? (
-                                        <span className="terminal-chat-attachment-thumb" aria-hidden="true">
-                                          <img src={previewSrc} alt="" />
-                                        </span>
-                                      ) : (
-                                        <span className="terminal-chat-attachment-icon" aria-hidden="true">
-                                          <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
-                                            <path d="M5 7.5A2.5 2.5 0 017.5 5h9A2.5 2.5 0 0119 7.5v9a2.5 2.5 0 01-2.5 2.5h-9A2.5 2.5 0 015 16.5v-9z" stroke="currentColor" strokeWidth="1.6" />
-                                            <path d="M8 15l2.6-2.8a1 1 0 011.5.04L14 14l1.1-1.2a1 1 0 011.47-.02L18 14.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                                            <circle cx="9" cy="9" r="1.2" fill="currentColor" />
-                                          </svg>
-                                        </span>
-                                      )}
-                                      <span className="terminal-chat-attachment-name">{label}</span>
-                                      <button
-                                        type="button"
-                                        onClick={() => removeComposerAttachment(attachment.id)}
-                                        className="terminal-chat-attachment-remove"
-                                        title="移除图片"
-                                        aria-label="移除图片"
-                                      >
-                                        <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
-                                          <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                        </svg>
-                                      </button>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          )}
-
-                          <textarea
-                            ref={composerRef}
-                            value={activeDraft}
-                            onChange={(event) =>
-                              setComposerDrafts((current) => ({
-                                ...current,
-                                [activeSession.id]: event.target.value,
-                              }))
-                            }
-                            onPaste={handleComposerPaste}
-                            onKeyDown={handleComposerKeyDown}
-                            rows={1}
-                            placeholder="有问题，尽管问，也可以直接附图"
-                            className="terminal-chat-textarea text-[15px]"
-                          />
-                        </div>
-
-                        <div className="button-area" data-provider={activeSelection?.serviceType ?? "openaiCompatible"}>
-                          <div className="button-area-left">
-                            <div className="terminal-chat-footer-control">
-                              <button
-                                type="button"
-                                onClick={() => void pickComposerAttachments()}
-                                disabled={loading}
-                                className="selector-button selector-shortcut-button"
-                                title="添加图片"
-                                aria-label="添加图片"
-                              >
-                                <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
-                                  <path d="M8 7.5V6.8A2.8 2.8 0 0110.8 4h2.4A2.8 2.8 0 0116 6.8v.7h1.2A2.8 2.8 0 0120 10.3v6.9a2.8 2.8 0 01-2.8 2.8H6.8A2.8 2.8 0 014 17.2v-6.9a2.8 2.8 0 012.8-2.8H8z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-                                  <path d="M12 10v4m-2-2h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                </svg>
-                              </button>
-                            </div>
-
-                            <ModelSelectionControl
-                              optionGroups={optionGroups}
-                              activeSelection={activeSelection}
-                              activeSelectionOrigin={activeSelectionOrigin}
-                              onSelectServiceType={selectServiceType}
-                              onSelectModel={selectModel}
-                              className="min-w-0 flex-1"
-                            />
-                          </div>
-
-                          <div className="button-area-right">
-                            {/* <div className="text-[11px] text-slate-400">
-                              Enter 发送
-                            </div> */}
-                            <button
-                              type="button"
-                              onClick={() => void sendMessage()}
-                              disabled={loading || !activeSelectionOption || (!activeDraft.trim() && activeAttachments.length === 0)}
-                              className="submit-button inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-[12px] bg-[#111111] text-white transition-all hover:-translate-y-[1px] hover:bg-black disabled:cursor-not-allowed disabled:bg-slate-300"
-                              title={loading ? "等待响应" : "发送"}
-                              aria-label={loading ? "等待响应" : "发送"}
-                            >
-                              <SendIcon />
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+                  <ModelChatComposer
+                    sessionId={activeSession.id}
+                    initialDraft={activeDraft}
+                    attachments={activeAttachments}
+                    promptHistory={promptHistory}
+                    loading={loading}
+                    activeSelection={activeSelection}
+                    activeSelectionOption={activeSelectionOption}
+                    activeSelectionOrigin={activeSelectionOrigin}
+                    optionGroups={optionGroups}
+                    onDraftChange={(sessionId, draft) => {
+                      composerDraftsRef.current[sessionId] = draft;
+                    }}
+                    onSend={sendMessage}
+                    onPickAttachments={() => void pickComposerAttachments()}
+                    onPasteImages={(items) => void pasteComposerImages(items)}
+                    onRemoveAttachment={removeComposerAttachment}
+                    onSelectServiceType={selectServiceType}
+                    onSelectModel={selectModel}
+                  />
                 </div>
               </div>
             </>

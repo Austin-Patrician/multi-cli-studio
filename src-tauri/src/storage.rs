@@ -2475,12 +2475,9 @@ impl TerminalStorage {
             .map_err(|err| err.to_string())?;
 
             task.current_owner_cli = request.to_cli.clone();
-            task.latest_conclusion = request
-                .latest_assistant_summary
-                .clone()
-                .or(task.latest_conclusion);
+            task.latest_conclusion = latest_conclusion;
             task.relevant_files = merged_files;
-            task.next_step = Some(format!("Continue the active task in {}.", request.to_cli));
+            task.next_step = next_step;
             task.updated_at = now;
         }
 
