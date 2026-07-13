@@ -32,8 +32,6 @@ export default defineConfig({
       ignored: [
         "**/.tauri-dev-data",
         "**/.tauri-dev-data/**",
-        "**/.studio",
-        "**/.studio/**",
         "**/.codex",
         "**/.codex/**",
         "**/.claude",

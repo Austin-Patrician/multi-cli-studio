@@ -206,12 +206,6 @@ export const ACP_COMMANDS: AcpCommandDef[] = [
     execution: "flag-inject", supportedClis: ["codex"],
   },
   {
-    kind: "context", slash: "/context", label: "Context",
-    description: "Show context data such as the current Studio goal",
-    argsHint: "goal",
-    execution: "local", supportedClis: ["codex", "claude", "gemini"],
-  },
-  {
     kind: "memory", slash: "/memory", label: "Memory",
     description: "View/edit project memory (CLAUDE.md / AGENTS.md)",
     execution: "local", supportedClis: ["codex", "claude", "gemini"],

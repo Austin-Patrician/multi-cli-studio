@@ -120,7 +120,7 @@ Multi CLI Studio is built around a different assumption:
 - unified desktop surface for `Codex`, `Claude`, and `Gemini`
 - persistent sessions and chat-like execution history
 - streaming output rendered directly into the UI
-- slash commands for model, permissions, effort, plan mode, context, and session controls
+- slash commands for model, permissions, effort, plan mode, memory files, and session controls
 - integrated git side panel to keep working-tree changes visible during execution
 
 ### Model Chat and Provider Layer

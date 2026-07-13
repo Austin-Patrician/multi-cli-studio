@@ -1,4 +1,4 @@
-﻿import { create } from "zustand";
+import { create } from "zustand";
 import { bridge } from "./bridge";
 import {
   AgentId,
@@ -152,66 +152,6 @@ function createId(prefix: string) {
 
 function nowIso() {
   return new Date().toISOString();
-}
-
-function joinWorkspaceRelativePath(rootPath: string, relativePath: string) {
-  const normalizedRoot = rootPath.replace(/[\\/]+$/, "");
-  const normalizedRelative = relativePath.replace(/^[\\/]+/, "");
-  return `${normalizedRoot}/${normalizedRelative}`;
-}
-
-function normalizeStudioText(content: string) {
-  return content
-    .replace(/\r\n/g, "\n")
-    .replace(/<!-- STUDIO-(?:WORKFLOW|CONTEXT):MANAGED -->\n?/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function extractMarkdownSection(content: string, heading: string) {
-  const lines = content.replace(/\r\n/g, "\n").split("\n");
-  const headingKey = `## ${heading}`.toLowerCase();
-  const output: string[] = [];
-  let capturing = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim().toLowerCase();
-    if (trimmed === headingKey) {
-      capturing = true;
-      continue;
-    }
-    if (capturing && trimmed.startsWith("## ")) {
-      break;
-    }
-    if (capturing) {
-      output.push(line);
-    }
-  }
-
-  return normalizeStudioText(output.join("\n"));
-}
-
-async function readStudioGoal(rootPath: string) {
-  const [currentContext, prd] = await Promise.all([
-    bridge.readExternalAbsoluteFile(
-      joinWorkspaceRelativePath(rootPath, ".studio/runtime/active-context/current.md")
-    ),
-    bridge.readExternalAbsoluteFile(
-      joinWorkspaceRelativePath(rootPath, ".studio/runtime/active-context/prd.md")
-    ),
-  ]);
-
-  const goal = currentContext.exists
-    ? extractMarkdownSection(currentContext.content, "Goal")
-    : "";
-  const workflowGoal = prd.exists
-    ? extractMarkdownSection(prd.content, "Goal")
-    : "";
-
-  return {
-    goal,
-    workflowGoal,
-  };
 }
 
 function generatedImageExtension(mediaType: string) {
@@ -445,7 +385,6 @@ function createWorkspaceRef(
     activeAgent: partial?.activeAgent ?? "codex",
     dirtyFiles: partial?.dirtyFiles ?? 0,
     failingChecks: partial?.failingChecks ?? 0,
-    handoffReady: partial?.handoffReady ?? true,
     lastSnapshot: partial?.lastSnapshot ?? null,
   };
 }
@@ -469,6 +408,14 @@ function createTerminalTab(
     permissionOverrides: partial?.permissionOverrides ?? {},
     transportSessions: normalizeTransportSessions(partial ?? {}),
     contextBoundariesByCli: normalizeContextBoundariesByCli(partial ?? {}),
+    handoff:
+      partial?.handoff?.status === "preparing"
+        ? {
+            ...partial.handoff,
+            status: "failed",
+            error: "Handoff preparation was interrupted. Switch CLI again to retry.",
+          }
+        : partial?.handoff ?? null,
     draftPrompt: partial?.draftPrompt ?? "",
     draftAttachments: cloneChatAttachments(partial?.draftAttachments) ?? [],
     status: partial?.status ?? "idle",
@@ -948,7 +895,6 @@ function deriveActiveWorkspaceState(
       activeAgent: resolveTerminalCliId(activeTab?.selectedCli, activeWorkspace.activeAgent),
       dirtyFiles: activeWorkspace.dirtyFiles,
       failingChecks: activeWorkspace.failingChecks,
-      handoffReady: activeWorkspace.handoffReady,
       lastSnapshot: activeWorkspace.lastSnapshot ?? null,
     },
   };
@@ -1617,11 +1563,8 @@ interface StoreState {
   chatFilePreviewsByTab: Record<string, ChatFilePreviewState>;
 
   loadInitialState: (projectRoot?: string) => Promise<void>;
-  switchAgent: (agentId: AgentId) => Promise<void>;
-  takeOverWriter: (agentId: AgentId) => Promise<void>;
   submitPrompt: (agentId: AgentId, prompt: string) => Promise<void>;
   requestReview: (agentId: AgentId) => Promise<void>;
-  snapshotWorkspace: () => Promise<void>;
   runChecks: () => Promise<void>;
   loadContextStore: () => Promise<void>;
   updateSettings: (settings: AppSettings) => Promise<void>;
@@ -1652,7 +1595,8 @@ interface StoreState {
   resetTerminalTabSession: (tabId?: string) => void;
   resetCliTransportSession: (cliId: AgentId, tabId?: string) => void;
   setTabToolApprovalMode: (tabId: string, mode: ToolApprovalMode) => Promise<void>;
-  setTabSelectedCli: (tabId: string, cliId: TerminalCliId) => void;
+  setTabSelectedCli: (tabId: string, cliId: TerminalCliId) => Promise<void>;
+  clearCliHandoff: (tabId: string) => void;
   setTabSelectedAgent: (tabId: string, agent: SelectedCustomAgent | null) => void;
   setTabDraftPrompt: (tabId: string, prompt: string) => void;
   addDraftChatAttachments: (
@@ -1983,7 +1927,6 @@ export const useStore = create<StoreState>((set, get) => {
         activeAgent: state.workspace.activeAgent,
         dirtyFiles: state.workspace.dirtyFiles,
         failingChecks: state.workspace.failingChecks,
-        handoffReady: state.workspace.handoffReady,
         lastSnapshot: state.workspace.lastSnapshot ?? null,
       });
       const tab = createTerminalTab(workspace, {
@@ -2007,7 +1950,6 @@ export const useStore = create<StoreState>((set, get) => {
           activeAgent: state.workspace.activeAgent,
           dirtyFiles: state.workspace.dirtyFiles,
           failingChecks: state.workspace.failingChecks,
-          handoffReady: state.workspace.handoffReady,
           lastSnapshot: state.workspace.lastSnapshot ?? workspace.lastSnapshot ?? null,
         };
       }
@@ -2125,59 +2067,6 @@ export const useStore = create<StoreState>((set, get) => {
     await Promise.all(loadPanels);
   },
 
-  switchAgent: async (agentId) => {
-    set({ busyAction: `attach-${agentId}` });
-    try {
-      const state = await bridge.switchActiveAgent(agentId);
-      get().setAppState(state);
-      const activeTabId = get().activeTerminalTabId;
-      if (activeTabId) {
-        get().setTabSelectedCli(activeTabId, agentId);
-      }
-    } finally {
-      set({ busyAction: null });
-    }
-  },
-
-  takeOverWriter: async (agentId) => {
-    set({ busyAction: `takeover-${agentId}` });
-    try {
-      const state = await bridge.takeOverWriter(agentId);
-      const activeTabId = get().activeTerminalTabId;
-      const activeTab = get().terminalTabs.find((tab) => tab.id === activeTabId);
-
-      set((current) => {
-        const workspaces = current.workspaces.map((workspace) =>
-          workspace.id === activeTab?.workspaceId
-            ? { ...workspace, currentWriter: agentId, activeAgent: agentId, handoffReady: true }
-            : workspace
-        );
-        const appState = deriveActiveWorkspaceState(
-          state,
-          workspaces,
-          current.terminalTabs,
-          current.activeTerminalTabId
-        );
-        persistTerminalState(
-          workspaces,
-          current.terminalTabs,
-          current.activeTerminalTabId,
-          current.chatSessions
-        );
-        return { appState, workspaces };
-      });
-
-      try {
-        const ctx = await bridge.getContextStore();
-        set({ contextStore: ctx });
-      } catch {
-        // ignore context refresh failures
-      }
-    } finally {
-      set({ busyAction: null });
-    }
-  },
-
   submitPrompt: async (agentId, prompt) => {
     set({ busyAction: "prompt" });
     try {
@@ -2193,62 +2082,6 @@ export const useStore = create<StoreState>((set, get) => {
       await bridge.requestReview(agentId);
     } finally {
       set({ busyAction: null });
-    }
-  },
-
-  snapshotWorkspace: async () => {
-    const activeTab = get().terminalTabs.find((tab) => tab.id === get().activeTerminalTabId);
-    const workspace = get().workspaces.find((item) => item.id === activeTab?.workspaceId);
-    if (!activeTab || !workspace) return;
-    const effectiveCli = resolveTerminalCliId(activeTab.selectedCli, workspace.activeAgent);
-
-    const timestamp = nowIso();
-    const systemMessage: ChatMessage = {
-      id: createId("msg"),
-      role: "system",
-      cliId: effectiveCli,
-      timestamp,
-      content: "Workspace snapshot captured and attached to this terminal session.",
-      isStreaming: false,
-      durationMs: null,
-      exitCode: 0,
-    };
-
-    set((current) => {
-      const nextMessages = [...current.chatSessions[activeTab.id].messages, systemMessage];
-      const workspaces = current.workspaces.map((item) =>
-        item.id === workspace.id ? { ...item, handoffReady: true, lastSnapshot: timestamp } : item
-      );
-      const chatSessions = {
-        ...current.chatSessions,
-        [activeTab.id]: {
-          ...current.chatSessions[activeTab.id],
-          messages: nextMessages,
-          updatedAt: timestamp,
-          estimatedTokens: calculateConversationSessionEstimatedTokens({
-            ...current.chatSessions[activeTab.id],
-            messages: nextMessages,
-          }),
-        },
-      };
-      const appState = current.appState
-        ? deriveActiveWorkspaceState(
-            current.appState,
-            workspaces,
-            current.terminalTabs,
-            current.activeTerminalTabId
-          )
-        : null;
-      persistTerminalState(workspaces, current.terminalTabs, current.activeTerminalTabId, chatSessions);
-      return { workspaces, chatSessions, appState };
-    });
-    const session = get().chatSessions[activeTab.id];
-    if (session) {
-      enqueueMessagePersistence(() =>
-        bridge.appendChatMessages({
-          seeds: [toPersistedSessionSeed(session, activeTab.id, [systemMessage])],
-        })
-      );
     }
   },
 
@@ -2960,12 +2793,24 @@ export const useStore = create<StoreState>((set, get) => {
     void get().hydrateTerminalSession(tabId);
   },
 
-  setTabSelectedCli: (tabId, cliId) => {
+  setTabSelectedCli: async (tabId, cliId) => {
     const current = get();
     const currentTab = current.terminalTabs.find((tab) => tab.id === tabId);
     const workspace = current.workspaces.find((item) => item.id === currentTab?.workspaceId) ?? null;
     const session = current.chatSessions[tabId] ?? null;
     const fromCli = resolveTerminalCliId(currentTab?.selectedCli, workspace?.activeAgent ?? "codex");
+
+    const targetCli = cliId === "auto" ? null : cliId;
+    const hasSourceConversation = Boolean(
+      session?.messages.some(
+        (message) =>
+          message.cliId === fromCli && (message.role === "user" || message.role === "assistant")
+      )
+    );
+    const shouldPrepareHandoff = Boolean(
+      workspace && session && targetCli && targetCli !== fromCli && hasSourceConversation
+    );
+    const handoffId = shouldPrepareHandoff ? createId("handoff") : null;
 
     set((state) => {
       const terminalTabs = state.terminalTabs.map((tab) =>
@@ -2973,7 +2818,28 @@ export const useStore = create<StoreState>((set, get) => {
           ? {
               ...tab,
               selectedCli: cliId,
-              transportSessions: normalizeTransportSessions(tab),
+              transportSessions:
+                targetCli && targetCli !== fromCli
+                  ? {
+                      ...normalizeTransportSessions(tab),
+                      [targetCli]: invalidateTransportSession(
+                        targetCli,
+                        normalizeTransportSessions(tab)[targetCli] ?? null
+                      ),
+                    }
+                  : normalizeTransportSessions(tab),
+              handoff:
+                shouldPrepareHandoff && targetCli && handoffId
+                  ? {
+                      id: handoffId,
+                      status: "preparing" as const,
+                      fromCli,
+                      toCli: targetCli,
+                      summary: null,
+                      error: null,
+                      createdAt: nowIso(),
+                    }
+                  : null,
             }
           : tab
       );
@@ -2990,25 +2856,73 @@ export const useStore = create<StoreState>((set, get) => {
       return { appState, workspaces, terminalTabs };
     });
 
-    const targetCli = cliId === "auto" ? null : cliId;
-    if (!workspace || !session || !targetCli || targetCli === fromCli) return;
+    if (!workspace || !session || !targetCli || targetCli === fromCli || !handoffId) return;
 
     const latest = extractLatestTaskContext(session.messages, fromCli);
-    const recordSwitch = async () => {
-      await bridge.switchCliForTask({
-        terminalTabId: tabId,
-        workspaceId: workspace.id,
-        projectRoot: workspace.rootPath,
-        projectName: workspace.name,
-        fromCli,
-        toCli: targetCli,
-        reason: "manual-switch",
-        latestUserPrompt: latest.latestUserPrompt,
-        latestAssistantSummary: latest.latestAssistantSummary,
-        relevantFiles: latest.relevantFiles,
-      });
+    const prepareHandoff = async () => {
+      try {
+        const result = await bridge.prepareCliHandoff({
+          terminalTabId: tabId,
+          workspaceId: workspace.id,
+          projectRoot: workspace.rootPath,
+          projectName: workspace.name,
+          fromCli,
+          toCli: targetCli,
+          reason: "manual-switch",
+          latestUserPrompt: latest.latestUserPrompt,
+          latestAssistantSummary: latest.latestAssistantSummary,
+          relevantFiles: latest.relevantFiles,
+          recentTurns: buildRecentTabContextTurns(session.messages, fromCli),
+          compactedSummaries: session.compactedSummaries.length > 0 ? session.compactedSummaries : null,
+          workingMemory: buildWorkingMemory(session.messages),
+          modelOverride: currentTab?.modelOverrides[fromCli] ?? null,
+          effortLevel: currentTab?.effortLevel ?? null,
+        });
+        set((state) => {
+          const terminalTabs = state.terminalTabs.map((tab) =>
+            tab.id === tabId && tab.handoff?.id === handoffId
+              ? {
+                  ...tab,
+                  handoff: {
+                    ...tab.handoff,
+                    status: "ready" as const,
+                    summary: result.summary,
+                    error: null,
+                    createdAt: result.createdAt,
+                  },
+                }
+              : tab
+          );
+          persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
+          return { terminalTabs };
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        set((state) => {
+          const terminalTabs = state.terminalTabs.map((tab) =>
+            tab.id === tabId && tab.handoff?.id === handoffId
+              ? {
+                  ...tab,
+                  handoff: { ...tab.handoff, status: "failed" as const, error: detail },
+                }
+              : tab
+          );
+          persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
+          return { terminalTabs };
+        });
+      }
     };
-    void recordSwitch();
+    await prepareHandoff();
+  },
+
+  clearCliHandoff: (tabId) => {
+    set((state) => {
+      const terminalTabs = state.terminalTabs.map((tab) =>
+        tab.id === tabId ? { ...tab, handoff: null } : tab
+      );
+      persistTerminalState(state.workspaces, terminalTabs, state.activeTerminalTabId, state.chatSessions);
+      return { terminalTabs };
+    });
   },
 
   setTabSelectedAgent: (tabId, agent) => {
@@ -3439,13 +3353,13 @@ export const useStore = create<StoreState>((set, get) => {
     }
 
     if (action === "run") {
-      get().setTabSelectedCli(tabId, routeBlock.targetCli);
+      await get().setTabSelectedCli(tabId, routeBlock.targetCli);
       await get().sendChatMessage(tabId, pendingRoute.content);
       return;
     }
 
     if (action === "switch") {
-      get().setTabSelectedCli(tabId, routeBlock.targetCli);
+      await get().setTabSelectedCli(tabId, routeBlock.targetCli);
       get().appendChatSystemMessage(
         tabId,
         routeBlock.targetCli,
@@ -3491,6 +3405,12 @@ export const useStore = create<StoreState>((set, get) => {
       .filter((attachment) => attachment.kind === "image")
       .map((attachment) => attachment.source);
     if ((!text && draftAttachments.length === 0) || tab.status === "streaming") return;
+    if (tab.handoff?.status === "preparing") {
+      throw new Error("Handoff context is still being prepared.");
+    }
+    if (tab.handoff?.status === "failed") {
+      throw new Error("Handoff preparation failed. Dismiss it or switch CLI to retry.");
+    }
     if (imageAttachments.length > 0 && !cliSupportsImageAttachments(selectedCliForSend)) {
       throw new Error(UNSUPPORTED_IMAGE_ATTACHMENT_MESSAGE);
     }
@@ -3800,8 +3720,13 @@ export const useStore = create<StoreState>((set, get) => {
     try {
       const writeMode = !tab.planMode;
       const recentTurns = buildRecentTabContextTurns(session.messages, effectiveCli);
-      const crossTabContextEntries = get().getRelatedTabContexts(tab.id);
-      const workingMemory = buildWorkingMemory(session.messages);
+      const pendingHandoff =
+        tab.handoff?.status === "ready" && tab.handoff.toCli === effectiveCli
+          ? tab.handoff
+          : null;
+      const runtimePrompt = pendingHandoff?.summary?.trim()
+        ? `<studio-handoff>\n${pendingHandoff.summary.trim()}\n</studio-handoff>\n\n<current-user-request>\n${actualPrompt}\n</current-user-request>`
+        : actualPrompt;
       const existingTransportSession = tab.transportSessions[effectiveCli] ?? null;
       const hasExistingSession = Boolean(existingTransportSession?.threadId);
 
@@ -3810,7 +3735,7 @@ export const useStore = create<StoreState>((set, get) => {
         terminalTabId: tab.id,
         workspaceId: workspace.id,
         assistantMessageId: pendingMessage.id,
-        prompt: actualPrompt,
+        prompt: runtimePrompt,
         projectRoot: workspace.rootPath,
         projectName: workspace.name,
         recentTurns,
@@ -3821,11 +3746,6 @@ export const useStore = create<StoreState>((set, get) => {
         modelOverride: tab.modelOverrides[effectiveCli] ?? null,
         permissionOverride: tab.permissionOverrides[effectiveCli] ?? null,
         imageAttachments: imageAttachments.length > 0 ? imageAttachments : null,
-        compactedSummaries: session.compactedSummaries.length > 0 ? session.compactedSummaries : null,
-        crossTabContext: crossTabContextEntries.length > 0 ? crossTabContextEntries : null,
-        workingMemory: workingMemory.modifiedFiles.length > 0 || workingMemory.activeErrors.length > 0
-          ? workingMemory
-          : null,
       };
 
       let messageId: string;
@@ -3882,6 +3802,21 @@ export const useStore = create<StoreState>((set, get) => {
             chatSessions,
             tabSubagentsByTab: rebuildTabSubagentMap(chatSessions),
           };
+        });
+      }
+
+      if (pendingHandoff) {
+        set((current) => {
+          const terminalTabs = current.terminalTabs.map((currentTab) =>
+            currentTab.id === tabId && currentTab.handoff?.id === pendingHandoff.id
+              ? {
+                  ...currentTab,
+                  handoff: { ...currentTab.handoff, status: "consumed" as const },
+                }
+              : currentTab
+          );
+          persistTerminalState(current.workspaces, terminalTabs, current.activeTerminalTabId, current.chatSessions);
+          return { terminalTabs };
         });
       }
     } catch {
@@ -4770,30 +4705,6 @@ export const useStore = create<StoreState>((set, get) => {
       }
       case "goal": {
         pushSystemMessage("Use /goal directly in a Codex conversation.", 1);
-        return;
-      }
-      case "context": {
-        const target = command.args[0]?.trim().toLowerCase() ?? "";
-        if (!target) {
-          pushSystemMessage("Usage: /context goal", 1);
-          return;
-        }
-        if (target !== "goal") {
-          pushSystemMessage(`Unknown /context target '${target}'. Supported: goal`, 1);
-          return;
-        }
-        try {
-          const { goal, workflowGoal } = await readStudioGoal(workspace.rootPath);
-          const content = [
-            `Goal: ${goal || "No active goal found."}`,
-            workflowGoal && workflowGoal !== goal ? `Workflow Goal: ${workflowGoal}` : null,
-          ]
-            .filter(Boolean)
-            .join("\n\n");
-          pushSystemMessage(content);
-        } catch {
-          pushSystemMessage("Unable to load the active Studio goal.", 1);
-        }
         return;
       }
       case "model": {

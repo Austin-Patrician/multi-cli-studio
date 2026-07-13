@@ -10,5 +10,4 @@ claudecode
 .local-release
 desktop-cc-gui
 Trellis
-.studio/runtime
 .tauri-dev-data

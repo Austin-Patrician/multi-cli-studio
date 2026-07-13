@@ -30,6 +30,7 @@ import {
   PickedChatAttachment,
   AssistantApprovalDecision,
   CliHandoffRequest,
+  CliHandoffResult,
   ContextStore,
   ConversationSession,
   ConversationTurn,
@@ -61,12 +62,8 @@ import {
   SemanticMemoryChunk,
   SemanticRecallRequest,
   StorageInfo,
-  StudioPromoteRequest,
-  StudioPromoteResult,
   TranscribeAudioRequest,
   TranscribeAudioResult,
-  StudioPolicyPromotionResult,
-  StudioWorkflowState,
   ToolApprovalMode,
   WorkspaceSessionBatchMutationResponse,
   WorkspaceSessionCatalogPage,
@@ -130,9 +127,6 @@ export type RuntimeProfileDescriptor = {
 
 export interface RuntimeBridge {
   loadAppState: (projectRoot?: string, refreshRuntime?: boolean) => Promise<AppState>;
-  switchActiveAgent: (agentId: AgentId) => Promise<AppState>;
-  takeOverWriter: (agentId: AgentId) => Promise<AppState>;
-  snapshotWorkspace: () => Promise<AppState>;
   runChecks: (projectRoot?: string, cliId?: AgentId, terminalTabId?: string) => Promise<string>;
   submitPrompt: (request: AgentPromptRequest) => Promise<string>;
   requestReview: (agentId: AgentId) => Promise<string>;
@@ -153,10 +147,7 @@ export interface RuntimeBridge {
   loadTerminalState: () => Promise<PersistedTerminalState | null>;
   loadTerminalSession: (terminalTabId: string) => Promise<ConversationSession | null>;
   saveTerminalState: (state: PersistedTerminalState) => Promise<void>;
-  switchCliForTask: (request: CliHandoffRequest) => Promise<void>;
-  promoteStudioMemory: (request: StudioPromoteRequest) => Promise<StudioPromoteResult>;
-  getStudioWorkflowState: (projectRoot: string, terminalTabId?: string | null) => Promise<StudioWorkflowState>;
-  runStudioPolicyPromotion: (projectRoot: string) => Promise<StudioPolicyPromotionResult>;
+  prepareCliHandoff: (request: CliHandoffRequest) => Promise<CliHandoffResult>;
   appendChatMessages: (request: ChatMessagesAppendRequest) => Promise<void>;
   updateChatMessageStream: (request: ChatMessageStreamUpdateRequest) => Promise<void>;
   finalizeChatMessage: (request: ChatMessageFinalizeRequest) => Promise<void>;
@@ -498,18 +489,6 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<AppState>("load_app_state", { projectRoot, refreshRuntime });
   },
-  async switchActiveAgent(agentId) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<AppState>("switch_active_agent", { agentId });
-  },
-  async takeOverWriter(agentId) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<AppState>("take_over_writer", { agentId });
-  },
-  async snapshotWorkspace() {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<AppState>("snapshot_workspace");
-  },
   async runChecks(projectRoot, cliId, terminalTabId) {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<string>("run_checks", { projectRoot, cliId, terminalTabId });
@@ -587,24 +566,9 @@ const tauriRuntime: RuntimeBridge = {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("save_terminal_state", { state: withoutPersistedChatMessages(state) });
   },
-  async switchCliForTask(request) {
+  async prepareCliHandoff(request) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("switch_cli_for_task", { request });
-  },
-  async promoteStudioMemory(request) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<StudioPromoteResult>("promote_studio_memory", { request });
-  },
-  async getStudioWorkflowState(projectRoot, terminalTabId) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<StudioWorkflowState>("get_studio_workflow_state", {
-      projectRoot,
-      terminalTabId: terminalTabId ?? null,
-    });
-  },
-  async runStudioPolicyPromotion(projectRoot) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<StudioPolicyPromotionResult>("run_studio_policy_promotion", { projectRoot });
+    return invoke<CliHandoffResult>("prepare_cli_handoff", { request });
   },
   async appendChatMessages(request) {
     const { invoke } = await import("@tauri-apps/api/core");

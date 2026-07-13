@@ -116,8 +116,7 @@ export function createSeedState(projectRoot = "C:\\Users\\admin\\source\\repos\\
       currentWriter: "codex",
       activeAgent: "codex",
       dirtyFiles: 3,
-      failingChecks: 1,
-      handoffReady: true
+      failingChecks: 1
     },
     agents: [
       baseAgent(
@@ -150,22 +149,6 @@ export function createSeedState(projectRoot = "C:\\Users\\admin\\source\\repos\\
         "Waiting for a UI-focused prompt or review request.",
         "gemini:latest"
       )
-    ],
-    handoffs: [
-      {
-        id: createId("handoff"),
-        from: "codex",
-        to: "claude",
-        status: "ready",
-        goal: "Review the orchestrator boundary before deeper CLI execution flows land.",
-        files: ["src/App.tsx", "src/lib/bridge.ts", "src-tauri/src/main.rs"],
-        risks: [
-          "Frontend and backend state models must stay aligned.",
-          "Writer lock ownership should remain explicit."
-        ],
-        nextStep: "Validate the shared session model and the bridge contracts.",
-        updatedAt: "just now"
-      }
     ],
     artifacts: [
       {

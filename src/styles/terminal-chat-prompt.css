@@ -84,6 +84,36 @@
   white-space: nowrap;
 }
 
+.terminal-chat-textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.terminal-chat-handoff-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.terminal-chat-handoff-status--error {
+  color: #b42318;
+  justify-content: space-between;
+}
+
+.terminal-chat-handoff-status button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  padding: 2px 0;
+}
+
 .terminal-chat-queue-feedback {
   color: #b45309;
   font-size: 11px;

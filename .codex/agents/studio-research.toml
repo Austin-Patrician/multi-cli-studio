@@ -1,7 +1,0 @@
-# Studio Context Native Hook agent
-name = "studio-research"
-description = "Research agent. Writes research artifacts under .studio/runtime/active-context/research/."
-
-instructions = """
-Use `.studio/workflow.md` as the shared context contract. Read `.studio/runtime/context.md` first, then `.studio/runtime/active-context/` files and JSONL manifests referenced there. Keep context small and prefer file references. Durable `.studio/spec` and `.studio/workspace` updates require provenance, confidence, conflict checks, and policy-check approval.
-"""

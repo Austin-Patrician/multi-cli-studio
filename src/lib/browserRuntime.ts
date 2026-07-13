@@ -41,6 +41,7 @@ import {
   ChatMessagesAppendRequest,
   ChatMessageStreamUpdateRequest,
   CliHandoffRequest,
+  CliHandoffResult,
   CliSkillItem,
   ExternalDirectoryEntry,
   ExternalTextFile,
@@ -54,12 +55,10 @@ import {
   CreateAutomationWorkflowRunRequest,
   AppSettings,
   NotificationConfig,
-  EnrichedHandoff,
   ChatPromptRequest,
   FileMentionCandidate,
   PickedChatAttachment,
   LocalUsageStatistics,
-  StudioPromoteRequest,
   TranscribeAudioRequest,
   TranscribeAudioResult,
   WorkspaceSessionBatchMutationResponse,
@@ -362,7 +361,6 @@ function createSeedContext(): ContextStore {
       gemini: { agentId: "gemini", conversationHistory: [], totalTokenEstimate: 0 },
     },
     conversationHistory: [],
-    handoffs: [],
     maxTurnsPerAgent: 50,
     maxOutputCharsPerTurn: 100000,
   };
@@ -2032,70 +2030,6 @@ export const browserRuntime = {
     };
   },
 
-  async switchActiveAgent(agentId: AgentId) {
-    state.workspace.activeAgent = agentId;
-    updateAgentModes(state.workspace.currentWriter, agentId);
-    pushActivity("info", `${agentId} attached`, `${agentId} is now attached to the primary workspace surface.`);
-    pushLine(agentId, "system", "primary terminal attached");
-    emitState();
-    return structuredClone(state);
-  },
-
-  async takeOverWriter(agentId: AgentId) {
-    const previousWriter = state.workspace.currentWriter;
-    state.workspace.currentWriter = agentId;
-    state.workspace.activeAgent = agentId;
-    state.workspace.handoffReady = true;
-    updateAgentModes(agentId, agentId);
-    pushLine(previousWriter, "system", `writer lock released to ${agentId}`);
-    pushLine(agentId, "system", `writer lock acquired from ${previousWriter}`);
-
-    const previousTurns = contextStore.agents[previousWriter]?.conversationHistory?.slice(-5) ?? [];
-    const enrichedHandoff: EnrichedHandoff = {
-      id: createId("handoff"),
-      from: previousWriter,
-      to: agentId,
-      timestamp: nowISO(),
-      gitDiff: " src/App.tsx | 12 ++--\n src/lib/bridge.ts | 4 +-\n 2 files changed, 10 insertions(+), 6 deletions(-)",
-      changedFiles: ["src/App.tsx", "src/lib/bridge.ts", "src-tauri/src/main.rs"],
-      previousTurns,
-      userGoal: `Resume implementation after ${previousWriter} staged the current app session.`,
-      status: "ready",
-    };
-    contextStore.handoffs = [enrichedHandoff, ...contextStore.handoffs].slice(0, 20);
-    persistContext();
-
-    state.handoffs = [
-      {
-        id: enrichedHandoff.id,
-        from: previousWriter,
-        to: agentId,
-        status: "ready" as const,
-        goal: enrichedHandoff.userGoal,
-        files: enrichedHandoff.changedFiles,
-        risks: [
-          "Preserve single-writer control",
-          "Keep frontend and backend state shapes aligned",
-        ],
-        nextStep: `Continue the active context as ${agentId} without dropping the current project context.`,
-        updatedAt: "just now",
-      },
-      ...state.handoffs,
-    ].slice(0, 8);
-
-    pushActivity("success", `${agentId} took over`, `Writer ownership moved from ${previousWriter} to ${agentId}.`);
-    emitState();
-    return structuredClone(state);
-  },
-
-  async snapshotWorkspace() {
-    state.workspace.handoffReady = true;
-    pushLine(state.workspace.activeAgent, "system", "workspace snapshot captured and attached to the app session");
-    pushActivity("success", "Workspace snapshot stored", "The current project state is ready for handoff or review.");
-    emitState();
-    return structuredClone(state);
-  },
-
   async runChecks(_projectRoot?: string, _cliId?: AgentId, _terminalTabId?: string) {
     const active = state.workspace.currentWriter;
     pushLine(active, "system", "running workspace checks...");
@@ -2366,66 +2300,14 @@ export const browserRuntime = {
   async saveTerminalState(nextState: PersistedTerminalState) {
     persistTerminalState(nextState);
   },
-  async switchCliForTask(_request: CliHandoffRequest) {
-    return;
-  },
-  async promoteStudioMemory(request: StudioPromoteRequest) {
-    console.info("[studio-context] promoteStudioMemory is unavailable in browser runtime", request);
+  async prepareCliHandoff(request: CliHandoffRequest): Promise<CliHandoffResult> {
+    const files = request.relevantFiles?.length
+      ? request.relevantFiles.map((file) => `- \`${file}\``).join("\n")
+      : "- None recorded";
     return {
-      path: `browser-runtime:${request.kind}/${request.title || "studio-memory"}`,
-      kind: request.kind,
+      summary: `## Previous Session Handoff\n\n### Current Goal\n${request.latestUserPrompt || "Continue the current task."}\n\n### Important Findings\n${request.latestAssistantSummary || "No assistant conclusion was recorded."}\n\n### Changes Made\n${files}\n\n### Validation\n- No validation result was recorded.\n\n### Remaining Work\nContinue from the current workspace state.\n\n### User Constraints\n- Preserve the user's stated requirements.`,
+      createdAt: new Date().toISOString(),
     };
-  },
-  async getStudioWorkflowState(projectRoot: string, _terminalTabId?: string | null) {
-    return {
-      projectRoot,
-      contextId: "active-context",
-      phase: "browser_runtime",
-      contextPath: null,
-      prdPath: null,
-      contextReportPath: null,
-      implementManifestPath: null,
-      checkManifestPath: null,
-      checkerReportPath: null,
-      policyCheckPath: null,
-      promotionReportPath: null,
-      artifacts: [],
-      manifestEntries: [],
-      timeline: [],
-      researchArtifacts: [],
-      implementEntries: 0,
-      checkEntries: 0,
-      contextCuratorStatus: "fallback",
-      contextCuratorMode: "browser-fallback",
-      contextCuratorFallback: true,
-      contextCuratorReason: "Browser runtime cannot run the native context-curator gate.",
-      contextCuratorError: null,
-      contextCuratorUpdatedAt: null,
-      memoryCandidateEntries: 0,
-      memoryPromotableEntries: 0,
-      memoryRejectedEntries: 0,
-      checkerStatus: null,
-      checkerSummary: null,
-      checkerIssues: [],
-      checkerNeedsRetry: false,
-      checkerRetryPerformed: false,
-      checkerRetryStatus: null,
-      checkerRetryReportPath: null,
-      checkerReportPreview: null,
-      checkerRetryReportPreview: null,
-      policyDecision: null,
-      memoryPolicyReason: null,
-      allowAutoPromote: false,
-      memoryCandidates: [],
-      promotionPromoted: 0,
-      promotionSkipped: 0,
-      promotionDecision: null,
-      lastUpdated: null,
-    };
-  },
-  async runStudioPolicyPromotion(projectRoot: string) {
-    console.info("[studio-context] runStudioPolicyPromotion is unavailable in browser runtime", projectRoot);
-    return { promoted: 0, skipped: 0, paths: [], reportPath: "browser-runtime:promotion-report.md" };
   },
   async appendChatMessages(_request: ChatMessagesAppendRequest) {
     return;
@@ -4170,21 +4052,6 @@ rename to src/components/chat/GitPanel.tsx`,
         return {
           success: false,
           output: "Codex /goal is only available in the desktop runtime.",
-          sideEffects: [],
-        };
-      }
-      case "context": {
-        const target = command.args[0]?.trim().toLowerCase() ?? "";
-        if (target !== "goal") {
-          return {
-            success: false,
-            output: "Usage: /context goal",
-            sideEffects: [],
-          };
-        }
-        return {
-          success: true,
-          output: "Studio context goal is only available in the desktop runtime with active context loaded.",
           sideEffects: [],
         };
       }

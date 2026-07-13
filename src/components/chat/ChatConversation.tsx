@@ -986,14 +986,16 @@ export function ChatConversation() {
     selectedAgent?: SelectedCustomAgent | null
   ) {
     if (!activeTab || activeTab.status === "streaming") return;
-    if (cliId && cliId !== activeTab.selectedCli) {
-      setTabSelectedCli(activeTab.id, cliId);
-    }
-    setTabSelectedAgent(activeTab.id, selectedAgent ?? null);
-    void sendChatMessage(activeTab.id, prompt, {
-      attachmentsOverride: attachments ?? null,
-      selectedAgentOverride: selectedAgent ?? null,
-    }).catch(() => {});
+    void (async () => {
+      if (cliId && cliId !== activeTab.selectedCli) {
+        await setTabSelectedCli(activeTab.id, cliId);
+      }
+      setTabSelectedAgent(activeTab.id, selectedAgent ?? null);
+      await sendChatMessage(activeTab.id, prompt, {
+        attachmentsOverride: attachments ?? null,
+        selectedAgentOverride: selectedAgent ?? null,
+      });
+    })().catch(() => {});
   }
 
   function handleDeleteMessage(messageId: string) {

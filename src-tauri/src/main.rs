@@ -6,7 +6,6 @@ mod code_intel;
 mod local_usage;
 mod session_management;
 mod storage;
-mod studio_context;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -52,20 +51,11 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use storage::{
-    default_terminal_db_path, CliHandoffStorageRequest, EnsureTaskPacketRequest, KernelEvidence,
-    KernelFact, KernelMemoryEntry, MessageBlocksUpdateRequest, MessageDeleteRequest,
+    default_terminal_db_path, MessageBlocksUpdateRequest, MessageDeleteRequest,
     MessageEventsAppendRequest, MessageFinalizeRequest, MessageSessionSeed,
     MessageStreamUpdateRequest, PersistedChatMessage, PersistedConversationSession,
     PersistedTerminalState, SemanticMemoryChunk, SemanticRecallRequest, TaskContextBundle,
     TaskKernel, TaskRecentTurn, TerminalStorage,
-};
-use studio_context::{
-    apply_checker_agent_output, apply_context_curator_output, apply_memory_distill_candidates,
-    auto_promote_studio_memory, build_checker_agent_prompt, build_context_curator_prompt,
-    export_studio_context, load_studio_workflow_state, promote_studio_context,
-    record_checker_retry_result, record_context_curator_fallback, set_checker_gate_state,
-    StudioCheckerApplyResult, StudioContextCurationApplyResult, StudioContextExportInput,
-    StudioPolicyPromotionResult, StudioPromoteRequest, StudioPromoteResult, StudioWorkflowState,
 };
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
@@ -102,11 +92,7 @@ const RUNTIME_LOG_TERMINAL_ID: &str = "runtime-console";
 const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
-const STUDIO_CONTEXT_CURATOR_TIMEOUT_MS: u64 = 45_000;
 const DATA_DIR_OVERRIDE_ENV: &str = "MULTI_CLI_STUDIO_DATA_DIR";
-const STUDIO_CONTEXT_KEY_ENV: &str = "STUDIO_CONTEXT_KEY";
-const STUDIO_CONTEXT_ID_ENV: &str = "STUDIO_CONTEXT_ID";
-const STUDIO_CONTEXT_LOG_ENV: &str = "STUDIO_CONTEXT_LOG";
 const SSH_ASKPASS_PASSWORD_ENV: &str = "MULTI_CLI_STUDIO_SSH_PASSWORD";
 const SSH_TEST_TIMEOUT_MS: u64 = 15_000;
 
@@ -123,25 +109,6 @@ struct CliCommandOutput {
     stderr: String,
 }
 
-macro_rules! studio_context_log {
-    ($($arg:tt)*) => {{
-        if studio_context_logging_enabled() {
-            println!($($arg)*);
-        }
-    }};
-}
-
-fn studio_context_logging_enabled() -> bool {
-    std::env::var(STUDIO_CONTEXT_LOG_ENV)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "debug"
-            )
-        })
-        .unwrap_or(false)
-}
-
 // ── UI state models (unchanged shape for frontend compat) ──────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,7 +116,6 @@ fn studio_context_logging_enabled() -> bool {
 struct AppStateDto {
     workspace: WorkspaceState,
     agents: Vec<AgentCard>,
-    handoffs: Vec<HandoffPack>,
     artifacts: Vec<ReviewArtifact>,
     activity: Vec<ActivityItem>,
     terminal_by_agent: BTreeMap<String, Vec<TerminalLine>>,
@@ -166,7 +132,6 @@ struct WorkspaceState {
     active_agent: String,
     dirty_files: usize,
     failing_checks: usize,
-    handoff_ready: bool,
     last_snapshot: Option<String>,
 }
 
@@ -221,20 +186,6 @@ struct AgentResourceItem {
     version: Option<String>,
     source: Option<String>,
     detail: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HandoffPack {
-    id: String,
-    from: String,
-    to: String,
-    status: String,
-    goal: String,
-    files: Vec<String>,
-    risks: Vec<String>,
-    next_step: String,
-    updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,20 +336,6 @@ struct ConversationTurn {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EnrichedHandoff {
-    id: String,
-    from: String,
-    to: String,
-    timestamp: String,
-    git_diff: String,
-    changed_files: Vec<String>,
-    previous_turns: Vec<ConversationTurn>,
-    user_goal: String,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct AgentContext {
     agent_id: String,
     conversation_history: Vec<ConversationTurn>,
@@ -411,7 +348,6 @@ struct ContextStore {
     agents: BTreeMap<String, AgentContext>,
     #[serde(default)]
     conversation_history: Vec<ConversationTurn>,
-    handoffs: Vec<EnrichedHandoff>,
     max_turns_per_agent: usize,
     max_output_chars_per_turn: usize,
 }
@@ -3512,17 +3448,6 @@ pub struct CompactedSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SharedContextEntry {
-    id: String,
-    source_tab_id: String,
-    source_tab_title: String,
-    source_cli: String,
-    summary: CompactedSummary,
-    updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ChatContextTurn {
     cli_id: String,
     user_prompt: String,
@@ -3568,12 +3493,6 @@ struct ChatPromptRequest {
     #[serde(default)]
     image_attachments: Option<Vec<String>>,
     transport_session: Option<AgentTransportSession>,
-    #[serde(default)]
-    compacted_summaries: Option<Vec<CompactedSummary>>,
-    #[serde(default)]
-    cross_tab_context: Option<Vec<SharedContextEntry>>,
-    #[serde(default)]
-    working_memory: Option<WorkingMemoryPayload>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3639,6 +3558,21 @@ struct CliHandoffRequest {
     latest_assistant_summary: Option<String>,
     #[serde(default)]
     relevant_files: Vec<String>,
+    #[serde(default)]
+    recent_turns: Vec<ChatContextTurn>,
+    #[serde(default)]
+    compacted_summaries: Option<Vec<CompactedSummary>>,
+    #[serde(default)]
+    working_memory: Option<WorkingMemoryPayload>,
+    model_override: Option<String>,
+    effort_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliHandoffResult {
+    summary: String,
+    created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -8078,7 +8012,6 @@ fn run_codex_app_server_turn(
     codex_pending_approvals: Arc<Mutex<BTreeMap<String, PendingCodexApproval>>>,
     block_prefix: Vec<ChatMessageBlock>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
-    studio_context_key: Option<&str>,
 ) -> Result<CodexTurnOutcome, String> {
     let mut cmd = spawn_workspace_command(
         workspace_target,
@@ -8092,7 +8025,6 @@ fn run_codex_app_server_turn(
         ],
         !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
     )?;
-    apply_studio_context_environment(&mut cmd, studio_context_key);
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -8492,7 +8424,6 @@ fn run_codex_goal_command(
     terminal_tab_id: &str,
     message_id: &str,
     write_mode: bool,
-    studio_context_key: Option<&str>,
 ) -> Result<CodexTurnOutcome, String> {
     let mut cmd = spawn_workspace_command(
         workspace_target,
@@ -8506,7 +8437,6 @@ fn run_codex_goal_command(
         ],
         !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
     )?;
-    apply_studio_context_environment(&mut cmd, studio_context_key);
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -9710,7 +9640,6 @@ fn run_claude_headless_turn_once(
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
-    studio_context_key: Option<&str>,
 ) -> Result<ClaudeTurnOutcome, String> {
     let requested_model = claude_requested_model(session, previous_transport_session.as_ref());
     let requested_effort = claude_reasoning_effort(session);
@@ -9754,7 +9683,6 @@ fn run_claude_headless_turn_once(
         &args,
         !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
     )?;
-    apply_studio_context_environment(&mut cmd, studio_context_key);
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -10009,7 +9937,6 @@ fn run_claude_headless_turn(
     claude_approval_rules: Arc<Mutex<ClaudeApprovalRules>>,
     claude_pending_approvals: Arc<Mutex<BTreeMap<String, PendingClaudeApproval>>>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
-    studio_context_key: Option<&str>,
 ) -> Result<ClaudeTurnOutcome, String> {
     let resume_session_id = previous_transport_session
         .as_ref()
@@ -10031,7 +9958,6 @@ fn run_claude_headless_turn(
         claude_approval_rules.clone(),
         claude_pending_approvals.clone(),
         live_turn.clone(),
-        studio_context_key,
     ) {
         Ok(outcome) => Ok(outcome),
         Err(error) if resume_session_id.is_some() && claude_should_retry_without_resume(&error) => {
@@ -10055,7 +9981,6 @@ fn run_claude_headless_turn(
                 claude_approval_rules,
                 claude_pending_approvals,
                 live_turn,
-                studio_context_key,
             )
         }
         Err(error) => Err(error),
@@ -10076,7 +10001,6 @@ fn run_gemini_acp_turn(
     timeout_ms: u64,
     block_prefix: Vec<ChatMessageBlock>,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
-    studio_context_key: Option<&str>,
 ) -> Result<GeminiTurnOutcome, String> {
     let project_root = workspace_target_project_root(workspace_target);
     let mut cmd = spawn_workspace_command(
@@ -10085,7 +10009,6 @@ fn run_gemini_acp_turn(
         &["--acp".to_string()],
         !matches!(workspace_target, WorkspaceTarget::Ssh { .. }),
     )?;
-    apply_studio_context_environment(&mut cmd, studio_context_key);
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -10600,192 +10523,6 @@ fn load_app_state(
 
     emit_state(&app, &state);
     Ok(state)
-}
-
-#[tauri::command]
-fn switch_active_agent(
-    app: AppHandle,
-    store: State<'_, AppStore>,
-    agent_id: String,
-) -> Result<AppStateDto, String> {
-    let next_state = mutate_state(&store, |state| {
-        state.workspace.active_agent = agent_id.clone();
-        update_agent_modes(state, None, Some(&agent_id));
-        append_activity(
-            state,
-            "info",
-            &format!("{} attached", agent_id),
-            &format!(
-                "{} is now attached to the primary workspace surface.",
-                agent_id
-            ),
-        );
-        append_terminal_line(state, &agent_id, "system", "primary terminal attached");
-        sync_workspace_metrics(state);
-    })?;
-    persist_state(&next_state)?;
-    emit_state(&app, &next_state);
-    Ok(next_state)
-}
-
-#[tauri::command]
-fn take_over_writer(
-    app: AppHandle,
-    store: State<'_, AppStore>,
-    agent_id: String,
-) -> Result<AppStateDto, String> {
-    // Capture enriched handoff data before mutating state
-    let (previous_writer, git_diff, changed_files, previous_turns) = {
-        let state = store.state.lock().map_err(|err| err.to_string())?;
-        let ctx = store.context.lock().map_err(|err| err.to_string())?;
-        let prev = state.workspace.current_writer.clone();
-        let project_root = state.workspace.project_root.clone();
-
-        let diff = git_output(&project_root, &["diff", "--stat"])
-            .unwrap_or_else(|| "no changes".to_string());
-        let files = git_output(&project_root, &["status", "--porcelain"])
-            .map(|output| {
-                output
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .map(|l| l.trim().split_whitespace().last().unwrap_or("").to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let turns = ctx
-            .agents
-            .get(&prev)
-            .map(|a| {
-                a.conversation_history
-                    .iter()
-                    .rev()
-                    .take(5)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        (prev, diff, files, turns)
-    };
-
-    // Create enriched handoff
-    let enriched = EnrichedHandoff {
-        id: create_id("handoff"),
-        from: previous_writer.clone(),
-        to: agent_id.clone(),
-        timestamp: now_stamp(),
-        git_diff: git_diff.clone(),
-        changed_files: changed_files.clone(),
-        previous_turns,
-        user_goal: format!(
-            "Resume implementation after {} staged the current app session.",
-            previous_writer
-        ),
-        status: "ready".to_string(),
-    };
-
-    // Store enriched handoff in context store
-    {
-        let mut ctx = store.context.lock().map_err(|err| err.to_string())?;
-        ctx.handoffs.insert(0, enriched.clone());
-        if ctx.handoffs.len() > 20 {
-            ctx.handoffs.truncate(20);
-        }
-        persist_context(&ctx)?;
-    }
-
-    let next_state = mutate_state(&store, |state| {
-        state.workspace.current_writer = agent_id.clone();
-        state.workspace.active_agent = agent_id.clone();
-        state.workspace.handoff_ready = true;
-        update_agent_modes(state, Some(&agent_id), Some(&agent_id));
-        append_terminal_line(
-            state,
-            &previous_writer,
-            "system",
-            &format!("writer lock released to {}", agent_id),
-        );
-        append_terminal_line(
-            state,
-            &agent_id,
-            "system",
-            &format!("writer lock acquired from {}", previous_writer),
-        );
-
-        let handoff_files = if changed_files.is_empty() {
-            vec![
-                "src/App.tsx".to_string(),
-                "src/lib/bridge.ts".to_string(),
-                "src-tauri/src/main.rs".to_string(),
-            ]
-        } else {
-            changed_files.clone()
-        };
-
-        prepend_handoff(
-            state,
-            HandoffPack {
-                id: enriched.id.clone(),
-                from: previous_writer.clone(),
-                to: agent_id.clone(),
-                status: "ready".to_string(),
-                goal: format!(
-                    "Resume implementation after {} staged the current app session.",
-                    previous_writer
-                ),
-                files: handoff_files,
-                risks: vec![
-                    "Preserve single-writer control".to_string(),
-                    "Keep frontend and backend state shapes aligned".to_string(),
-                ],
-                next_step: format!(
-                    "Continue the active context as {} without dropping the current project context.",
-                    agent_id
-                ),
-                updated_at: "just now".to_string(),
-            },
-        );
-        append_activity(
-            state,
-            "success",
-            &format!("{} took over", agent_id),
-            &format!(
-                "Writer ownership moved from {} to {}.",
-                previous_writer, agent_id
-            ),
-        );
-        sync_workspace_metrics(state);
-    })?;
-    persist_state(&next_state)?;
-    emit_state(&app, &next_state);
-    Ok(next_state)
-}
-
-#[tauri::command]
-fn snapshot_workspace(app: AppHandle, store: State<'_, AppStore>) -> Result<AppStateDto, String> {
-    let next_state = mutate_state(&store, |state| {
-        state.workspace.last_snapshot = Some(now_stamp());
-        state.workspace.handoff_ready = true;
-        append_terminal_line(
-            state,
-            &state.workspace.active_agent.clone(),
-            "system",
-            "workspace snapshot captured and attached to the app session",
-        );
-        append_activity(
-            state,
-            "success",
-            "Workspace snapshot stored",
-            "The current project state is ready for handoff or review.",
-        );
-        sync_workspace_metrics(state);
-    })?;
-    persist_state(&next_state)?;
-    emit_state(&app, &next_state);
-    Ok(next_state)
 }
 
 #[tauri::command]
@@ -13083,6 +12820,151 @@ fn unique_download_path(base_dir: &Path, file_name: &str) -> PathBuf {
     base_dir.join(format!("{}-{}{}", stem, create_id("log"), extension))
 }
 
+fn build_cli_handoff_prompt(request: &CliHandoffRequest) -> String {
+    let compacted = request
+        .compacted_summaries
+        .as_ref()
+        .map(|items| format_compacted_summaries_section(items))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "No compacted summary is available.".to_string());
+    let recent_turns = request
+        .recent_turns
+        .iter()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|turn| {
+            format!(
+                "User: {}\nAssistant: {}",
+                truncate_str(&turn.user_prompt, 1_500),
+                truncate_str(&turn.assistant_reply, 2_500)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let files = if request.relevant_files.is_empty() {
+        "None recorded".to_string()
+    } else {
+        request
+            .relevant_files
+            .iter()
+            .take(30)
+            .map(|file| format!("- {file}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let working_memory = request
+        .working_memory
+        .as_ref()
+        .map(|memory| format_working_memory_section(Some(memory)))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "No additional working-memory record is available.".to_string());
+
+    format!(
+        "You are preparing a compact cross-CLI handoff from {from_cli} to {to_cli}.\n\
+Return only one concise Markdown summary. Do not modify files. Do not continue the task. Do not mention this prompt or internal orchestration.\n\
+Use exactly these headings:\n\
+## Previous Session Handoff\n\
+### Current Goal\n\
+### Important Findings\n\
+### Changes Made\n\
+### Validation\n\
+### Remaining Work\n\
+### User Constraints\n\n\
+Keep only facts supported by the supplied session material or current workspace. Omit exploratory tool noise. Mention commands only when they establish a validation result or an unresolved failure. Keep the result under 4,000 characters.\n\n\
+Project: {project_name}\n\
+Workspace: {workspace_id}\n\
+Tab: {terminal_tab_id}\n\
+Switch reason: {reason}\n\
+Latest user goal: {latest_goal}\n\
+Latest assistant conclusion: {latest_conclusion}\n\n\
+Recorded relevant files:\n{files}\n\n\
+Compacted history:\n{compacted}\n\n\
+Recent active turns:\n{recent_turns}\n\n\
+Working memory:\n{working_memory}",
+        from_cli = request.from_cli,
+        to_cli = request.to_cli,
+        project_name = request.project_name,
+        workspace_id = request.workspace_id,
+        terminal_tab_id = request.terminal_tab_id,
+        reason = request.reason.as_deref().unwrap_or("CLI switch"),
+        latest_goal = request.latest_user_prompt.as_deref().unwrap_or("Not recorded"),
+        latest_conclusion = request.latest_assistant_summary.as_deref().unwrap_or("Not recorded"),
+        files = files,
+        compacted = compacted,
+        recent_turns = if recent_turns.is_empty() { "No recent turns recorded" } else { &recent_turns },
+        working_memory = working_memory,
+    )
+}
+
+fn normalize_cli_handoff_summary(raw: &str) -> Result<String, String> {
+    let cleaned = Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+        .map(|pattern| pattern.replace_all(raw, "").into_owned())
+        .unwrap_or_else(|_| raw.to_string())
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        return Err("The source CLI returned an empty handoff summary.".to_string());
+    }
+    let sanitized = cleaned
+        .replace("<studio-handoff>", "")
+        .replace("</studio-handoff>", "")
+        .replace("<current-user-request>", "")
+        .replace("</current-user-request>", "");
+    let section_names = [
+        "Current Goal",
+        "Important Findings",
+        "Changes Made",
+        "Validation",
+        "Remaining Work",
+        "User Constraints",
+    ];
+    let mut summary = sanitized;
+    let mut first_section_index = None;
+    for section_name in section_names {
+        let pattern = RegexBuilder::new(&format!(
+            r"^\s*#{{1,6}}\s+(?:\*\*)?{}(?:\*\*)?\s*$",
+            regex::escape(section_name)
+        ))
+        .case_insensitive(true)
+        .multi_line(true)
+        .build()
+        .map_err(|err| err.to_string())?;
+        let Some(section_match) = pattern.find(&summary) else {
+            let preview = truncate_str(&summary.replace(['\r', '\n'], " "), 300);
+            return Err(format!(
+                "The source CLI returned an incomplete handoff summary (missing '{section_name}'). Output: {preview}"
+            ));
+        };
+        first_section_index = Some(
+            first_section_index
+                .map(|index: usize| index.min(section_match.start()))
+                .unwrap_or(section_match.start()),
+        );
+        summary = pattern
+            .replace(&summary, format!("### {section_name}"))
+            .into_owned();
+    }
+
+    let title_pattern =
+        RegexBuilder::new(r"^\s*#{1,6}\s+(?:\*\*)?Previous Session Handoff(?:\*\*)?\s*$")
+            .case_insensitive(true)
+            .multi_line(true)
+            .build()
+            .map_err(|err| err.to_string())?;
+    let body = if let Some(title_match) = title_pattern.find(&summary) {
+        summary[title_match.end()..].trim()
+    } else {
+        summary[first_section_index.unwrap_or(0)..].trim()
+    };
+    Ok(truncate_str(
+        &format!("## Previous Session Handoff\n\n{body}"),
+        4_000,
+    ))
+}
+
 #[tauri::command]
 fn save_text_to_downloads(file_name: String, content: String) -> Result<String, String> {
     let base_dir = dirs::download_dir()
@@ -13096,64 +12978,64 @@ fn save_text_to_downloads(file_name: String, content: String) -> Result<String, 
     Ok(path.to_string_lossy().to_string())
 }
 
-#[tauri::command]
-fn switch_cli_for_task(
-    store: State<'_, AppStore>,
+fn prepare_cli_handoff_blocking(
     request: CliHandoffRequest,
-) -> Result<(), String> {
-    let from_cli = request.from_cli.clone();
-    let to_cli = request.to_cli.clone();
-    let project_name = request.project_name.clone();
-    let latest_user_prompt = request.latest_user_prompt.clone();
-    let relevant_files = request.relevant_files.clone();
-    let bundle = store
-        .terminal_storage
-        .switch_cli_for_task(&CliHandoffStorageRequest {
-            terminal_tab_id: request.terminal_tab_id,
-            workspace_id: request.workspace_id,
-            project_root: request.project_root,
-            project_name: project_name.clone(),
-            from_cli: from_cli.clone(),
-            to_cli: to_cli.clone(),
-            reason: request.reason,
-            latest_user_prompt: latest_user_prompt.clone(),
-            latest_assistant_summary: request.latest_assistant_summary.clone(),
-            relevant_files: relevant_files.clone(),
-            handoff_payload_json: None,
-        })?;
-
-    if let Ok(mut ctx) = store.context.lock() {
-        ctx.handoffs.insert(
-            0,
-            EnrichedHandoff {
-                id: create_id("handoff"),
-                from: from_cli,
-                to: to_cli,
-                timestamp: now_stamp(),
-                git_diff: String::new(),
-                changed_files: if bundle.task_packet.relevant_files.is_empty() {
-                    relevant_files
-                } else {
-                    bundle.task_packet.relevant_files.clone()
-                },
-                previous_turns: Vec::new(),
-                user_goal: latest_user_prompt
-                    .or_else(|| Some(bundle.task_packet.goal.clone()))
-                    .unwrap_or_else(|| format!("Continue work in {}", project_name)),
-                status: bundle
-                    .task_packet
-                    .next_step
-                    .clone()
-                    .unwrap_or_else(|| "ready".to_string()),
-            },
-        );
-        if ctx.handoffs.len() > 20 {
-            ctx.handoffs.truncate(20);
-        }
-        let _ = persist_context(&ctx);
+    command_path: String,
+) -> Result<CliHandoffResult, String> {
+    let prompt = build_cli_handoff_prompt(&request);
+    let mut session = acp::AcpSession::default();
+    session.plan_mode = true;
+    session.effort_level = request.effort_level.clone();
+    if let Some(model) = request
+        .model_override
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    {
+        session.model.insert(request.from_cli.clone(), model);
     }
 
-    Ok(())
+    let outcome = run_silent_agent_turn_once(
+        &request.project_root,
+        &request.from_cli,
+        &command_path,
+        &prompt,
+        false,
+        &session,
+        60_000,
+        None,
+    )?;
+    let raw_summary = if outcome.final_content.trim().is_empty() {
+        outcome.raw_output
+    } else {
+        outcome.final_content
+    };
+    let summary = normalize_cli_handoff_summary(&raw_summary)?;
+
+    Ok(CliHandoffResult {
+        summary,
+        created_at: now_stamp(),
+    })
+}
+
+#[tauri::command]
+async fn prepare_cli_handoff(
+    store: State<'_, AppStore>,
+    request: CliHandoffRequest,
+) -> Result<CliHandoffResult, String> {
+    if request.from_cli == request.to_cli {
+        return Err("Source and target CLI must be different.".to_string());
+    }
+
+    let command_path = {
+        let state = store.state.lock().map_err(|err| err.to_string())?;
+        resolve_runtime_command(&state, &request.from_cli)?
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        prepare_cli_handoff_blocking(request, command_path)
+    })
+    .await
+    .map_err(|err| format!("Handoff worker failed: {err}"))?
 }
 
 // ── Agent job orchestration ────────────────────────────────────────────
@@ -13429,30 +13311,7 @@ fn send_chat_message(
     let requested_transport_session = request.transport_session.clone();
     let transport_kind = default_transport_kind(&cli_id);
     let terminal_storage = store.terminal_storage.clone();
-    if !remote_workspace && goal_command.is_none() {
-        terminal_storage.ensure_task_bundle(&EnsureTaskPacketRequest {
-            terminal_tab_id: terminal_tab_id.clone(),
-            workspace_id: workspace_id.clone(),
-            project_root: effective_project_root.clone(),
-            project_name: project_name.clone(),
-            cli_id: cli_id.clone(),
-            initial_goal: prompt.clone(),
-        })?;
-    }
-    let pending_handoff = if goal_command.is_some() {
-        None
-    } else {
-        terminal_storage
-            .load_pending_handoff_for_terminal_tab(&terminal_tab_id, &cli_id)
-            .ok()
-            .flatten()
-    };
-    let force_fresh_session = pending_handoff.is_some();
-    let effective_previous_transport_session = if force_fresh_session {
-        None
-    } else {
-        requested_transport_session.clone()
-    };
+    let effective_previous_transport_session = requested_transport_session.clone();
 
     let mut request_session = acp::AcpSession::default();
     request_session.plan_mode = request.plan_mode;
@@ -13513,7 +13372,6 @@ fn send_chat_message(
                 &terminal_tab_id,
                 &msg_id,
                 write_mode,
-                None,
             );
             let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -13584,16 +13442,7 @@ fn send_chat_message(
         _ => (prompt.clone(), Vec::new(), None),
     };
 
-    let _ = terminal_storage.maybe_auto_compact_terminal_tab(&terminal_tab_id);
-
-    // Build script with tab-scoped context
-    let (
-        composed_prompt_base,
-        studio_context_metrics,
-        studio_workflow_input,
-        studio_workflow_task_id,
-        studio_context_key,
-    ) = {
+    let composed_prompt_base = {
         let mut state = store.state.lock().map_err(|e| e.to_string())?.clone();
         state.workspace.project_root = effective_project_root.clone();
         state.workspace.project_name = project_name.clone();
@@ -13604,139 +13453,13 @@ fn send_chat_message(
                 .unwrap_or_else(|| "workspace".to_string())
         };
         sync_workspace_metrics(&mut state);
-        let is_resuming = effective_previous_transport_session
-            .as_ref()
-            .and_then(|s| s.thread_id.as_ref())
-            .is_some();
-        let memory_candidates = if remote_workspace {
-            None
-        } else {
-            build_studio_memory_candidates(&terminal_storage, &terminal_tab_id)
-                .ok()
-                .flatten()
-        };
-        let studio_context_input = StudioContextExportInput {
-            project_root: effective_project_root.clone(),
-            project_name: project_name.clone(),
-            workspace_id: workspace_id.clone(),
-            context_title: None,
-            context_goal: None,
-            terminal_tab_id: terminal_tab_id.clone(),
-            cli_id: cli_id.clone(),
-            branch: state.workspace.branch.clone(),
-            dirty_files: state.workspace.dirty_files,
-            failing_checks: state.workspace.failing_checks,
-            write_mode,
-            is_session_resuming: is_resuming,
-            user_prompt: prompt_for_context.clone(),
-            handoff_summary: pending_handoff
-                .as_ref()
-                .and_then(|handoff| handoff.latest_conclusion.clone()),
-            handoff_files: pending_handoff
-                .as_ref()
-                .map(|handoff| handoff.files.clone())
-                .filter(|files| !files.is_empty())
-                .unwrap_or_default(),
-            handoff_next_step: pending_handoff
-                .as_ref()
-                .and_then(|handoff| handoff.next_step.clone()),
-            compacted_context: request
-                .compacted_summaries
-                .as_ref()
-                .map(|summaries| format_compacted_summaries_section(summaries))
-                .filter(|value| !value.trim().is_empty()),
-            cross_tab_context: request
-                .cross_tab_context
-                .as_ref()
-                .map(|entries| format_cross_tab_entries_section(entries, false))
-                .filter(|value| !value.trim().is_empty()),
-            working_memory: request
-                .working_memory
-                .as_ref()
-                .map(|memory| format_working_memory_section(Some(memory)))
-                .filter(|value| !value.trim().is_empty()),
-            memory_candidates,
-        };
-        let studio_context = if remote_workspace {
-            None
-        } else {
-            match export_studio_context(&studio_context_input) {
-                Ok(result) => result,
-                Err(error) => {
-                    eprintln!("[studio-context] export failed: {error}");
-                    None
-                }
-            }
-        };
-        if let Some(export) = studio_context.as_ref() {
-            start_studio_context_curator_job(
-                effective_project_root.clone(),
-                cli_id.clone(),
-                wrapper_path.clone(),
-                studio_context_input.clone(),
-                export.context_id.clone(),
-                Some(export.context_key.clone()),
-                request_session.clone(),
-            );
-        }
-        let studio_context_prelude = studio_context
-            .as_ref()
-            .map(|export| export.prelude.as_str());
-        let studio_context_metrics = studio_context.as_ref().map(|export| export.metrics.clone());
-        let studio_workflow_task_id = studio_context
-            .as_ref()
-            .map(|export| export.context_id.clone());
-        let studio_context_key = studio_context
-            .as_ref()
-            .map(|export| export.context_key.clone());
-        let studio_workflow_input = if studio_context.is_some() {
-            Some(studio_context_input.clone())
-        } else {
-            None
-        };
-        let composed = compose_tab_context_prompt(
-            &state,
-            &terminal_storage,
-            &cli_id,
-            &terminal_tab_id,
-            &workspace_id,
-            &effective_project_root,
-            &project_name,
-            &prompt_for_context,
-            &recent_turns,
-            write_mode,
-            request.compacted_summaries.as_ref(),
-            request.cross_tab_context.as_ref(),
-            request.working_memory.as_ref(),
-            is_resuming,
-            studio_context_prelude,
-        );
-        (
-            composed,
-            studio_context_metrics,
-            studio_workflow_input,
-            studio_workflow_task_id,
-            studio_context_key,
-        )
+        compose_tab_context_prompt(&state, &cli_id, &prompt_for_context, write_mode)
     };
     let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
         format!("/{} {}", skill.name, composed_prompt_base)
     } else {
         composed_prompt_base
     };
-    if let Some(mut metrics) = studio_context_metrics {
-        metrics.final_prompt_chars = composed_prompt.chars().count();
-        match serde_json::to_string(&metrics) {
-            Ok(payload) => studio_context_log!("[studio-context] {payload}"),
-            Err(_) => studio_context_log!(
-                "[studio-context] prelude_chars={} runtime_context_chars={} current_context_chars={} final_prompt_chars={}",
-                metrics.prelude_chars,
-                metrics.runtime_context_chars,
-                metrics.current_context_chars,
-                metrics.final_prompt_chars
-            ),
-        }
-    }
 
     let msg_id = message_id.clone();
     let app_handle = app.clone();
@@ -13753,9 +13476,6 @@ fn send_chat_message(
     let workspace_id_for_thread = workspace_id.clone();
     let project_name_for_thread = project_name.clone();
     let workspace_target_for_thread = workspace_target.clone();
-    let studio_workflow_input_for_thread = studio_workflow_input.clone();
-    let studio_workflow_task_id_for_thread = studio_workflow_task_id.clone();
-    let studio_context_key_for_thread = studio_context_key.clone();
     let recent_turns_for_thread: Vec<TaskRecentTurn> = recent_turns
         .iter()
         .map(|turn| TaskRecentTurn {
@@ -13783,9 +13503,6 @@ fn send_chat_message(
         let codex_live_chat_turns = live_chat_turns.clone();
         let codex_image_attachments = image_attachments.clone();
         let codex_workspace_target = workspace_target_for_thread.clone();
-        let codex_studio_workflow_input = studio_workflow_input_for_thread.clone();
-        let codex_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
-        let codex_studio_context_key = studio_context_key_for_thread.clone();
 
         thread::spawn(move || {
             let start = Instant::now();
@@ -13805,7 +13522,6 @@ fn send_chat_message(
                 codex_pending_approvals,
                 Vec::new(),
                 Some(codex_live_turn.clone()),
-                codex_studio_context_key.as_deref(),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -13908,26 +13624,6 @@ fn send_chat_message(
                 exit_code,
             });
 
-            if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
-                if let (Some(input), Some(task_id)) = (
-                    codex_studio_workflow_input.as_ref(),
-                    codex_studio_workflow_task_id.as_ref(),
-                ) {
-                    start_studio_post_turn_job(
-                        codex_terminal_storage.clone(),
-                        codex_project_root.clone(),
-                        "codex".to_string(),
-                        codex_wrapper_path.clone(),
-                        input.clone(),
-                        task_id.clone(),
-                        codex_studio_context_key.clone(),
-                        request_session_for_thread.clone(),
-                        final_content.clone(),
-                        turn_write_mode,
-                    );
-                }
-            }
-
             let _ = app_handle.emit(
                 "stream-chunk",
                 StreamEvent {
@@ -13973,9 +13669,6 @@ fn send_chat_message(
         let gemini_live_turn = live_turn.clone();
         let gemini_live_chat_turns = live_chat_turns.clone();
         let gemini_workspace_target = workspace_target_for_thread.clone();
-        let gemini_studio_workflow_input = studio_workflow_input_for_thread.clone();
-        let gemini_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
-        let gemini_studio_context_key = studio_context_key_for_thread.clone();
         let gemini_image_attachments = image_attachments.clone();
 
         thread::spawn(move || {
@@ -13994,7 +13687,6 @@ fn send_chat_message(
                 timeout_ms,
                 Vec::new(),
                 Some(gemini_live_turn.clone()),
-                gemini_studio_context_key.as_deref(),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -14100,26 +13792,6 @@ fn send_chat_message(
                 exit_code,
             });
 
-            if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
-                if let (Some(input), Some(task_id)) = (
-                    gemini_studio_workflow_input.as_ref(),
-                    gemini_studio_workflow_task_id.as_ref(),
-                ) {
-                    start_studio_post_turn_job(
-                        gemini_terminal_storage.clone(),
-                        gemini_project_root.clone(),
-                        "gemini".to_string(),
-                        gemini_wrapper_path.clone(),
-                        input.clone(),
-                        task_id.clone(),
-                        gemini_studio_context_key.clone(),
-                        request_session_for_thread.clone(),
-                        final_content.clone(),
-                        turn_write_mode,
-                    );
-                }
-            }
-
             let _ = app_handle.emit(
                 "stream-chunk",
                 StreamEvent {
@@ -14167,9 +13839,6 @@ fn send_chat_message(
         let claude_live_turn = live_turn.clone();
         let claude_live_chat_turns = live_chat_turns.clone();
         let claude_workspace_target = workspace_target_for_thread.clone();
-        let claude_studio_workflow_input = studio_workflow_input_for_thread.clone();
-        let claude_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
-        let claude_studio_context_key = studio_context_key_for_thread.clone();
         let claude_image_attachments = image_attachments.clone();
 
         thread::spawn(move || {
@@ -14189,7 +13858,6 @@ fn send_chat_message(
                 claude_approval_rules,
                 claude_pending_approvals,
                 Some(claude_live_turn.clone()),
-                claude_studio_context_key.as_deref(),
             );
 
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -14295,26 +13963,6 @@ fn send_chat_message(
                 exit_code,
             });
 
-            if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
-                if let (Some(input), Some(task_id)) = (
-                    claude_studio_workflow_input.as_ref(),
-                    claude_studio_workflow_task_id.as_ref(),
-                ) {
-                    start_studio_post_turn_job(
-                        claude_terminal_storage.clone(),
-                        claude_project_root.clone(),
-                        "claude".to_string(),
-                        claude_wrapper_path.clone(),
-                        input.clone(),
-                        task_id.clone(),
-                        claude_studio_context_key.clone(),
-                        request_session_for_thread.clone(),
-                        final_content.clone(),
-                        turn_write_mode,
-                    );
-                }
-            }
-
             let _ = app_handle.emit(
                 "stream-chunk",
                 StreamEvent {
@@ -14361,9 +14009,6 @@ fn send_chat_message(
     let shell_recent_turns = recent_turns_for_thread.clone();
     let shell_live_turn = live_turn.clone();
     let shell_live_chat_turns = live_chat_turns.clone();
-    let shell_studio_workflow_input = studio_workflow_input_for_thread.clone();
-    let shell_studio_workflow_task_id = studio_workflow_task_id_for_thread.clone();
-    let shell_studio_context_key = studio_context_key_for_thread.clone();
 
     thread::spawn(move || {
         let start = Instant::now();
@@ -14374,7 +14019,6 @@ fn send_chat_message(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         apply_runtime_environment(&mut cmd);
-        apply_studio_context_environment(&mut cmd, shell_studio_context_key.as_deref());
 
         #[cfg(target_os = "windows")]
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -14575,26 +14219,6 @@ fn send_chat_message(
             exit_code,
         });
 
-        if exit_code.unwrap_or(0) == 0 && !interrupted_by_user {
-            if let (Some(input), Some(task_id)) = (
-                shell_studio_workflow_input.as_ref(),
-                shell_studio_workflow_task_id.as_ref(),
-            ) {
-                start_studio_post_turn_job(
-                    shell_terminal_storage.clone(),
-                    project_root.clone(),
-                    agent_id.clone(),
-                    wrapper_path.clone(),
-                    input.clone(),
-                    task_id.clone(),
-                    shell_studio_context_key.clone(),
-                    request_session_for_thread.clone(),
-                    raw_output.clone(),
-                    turn_write_mode,
-                );
-            }
-        }
-
         // Emit done
         let _ = app_handle.emit(
             "stream-chunk",
@@ -14627,26 +14251,6 @@ fn send_chat_message(
     });
 
     Ok(message_id)
-}
-
-#[tauri::command]
-fn promote_studio_memory(request: StudioPromoteRequest) -> Result<StudioPromoteResult, String> {
-    promote_studio_context(&request)
-}
-
-#[tauri::command]
-fn get_studio_workflow_state(
-    project_root: String,
-    terminal_tab_id: Option<String>,
-) -> Result<StudioWorkflowState, String> {
-    load_studio_workflow_state(&project_root, terminal_tab_id.as_deref())
-}
-
-#[tauri::command]
-fn run_studio_policy_promotion(
-    project_root: String,
-) -> Result<StudioPolicyPromotionResult, String> {
-    auto_promote_studio_memory(&project_root, studio_context::ACTIVE_CONTEXT_ID)
 }
 
 #[tauri::command]
@@ -14795,8 +14399,7 @@ fn run_auto_orchestration(
                 .insert("claude".to_string(), model.clone());
         }
         let _ = terminal_storage.maybe_auto_compact_terminal_tab(&terminal_tab_id);
-        let planner_prompt =
-            build_auto_plan_prompt(&composed_state, &terminal_storage, &request_for_thread);
+        let planner_prompt = build_auto_plan_prompt(&composed_state, &request_for_thread);
         let planner_result = run_silent_agent_turn_once(
             &request_for_thread.project_root,
             "claude",
@@ -14806,7 +14409,6 @@ fn run_auto_orchestration(
             &planner_session,
             timeout_ms,
             Some(auto_live_turn.clone()),
-            None,
         );
         if was_live_chat_turn_interrupted(Some(&auto_live_turn)) {
             let blocks = build_auto_orchestration_blocks(
@@ -14960,20 +14562,9 @@ fn run_auto_orchestration(
 
             let worker_prompt = compose_tab_context_prompt(
                 &composed_state,
-                &terminal_storage,
                 &step.owner,
-                &request_for_thread.terminal_tab_id,
-                &request_for_thread.workspace_id,
-                &request_for_thread.project_root,
-                &request_for_thread.project_name,
                 &build_auto_worker_prompt(&request_for_thread.prompt, &step),
-                &request_for_thread.recent_turns,
                 step.write,
-                None,
-                None,
-                None,
-                false,
-                None,
             );
 
             let block_prefix = {
@@ -15004,7 +14595,6 @@ fn run_auto_orchestration(
                     codex_pending_approvals.clone(),
                     block_prefix,
                     Some(auto_live_turn.clone()),
-                    None,
                 ) {
                     Ok(outcome) => {
                         worker_trace_blocks.extend(outcome.blocks.clone());
@@ -15043,7 +14633,6 @@ fn run_auto_orchestration(
                     timeout_ms,
                     block_prefix,
                     Some(auto_live_turn.clone()),
-                    None,
                 ) {
                     Ok(outcome) => {
                         worker_trace_blocks.extend(outcome.blocks.clone());
@@ -15077,7 +14666,6 @@ fn run_auto_orchestration(
                     &worker_session,
                     timeout_ms,
                     Some(auto_live_turn.clone()),
-                    None,
                 ) {
                     Ok(outcome) => {
                         step_states[index].status = "completed".to_string();
@@ -15167,7 +14755,6 @@ fn run_auto_orchestration(
             &synthesis_session,
             timeout_ms,
             Some(auto_live_turn.clone()),
-            None,
         )
         .ok()
         .map(|outcome| {
@@ -15681,23 +15268,6 @@ fn execute_acp_command(
                 } else {
                     output
                 },
-                side_effects: vec![],
-            })
-        }
-        "context" => {
-            let target = command.args.first().map(|value| value.trim()).unwrap_or("");
-            if !target.eq_ignore_ascii_case("goal") {
-                return Ok(acp::AcpCommandResult {
-                    success: false,
-                    output: "Usage: /context goal".into(),
-                    side_effects: vec![],
-                });
-            }
-            Ok(acp::AcpCommandResult {
-                success: false,
-                output:
-                    "Studio context goal is resolved by the desktop chat runtime, not the ACP backend."
-                        .into(),
                 side_effects: vec![],
             })
         }
@@ -21347,679 +20917,6 @@ fn format_working_memory_section(wm: Option<&WorkingMemoryPayload>) -> String {
     )
 }
 
-fn build_studio_memory_candidates(
-    storage: &TerminalStorage,
-    terminal_tab_id: &str,
-) -> Result<Option<String>, String> {
-    let Some(kernel) = storage.load_task_kernel_by_terminal_tab(terminal_tab_id)? else {
-        return Ok(None);
-    };
-    let mut lines = Vec::new();
-    for entry in kernel
-        .memory_entries
-        .iter()
-        .filter(|entry| is_promotable_studio_memory_kind(&entry.kind, &entry.content))
-        .take(16)
-    {
-        lines.push(format_studio_memory_entry_candidate(entry)?);
-    }
-    for fact in kernel
-        .facts
-        .iter()
-        .filter(|fact| {
-            (fact.status == "verified" || fact.confidence == "high")
-                && is_promotable_studio_memory_kind(&fact.kind, &fact.statement)
-        })
-        .take(16)
-    {
-        lines.push(format_studio_fact_candidate(fact)?);
-    }
-    for evidence in kernel
-        .evidence
-        .iter()
-        .filter(|evidence| is_promotable_studio_evidence(evidence))
-        .take(8)
-    {
-        lines.push(format_studio_evidence_candidate(evidence)?);
-    }
-    push_studio_checkpoint_memory_candidates(&mut lines, &kernel)?;
-    if lines.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(lines.join("\n")))
-}
-
-fn is_promotable_studio_memory_kind(kind: &str, content: &str) -> bool {
-    if kind == "runtime"
-        || content.trim_start().starts_with("Command succeeded:")
-        || is_file_change_memory_noise(content)
-    {
-        return false;
-    }
-    matches!(
-        kind,
-        "decision"
-            | "constraint"
-            | "rule"
-            | "requirement"
-            | "risk"
-            | "failure"
-            | "checkpoint"
-            | "progress"
-    )
-}
-
-fn is_file_change_memory_noise(content: &str) -> bool {
-    let normalized = content.trim_start().to_ascii_lowercase();
-    normalized.starts_with("file added:")
-        || normalized.starts_with("file modified:")
-        || normalized.starts_with("file deleted:")
-        || normalized.starts_with("file renamed:")
-}
-
-fn is_promotable_studio_evidence(evidence: &KernelEvidence) -> bool {
-    let summary = evidence.summary.to_ascii_lowercase();
-    matches!(evidence.evidence_type.as_str(), "status" | "command")
-        && (summary.contains("error")
-            || summary.contains("failed")
-            || summary.contains("failure")
-            || summary.contains("exit code"))
-}
-
-fn push_studio_checkpoint_memory_candidates(
-    lines: &mut Vec<String>,
-    kernel: &TaskKernel,
-) -> Result<(), String> {
-    let Some(snapshot) = kernel.latest_checkpoint.as_ref() else {
-        return Ok(());
-    };
-    let user_prompt = snapshot
-        .source_user_prompt
-        .as_deref()
-        .unwrap_or(kernel.task_packet.goal.as_str());
-    let assistant_summary = snapshot
-        .source_assistant_summary
-        .as_deref()
-        .or(kernel.task_packet.latest_conclusion.as_deref())
-        .unwrap_or(snapshot.summary.as_str());
-
-    if let Some(content) = durable_decision_content(user_prompt, assistant_summary) {
-        lines.push(format_studio_snapshot_candidate(
-            "decision",
-            &content,
-            "memory",
-            &snapshot.id,
-            &snapshot.created_at,
-        )?);
-    }
-
-    if should_record_checkpoint_candidate(snapshot, user_prompt, assistant_summary) {
-        lines.push(format_studio_snapshot_candidate(
-            "checkpoint",
-            &format_checkpoint_candidate_content(user_prompt, assistant_summary),
-            "journal",
-            &snapshot.id,
-            &snapshot.created_at,
-        )?);
-    }
-
-    Ok(())
-}
-
-fn durable_decision_content(user_prompt: &str, assistant_summary: &str) -> Option<String> {
-    let prompt = user_prompt.trim();
-    if prompt.is_empty()
-        || is_studio_memory_placeholder(prompt)
-        || is_referential_user_prompt(prompt)
-    {
-        return None;
-    }
-    let prompt_lower = prompt.to_ascii_lowercase();
-    let assistant_lower = assistant_summary.to_ascii_lowercase();
-    let durable_signal = [
-        "我觉得",
-        "策略",
-        "约定",
-        "设计",
-        "规则",
-        "spec",
-        "memory",
-        "active context",
-        "active-context",
-        "context tab",
-        "跨cli",
-        "跨 cli",
-        "注入",
-        "长期",
-        "以后",
-        "应该",
-        "必须",
-        "只展示",
-        "不要",
-    ]
-    .iter()
-    .any(|needle| prompt_lower.contains(needle));
-    let assistant_confirms_decision = ["implemented", "updated", "实现", "改成", "修复", "完成"]
-        .iter()
-        .any(|needle| assistant_lower.contains(needle));
-    if !durable_signal || !assistant_confirms_decision {
-        return None;
-    }
-    Some(format!(
-        "Project decision: {}",
-        truncate_str(&prompt.replace('\n', " "), 420)
-    ))
-}
-
-fn is_referential_user_prompt(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase();
-    normalized.chars().count() < 12
-        || matches!(
-            normalized.as_str(),
-            "继续" | "continus" | "continue" | "实现" | "可以的" | "给我修这两个点"
-        )
-        || normalized.starts_with("继续把")
-}
-
-fn should_record_checkpoint_candidate(
-    snapshot: &storage::ContextSnapshot,
-    user_prompt: &str,
-    assistant_summary: &str,
-) -> bool {
-    let summary = assistant_summary.trim();
-    if summary.chars().count() < 24 || is_studio_memory_placeholder(summary) {
-        return false;
-    }
-    !snapshot.files_touched.is_empty()
-        || !snapshot.work_completed.is_empty()
-        || text_contains_checkpoint_signal(user_prompt)
-        || text_contains_checkpoint_signal(summary)
-}
-
-fn text_contains_checkpoint_signal(value: &str) -> bool {
-    let normalized = value.to_ascii_lowercase();
-    [
-        "implemented",
-        "fixed",
-        "added",
-        "updated",
-        "build passed",
-        "实现",
-        "修复",
-        "新增",
-        "改成",
-        "完成",
-        "通过",
-        ".studio/",
-        "context",
-        "memory",
-        "spec",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
-}
-
-fn is_studio_memory_placeholder(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase();
-    normalized.is_empty()
-        || normalized.contains("no assistant conclusion captured yet")
-        || normalized.contains("continue the current user request")
-}
-
-fn format_checkpoint_candidate_content(user_prompt: &str, assistant_summary: &str) -> String {
-    let prompt = truncate_str(&user_prompt.trim().replace('\n', " "), 180);
-    let summary = truncate_str(&assistant_summary.trim().replace('\n', " "), 420);
-    if prompt.is_empty() {
-        format!("Turn checkpoint: {summary}")
-    } else {
-        format!("Turn checkpoint for `{prompt}`: {summary}")
-    }
-}
-
-fn format_studio_snapshot_candidate(
-    kind: &str,
-    content: &str,
-    promotion_hint: &str,
-    snapshot_id: &str,
-    updated_at: &str,
-) -> Result<String, String> {
-    serde_json::to_string(&json!({
-        "_studioManaged": true,
-        "candidateType": "contextSnapshot",
-        "id": snapshot_id,
-        "kind": kind,
-        "confidence": "high",
-        "content": truncate_str(content, 640),
-        "sourceFactId": snapshot_id,
-        "sourceEvidenceIds": [],
-        "updatedAt": updated_at,
-        "promotionHint": promotion_hint,
-    }))
-    .map_err(|err| err.to_string())
-}
-
-fn maybe_run_studio_context_curator(
-    project_root: &str,
-    cli_id: &str,
-    command_path: &str,
-    input: &StudioContextExportInput,
-    task_id: &str,
-    context_key: Option<&str>,
-    session: &acp::AcpSession,
-) -> Option<StudioContextCurationApplyResult> {
-    let prompt = build_context_curator_prompt(input, task_id);
-    let mut curator_session = session.clone();
-    curator_session.plan_mode = true;
-
-    let outcome = match run_silent_agent_turn_once(
-        project_root,
-        cli_id,
-        command_path,
-        &prompt,
-        false,
-        &curator_session,
-        STUDIO_CONTEXT_CURATOR_TIMEOUT_MS,
-        None,
-        context_key,
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            studio_context_log!("[studio-context] context-curator skipped: {error}");
-            let _ = record_context_curator_fallback(
-                project_root,
-                task_id,
-                "Context-curator execution failed; using explicit heuristic fallback manifests.",
-                Some(&error),
-            );
-            return None;
-        }
-    };
-    let raw_output = if outcome.final_content.trim().is_empty() {
-        outcome.raw_output.as_str()
-    } else {
-        outcome.final_content.as_str()
-    };
-    let result = match apply_context_curator_output(project_root, task_id, raw_output) {
-        Ok(result) => result,
-        Err(error) => {
-            studio_context_log!("[studio-context] context-curator output ignored: {error}");
-            let _ = record_context_curator_fallback(
-                project_root,
-                task_id,
-                "Context-curator output was invalid or empty; using explicit heuristic fallback manifests.",
-                Some(&error),
-            );
-            return None;
-        }
-    };
-    studio_context_log!(
-        "[studio-context] context-curator implement={} check={} report={}",
-        result.implement_entries,
-        result.check_entries,
-        result.report_path
-    );
-    Some(result)
-}
-
-fn start_studio_context_curator_job(
-    project_root: String,
-    cli_id: String,
-    command_path: String,
-    input: StudioContextExportInput,
-    task_id: String,
-    context_key: Option<String>,
-    session: acp::AcpSession,
-) {
-    thread::spawn(move || {
-        let _ = maybe_run_studio_context_curator(
-            &project_root,
-            &cli_id,
-            &command_path,
-            &input,
-            &task_id,
-            context_key.as_deref(),
-            &session,
-        );
-    });
-}
-
-fn maybe_distill_and_promote_studio_memory(
-    terminal_storage: &TerminalStorage,
-    project_root: &str,
-    task_id: &str,
-    input: &StudioContextExportInput,
-) {
-    let candidates = match build_studio_memory_candidates(terminal_storage, &input.terminal_tab_id)
-    {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            studio_context_log!("[studio-context] memory-distill skipped: {error}");
-            None
-        }
-    };
-    let distill = match apply_memory_distill_candidates(
-        project_root,
-        task_id,
-        input,
-        candidates.as_deref(),
-        true,
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            studio_context_log!("[studio-context] memory-distill failed: {error}");
-            return;
-        }
-    };
-    studio_context_log!(
-        "[studio-context] memory-distill candidates={} promotable={} rejected={} decision={} report={}",
-        distill.candidate_entries,
-        distill.promotable_entries,
-        distill.rejected_entries,
-        distill.decision,
-        distill.report_path
-    );
-    if !distill.allow_auto_promote {
-        studio_context_log!(
-            "[studio-context] auto-promotion skipped: policy-check held candidates"
-        );
-        return;
-    }
-    match auto_promote_studio_memory(project_root, task_id) {
-        Ok(result) => studio_context_log!(
-            "[studio-context] auto-promotion promoted={} skipped={} report={}",
-            result.promoted,
-            result.skipped,
-            result.report_path
-        ),
-        Err(error) => studio_context_log!("[studio-context] auto-promotion skipped: {error}"),
-    }
-}
-
-fn start_studio_post_turn_job(
-    terminal_storage: TerminalStorage,
-    project_root: String,
-    cli_id: String,
-    command_path: String,
-    input: StudioContextExportInput,
-    task_id: String,
-    context_key: Option<String>,
-    session: acp::AcpSession,
-    implementation_output: String,
-    write_mode: bool,
-) {
-    thread::spawn(move || {
-        let checker_result = maybe_run_studio_checker_and_retry(
-            &project_root,
-            &cli_id,
-            &command_path,
-            &input,
-            &task_id,
-            context_key.as_deref(),
-            &session,
-            &implementation_output,
-            write_mode,
-        );
-        if write_mode {
-            match checker_result.as_ref().map(|result| result.status.as_str()) {
-                Some("pass") => maybe_distill_and_promote_studio_memory(
-                    &terminal_storage,
-                    &project_root,
-                    &task_id,
-                    &input,
-                ),
-                Some("fail") => {
-                    studio_context_log!("[studio-context] auto-promotion skipped: checker failed")
-                }
-                _ => studio_context_log!(
-                    "[studio-context] auto-promotion skipped: checker did not complete"
-                ),
-            }
-        }
-    });
-}
-
-fn maybe_run_studio_checker_and_retry(
-    project_root: &str,
-    cli_id: &str,
-    command_path: &str,
-    input: &StudioContextExportInput,
-    task_id: &str,
-    context_key: Option<&str>,
-    session: &acp::AcpSession,
-    implementation_output: &str,
-    write_mode: bool,
-) -> Option<StudioCheckerApplyResult> {
-    if !write_mode {
-        let _ = set_checker_gate_state(
-            project_root,
-            task_id,
-            "not_applicable",
-            "Checker is not applicable because this turn is not write-enabled.",
-        );
-        return None;
-    }
-    if implementation_output.trim().is_empty() {
-        let _ = set_checker_gate_state(
-            project_root,
-            task_id,
-            "not_applicable",
-            "Checker is not applicable because this turn produced no implementation output.",
-        );
-        return None;
-    }
-    let _ = set_checker_gate_state(
-        project_root,
-        task_id,
-        "running",
-        "Checker is running for the latest implementation.",
-    );
-    let prompt = build_checker_agent_prompt(input, task_id, implementation_output);
-    let mut checker_session = session.clone();
-    checker_session.plan_mode = true;
-    let outcome = match run_silent_agent_turn_once(
-        project_root,
-        cli_id,
-        command_path,
-        &prompt,
-        false,
-        &checker_session,
-        STUDIO_CONTEXT_CURATOR_TIMEOUT_MS,
-        None,
-        context_key,
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            studio_context_log!("[studio-context] checker skipped: {error}");
-            let _ = set_checker_gate_state(
-                project_root,
-                task_id,
-                "skipped",
-                &format!(
-                    "Checker was skipped because the silent checker agent failed to start: {error}"
-                ),
-            );
-            return None;
-        }
-    };
-    let raw_output = if outcome.final_content.trim().is_empty() {
-        outcome.raw_output.as_str()
-    } else {
-        outcome.final_content.as_str()
-    };
-    let result = match apply_checker_agent_output(project_root, task_id, raw_output) {
-        Ok(result) => result,
-        Err(error) => {
-            studio_context_log!("[studio-context] checker output ignored: {error}");
-            let _ = set_checker_gate_state(
-                project_root,
-                task_id,
-                "skipped",
-                &format!("Checker output was skipped because it could not be applied: {error}"),
-            );
-            return None;
-        }
-    };
-    studio_context_log!(
-        "[studio-context] checker status={} issues={} report={}",
-        result.status,
-        result.issues.len(),
-        result.report_path
-    );
-    if result.needs_retry {
-        maybe_run_studio_retry_repair(
-            project_root,
-            cli_id,
-            command_path,
-            input,
-            task_id,
-            context_key,
-            session,
-            &result,
-        );
-    }
-    Some(result)
-}
-
-fn maybe_run_studio_retry_repair(
-    project_root: &str,
-    cli_id: &str,
-    command_path: &str,
-    input: &StudioContextExportInput,
-    task_id: &str,
-    context_key: Option<&str>,
-    session: &acp::AcpSession,
-    checker: &StudioCheckerApplyResult,
-) -> bool {
-    let prompt = format!(
-        "Studio checker found issues after the implementation. Apply one focused retry fix.\n\n\
-Context: {task_id}\n\
-PRD: .studio/runtime/active-context/prd.md\n\
-Manifest: .studio/runtime/active-context/manifest.jsonl\n\
-Checker report: .studio/runtime/active-context/checker-report.md\n\n\
-Original request:\n{}\n\n\
-Checker summary:\n{}\n\n\
-Issues:\n{}\n\n\
-Rules:\n- Keep the fix minimal.\n- Do not ask for human confirmation.\n- Stop after one retry round.\n",
-        if input.user_prompt.trim().is_empty() {
-            "Continue the active context."
-        } else {
-            input.user_prompt.trim()
-        },
-        checker.summary,
-        if checker.issues.is_empty() {
-            "- Checker requested retry without concrete issues.".to_string()
-        } else {
-            checker
-                .issues
-                .iter()
-                .map(|issue| format!("- {issue}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-    );
-    let mut retry_session = session.clone();
-    retry_session.plan_mode = false;
-    match run_silent_agent_turn_once(
-        project_root,
-        cli_id,
-        command_path,
-        &prompt,
-        true,
-        &retry_session,
-        STUDIO_CONTEXT_CURATOR_TIMEOUT_MS.saturating_mul(2),
-        None,
-        context_key,
-    ) {
-        Ok(outcome) => {
-            let raw_output = if outcome.final_content.trim().is_empty() {
-                outcome.raw_output.as_str()
-            } else {
-                outcome.final_content.as_str()
-            };
-            match record_checker_retry_result(project_root, task_id, true, raw_output) {
-                Ok(result) => studio_context_log!(
-                    "[studio-context] checker retry status={} report={}",
-                    result.status,
-                    result.report_path
-                ),
-                Err(error) => {
-                    studio_context_log!("[studio-context] checker retry report failed: {error}")
-                }
-            }
-            true
-        }
-        Err(error) => {
-            studio_context_log!("[studio-context] checker retry failed: {error}");
-            let _ = record_checker_retry_result(project_root, task_id, false, &error);
-            false
-        }
-    }
-}
-
-fn format_studio_memory_entry_candidate(entry: &KernelMemoryEntry) -> Result<String, String> {
-    serde_json::to_string(&json!({
-        "_studioManaged": true,
-        "candidateType": "kernelMemory",
-        "id": entry.id,
-        "kind": entry.kind,
-        "confidence": if entry.pin_state == "pinned" || entry.priority == "high" { "high" } else { "medium" },
-        "scope": entry.scope,
-        "scopeRef": entry.scope_ref,
-        "priority": entry.priority,
-        "pinState": entry.pin_state,
-        "content": entry.content,
-        "sourceFactId": entry.source_fact_id,
-        "sourceEvidenceIds": entry.source_evidence_ids,
-        "tags": entry.tags,
-        "updatedAt": entry.updated_at,
-        "promotionHint": promotion_hint_for_memory_kind(&entry.kind),
-    }))
-    .map_err(|err| err.to_string())
-}
-
-fn format_studio_fact_candidate(fact: &KernelFact) -> Result<String, String> {
-    serde_json::to_string(&json!({
-        "_studioManaged": true,
-        "candidateType": "kernelFact",
-        "id": fact.id,
-        "kind": fact.kind,
-        "status": fact.status,
-        "confidence": fact.confidence,
-        "ownerCli": fact.owner_cli,
-        "content": fact.statement,
-        "sourceEvidenceIds": fact.source_evidence_ids,
-        "updatedAt": fact.updated_at,
-        "promotionHint": promotion_hint_for_memory_kind(&fact.kind),
-    }))
-    .map_err(|err| err.to_string())
-}
-
-fn format_studio_evidence_candidate(evidence: &KernelEvidence) -> Result<String, String> {
-    serde_json::to_string(&json!({
-        "_studioManaged": true,
-        "candidateType": "kernelEvidence",
-        "id": evidence.id.clone(),
-        "kind": "failure",
-        "confidence": "high",
-        "content": evidence.summary.clone(),
-        "sourceEvidenceIds": [evidence.id.clone()],
-        "cliId": evidence.cli_id.clone(),
-        "evidenceType": evidence.evidence_type.clone(),
-        "updatedAt": evidence.timestamp.clone(),
-        "promotionHint": "journal",
-    }))
-    .map_err(|err| err.to_string())
-}
-
-fn promotion_hint_for_memory_kind(kind: &str) -> &'static str {
-    match kind {
-        "constraint" | "rule" => "spec",
-        "failure" | "checkpoint" | "progress" => "journal",
-        "decision" | "requirement" | "codebase" | "risk" => "memory",
-        _ => "hold",
-    }
-}
-
 fn format_compacted_summaries_section(summaries: &[CompactedSummary]) -> String {
     if summaries.is_empty() {
         return String::new();
@@ -22065,86 +20962,11 @@ fn format_compacted_summaries_section(summaries: &[CompactedSummary]) -> String 
     )
 }
 
-fn format_cross_tab_entries_section(entries: &[SharedContextEntry], detailed: bool) -> String {
-    if entries.is_empty() {
-        return String::new();
-    }
-
-    let blocks = entries
-        .iter()
-        .take(8)
-        .map(|entry| {
-            let mut lines = vec![format!(
-                "[Tab \"{}\" ({}, {})]",
-                entry.source_tab_title, entry.source_cli, entry.updated_at
-            )];
-            let summary = &entry.summary;
-            if !summary.intent.is_empty() {
-                lines.push(format!("Intent: {}", truncate_str(&summary.intent, 600)));
-            }
-            if detailed && !summary.technical_context.is_empty() {
-                lines.push(format!(
-                    "Context: {}",
-                    truncate_str(&summary.technical_context, 800)
-                ));
-            }
-            if !summary.changed_files.is_empty() {
-                lines.push(format!(
-                    "Changed: {}",
-                    summary
-                        .changed_files
-                        .iter()
-                        .take(20)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            if detailed && !summary.errors_and_fixes.is_empty() {
-                lines.push(format!(
-                    "Errors/Fixes: {}",
-                    truncate_str(&summary.errors_and_fixes, 600)
-                ));
-            }
-            if !summary.current_state.is_empty() {
-                lines.push(format!(
-                    "State: {}",
-                    truncate_str(&summary.current_state, 600)
-                ));
-            }
-            if detailed && !summary.next_steps.is_empty() {
-                lines.push(format!(
-                    "Next steps: {}",
-                    truncate_str(&summary.next_steps, 400)
-                ));
-            }
-            lines.join("\n")
-        })
-        .collect::<Vec<_>>();
-
-    format!(
-        "\n\n<cross-tab-context>\n{}\n</cross-tab-context>",
-        blocks.join("\n\n")
-    )
-}
-
-/// Builds a unified context prompt including conversation history from all CLIs
 fn compose_tab_context_prompt(
     state: &AppStateDto,
-    storage: &TerminalStorage,
     cli_id: &str,
-    terminal_tab_id: &str,
-    workspace_id: &str,
-    project_root: &str,
-    project_name: &str,
     prompt: &str,
-    recent_turns: &[ChatContextTurn],
     write_mode: bool,
-    compacted_summaries: Option<&Vec<CompactedSummary>>,
-    cross_tab_context: Option<&Vec<SharedContextEntry>>,
-    working_memory: Option<&WorkingMemoryPayload>,
-    is_session_resuming: bool,
-    studio_context_prelude: Option<&str>,
 ) -> String {
     let workspace_preamble = format!(
         "You are operating inside Multi CLI Studio.\n\
@@ -22178,83 +21000,10 @@ fn compose_tab_context_prompt(
         rules, state.workspace.dirty_files, state.workspace.failing_checks,
     );
 
-    let studio_context_prelude = studio_context_prelude
-        .map(str::trim)
-        .filter(|ctx| !ctx.is_empty());
-    let studio_context_section = studio_context_prelude
-        .map(|ctx| format!("\n\n{}", ctx))
-        .unwrap_or_default();
-
-    // When resuming a native CLI session, skip the heavy context assembly
-    // (conversation history is already maintained by the CLI's session).
-    // Only include lightweight per-turn metadata + the Studio context prelude.
-    if is_session_resuming {
-        return format!(
-            "{}\n\n{}{}\n\n--- User request ---\n{}",
-            workspace_preamble, workspace_tail, studio_context_section, prompt
-        );
-    }
-
-    if studio_context_prelude.is_some() {
-        return format!(
-            "{}\n\n{}{}\n\n--- User request ---\n{}",
-            workspace_preamble, workspace_tail, studio_context_section, prompt
-        );
-    }
-
-    let compacted_section = compacted_summaries
-        .map(|summaries| format_compacted_summaries_section(summaries))
-        .unwrap_or_default();
-    let cross_tab_section = cross_tab_context
-        .map(|entries| format_cross_tab_entries_section(entries, false))
-        .unwrap_or_default();
-    let legacy_working_memory_section = format_working_memory_section(working_memory);
-
-    let fallback_recent_turns = recent_turns
-        .iter()
-        .map(|turn| TaskRecentTurn {
-            cli_id: turn.cli_id.clone(),
-            user_prompt: turn.user_prompt.clone(),
-            assistant_reply: turn.assistant_reply.clone(),
-            timestamp: turn.timestamp.clone(),
-        })
-        .collect::<Vec<_>>();
-
-    storage
-        .build_context_assembly(
-            &EnsureTaskPacketRequest {
-                terminal_tab_id: terminal_tab_id.to_string(),
-                workspace_id: workspace_id.to_string(),
-                project_root: project_root.to_string(),
-                project_name: project_name.to_string(),
-                cli_id: cli_id.to_string(),
-                initial_goal: prompt.to_string(),
-            },
-            cli_id,
-            prompt,
-            &format!(
-                "{}\n\n{}{}{}{}",
-                workspace_preamble,
-                workspace_tail,
-                legacy_working_memory_section,
-                compacted_section,
-                cross_tab_section,
-            ),
-            &fallback_recent_turns,
-            write_mode,
-        )
-        .map(|assembled| assembled.prompt)
-        .unwrap_or_else(|_| {
-            format!(
-                "{}\n\n{}{}{}{}\n\n--- User request ---\n{}",
-                workspace_preamble,
-                workspace_tail,
-                legacy_working_memory_section,
-                compacted_section,
-                cross_tab_section,
-                prompt
-            )
-        })
+    format!(
+        "{}\n\n{}\n\n--- User request ---\n{}",
+        workspace_preamble, workspace_tail, prompt
+    )
 }
 
 fn collect_relevant_files_from_blocks(blocks: &[ChatMessageBlock]) -> Vec<String> {
@@ -22368,7 +21117,6 @@ fn build_agent_script(
 
 fn build_agent_args(
     agent_id: &str,
-    prompt: &str,
     write_mode: bool,
     session: &acp::AcpSession,
     output_last_message_path: Option<&Path>,
@@ -22393,6 +21141,7 @@ fn build_agent_args(
                 sandbox,
                 "--color".to_string(),
                 "never".to_string(),
+                "--ephemeral".to_string(),
             ];
             if let Some(model) = session.model.get("codex") {
                 args.push("--model".to_string());
@@ -22402,7 +21151,7 @@ fn build_agent_args(
                 args.push("--output-last-message".to_string());
                 args.push(path.to_string_lossy().to_string());
             }
-            args.push(prompt.to_string());
+            args.push("-".to_string());
             args
         }
         "claude" => {
@@ -22418,7 +21167,7 @@ fn build_agent_args(
             };
             let mut args = vec![
                 "-p".to_string(),
-                prompt.to_string(),
+                "--no-session-persistence".to_string(),
                 "--output-format".to_string(),
                 "text".to_string(),
                 "--permission-mode".to_string(),
@@ -22445,8 +21194,6 @@ fn build_agent_args(
                     .unwrap_or_else(|| "auto_edit".to_string())
             };
             let mut args = vec![
-                "-p".to_string(),
-                prompt.to_string(),
                 "--output-format".to_string(),
                 "text".to_string(),
                 "--approval-mode".to_string(),
@@ -22466,17 +21213,12 @@ fn build_agent_args(
 
 fn build_review_prompt(state: &AppStateDto, agent_id: &str) -> String {
     format!(
-        "Review the current workspace from the perspective of {}. Focus on the active work, the main risks, and the next best move.\n\nCurrent writer: {}\nActive agent: {}\nDirty files: {}\nFailing checks: {}\nLatest handoff: {}\nLatest artifact: {}",
+        "Review the current workspace from the perspective of {}. Focus on the active work, the main risks, and the next best move.\n\nCurrent writer: {}\nActive agent: {}\nDirty files: {}\nFailing checks: {}\nLatest artifact: {}",
         agent_id,
         state.workspace.current_writer,
         state.workspace.active_agent,
         state.workspace.dirty_files,
         state.workspace.failing_checks,
-        state
-            .handoffs
-            .first()
-            .map(|item| item.goal.clone())
-            .unwrap_or_else(|| "none".to_string()),
         state
             .artifacts
             .first()
@@ -22538,46 +21280,7 @@ fn compose_context_prompt(
         }
     }
 
-    // 3. Cross-agent context from latest handoff targeting this agent
-    if let Some(handoff) = ctx.handoffs.iter().find(|h| h.to == agent_id) {
-        parts.push(format!(
-            "\n--- Context from previous agent ({}) ---\n\
-             Handoff goal: {}\n\
-             Git diff at handoff:\n{}",
-            handoff.from, handoff.user_goal, handoff.git_diff,
-        ));
-
-        if !handoff.changed_files.is_empty() {
-            parts.push(format!(
-                "Changed files: {}",
-                handoff.changed_files.join(", ")
-            ));
-        }
-
-        let summaries: Vec<_> = handoff
-            .previous_turns
-            .iter()
-            .rev()
-            .take(3)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        if !summaries.is_empty() {
-            parts.push(format!(
-                "Previous agent's last {} turn summaries:",
-                summaries.len()
-            ));
-            for turn in &summaries {
-                parts.push(format!(
-                    "  - User: {} -> Agent: {}",
-                    turn.user_prompt, turn.output_summary
-                ));
-            }
-        }
-    }
-
-    // 4. Current workspace state
+    // 3. Current workspace state
     parts.push(format!(
         "\n--- Current workspace ---\n\
          Dirty files: {}\n\
@@ -22718,28 +21421,13 @@ fn parse_auto_plan(text: &str, prompt: &str) -> AutoPlan {
         .unwrap_or_else(|| auto_plan_fallback(prompt))
 }
 
-fn build_auto_plan_prompt(
-    state: &AppStateDto,
-    storage: &TerminalStorage,
-    request: &AutoOrchestrationRequest,
-) -> String {
+fn build_auto_plan_prompt(state: &AppStateDto, request: &AutoOrchestrationRequest) -> String {
     let mut parts = Vec::new();
     parts.push(compose_tab_context_prompt(
         state,
-        storage,
         "claude",
-        &request.terminal_tab_id,
-        &request.workspace_id,
-        &request.project_root,
-        &request.project_name,
         &request.prompt,
-        &request.recent_turns,
         false,
-        None,
-        None,
-        None,
-        false,
-        None,
     ));
     parts.push(
         "\n--- Auto orchestration contract ---\n\
@@ -22875,13 +21563,11 @@ fn run_silent_agent_turn_once(
     session: &acp::AcpSession,
     timeout_ms: u64,
     live_turn: Option<Arc<LiveChatTurnHandle>>,
-    studio_context_key: Option<&str>,
 ) -> Result<SilentAgentTurnOutcome, String> {
     let resolved_command = resolve_direct_command_path(command_path);
     let output_last_message_path = if agent_id == "codex" {
-        let output_dir = Path::new(project_root)
-            .join(".studio")
-            .join("runtime")
+        let output_dir = std::env::temp_dir()
+            .join("multi-cli-studio")
             .join("silent-agent");
         fs::create_dir_all(&output_dir)
             .map_err(|err| format!("Failed to prepare silent agent output: {err}"))?;
@@ -22891,15 +21577,13 @@ fn run_silent_agent_turn_once(
     };
     let args = build_agent_args(
         agent_id,
-        prompt,
         write_mode,
         session,
         output_last_message_path.as_deref(),
     )?;
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let mut cmd = batch_aware_command(&resolved_command, &arg_refs);
-    apply_studio_context_environment(&mut cmd, studio_context_key);
-    cmd.stdin(Stdio::null())
+    cmd.stdin(Stdio::piped())
         .current_dir(project_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -22907,7 +21591,15 @@ fn run_silent_agent_turn_once(
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let child = cmd.spawn().map_err(|err| err.to_string())?;
+    let mut child = cmd.spawn().map_err(|err| err.to_string())?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("Failed to open {agent_id} stdin"))?;
+    stdin
+        .write_all(prompt.as_bytes())
+        .map_err(|err| format!("Failed to send handoff prompt to {agent_id}: {err}"))?;
+    drop(stdin);
     if let Some(handle) = live_turn.as_ref() {
         set_live_chat_turn_target(
             handle,
@@ -23821,7 +22513,6 @@ fn normalize_automation_validation_response(
 fn evaluate_automation_round(
     state_snapshot: &AppStateDto,
     settings_arc: &Arc<Mutex<AppSettings>>,
-    terminal_storage: &TerminalStorage,
     run: &AutomationRun,
     goal: &AutomationGoal,
     profile: &AutomationGoalRuleConfig,
@@ -23845,18 +22536,6 @@ fn evaluate_automation_round(
         .map(|settings| settings.process_timeout_ms)
         .unwrap_or(DEFAULT_TIMEOUT_MS);
 
-    let recent_turns = terminal_storage
-        .load_prompt_turns_for_terminal_tab(&goal.synthetic_terminal_tab_id, owner_cli, 4)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|turn| ChatContextTurn {
-            cli_id: turn.cli_id,
-            user_prompt: turn.user_prompt,
-            assistant_reply: turn.assistant_reply,
-            timestamp: turn.timestamp,
-        })
-        .collect::<Vec<_>>();
-
     let mut validation_session = acp::AcpSession::default();
     validation_session.plan_mode = true;
     validation_session.permission_mode.insert(
@@ -23873,23 +22552,7 @@ fn evaluate_automation_round(
         raw_output,
         exit_code,
     );
-    let composed_prompt = compose_tab_context_prompt(
-        state_snapshot,
-        terminal_storage,
-        owner_cli,
-        &goal.synthetic_terminal_tab_id,
-        &run.workspace_id,
-        &run.project_root,
-        &run.project_name,
-        &prompt,
-        &recent_turns,
-        false,
-        None,
-        None,
-        None,
-        false,
-        None,
-    );
+    let composed_prompt = compose_tab_context_prompt(state_snapshot, owner_cli, &prompt, false);
     let result = run_silent_agent_turn_once(
         &run.project_root,
         owner_cli,
@@ -23898,7 +22561,6 @@ fn evaluate_automation_round(
         false,
         &validation_session,
         timeout_ms,
-        None,
         None,
     );
 
@@ -24235,7 +22897,7 @@ fn execute_auto_mode_goal(
 
     let mut planner_session = acp::AcpSession::default();
     planner_session.plan_mode = true;
-    let planner_prompt = build_auto_plan_prompt(state_snapshot, terminal_storage, &request);
+    let planner_prompt = build_auto_plan_prompt(state_snapshot, &request);
     let planner_result = run_silent_agent_turn_once(
         &request.project_root,
         "claude",
@@ -24244,7 +22906,6 @@ fn execute_auto_mode_goal(
         false,
         &planner_session,
         timeout_ms,
-        None,
         None,
     );
 
@@ -24307,20 +22968,9 @@ fn execute_auto_mode_goal(
 
         let worker_prompt = compose_tab_context_prompt(
             state_snapshot,
-            terminal_storage,
             &step.owner,
-            &request.terminal_tab_id,
-            &request.workspace_id,
-            &request.project_root,
-            &request.project_name,
             &build_auto_worker_prompt(&request.prompt, &step),
-            &request.recent_turns,
             step.write,
-            None,
-            None,
-            None,
-            false,
-            None,
         );
 
         let message_id = create_id("auto-step");
@@ -24340,7 +22990,6 @@ fn execute_auto_mode_goal(
                 codex_session_approval_rules.clone(),
                 codex_pending_approvals.clone(),
                 Vec::new(),
-                None,
                 None,
             )
             .map(|outcome| {
@@ -24366,7 +23015,6 @@ fn execute_auto_mode_goal(
                 timeout_ms,
                 Vec::new(),
                 None,
-                None,
             )
             .map(|outcome| {
                 (
@@ -24391,7 +23039,6 @@ fn execute_auto_mode_goal(
                 timeout_ms,
                 claude_approval_rules.clone(),
                 claude_pending_approvals.clone(),
-                None,
                 None,
             )
             .map(|outcome| {
@@ -24438,7 +23085,6 @@ fn execute_auto_mode_goal(
         false,
         &synthesis_session,
         timeout_ms,
-        None,
         None,
     )
     .ok()
@@ -25524,18 +24170,6 @@ fn execute_automation_goal(
         }
     };
 
-    let recent_turns = terminal_storage
-        .load_prompt_turns_for_terminal_tab(&goal.synthetic_terminal_tab_id, &owner_cli, 4)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|turn| ChatContextTurn {
-            cli_id: turn.cli_id,
-            user_prompt: turn.user_prompt,
-            assistant_reply: turn.assistant_reply,
-            timestamp: turn.timestamp,
-        })
-        .collect::<Vec<_>>();
-
     let mut session = acp::AcpSession::default();
     session.plan_mode = false;
     session.permission_mode.insert(
@@ -25604,26 +24238,11 @@ fn execute_automation_goal(
         _ => (automation_prompt, Vec::new(), None),
     };
 
-    let is_resuming = previous_transport_session
-        .as_ref()
-        .and_then(|s| s.thread_id.as_ref())
-        .is_some();
     let composed_prompt_base = compose_tab_context_prompt(
         &state_snapshot,
-        terminal_storage,
         &owner_cli,
-        &goal.synthetic_terminal_tab_id,
-        &run.workspace_id,
-        &run.project_root,
-        &run.project_name,
         &prompt_for_context,
-        &recent_turns,
         profile.allow_safe_workspace_edits,
-        None,
-        None,
-        None,
-        is_resuming,
-        None,
     );
     let composed_prompt = if let Some(skill) = selected_claude_skill.as_ref() {
         format!("/{} {}", skill.name, composed_prompt_base)
@@ -25661,7 +24280,6 @@ fn execute_automation_goal(
             codex_pending_approvals.clone(),
             Vec::new(),
             None,
-            None,
         )
         .map(|outcome| {
             (
@@ -25688,7 +24306,6 @@ fn execute_automation_goal(
             claude_approval_rules.clone(),
             claude_pending_approvals.clone(),
             None,
-            None,
         )
         .map(|outcome| {
             (
@@ -25714,7 +24331,6 @@ fn execute_automation_goal(
             timeout_ms,
             Vec::new(),
             None,
-            None,
         )
         .map(|outcome| {
             (
@@ -25734,7 +24350,6 @@ fn execute_automation_goal(
             true,
             &session,
             timeout_ms,
-            None,
             None,
         )
         .map(|outcome| {
@@ -26253,7 +24868,6 @@ fn execute_automation_run_loop(
                 evaluate_automation_round(
                     &state_snapshot,
                     settings_arc,
-                    terminal_storage,
                     &run_snapshot,
                     &working_goal,
                     &working_goal.rule_config,
@@ -29064,13 +27678,6 @@ fn apply_runtime_environment(command: &mut Command) {
     command.env("PYTHONUTF8", "1");
 }
 
-fn apply_studio_context_environment(command: &mut Command, context_key: Option<&str>) {
-    if let Some(context_key) = context_key.map(str::trim).filter(|value| !value.is_empty()) {
-        command.env(STUDIO_CONTEXT_KEY_ENV, context_key);
-        command.env(STUDIO_CONTEXT_ID_ENV, context_key);
-    }
-}
-
 fn configured_cli_override(command_name: &str) -> Option<String> {
     let cli_key = match command_name {
         "codex" | "claude" | "gemini" => command_name,
@@ -30288,7 +28895,6 @@ fn seed_context() -> ContextStore {
     ContextStore {
         agents,
         conversation_history: Vec::new(),
-        handoffs: Vec::new(),
         max_turns_per_agent: DEFAULT_MAX_TURNS,
         max_output_chars_per_turn: DEFAULT_MAX_OUTPUT_CHARS,
     }
@@ -30388,7 +28994,6 @@ fn seed_state(project_root: &str) -> AppStateDto {
             active_agent: "codex".to_string(),
             dirty_files: 0,
             failing_checks: 0,
-            handoff_ready: true,
             last_snapshot: None,
         },
         agents: vec![
@@ -30426,25 +29031,6 @@ fn seed_state(project_root: &str) -> AppStateDto {
                 unavailable_runtime(),
             ),
         ],
-        handoffs: vec![HandoffPack {
-            id: create_id("handoff"),
-            from: "codex".to_string(),
-            to: "claude".to_string(),
-            status: "ready".to_string(),
-            goal: "Review the orchestrator boundary before deeper CLI execution flows land."
-                .to_string(),
-            files: vec![
-                "src/App.tsx".to_string(),
-                "src/lib/bridge.ts".to_string(),
-                "src-tauri/src/main.rs".to_string(),
-            ],
-            risks: vec![
-                "The frontend and backend state models must stay in sync.".to_string(),
-                "Writer lock ownership should remain explicit.".to_string(),
-            ],
-            next_step: "Validate the shared session model and the bridge contracts.".to_string(),
-            updated_at: "just now".to_string(),
-        }],
         artifacts: vec![ReviewArtifact {
             id: create_id("artifact"),
             source: "system".to_string(),
@@ -30554,48 +29140,10 @@ fn append_activity(state: &mut AppStateDto, tone: &str, title: &str, detail: &st
     }
 }
 
-fn prepend_handoff(state: &mut AppStateDto, handoff: HandoffPack) {
-    state.handoffs.insert(0, handoff);
-    if state.handoffs.len() > 8 {
-        state.handoffs.truncate(8);
-    }
-}
-
 fn prepend_artifact(state: &mut AppStateDto, artifact: ReviewArtifact) {
     state.artifacts.insert(0, artifact);
     if state.artifacts.len() > 10 {
         state.artifacts.truncate(10);
-    }
-}
-
-fn update_agent_modes(
-    state: &mut AppStateDto,
-    writer_override: Option<&str>,
-    active_override: Option<&str>,
-) {
-    let writer = writer_override
-        .unwrap_or(&state.workspace.current_writer)
-        .to_string();
-    let active = active_override
-        .unwrap_or(&state.workspace.active_agent)
-        .to_string();
-
-    for agent in &mut state.agents {
-        agent.mode = if agent.id == writer {
-            "writer".to_string()
-        } else {
-            match agent.id.as_str() {
-                "claude" => "architect".to_string(),
-                "gemini" => "ui-designer".to_string(),
-                _ => "standby".to_string(),
-            }
-        };
-        agent.status = if agent.id == active {
-            "active".to_string()
-        } else {
-            "ready".to_string()
-        };
-        agent.last_sync = "just now".to_string();
     }
 }
 
@@ -30634,15 +29182,6 @@ fn git_output_allow_empty(project_root: &str, args: &[&str]) -> Option<String> {
     } else {
         None
     }
-}
-
-fn mutate_state<F>(store: &State<'_, AppStore>, update: F) -> Result<AppStateDto, String>
-where
-    F: FnOnce(&mut AppStateDto),
-{
-    let mut guard = store.state.lock().map_err(|err| err.to_string())?;
-    update(&mut guard);
-    Ok(guard.clone())
 }
 
 fn mutate_store_arc<F>(store: &Arc<Mutex<AppStateDto>>, update: F) -> Result<(), String>
@@ -30909,9 +29448,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             load_app_state,
-            switch_active_agent,
-            take_over_writer,
-            snapshot_workspace,
             run_checks,
             submit_prompt,
             request_review,
@@ -30964,12 +29500,9 @@ pub fn run() {
             cancel_automation_workflow_run,
             delete_automation_workflow_run,
             save_text_to_downloads,
-            switch_cli_for_task,
+            prepare_cli_handoff,
             transcribe_audio,
             send_chat_message,
-            promote_studio_memory,
-            get_studio_workflow_state,
-            run_studio_policy_promotion,
             interrupt_chat_turn,
             run_auto_orchestration,
             respond_assistant_approval,
@@ -31064,72 +29597,40 @@ fn main() {
 }
 
 #[cfg(test)]
-mod studio_memory_candidate_tests {
+mod handoff_tests {
     use super::*;
 
     #[test]
-    fn snapshot_checkpoint_generates_promotable_memory_candidates() {
-        let kernel = TaskKernel {
-            task_packet: storage::TaskPacket {
-                id: "task-1".to_string(),
-                terminal_tab_id: "tab-1".to_string(),
-                workspace_id: "workspace-1".to_string(),
-                project_root: "/tmp/project".to_string(),
-                project_name: "fixture".to_string(),
-                title: "Context design".to_string(),
-                goal: "Design shared context".to_string(),
-                status: "active".to_string(),
-                current_owner_cli: "codex".to_string(),
-                latest_conclusion: Some(
-                    "Implemented the context tab so it shows only injected text.".to_string(),
-                ),
-                open_questions: Vec::new(),
-                risks: Vec::new(),
-                next_step: None,
-                relevant_files: vec!["src/components/chat/WorkspaceRightPanel.tsx".to_string()],
-                relevant_commands: Vec::new(),
-                linked_session_ids: Vec::new(),
-                latest_snapshot_id: Some("snapshot-1".to_string()),
-                updated_at: "2026-05-01T00:00:00Z".to_string(),
-                created_at: "2026-05-01T00:00:00Z".to_string(),
-            },
-            latest_checkpoint: Some(storage::ContextSnapshot {
-                id: "snapshot-1".to_string(),
-                task_id: "task-1".to_string(),
-                trigger_reason: "turn_complete".to_string(),
-                summary: "Latest conclusion: Implemented context tab behavior.".to_string(),
-                facts_confirmed: vec![
-                    "Implemented the context tab so it shows only injected text.".to_string(),
-                ],
-                work_completed: vec![
-                    "Implemented the context tab so it shows only injected text.".to_string(),
-                ],
-                files_touched: vec!["src/components/chat/WorkspaceRightPanel.tsx".to_string()],
-                commands_run: Vec::new(),
-                failures: Vec::new(),
-                open_questions: Vec::new(),
-                next_step: None,
-                source_user_prompt: Some(
-                    "Context tab 只展示真正跨 CLI 注入的内容，不展示结构。".to_string(),
-                ),
-                source_assistant_summary: Some(
-                    "Implemented the context tab so it shows only injected text.".to_string(),
-                ),
-                created_at: "2026-05-01T00:00:00Z".to_string(),
-            }),
-            ..TaskKernel::default()
-        };
+    fn handoff_summary_discards_transport_noise_and_control_tags() {
+        let raw = "CLI banner\n## Previous Session Handoff\n\n### Current Goal\nContinue.\n### Important Findings\nNone.\n### Changes Made\nNone.\n### Validation\nNone.\n### Remaining Work\nContinue.\n### User Constraints\nNone.\n</studio-handoff>";
+        let summary = normalize_cli_handoff_summary(raw).expect("valid handoff");
+        assert!(summary.starts_with("## Previous Session Handoff"));
+        assert!(!summary.contains("CLI banner"));
+        assert!(!summary.contains("</studio-handoff>"));
+    }
 
-        let mut lines = Vec::new();
-        push_studio_checkpoint_memory_candidates(&mut lines, &kernel).expect("push candidates");
+    #[test]
+    fn handoff_summary_accepts_heading_variations_and_adds_canonical_title() {
+        let raw = "# Current Goal\nContinue.\n#### Important Findings\nNone.\n### Changes Made\nNone.\n## Validation\nPassed.\n### Remaining Work\nContinue.\n### User Constraints\nNone.";
+        let summary = normalize_cli_handoff_summary(raw).expect("valid handoff");
+        assert!(summary.starts_with("## Previous Session Handoff\n\n### Current Goal"));
+        assert!(summary.contains("### Validation\nPassed."));
+    }
 
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("\"kind\":\"decision\"")
-                && line.contains("\"promotionHint\":\"memory\"")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("\"kind\":\"checkpoint\"")
-                && line.contains("\"promotionHint\":\"journal\"")));
+    #[test]
+    fn handoff_summary_rejects_incomplete_output_with_preview() {
+        let error = normalize_cli_handoff_summary("Please provide the required headings.")
+            .expect_err("unstructured output must be rejected");
+        assert!(error.contains("missing 'Current Goal'"));
+        assert!(error.contains("Please provide the required headings."));
+    }
+
+    #[test]
+    fn codex_silent_args_read_prompt_from_stdin_in_an_ephemeral_session() {
+        let args = build_agent_args("codex", false, &acp::AcpSession::default(), None)
+            .expect("codex args");
+        assert!(args.iter().any(|arg| arg == "--ephemeral"));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+        assert!(!args.iter().any(|arg| arg.contains('\n')));
     }
 }

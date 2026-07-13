@@ -1391,11 +1391,10 @@ export function ChatPromptBar({
   const cliSkillStatusByContext = useStore((s) => s.cliSkillStatusByContext);
   const setTabDraftPrompt = useStore((s) => s.setTabDraftPrompt);
   const setTabSelectedCli = useStore((s) => s.setTabSelectedCli);
+  const clearCliHandoff = useStore((s) => s.clearCliHandoff);
   const setTabSelectedAgent = useStore((s) => s.setTabSelectedAgent);
   const sendChatMessage = useStore((s) => s.sendChatMessage);
   const executeAcpCommand = useStore((s) => s.executeAcpCommand);
-  const snapshotWorkspace = useStore((s) => s.snapshotWorkspace);
-  const runChecks = useStore((s) => s.runChecks);
   const togglePlanMode = useStore((s) => s.togglePlanMode);
   const resetTerminalTabSession = useStore((s) => s.resetTerminalTabSession);
   const resetCliTransportSession = useStore((s) => s.resetCliTransportSession);
@@ -1431,6 +1430,8 @@ export function ChatPromptBar({
   const prompt = activeTab?.draftPrompt ?? "";
   const draftAttachments = activeTab?.draftAttachments ?? [];
   const isStreaming = activeTab?.status === "streaming";
+  const isPreparingHandoff = activeTab?.handoff?.status === "preparing";
+  const handoffFailed = activeTab?.handoff?.status === "failed";
   const isBusy = busyAction === "checks" || busyAction?.startsWith("review-") || false;
   const cliSkillCacheKey = workspace ? `${effectiveCli}:${workspace.id}` : null;
   const cliSkills = cliSkillCacheKey ? cliSkillsByContext[cliSkillCacheKey] ?? [] : [];
@@ -2589,12 +2590,6 @@ export function ChatPromptBar({
       requestAnimationFrame(() => textareaRef.current?.focus());
       return;
     }
-    if (command.kind === "context") {
-      setPrompt("/context goal");
-      requestAnimationFrame(() => textareaRef.current?.focus());
-      return;
-    }
-
     const parsed = parseSlashCommand(command.slash);
     if (!parsed) return;
     setPrompt("");
@@ -2882,7 +2877,11 @@ export function ChatPromptBar({
 
   if (!activeTab || !workspace) return null;
   const isAutoMode = activeTab.selectedCli === "auto";
-  const promptPlaceholder = isStreaming
+  const promptPlaceholder = isPreparingHandoff
+    ? "正在准备交接上下文..."
+    : handoffFailed
+      ? "交接准备失败，请跳过或重新切换 CLI"
+    : isStreaming
     ? queuedPrompt
       ? "响应中，队列已满 · Ctrl+B 编辑队列 · Shift+Enter 换行 · ↑↓ 历史"
       : "响应中，可继续输入 · Enter 加入队列 · Shift+Enter 换行 · ↑↓ 历史"
@@ -2937,9 +2936,13 @@ export function ChatPromptBar({
     activeTab.selectedCli === "codex"
       ? activeTab.fastMode ? "FAST" : "STD"
       : activeTab.fastMode ? "ON" : "OFF";
-  const footerSelectorsLocked = isStreaming;
+  const footerSelectorsLocked = isStreaming || isPreparingHandoff;
   const sessionActionsLocked = footerSelectorsLocked || isBusy;
-  const selectorLockTitle = isStreaming ? "响应进行中，当前不可修改会话配置" : undefined;
+  const selectorLockTitle = isPreparingHandoff
+    ? "正在准备交接上下文"
+    : isStreaming
+      ? "响应进行中，当前不可修改会话配置"
+      : undefined;
   const autoSelectorTitle = "Auto 路由下不可直接指定，先切换到具体 CLI";
   const reasoningSelectorTitle = !supportsReasoning
     ? `${titleCaseCli(effectiveCli)} 当前不支持思考深度选择`
@@ -2973,6 +2976,8 @@ export function ChatPromptBar({
           : null;
   const sendDisabled =
     voiceInputState !== "idle" ||
+    isPreparingHandoff ||
+    handoffFailed ||
     (!isStreaming && prompt.trim().length === 0 && draftAttachments.length === 0);
   const voiceButtonTitle =
     voiceInputState === "recording"
@@ -3659,6 +3664,18 @@ export function ChatPromptBar({
                   </div>
                 ) : null}
 
+                {isPreparingHandoff ? (
+                  <div className="terminal-chat-handoff-status" role="status">
+                    <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
+                    <span>正在使用 {titleCaseCli(activeTab.handoff?.fromCli ?? effectiveCli)} 整理交接上下文</span>
+                  </div>
+                ) : handoffFailed ? (
+                  <div className="terminal-chat-handoff-status terminal-chat-handoff-status--error" role="alert">
+                    <span>{activeTab.handoff?.error || "交接上下文准备失败"}</span>
+                    <button type="button" onClick={() => clearCliHandoff(activeTab.id)}>跳过交接</button>
+                  </div>
+                ) : null}
+
                 <textarea
                   ref={textareaRef}
                   rows={1}
@@ -3667,6 +3684,7 @@ export function ChatPromptBar({
                   onPaste={handlePromptPaste}
                   onKeyDown={handleKeyDown}
                   placeholder={promptPlaceholder}
+                  disabled={isPreparingHandoff || handoffFailed}
                   className="terminal-chat-textarea"
                 />
 

@@ -63,7 +63,6 @@ export interface WorkspaceState {
   activeAgent: AgentId;
   dirtyFiles: number;
   failingChecks: number;
-  handoffReady: boolean;
   lastSnapshot?: string | null;
 }
 
@@ -72,18 +71,6 @@ export interface TerminalLine {
   speaker: "system" | AgentId | "user";
   content: string;
   time?: string;
-}
-
-export interface HandoffPack {
-  id: string;
-  from: AgentId;
-  to: AgentId;
-  status: "ready" | "draft" | "blocked";
-  goal: string;
-  files: string[];
-  risks: string[];
-  nextStep: string;
-  updatedAt: string;
 }
 
 export interface ReviewArtifact {
@@ -163,7 +150,6 @@ export interface WorkspaceRef {
   activeAgent: AgentId;
   dirtyFiles: number;
   failingChecks: number;
-  handoffReady: boolean;
   lastSnapshot?: string | null;
 }
 
@@ -201,6 +187,18 @@ export interface TerminalCliContextBoundary {
 
 export type ToolApprovalMode = "manual" | "auto";
 
+export type CliHandoffStatus = "preparing" | "ready" | "failed" | "consumed";
+
+export interface CliHandoffState {
+  id: string;
+  status: CliHandoffStatus;
+  fromCli: AgentId;
+  toCli: AgentId;
+  summary: string | null;
+  error: string | null;
+  createdAt: string;
+}
+
 export interface TerminalTab {
   id: string;
   title: string;
@@ -215,6 +213,7 @@ export interface TerminalTab {
   permissionOverrides: Partial<Record<AgentId, string>>;
   transportSessions: Partial<Record<AgentId, AgentTransportSession>>;
   contextBoundariesByCli: Partial<Record<AgentId, TerminalCliContextBoundary>>;
+  handoff: CliHandoffState | null;
   draftPrompt: string;
   draftAttachments: ChatAttachment[];
   status: "idle" | "streaming";
@@ -232,7 +231,6 @@ export interface ChatFilePreviewState {
 export interface AppState {
   workspace: WorkspaceState;
   agents: AgentCard[];
-  handoffs: HandoffPack[];
   artifacts: ReviewArtifact[];
   activity: ActivityItem[];
   terminalByAgent: Record<AgentId, TerminalLine[]>;
@@ -272,18 +270,6 @@ export interface ConversationTurn {
 }
 
 /** Handoff with real data */
-export interface EnrichedHandoff {
-  id: string;
-  from: AgentId;
-  to: AgentId;
-  timestamp: string;
-  gitDiff: string;
-  changedFiles: string[];
-  previousTurns: ConversationTurn[];
-  userGoal: string;
-  status: "ready" | "draft" | "completed";
-}
-
 /** Per-agent conversation memory */
 export interface AgentContext {
   agentId: AgentId;
@@ -295,7 +281,6 @@ export interface AgentContext {
 export interface ContextStore {
   agents: Record<AgentId, AgentContext>;
   conversationHistory: ConversationTurn[];
-  handoffs: EnrichedHandoff[];
   maxTurnsPerAgent: number;
   maxOutputCharsPerTurn: number;
 }
@@ -1238,12 +1223,6 @@ export interface ChatPromptRequest {
   permissionOverride?: string | null;
   imageAttachments?: string[] | null;
   transportSession?: AgentTransportSession | null;
-  /** Runtime-file context only; not injected directly when Studio Context is available. */
-  compactedSummaries?: CompactedSummary[] | null;
-  /** Runtime-file context only; not injected directly when Studio Context is available. */
-  crossTabContext?: SharedContextEntry[] | null;
-  /** Runtime-file context only; not injected directly when Studio Context is available. */
-  workingMemory?: WorkingMemory | null;
 }
 
 export interface TranscribeAudioRequest {
@@ -1254,118 +1233,6 @@ export interface TranscribeAudioRequest {
 
 export interface TranscribeAudioResult {
   text: string;
-}
-
-export type StudioPromoteKind = "spec" | "memory" | "journal";
-
-export interface StudioPromoteRequest {
-  projectRoot: string;
-  kind: StudioPromoteKind;
-  title: string;
-  content: string;
-  source?: string | null;
-}
-
-export interface StudioPromoteResult {
-  path: string;
-  kind: StudioPromoteKind;
-}
-
-export interface StudioPolicyPromotionResult {
-  promoted: number;
-  skipped: number;
-  paths: string[];
-  reportPath: string;
-}
-
-export interface StudioWorkflowArtifact {
-  label: string;
-  path: string;
-  status: "ready" | "missing" | string;
-  updatedAt: string | null;
-  sizeBytes: number | null;
-}
-
-export interface StudioWorkflowManifestEntry {
-  manifest: "implement" | "check" | string;
-  file: string;
-  reason: string;
-  confidence: number | null;
-  score: number | null;
-  status: "ready" | "missing" | string;
-  fallback: boolean;
-}
-
-export interface StudioWorkflowTimelineEvent {
-  kind: string;
-  title: string;
-  summary: string;
-  timestamp: string | null;
-  status: string;
-  path: string | null;
-}
-
-export interface StudioWorkflowMemoryCandidate {
-  id: string | null;
-  candidateType: string;
-  kind: string;
-  content: string;
-  confidence: string;
-  promotionHint: string;
-  target: string;
-  status: "promotable" | "held" | "rejected" | string;
-  evidenceCount: number;
-  updatedAt: string | null;
-}
-
-export interface StudioWorkflowState {
-  projectRoot: string;
-  contextId: string | null;
-  phase: string;
-  contextPath: string | null;
-  prdPath: string | null;
-  specPath: string | null;
-  planPath: string | null;
-  tasksPath: string | null;
-  checkPath: string | null;
-  contextReportPath: string | null;
-  implementManifestPath: string | null;
-  checkManifestPath: string | null;
-  checkerReportPath: string | null;
-  policyCheckPath: string | null;
-  promotionReportPath: string | null;
-  artifacts: StudioWorkflowArtifact[];
-  manifestEntries: StudioWorkflowManifestEntry[];
-  timeline: StudioWorkflowTimelineEvent[];
-  researchArtifacts: string[];
-  implementEntries: number;
-  checkEntries: number;
-  contextCuratorStatus: string | null;
-  contextCuratorMode: string | null;
-  contextCuratorFallback: boolean;
-  contextCuratorReason: string | null;
-  contextCuratorError: string | null;
-  contextCuratorUpdatedAt: string | null;
-  memoryCandidateEntries: number;
-  memoryPromotableEntries: number;
-  memoryRejectedEntries: number;
-  checkerStatus: string | null;
-  checkerSummary: string | null;
-  checkerIssues: string[];
-  checkerNeedsRetry: boolean;
-  checkerRetryPerformed: boolean;
-  checkerRetryStatus: string | null;
-  checkerRetryReportPath: string | null;
-  checkerReportPreview: string | null;
-  checkerRetryReportPreview: string | null;
-  policyDecision: string | null;
-  memoryPolicyReason: string | null;
-  allowAutoPromote: boolean;
-  memoryCandidates: StudioWorkflowMemoryCandidate[];
-  promotionPromoted: number;
-  promotionSkipped: number;
-  promotionDecision: string | null;
-  lastUpdated: string | null;
 }
 
 export interface AutoOrchestrationRequest {
@@ -1394,6 +1261,16 @@ export interface CliHandoffRequest {
   latestUserPrompt?: string | null;
   latestAssistantSummary?: string | null;
   relevantFiles?: string[];
+  recentTurns?: ChatContextTurn[];
+  compactedSummaries?: CompactedSummary[] | null;
+  workingMemory?: WorkingMemory | null;
+  modelOverride?: string | null;
+  effortLevel?: string | null;
+}
+
+export interface CliHandoffResult {
+  summary: string;
+  createdAt: string;
 }
 
 export type AssistantApprovalDecision = "allowOnce" | "allowAlways" | "deny";

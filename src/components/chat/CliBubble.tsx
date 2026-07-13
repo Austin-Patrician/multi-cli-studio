@@ -7,7 +7,6 @@ import {
   AgentId,
   AssistantApprovalDecision,
   AutoRouteAction,
-  StudioPromoteKind,
 } from "../../lib/models";
 import {
   AssistantDisplayBlock,
@@ -505,164 +504,6 @@ function MessageActionButton({
   );
 }
 
-type PromoteDraft = {
-  kind: StudioPromoteKind;
-  title: string;
-  content: string;
-};
-
-const PROMOTE_LABELS: Record<StudioPromoteKind, string> = {
-  spec: "保存为 Spec",
-  memory: "保存为项目记忆",
-  journal: "保存为 Journal",
-};
-
-const PROMOTE_KINDS: StudioPromoteKind[] = ["spec", "memory", "journal"];
-
-function stripMarkdownNoise(value: string) {
-  return value
-    .replace(/```[\s\S]*?```/g, (block) => {
-      const lines = block.split("\n");
-      return lines.length > 14 ? "[code block omitted]" : block;
-    })
-    .replace(/<[^>]+>/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function firstUsefulLine(value: string) {
-  return (
-    value
-      .split("\n")
-      .map((line) => line.replace(/^#+\s*/, "").replace(/^[-*]\s*/, "").trim())
-      .find((line) => line.length >= 8 && !line.startsWith("```")) ?? "Studio Memory"
-  );
-}
-
-function clampText(value: string, limit: number) {
-  const trimmed = value.trim();
-  if (trimmed.length <= limit) return trimmed;
-  return `${trimmed.slice(0, limit - 40).trimEnd()}\n\n[truncated for memory preview]`;
-}
-
-function createPromoteDraft(kind: StudioPromoteKind, rawText: string): PromoteDraft {
-  const cleaned = stripMarkdownNoise(rawText);
-  const titleBase = firstUsefulLine(cleaned).replace(/[：:。.!?？].*$/, "");
-  const title = clampText(titleBase, 64) || "Studio Memory";
-  const body = clampText(cleaned || rawText, kind === "journal" ? 3600 : 2600);
-  const heading = `# ${title}`;
-  const contentByKind: Record<StudioPromoteKind, string> = {
-    spec: `${heading}\n\n${body}\n\n## Rule\n\nKeep this as durable project guidance until explicitly changed.`,
-    memory: `${heading}\n\n## Context\n\n${body}\n\n## Reuse\n\nKeep this as durable project memory when it is relevant to future CLI turns.`,
-    journal: `${heading}\n\nRecorded: ${new Date().toISOString()}\n\n${body}`,
-  };
-  return { kind, title, content: contentByKind[kind] };
-}
-
-function PromoteMemoryDialog({
-  draft,
-  saving,
-  error,
-  savedPath,
-  onChange,
-  onCancel,
-  onSave,
-}: {
-  draft: PromoteDraft;
-  saving: boolean;
-  error: string | null;
-  savedPath: string | null;
-  onChange: (draft: PromoteDraft) => void;
-  onCancel: () => void;
-  onSave: () => void;
-}) {
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !saving) onCancel();
-    }
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onCancel, saving]);
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/55 px-5 py-6 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Save assistant message as Studio memory"
-    >
-      <div
-        className="w-full max-w-2xl overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-[0_30px_90px_rgba(15,23,42,0.22)]"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="border-b border-slate-200 px-5 py-4">
-          <div className="text-sm font-semibold text-slate-950">{PROMOTE_LABELS[draft.kind]}</div>
-          <div className="mt-1 text-xs leading-5 text-slate-500">
-            检查自动生成的标题和内容，确认后保存为长期 Studio 记忆。
-          </div>
-        </div>
-        <div className="space-y-4 px-5 py-4">
-          <label className="block">
-            <span className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">标题</span>
-            <input
-              value={draft.title}
-              onChange={(event) => onChange({ ...draft, title: event.target.value })}
-              className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:bg-white"
-              placeholder="简短的记忆标题"
-            />
-          </label>
-          <div className="grid gap-3 sm:grid-cols-3">
-            {PROMOTE_KINDS.map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                onClick={() => onChange({ ...draft, kind })}
-                className={`rounded-xl border px-3 py-2 text-left text-xs font-semibold transition ${
-                  draft.kind === kind
-                    ? "border-slate-900 bg-slate-900 text-white"
-                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
-                }`}
-              >
-                {PROMOTE_LABELS[kind]}
-              </button>
-            ))}
-          </div>
-          <label className="block">
-            <span className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">内容预览</span>
-            <textarea
-              value={draft.content}
-              onChange={(event) => onChange({ ...draft, content: event.target.value })}
-              className="mt-2 min-h-[260px] w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 font-mono text-xs leading-5 text-slate-900 outline-none transition focus:border-slate-400 focus:bg-white"
-              placeholder="Markdown 记忆内容"
-            />
-          </label>
-          {error ? <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</div> : null}
-          {savedPath ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">Saved to {savedPath}</div> : null}
-        </div>
-        <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-4">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={saving}
-            className="rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:bg-slate-100 disabled:cursor-wait disabled:opacity-60"
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={saving || !draft.title.trim() || !draft.content.trim()}
-            className="rounded-full bg-slate-950 px-4 py-2 text-xs font-semibold text-white transition hover:bg-slate-800 disabled:cursor-wait disabled:opacity-60"
-          >
-            {saving ? "保存中..." : "保存记忆"}
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body
-  );
-}
-
 function MetaPill({
   children,
   tone = "neutral",
@@ -965,20 +806,6 @@ function RuntimeTextBlock({
       isStreaming={false}
       renderMode="rich"
     />
-  );
-}
-
-function MemoryIcon() {
-  return (
-    <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <path
-        d="M5.5 4.5h9A1.5 1.5 0 0116 6v9.2l-2.8-1.5-2.8 1.5-2.8-1.5-2.8 1.5V6a1.5 1.5 0 011.5-1.5z"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-      <path d="M7.5 7.5h5M7.5 10h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
   );
 }
 
@@ -2253,12 +2080,6 @@ export function CliBubble({
   const cli = message.cliId as AgentId;
   const badge = cli ? CLI_BADGE[cli] : null;
   const [renderMode, setRenderMode] = useState<"rich" | "raw">("rich");
-  const [promoteMenuOpen, setPromoteMenuOpen] = useState(false);
-  const [promoteDraft, setPromoteDraft] = useState<PromoteDraft | null>(null);
-  const [promoteSaving, setPromoteSaving] = useState(false);
-  const [promoteError, setPromoteError] = useState<string | null>(null);
-  const [promoteSavedPath, setPromoteSavedPath] = useState<string | null>(null);
-  const promoteMenuRef = useRef<HTMLDivElement | null>(null);
   const time = new Date(message.timestamp).toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
@@ -2296,60 +2117,8 @@ export function CliBubble({
       contentFormat !== "plain" ||
       rawText.includes("\n"));
   const showDurationFooter = !message.isStreaming && message.durationMs != null;
-  const canPromote = !message.isStreaming && rawText.trim().length > 0 && Boolean(workspaceRoot?.trim());
-  const showBottomActions = Boolean(onRegenerate || onDelete || canPromote);
+  const showBottomActions = Boolean(onRegenerate || onDelete);
   const showBottomFooter = showDurationFooter || showBottomActions;
-
-  useEffect(() => {
-    if (!promoteMenuOpen) return;
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (promoteMenuRef.current?.contains(target)) return;
-      setPromoteMenuOpen(false);
-    }
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setPromoteMenuOpen(false);
-    }
-    document.addEventListener("pointerdown", handlePointerDown, true);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown, true);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [promoteMenuOpen]);
-
-  function openPromoteDraft(kind: StudioPromoteKind) {
-    setPromoteMenuOpen(false);
-    setPromoteError(null);
-    setPromoteSavedPath(null);
-    setPromoteDraft(createPromoteDraft(kind, rawText));
-  }
-
-  async function savePromoteDraft() {
-    if (!promoteDraft || !workspaceRoot?.trim()) return;
-    setPromoteSaving(true);
-    setPromoteError(null);
-    setPromoteSavedPath(null);
-    try {
-      const result = await bridge.promoteStudioMemory({
-        projectRoot: workspaceRoot,
-        kind: promoteDraft.kind,
-        title: promoteDraft.title,
-        content: promoteDraft.content,
-        source: `assistant:${message.id}`,
-      });
-      setPromoteSavedPath(result.path);
-      window.setTimeout(() => {
-        setPromoteDraft(null);
-        setPromoteSavedPath(null);
-      }, 900);
-    } catch (error) {
-      setPromoteError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setPromoteSaving(false);
-    }
-  }
 
   return (
     <div className="flex w-full max-w-[min(90%,960px)] flex-col items-start gap-2">
@@ -2473,30 +2242,6 @@ export function CliBubble({
                     disabled={actionsDisabled}
                   />
                 )}
-                {canPromote && (
-                  <div className="relative" ref={promoteMenuRef}>
-                    <MessageActionButton
-                      label="Save memory"
-                      icon={<MemoryIcon />}
-                      onClick={() => setPromoteMenuOpen((open) => !open)}
-                      disabled={actionsDisabled}
-                    />
-                    {promoteMenuOpen && (
-                      <div className="absolute bottom-9 left-0 z-20 w-44 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-[0_18px_45px_rgba(15,23,42,0.16)]">
-                        {PROMOTE_KINDS.map((kind) => (
-                          <button
-                            key={kind}
-                            type="button"
-                            className="block w-full px-3 py-2 text-left text-xs font-semibold text-slate-700 transition hover:bg-slate-50 hover:text-slate-950"
-                            onClick={() => openPromoteDraft(kind)}
-                          >
-                            {PROMOTE_LABELS[kind]}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
                 {onDelete && (
                   <MessageActionButton
                     label="Delete"
@@ -2511,21 +2256,6 @@ export function CliBubble({
           </div>
         )}
       </div>
-      {promoteDraft && (
-        <PromoteMemoryDialog
-          draft={promoteDraft}
-          saving={promoteSaving}
-          error={promoteError}
-          savedPath={promoteSavedPath}
-          onChange={setPromoteDraft}
-          onCancel={() => {
-            setPromoteDraft(null);
-            setPromoteError(null);
-            setPromoteSavedPath(null);
-          }}
-          onSave={() => void savePromoteDraft()}
-        />
-      )}
     </div>
   );
 }

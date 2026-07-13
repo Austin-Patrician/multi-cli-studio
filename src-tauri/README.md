@@ -55,11 +55,11 @@ Handles persistent state management:
 - Workspace persistence (`PersistedWorkspaceRef`)
 - Terminal tab state (`PersistedTerminalTab`)
 - Chat session history (`PersistedConversationSession`)
-- Task packets and context snapshots for agent handoffs
-- Context compaction for long-running conversations
+- One-time cross-CLI handoff summaries stored with terminal tab state
+- Conversation compaction for long-running sessions
 
 ### 3. ACP (`src/acp.rs`)
-Agent Communication Protocol - handles inter-agent communication and handoffs
+Agent Communication Protocol - handles CLI capabilities and command integration
 
 ### 4. Main Application (`src/main.rs`)
 Tauri command handlers and application entry point
@@ -85,10 +85,10 @@ Tauri command handlers and application entry point
 
 ## Key Features
 
-1. **Multi-Agent Orchestration**: Seamlessly switch between Codex, Claude, and Gemini agents
+1. **CLI Handoff**: Switch between Codex, Claude, and Gemini with a source-CLI summary
 2. **Persistent Sessions**: Conversation history and context survive app restarts
 3. **Automation Jobs**: Create scheduled jobs with custom goals and parameters
-4. **Context Management**: Automatic context compaction for long conversations
+4. **Conversation Management**: Session persistence and explicit compaction
 5. **CLI Detection**: Automatically detects installed CLI wrappers
 6. **Real-time Streaming**: CLI output streamed to frontend via Tauri events
 7. **Workspace Management**: Track git status, dirty files, and failing checks

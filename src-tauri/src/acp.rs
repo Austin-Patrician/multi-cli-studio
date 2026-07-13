@@ -219,15 +219,6 @@ pub fn command_registry() -> Vec<AcpCommandDef> {
             supported_clis: vec!["codex".into()],
         },
         AcpCommandDef {
-            kind: "context".into(),
-            slash: "/context".into(),
-            label: "Context".into(),
-            description: "Show context data such as the current Studio goal".into(),
-            args_hint: Some("goal".into()),
-            execution: "local".into(),
-            supported_clis: vec!["codex".into(), "claude".into(), "gemini".into()],
-        },
-        AcpCommandDef {
             kind: "memory".into(),
             slash: "/memory".into(),
             label: "Memory".into(),
