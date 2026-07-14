@@ -2876,7 +2876,6 @@ export const useStore = create<StoreState>((set, get) => {
           compactedSummaries: session.compactedSummaries.length > 0 ? session.compactedSummaries : null,
           workingMemory: buildWorkingMemory(session.messages),
           modelOverride: currentTab?.modelOverrides[fromCli] ?? null,
-          effortLevel: currentTab?.effortLevel ?? null,
         });
         set((state) => {
           const terminalTabs = state.terminalTabs.map((tab) =>

@@ -1265,7 +1265,6 @@ export interface CliHandoffRequest {
   compactedSummaries?: CompactedSummary[] | null;
   workingMemory?: WorkingMemory | null;
   modelOverride?: string | null;
-  effortLevel?: string | null;
 }
 
 export interface CliHandoffResult {

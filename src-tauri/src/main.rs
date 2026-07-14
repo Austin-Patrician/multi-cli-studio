@@ -92,6 +92,7 @@ const RUNTIME_LOG_TERMINAL_ID: &str = "runtime-console";
 const DEFAULT_MAX_TURNS: usize = 50;
 const DEFAULT_MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
+const CLI_HANDOFF_TIMEOUT_MS: u64 = 180_000;
 const DATA_DIR_OVERRIDE_ENV: &str = "MULTI_CLI_STUDIO_DATA_DIR";
 const SSH_ASKPASS_PASSWORD_ENV: &str = "MULTI_CLI_STUDIO_SSH_PASSWORD";
 const SSH_TEST_TIMEOUT_MS: u64 = 15_000;
@@ -3565,7 +3566,6 @@ struct CliHandoffRequest {
     #[serde(default)]
     working_memory: Option<WorkingMemoryPayload>,
     model_override: Option<String>,
-    effort_level: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5144,14 +5144,24 @@ fn batch_aware_command(command_path: &str, args: &[&str]) -> Command {
 }
 
 fn start_process_watchdog(pid: u32, timeout_ms: u64) -> Arc<AtomicBool> {
+    start_process_watchdog_with_timeout_state(pid, timeout_ms).0
+}
+
+fn start_process_watchdog_with_timeout_state(
+    pid: u32,
+    timeout_ms: u64,
+) -> (Arc<AtomicBool>, Arc<AtomicBool>) {
     let completed = Arc::new(AtomicBool::new(false));
     let completed_flag = completed.clone();
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let timed_out_flag = timed_out.clone();
 
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(timeout_ms));
         if completed_flag.load(Ordering::SeqCst) {
             return;
         }
+        timed_out_flag.store(true, Ordering::SeqCst);
 
         #[cfg(target_os = "windows")]
         {
@@ -5167,7 +5177,7 @@ fn start_process_watchdog(pid: u32, timeout_ms: u64) -> Arc<AtomicBool> {
         }
     });
 
-    completed
+    (completed, timed_out)
 }
 
 fn terminate_process_tree(pid: u32) {
@@ -12824,22 +12834,22 @@ fn build_cli_handoff_prompt(request: &CliHandoffRequest) -> String {
     let compacted = request
         .compacted_summaries
         .as_ref()
-        .map(|items| format_compacted_summaries_section(items))
+        .map(|items| truncate_str(&format_compacted_summaries_section(items), 4_000))
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "No compacted summary is available.".to_string());
     let recent_turns = request
         .recent_turns
         .iter()
         .rev()
-        .take(8)
+        .take(4)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .map(|turn| {
             format!(
                 "User: {}\nAssistant: {}",
-                truncate_str(&turn.user_prompt, 1_500),
-                truncate_str(&turn.assistant_reply, 2_500)
+                truncate_str(&turn.user_prompt, 800),
+                truncate_str(&turn.assistant_reply, 1_200)
             )
         })
         .collect::<Vec<_>>()
@@ -12850,7 +12860,7 @@ fn build_cli_handoff_prompt(request: &CliHandoffRequest) -> String {
         request
             .relevant_files
             .iter()
-            .take(30)
+            .take(20)
             .map(|file| format!("- {file}"))
             .collect::<Vec<_>>()
             .join("\n")
@@ -12858,7 +12868,7 @@ fn build_cli_handoff_prompt(request: &CliHandoffRequest) -> String {
     let working_memory = request
         .working_memory
         .as_ref()
-        .map(|memory| format_working_memory_section(Some(memory)))
+        .map(|memory| truncate_str(&format_working_memory_section(Some(memory)), 4_000))
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "No additional working-memory record is available.".to_string());
 
@@ -12985,7 +12995,9 @@ fn prepare_cli_handoff_blocking(
     let prompt = build_cli_handoff_prompt(&request);
     let mut session = acp::AcpSession::default();
     session.plan_mode = true;
-    session.effort_level = request.effort_level.clone();
+    if request.from_cli == "claude" {
+        session.effort_level = Some("low".to_string());
+    }
     if let Some(model) = request
         .model_override
         .clone()
@@ -13001,7 +13013,7 @@ fn prepare_cli_handoff_blocking(
         &prompt,
         false,
         &session,
-        60_000,
+        CLI_HANDOFF_TIMEOUT_MS,
         None,
     )?;
     let raw_summary = if outcome.final_content.trim().is_empty() {
@@ -21610,7 +21622,7 @@ fn run_silent_agent_turn_once(
             }),
         );
     }
-    let watchdog = start_process_watchdog(child.id(), timeout_ms);
+    let (watchdog, timed_out) = start_process_watchdog_with_timeout_state(child.id(), timeout_ms);
     let output = child.wait_with_output().map_err(|err| err.to_string())?;
     if let Some(handle) = live_turn.as_ref() {
         clear_live_chat_turn_target(handle);
@@ -21626,6 +21638,12 @@ fn run_silent_agent_turn_once(
         .filter(|value| !value.is_empty());
     if let Some(path) = output_last_message_path.as_ref() {
         let _ = fs::remove_file(path);
+    }
+    if timed_out.load(Ordering::SeqCst) {
+        return Err(format!(
+            "{agent_id} handoff timed out after {} seconds.",
+            timeout_ms / 1_000
+        ));
     }
     let combined = if stderr.trim().is_empty() {
         stdout.clone()
